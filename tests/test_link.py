@@ -2,6 +2,7 @@ import asyncio
 import secrets
 import unittest
 
+from aioquic.quic.events import ConnectionTerminated
 from cryptography.hazmat.primitives import serialization
 
 from tools.silverfish.link import (
@@ -351,6 +352,19 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(LinkError, "invalid catalog flag"):
             await self.connect_guest(dict(self.request, catalog="yes"))
         self.assertTrue((await self.connect_guest())["accepted"])
+
+    async def test_delayed_termination_does_not_spawn_work_after_host_close(self):
+        guest_id = self.request["guest_id"]
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.host._current
+        self.assertIsNotNone(protocol)
+
+        await self.host.close()
+        self.assertEqual(self.disconnected.get_nowait(), guest_id)
+        protocol.quic_event_received(ConnectionTerminated(0, None, ""))
+
+        self.assertFalse(self.host._tasks)
+        self.assertTrue(self.disconnected.empty())
 
     async def test_identity_round_trip_preserves_certificate_pin(self):
         key = self.identity.private_key.private_bytes(

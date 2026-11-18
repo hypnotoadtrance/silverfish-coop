@@ -10,7 +10,7 @@ import logging
 import math
 import ssl
 import struct
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -387,7 +387,7 @@ class _HostProtocol(_LinkProtocol):
                 payload = self._admission_payload(event)
                 if payload is not None:
                     if len(self.host._tasks) < _MAX_HOST_TASKS:
-                        self.host._spawn(self._respond(payload))
+                        self.host._spawn(self._respond, payload)
                     else:
                         self.close(error_code=_APP_ERROR, reason_phrase="host busy")
             else:
@@ -414,7 +414,7 @@ class _HostProtocol(_LinkProtocol):
                     action.deadline.cancel()
             self._actions.clear()
             if self.guest_id is not None:
-                self.host._spawn(self.host._release(self))
+                self.host._spawn(self.host._release, self)
 
     def _read_action(self, event: events.StreamDataReceived) -> None:
         stream_id = event.stream_id
@@ -441,7 +441,7 @@ class _HostProtocol(_LinkProtocol):
             if len(self.host._tasks) >= _MAX_HOST_TASKS:
                 self.close(error_code=_APP_ERROR, reason_phrase="host busy")
                 return
-            self.host._spawn(self._respond_to_action(stream_id, action))
+            self.host._spawn(self._respond_to_action, stream_id, action)
 
     def _action_read_timeout(self) -> None:
         self.close(error_code=_APP_ERROR, reason_phrase="application stream timed out")
@@ -557,8 +557,12 @@ class HostLink:
             for route in old_routes.values():
                 route.close()
 
-    def _spawn(self, request: Awaitable[None]) -> None:
-        task = asyncio.create_task(request)
+    def _spawn(self, callback: Callable[..., Coroutine[Any, Any, None]], *args: Any) -> None:
+        # aioquic can deliver termination events after the server has closed.
+        # HostLink.close already releases the active guest and drains its tasks.
+        if self._closed:
+            return
+        task = asyncio.create_task(callback(*args))
         self._tasks.add(task)
         task.add_done_callback(self._task_finished)
 
@@ -682,6 +686,11 @@ class HostLink:
             self._guest_sockets.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Give the QUIC close send a turn before finishing the UDP transport.
+        # Windows may otherwise leave a socket with an in-flight write open.
+        await asyncio.sleep(0)
+        self._server._transport.abort()
+        await asyncio.sleep(0)
 
 
 async def start_host(
