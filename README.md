@@ -113,7 +113,7 @@ To exercise item retention, start a test campaign with `--fixtures --fixture-kee
 
 ## Native integration labs
 
-The staged host reports placed merchant stock, saved scene fields, and an allowlisted authored quest probe. These are checkpoints for development of native campaign integration. The `vitals-probe` and `vitals-reset` commands verify transient guest save ownership in a fixture session. The generated death overlay is qualified for the sampled Steam build and uses a separate stage. See the [local cooked-patch tool](tools/cooked_patch/README.md).
+The staged host reports placed merchant stock, saved scene fields, and an allowlisted authored quest probe. The `vitals-probe` and `vitals-reset` commands verify transient guest save ownership in a fixture session. A C++ lab uses the stock packages to test native inventory value copying, guest death and revive, and native health restoration after travel or restart. See the [native lab instructions](native/README.md). The generated death overlay is qualified for the sampled Steam build and uses a separate stage. See the [local cooked-patch tool](tools/cooked_patch/README.md).
 
 ```powershell
 & $sfPython tests/live_smoke.py --work .work --gameplay --wipe --zones --native-probe --native-quest

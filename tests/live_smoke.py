@@ -18,12 +18,16 @@ options.add_argument("--native-probe", action="store_true", help="exercise trans
 options.add_argument("--native-quest", action="store_true", help="exercise the allowlisted native quest start")
 options.add_argument("--native-death", action="store_true", help="explicitly invoke the staged native death wrapper")
 options.add_argument("--native-damage", action="store_true", help="exercise stock direct damage and its death handoff")
-options.add_argument("--native-backend", choices=("cpp", "overlay"),
+options.add_argument("--native-inventory", action="store_true", help="exercise native inventory copy ownership")
+options.add_argument("--native-guest", action="store_true", help="exercise persistent scoped native guest damage and revive")
+options.add_argument("--native-backend", choices=("cpp", "cpp-scoped", "overlay"),
                      help="require the specified death probe backend")
 options.add_argument("--wipe", action="store_true", help="exercise wipe, item retention and backpack ownership")
 args = options.parse_args()
 if args.native_backend and not (args.native_death or args.native_damage):
     options.error("--native-backend requires a native death or damage probe")
+if args.native_guest and any((args.native_death, args.native_damage, args.native_inventory, args.native_probe)):
+    options.error("--native-guest requires its own run without transient save probes")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -172,8 +176,12 @@ async def smoke():
     relay = None
     try:
         fixture_test = any((args.gameplay, args.native_probe, args.native_quest, args.wipe,
-                            args.native_death, args.native_damage))
+                            args.native_death, args.native_damage, args.native_inventory, args.native_guest))
         fixtures = ["--fixtures"] if fixture_test else []
+        if args.native_backend == "cpp-scoped" or args.native_guest:
+            fixtures += ["--native-events"]
+        if args.native_guest:
+            fixtures += ["--native-guest"]
         if args.wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures)
@@ -239,6 +247,11 @@ async def smoke():
                 "quest": quest, "shops": len(shops["game"]["native_shops"]),
                 "offers": len(shops["game"].get("native_offers", [])),
             })
+        if args.native_inventory:
+            copied_inventory = await command("action", "--campaign", campaign, "native-inventory-probe")
+            inventory = copied_inventory["native_inventory_canary"]
+            assert inventory["state"] == "copied" and inventory["binding_restored"], inventory
+            note("native_inventory_storage_is_independent", inventory)
         if args.native_death or args.native_damage:
             ready = await wait(
                 run, lambda state: state.get("game", {}).get("native_death_hook", {}).get("state") == "ready",
@@ -269,6 +282,38 @@ async def smoke():
                 "backend": backend, "stock_dead": False, "same_pawn": True,
                 "revived_health": revived["health"],
             })
+        if args.native_guest:
+            async def enrolled():
+                return await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state")
+                                  == "bound" and state["game"].get("native_death_hook", {}).get("scope") == "guest")
+
+            await enrolled()
+            await asyncio.sleep(2)
+            before = (await enrolled())["game"]
+            assert before["native_guest_save"]["pawn"] == original_guest
+            assert before["native_death_hook"]["sequence"] == 0
+            invoked = await command("action", "--campaign", campaign, "native-guest-damage", "--target", "guest")
+            hit = invoked["native_damage_canary"]
+            assert hit["guest_before"] > 0 >= hit["guest_after"] and not hit["binding_restored"]
+            assert hit["host_before"] == hit["host_after"]
+            down = await wait(run, lambda state: state["gameplay"]["players"].get("guest", {}).get("downed")
+                              and state["game"].get("native_death_hook", {}).get("sequence") == 1
+                              and state["game"].get("player_effects", {}).get("guest", {}).get("state") == "downed")
+            assert down["game"]["native_dead_flags"]["guest"] is False
+            assert down["game"]["pawns"]["guest"]["name"] == original_guest
+            assert down["game"]["native_guest_save"]["pawn"] == original_guest
+            note("resident_scope_catches_stock_lethal_damage", hit)
+            revive = await command("action", "--campaign", campaign, "interact", "--target", chosen)
+            assert revive["effect"] == "revive"
+            revived = await wait(run, lambda state: (state["game"].get("pawns", {}).get("guest", {}).get("health") or 0) > 0
+                                 and state["game"].get("player_effects", {}).get("guest", {}).get("state") == "standing")
+            native_health = revived["game"]["pawns"]["guest"]["health"]
+            assert revived["game"]["pawns"]["guest"]["name"] == original_guest
+            assert revived["game"]["native_guest_save"]["pawn"] == original_guest
+            assert revived["game"]["pawns"]["local"]["health"] == hit["host_before"]
+            assert abs(native_health - hit["guest_before"] * 0.10) < 1, revived["game"]["pawns"]
+            note("same_native_pawn_revived_in_place", {"guest_health": native_health,
+                                                      "host_health": hit["host_before"], "pawn": original_guest})
         winner = await gameplay_slice(host_status, chosen) if args.gameplay else None
         dropped = await command("action", "--profile", profile, "drop-link")
         assert dropped["link_connected"] is False
@@ -288,6 +333,8 @@ async def smoke():
         assert reconnected["link_connected"] and reconnected["resumed"]
         after = await wait(run, lambda state: state.get("link_connected") and state.get("game", {}).get("remote_clients") == 1)
         assert after["game"]["pawns"]["guest"]["name"] == original_guest
+        if args.native_guest:
+            assert after["game"]["native_guest_save"]["pawn"] == original_guest
         note("same_pawn_reconnected", {"resumed": reconnected["resumed"], "pawn": original_guest})
         if args.gameplay:
             attempts = await asyncio.gather(
@@ -356,12 +403,21 @@ async def smoke():
                                     and state.get("state") == "connected")
             assert client_map["character_id"] == chosen and client_map["host_session"] == guest["host_session"]
             note("party_travels_with_same_authenticated_session", {"map": destination, "character_id": chosen})
+            if args.native_guest:
+                traveled = (await enrolled())["game"]
+                assert traveled["map"] == destination and traveled["pawns"]["guest"]["health"] == native_health
+                assert traveled["native_guest_save"]["pawn"] != original_guest
+                note("native_guest_health_preserved_across_travel", {
+                    "guest_health": native_health, "map": destination, "pawn": traveled["native_guest_save"]["pawn"],
+                })
         saved = await command("action", "--campaign", campaign, "checkpoint")
         assert saved["revision"] > 0
         snapshot = json.loads((run.parent / "save" / "campaign.json").read_text(encoding="utf-8"))
         saved_character = snapshot["characters"][chosen]
         assert len(saved_character["state"]["location"]) == 3
         assert saved_character["state"]["map"] == expected_map
+        if args.native_guest:
+            assert saved_character["state"]["health"] == native_health
         note("isolated_checkpoint", {"revision": saved["revision"],
                                      "character_location": saved_character["state"]["location"]})
         await stop(host, "--campaign", campaign)
@@ -383,6 +439,13 @@ async def smoke():
         note("restart_and_original_invite", {"same_campaign_id": restored["campaign"]["campaign_id"],
                                              "same_character_id": chosen,
                                              "restored_location": restored_location})
+        if args.native_guest:
+            rebound = (await enrolled())["game"]
+            assert rebound["native_guest_save"]["pawn"] == rebound["pawns"]["guest"]["name"]
+            assert rebound["pawns"]["guest"]["health"] == saved_character["state"]["health"]
+            note("native_guest_health_restored_after_host_restart", {
+                "guest_health": rebound["pawns"]["guest"]["health"], "same_character_id": chosen,
+            })
         if args.gameplay:
             restored_party = await wait(client_run, lambda state: state.get("gameplay", {}).get("loot", {})
                                         .get("claimed_by") and state["host_session"] == restored["generation"]

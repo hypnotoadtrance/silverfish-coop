@@ -16,7 +16,7 @@ from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .travel import PLAYTEST_MAPS, travel_decision
 from .runtime import (Bridge, MAP, launch, native_death_backend, read_json, spare_udp_port, staged_build,
-                      stop_game, verify_loopback_socket, write_json)
+                      stop_game, verify_loopback_socket, write_json, write_text)
 
 
 PROTOCOL = 2
@@ -40,7 +40,9 @@ def _pawn(state: dict, role: str) -> dict:
     pawn = state.get("pawns", {}).get(role)
     if not pawn:
         return {}
-    return {"map": state["map"], "location": pawn["location"], "health": pawn["health"]}
+    health = pawn["health"]
+    return {"map": state["map"], "location": pawn["location"],
+            "health": max(0, health) if health is not None else None}
 
 
 async def project_players(bridge: Bridge, game: dict, public: dict, *, client: bool) -> None:
@@ -58,7 +60,8 @@ async def project_players(bridge: Bridge, game: dict, public: dict, *, client: b
 
 class Host:
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
-                 bind: str, port: int, fixtures: bool, death_rules: dict | None, *, native_death: bool):
+                 bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
+                 native_backend: str | None, native_events: bool, native_guest: bool):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -72,7 +75,12 @@ class Host:
         self.next_save = 0.0
         self.last_seen = 0.0
         self.fixtures = fixtures
-        self.native_death = native_death
+        self.native_backend = native_backend
+        self.native_events = native_events
+        self.native_guest = native_guest
+        self.next_native_heartbeat = 0.0
+        self.native_guest_health = None
+        self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         self.party = party.load_party(store.status()["world"].get("party"))
         if death_rules is not None:
             if self.party["wipe"]:
@@ -114,10 +122,13 @@ class Host:
             active = self.store.activate(request["guest_id"], request["credential"], request["character_id"])
         except CampaignError:
             return {"accepted": False, "reason": "guest_or_character_unavailable"}
+        saved = active["character"]["state"]
+        if after_grace:
+            saved = {"health": saved.get("health")} if self.native_guest else {}
         self.guest = {
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
             "character_id": active["character"]["character_id"], "disconnected": None,
-            "restore": {} if after_grace else active["character"]["state"],
+            "restore": saved,
         }
         if not active["resumed"]:
             self.guest_pawn = None
@@ -155,6 +166,8 @@ class Host:
         if native:
             world["native_observation"] = native
         guest = _pawn(self.last_game, "guest")
+        if self.native_guest and self.last_game.get("native_guest_save", {}).get("pawn") != self.guest_pawn:
+            guest = {}
         active = self.guest and any(
             lease["character_id"] == self.guest["character_id"] for lease in self.store.status()["leases"]
         )
@@ -228,6 +241,9 @@ class Host:
         self.transitioning = True
         self.control.event("zone_travel_requested", source=current, destination=destination)
         try:
+            guest = _pawn(self.last_game, "guest")
+            if self.native_guest and guest.get("health") is not None:
+                self.checkpoint()
             await bridge.command("travel", destination)
             try:
                 observed = await bridge.wait_for(
@@ -246,7 +262,7 @@ class Host:
             self.guest_pawn = None
             self.marker_ready = False
             if self.guest:
-                self.guest["restore"] = {}
+                self.guest["restore"] = {"health": guest.get("health")} if self.native_guest else {}
             revision = self.checkpoint()
             self.control.event("zone_travel_ready", source=current, destination=destination,
                                epoch=self.zone_epoch, revision=revision)
@@ -416,12 +432,30 @@ class Host:
             self.last_game = state
         party.add_player(self.party, "host")
         pawn = self.last_game.get("pawns", {}).get("guest")
+        bound_pawn = self.last_game.get("native_guest_save", {}).get("pawn")
+        lease_active = self.guest and (self.guest["disconnected"] is None
+                                       or time.monotonic() - self.guest["disconnected"] < DEFAULT_RECONNECT_GRACE)
+        if self.native_guest and pawn and lease_active and bound_pawn == pawn["name"]:
+            health = _pawn(self.last_game, "guest")["health"]
+            if health is not None:
+                self.native_guest_health = (self.guest["character_id"], bound_pawn, health)
+        if (self.native_guest and pawn and lease_active and self.last_game.get("remote_clients") == 1
+                and bound_pawn != pawn["name"]):
+            saved_health = self.guest["restore"].get("health")
+            if self.native_guest_health and self.native_guest_health[:2] == (self.guest["character_id"], pawn["name"]):
+                saved_health = self.native_guest_health[2]
+            health = "-" if saved_health is None else str(saved_health)
+            snapshot = await bridge.command("native-guest-bind", pawn["name"], health, timeout=4)
+            if snapshot.get("native_guest_save", {}).get("pawn") != pawn["name"]:
+                raise RuntimeError("The guest's independent native save could not be verified")
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
         if pawn and self.guest and pawn["name"] != self.guest_pawn:
             saved = self.guest["restore"]
             if saved.get("map") == self.last_game["map"]:
                 restored = None
                 try:
-                    restored = await bridge.restore("guest", saved)
+                    restored = await bridge.restore("guest", dict(saved, health=None) if self.native_guest else saved)
                 except (RuntimeError, TimeoutError):
                     # The stock game can share the SaveGame object between players.
                     with contextlib.suppress(RuntimeError, TimeoutError):
@@ -453,7 +487,14 @@ class Host:
             try:
                 if action == "invite":
                     result = self.invite(request)
-                elif action in ("native-death-probe", "native-damage-probe") and self.native_death and self.fixtures:
+                elif (action == "native-inventory-probe" and self.native_backend == "cpp"
+                      and self.fixtures and not self.native_guest):
+                    snapshot = await bridge.command(action, timeout=4)
+                    result = {"native_inventory_canary": snapshot.get("native_inventory_canary")}
+                elif (action in ("native-death-probe", "native-damage-probe", "native-guest-damage")
+                      and self.native_backend and self.fixtures):
+                    if (action == "native-guest-damage") != self.native_guest:
+                        raise ValueError("Use the damage probe for this host's native ownership mode")
                     target = request.get("target")
                     if target not in ("host", "guest"):
                         raise ValueError("The native death probe needs --target host or guest")
@@ -489,18 +530,40 @@ class Host:
             except (ValueError, OSError, CampaignError, RuntimeError) as error:
                 self.control.respond(path, False, error=str(error))
 
+    def deliver_native_deaths(self, bridge: Bridge) -> None:
+        self.pending_native_deaths.extend(bridge.native_deaths())
+        if time.monotonic() - self.last_seen > POSITION_MAX_AGE:
+            return
+        pending = []
+        for slot, operation_id, pawn in self.pending_native_deaths:
+            observed = self.last_game.get("pawns", {}).get(slot, {}).get("name")
+            target = self.roles().get("host" if slot == "local" else "guest")
+            if (pawn and pawn != observed) or (self.native_guest and not pawn):
+                self.control.event("native_death_rejected", operation_id=operation_id, reason="pawn_identity_changed")
+                continue
+            try:
+                self.act("host", operation_id, "native-down", target, 1000)
+            except OSError:
+                pending.append((slot, operation_id, pawn))
+            except (ValueError, RuntimeError) as error:
+                self.control.event("native_death_rejected", operation_id=operation_id, reason=str(error))
+        self.pending_native_deaths = pending
+
     async def run(self, bridge: Bridge, transport) -> None:
         while not self.stopping:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
-            if self.native_death:
-                for slot, operation_id in bridge.native_deaths():
-                    target = self.roles().get("host" if slot == "local" else "guest")
-                    try:
-                        self.act("host", operation_id, "native-down", target, 1000)
-                    except (ValueError, OSError, RuntimeError) as error:
-                        self.control.event("native_death_rejected", operation_id=operation_id, reason=str(error))
+            now = time.monotonic()
+            if (self.native_events and self.last_game.get("state") == "hosting"
+                    and now >= self.next_native_heartbeat and now - self.last_seen < 1
+                    and (not self.native_guest or
+                         (self.roles().get("guest") and self.last_game.get("native_guest_save", {}).get("pawn")
+                          == self.guest_pawn and self.guest_pawn))):
+                write_text(bridge.directory / "native-events-heartbeat", f"{int(time.time())}\n")
+                self.next_native_heartbeat = now + 0.6
+            if self.native_backend:
+                self.deliver_native_deaths(bridge)
             for operation_id in bridge.interactions():
                 try:
                     self.act("host", operation_id, "interact", None)
@@ -524,8 +587,14 @@ class Host:
 
 
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
-                    fixtures: bool = False, death_rules: dict | None = None) -> None:
+                    fixtures: bool = False, death_rules: dict | None = None, *,
+                    native_events: bool = False, native_guest: bool = False) -> None:
     game_build = staged_build(work)
+    native_backend = native_death_backend(work)
+    if native_events and native_backend != "cpp":
+        raise ValueError("--native-events requires the staged C++ lab")
+    if native_guest and not (native_events and fixtures):
+        raise ValueError("--native-guest requires --fixtures and --native-events")
     with Control(directory / "run") as control, CampaignStore(directory / "save") as store:
         process = transport = None
         controller = None
@@ -535,7 +604,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             identity = _identity(directory / "save")
             internal_port = spare_udp_port()
             bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
-            process = launch(work, directory / "game-user", bridge_directory, headless, internal_port)
+            process = launch(work, directory / "game-user", bridge_directory, headless, internal_port,
+                             native_events=native_events, native_guest=native_guest)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             old_world = store.status()["world"]
@@ -554,7 +624,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     with contextlib.suppress(RuntimeError, TimeoutError):
                         await bridge.restore("local", dict(saved, health=None))
             controller = Host(store, control, game_build, identity, bind, port, fixtures, death_rules,
-                              native_death=native_death_backend(work) is not None)
+                              native_backend=native_backend, native_events=native_events, native_guest=native_guest)
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
@@ -574,6 +644,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 if result == "stopped" and controller.last_game.get("state") == "hosting":
                     with contextlib.suppress(CampaignError, OSError, RuntimeError):
                         controller.checkpoint()
+                if native_guest and process.poll() is None:
+                    with contextlib.suppress(OSError, RuntimeError):
+                        await bridge.command("native-guest-clear", timeout=2)
             if transport:
                 await transport.close()
             if process:

@@ -231,7 +231,7 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 
 
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
-           port: int | None = None):
+           port: int | None = None, *, native_events: bool = False, native_guest: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -240,9 +240,19 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     bridge.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SILVERFISH_COOP_BRIDGE=str(bridge))
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
+    env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
     backend = native_death_backend(work)
+    if native_events and (backend != "cpp" or port is None):
+        raise ValueError("Native event scope requires a staged C++ listen host")
+    if native_guest and not native_events:
+        raise ValueError("Native guest ownership requires native event scope")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
+    if native_events:
+        env["SILVERFISH_COOP_NATIVE_EVENTS"] = "1"
+    if native_guest:
+        env["SILVERFISH_COOP_NATIVE_GUEST_SAVE"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -301,7 +311,7 @@ class Bridge:
                 results.append(uuid.uuid5(self.input_namespace, count.decode("ascii")).hex)
         return results
 
-    def native_deaths(self) -> list[tuple[str, str]]:
+    def native_deaths(self) -> list[tuple[str, str, str | None]]:
         try:
             with (self.directory / "death.tsv").open("rb") as stream:
                 stream.seek(self.death_offset)
@@ -313,10 +323,11 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.split(b"\t")
-            if (len(fields) == 3 and fields[0] == b"downed" and fields[1] in (b"local", b"guest")
+            if (len(fields) in (3, 4) and fields[0] == b"downed" and fields[1] in (b"local", b"guest")
                     and fields[2].isdigit() and len(fields[2]) <= 12):
+                pawn = fields[3].decode("utf-8", errors="replace") if len(fields) == 4 else None
                 identifier = uuid.uuid5(self.input_namespace, "death" + fields[2].decode("ascii")).hex
-                events.append((fields[1].decode("ascii"), identifier))
+                events.append((fields[1].decode("ascii"), identifier, pawn))
         return events
 
     def snapshot(self) -> dict | None:
@@ -346,6 +357,14 @@ class Bridge:
                     data.setdefault("player_visuals", {})[fields[1]] = {
                         "input_gate": fields[2] == "1", "marker": fields[3] == "1",
                     }
+                elif fields[0] == "native-inventory-canary" and len(fields) == 4:
+                    data["native_inventory_canary"] = {
+                        "state": fields[1], "binding_restored": fields[2] == "1", "detail": fields[3],
+                    }
+                elif fields[0] == "native-guest-save" and len(fields) in (2, 3):
+                    data["native_guest_save"] = {
+                        "state": fields[1], "pawn": fields[2] if len(fields) == 3 else None,
+                    }
                 elif fields[0] == "native-damage-canary" and len(fields) == 8:
                     data["native_damage_canary"] = {
                         "slot": fields[1], "guest_before": _finite(fields[2]), "guest_after": _finite(fields[3]),
@@ -359,6 +378,7 @@ class Bridge:
                         "state": fields[1], "sequence": int(fields[2]),
                         "failure": fields[3] if len(fields) >= 4 else "",
                         "backend": fields[4] if len(fields) >= 5 else "overlay",
+                        "scope": fields[5] if len(fields) >= 6 and fields[5] else None,
                     }
                 elif fields[0] == "native-scene" and len(fields) == 18:
                     keys = ("active_map", "saved_level", "entrance", "rest_level", "bed", "instance_seed",

@@ -53,6 +53,10 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--bind", default="127.0.0.1", help="local IP to bind for authenticated Direct IP")
     host.add_argument("--port", type=_port, default=7777)
     host.add_argument("--headless", action="store_true")
+    host.add_argument("--native-events", action="store_true",
+                      help="enable supervised host-side native event scope in the C++ lab")
+    host.add_argument("--native-guest", action="store_true",
+                      help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
     host.add_argument("--fixture-backpacks", action="store_true", help="drop unretained test inventory in owner-only bags")
@@ -87,7 +91,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("action", choices=[
         "checkpoint", "drop-link", "reconnect", "stop", "walk", "interact", "test-damage", "travel",
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
-        "native-death-probe", "native-damage-probe",
+        "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
     ])
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
@@ -124,7 +128,8 @@ async def execute(opts):
                 raise ValueError("Wipe fixture settings require --fixtures and a nonnegative slot count")
             rules = {"keep_slots": opts.fixture_keep_slots, "drop_backpacks": opts.fixture_backpacks}
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
-                        opts.bind, opts.port, opts.headless, opts.fixtures, rules)
+                        opts.bind, opts.port, opts.headless, opts.fixtures, rules,
+                        native_events=opts.native_events, native_guest=opts.native_guest)
         return {"ok": True, "state": "stopped"}
     if operation == "join":
         from .service import join_game
