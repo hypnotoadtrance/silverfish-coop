@@ -18,8 +18,12 @@ options.add_argument("--native-probe", action="store_true", help="exercise trans
 options.add_argument("--native-quest", action="store_true", help="exercise the allowlisted native quest start")
 options.add_argument("--native-death", action="store_true", help="explicitly invoke the staged native death wrapper")
 options.add_argument("--native-damage", action="store_true", help="exercise stock direct damage and its death handoff")
+options.add_argument("--native-backend", choices=("cpp", "overlay"),
+                     help="require the specified death probe backend")
 options.add_argument("--wipe", action="store_true", help="exercise wipe, item retention and backpack ownership")
 args = options.parse_args()
+if args.native_backend and not (args.native_death or args.native_damage):
+    options.error("--native-backend requires a native death or damage probe")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -236,7 +240,12 @@ async def smoke():
                 "offers": len(shops["game"].get("native_offers", [])),
             })
         if args.native_death or args.native_damage:
-            await wait(run, lambda state: state.get("game", {}).get("native_death_hook", {}).get("state") == "ready")
+            ready = await wait(
+                run, lambda state: state.get("game", {}).get("native_death_hook", {}).get("state") == "ready",
+            )
+            backend = ready["game"]["native_death_hook"].get("backend")
+            if args.native_backend and backend != args.native_backend:
+                raise RuntimeError(f"Expected native backend {args.native_backend}, got {backend}")
             probe = "native-damage-probe" if args.native_damage else "native-death-probe"
             invoked = await command("action", "--campaign", campaign, probe, "--target", "guest")
             if args.native_damage:
@@ -246,6 +255,7 @@ async def smoke():
                 assert canary["binding_restored"]
                 note("stock_direct_damage_crosses_lethal_threshold", canary)
             assert invoked["native_death_hook"]["sequence"] >= 1
+            assert invoked["native_death_hook"].get("backend") == backend
             down = await wait(run, lambda state: state["gameplay"]["players"].get("guest", {}).get("downed"))
             assert down["game"]["native_dead_flags"]["guest"] is False
             assert down["game"]["pawns"]["guest"]["name"] == original_guest
@@ -255,8 +265,10 @@ async def smoke():
             assert still_present["game"]["pawns"]["guest"]["name"] == original_guest
             revived = await command("action", "--campaign", campaign, "interact", "--target", chosen)
             assert revived["effect"] == "revive"
-            note("native_death_wrapper_routes_to_coop", {"stock_dead": False, "same_pawn": True,
-                                                        "revived_health": revived["health"]})
+            note("native_death_wrapper_routes_to_coop", {
+                "backend": backend, "stock_dead": False, "same_pawn": True,
+                "revived_health": revived["health"],
+            })
         winner = await gameplay_slice(host_status, chosen) if args.gameplay else None
         dropped = await command("action", "--profile", profile, "drop-link")
         assert dropped["link_connected"] is False

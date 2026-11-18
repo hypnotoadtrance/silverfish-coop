@@ -15,7 +15,7 @@ from . import link, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .travel import PLAYTEST_MAPS, travel_decision
-from .runtime import (Bridge, MAP, has_native_death_patch, launch, read_json, spare_udp_port, staged_build,
+from .runtime import (Bridge, MAP, launch, native_death_backend, read_json, spare_udp_port, staged_build,
                       stop_game, verify_loopback_socket, write_json)
 
 
@@ -554,7 +554,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     with contextlib.suppress(RuntimeError, TimeoutError):
                         await bridge.restore("local", dict(saved, health=None))
             controller = Host(store, control, game_build, identity, bind, port, fixtures, death_rules,
-                              native_death=has_native_death_patch(work))
+                              native_death=native_death_backend(work) is not None)
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()

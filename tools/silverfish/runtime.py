@@ -23,6 +23,9 @@ STOCK_PACKAGES = ("SilverFish-Windows.pak", "SilverFish-Windows.utoc",
                   "SilverFish-Windows.ucas", "global.utoc", "global.ucas")
 MAP = "/Game/Classes/Maps/PlaytestMap_01"
 MENU = "/Game/Classes/Maps/MainMenu_P"
+CPP_MOD_NAME = "SilverfishCoopNative"
+CPP_RUNTIME_DLL = Path("ue4ss/UE4SS.dll")
+CPP_ADDON_DLL = Path(f"ue4ss/Mods/{CPP_MOD_NAME}/dlls/main.dll")
 DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
 DEATH_PATCH_HASHES = {
     ".pak": "75e7144577253917f6da7312ef5e585b12fb728226a22b0938323751a6b555cd",
@@ -79,8 +82,19 @@ def _manifest_paths(source: Path) -> list[Path]:
     return files
 
 
-def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None) -> dict:
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None, *,
+                 cpp_runtime: Path | None = None, cpp_addon: Path | None = None) -> dict:
     """Copy stock files only, then install the pinned loader and this mod in the copy."""
+    if bool(cpp_runtime) != bool(cpp_addon):
+        raise ValueError("Supply both the locally built UE4SS runtime and its matching C++ add-on")
+    for dll in (cpp_runtime, cpp_addon):
+        if dll and (dll.suffix.lower() != ".dll" or not dll.is_file()):
+            raise ValueError(f"Native module input is not a DLL file: {dll}")
     source = source.resolve(strict=True)
     ue4ss = ue4ss.resolve(strict=True)
     work = work.resolve()
@@ -119,13 +133,25 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None)
             configured.append(f"{key} = 0" if key in disable else line)
         write_text(settings, "\n".join(configured) + "\n")
         shutil.copytree(REPO / "mod/SilverfishCoop", loader / "Mods/SilverfishCoop")
-        write_text(loader / "Mods/mods.txt", "SilverfishCoop : 1\n")
+        enabled_mods = "SilverfishCoop : 1\n"
+        cpp_hashes = None
+        if cpp_runtime and cpp_addon:
+            for source_dll, relative in ((cpp_runtime, CPP_RUNTIME_DLL), (cpp_addon, CPP_ADDON_DLL)):
+                target = binaries / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_dll, target)
+            cpp_hashes = {"runtime": _file_sha256(binaries / CPP_RUNTIME_DLL),
+                          "addon": _file_sha256(binaries / CPP_ADDON_DLL)}
+            enabled_mods = f"{CPP_MOD_NAME} : 1\n" + enabled_mods
+        write_text(loader / "Mods/mods.txt", enabled_mods)
 
         digest = hashlib.sha256()
         for relative in (SHIPPING, *(PAKS / name for name in STOCK_PACKAGES)):
             with (building / relative).open("rb") as stream:
                 digest.update(hashlib.file_digest(stream, "sha256").digest())
         metadata = {"schema": 1, "game_build": digest.hexdigest(), "stock_files": len(files)}
+        if cpp_hashes is not None:
+            metadata["cpp_death_lab"] = cpp_hashes
         write_json(building / "silverfish-coop-stage.json", metadata)
         building.replace(stage)
     return metadata
@@ -145,6 +171,26 @@ def has_native_death_patch(work: Path) -> bool:
     return True
 
 
+def native_death_backend(work: Path, metadata: dict | None = None) -> str | None:
+    stage = work / "stage"
+    if metadata is None:
+        metadata = read_json(stage / "silverfish-coop-stage.json")
+    overlay = has_native_death_patch(work)
+    native = metadata.get("cpp_death_lab")
+    binaries = (stage / SHIPPING).parent
+    if native is None:
+        if (binaries / CPP_ADDON_DLL).exists():
+            raise ValueError("The C++ add-on is missing its stage manifest")
+        return "overlay" if overlay else None
+    if overlay or not isinstance(native, dict) or set(native) != {"runtime", "addon"}:
+        raise ValueError("The C++ death lab requires a separate stage with stock cooked packages")
+    for key, relative in (("runtime", CPP_RUNTIME_DLL), ("addon", CPP_ADDON_DLL)):
+        path = binaries / relative
+        if not path.is_file() or _file_sha256(path) != native[key]:
+            raise ValueError(f"The staged native lab {key} differs from its manifest")
+    return "cpp"
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -153,8 +199,13 @@ def staged_build(work: Path) -> str:
     game_build = metadata.get("game_build")
     if not isinstance(game_build, str) or len(game_build) != 64:
         raise ValueError("Stage game fingerprint is invalid")
-    if has_native_death_patch(work):
+    backend = native_death_backend(work, metadata)
+    if backend == "overlay":
         return hashlib.sha256((game_build + ":native-death-lab:1").encode("ascii")).hexdigest()
+    if backend == "cpp":
+        native = metadata["cpp_death_lab"]
+        fingerprint = ":".join((game_build, "native-death-cpp", native["runtime"], native["addon"]))
+        return hashlib.sha256(fingerprint.encode("ascii")).hexdigest()
     return game_build
 
 
@@ -189,8 +240,9 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     bridge.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SILVERFISH_COOP_BRIDGE=str(bridge))
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
-    if has_native_death_patch(work):
-        env["SILVERFISH_COOP_NATIVE_DEATH"] = "1"
+    backend = native_death_backend(work)
+    if backend:
+        env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -303,7 +355,11 @@ class Bridge:
                 elif fields[0] == "native-death-pawn" and len(fields) == 3:
                     data.setdefault("native_dead_flags", {})[fields[1]] = fields[2] == "1"
                 elif fields[0] == "native-death" and len(fields) >= 3:
-                    data["native_death_hook"] = {"state": fields[1], "sequence": int(fields[2])}
+                    data["native_death_hook"] = {
+                        "state": fields[1], "sequence": int(fields[2]),
+                        "failure": fields[3] if len(fields) >= 4 else "",
+                        "backend": fields[4] if len(fields) >= 5 else "overlay",
+                    }
                 elif fields[0] == "native-scene" and len(fields) == 18:
                     keys = ("active_map", "saved_level", "entrance", "rest_level", "bed", "instance_seed",
                             "game_seconds", "weather_offset", "ongoing_storm", "artifact_area_count",

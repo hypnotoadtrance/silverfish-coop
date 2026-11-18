@@ -45,6 +45,8 @@ def parser() -> argparse.ArgumentParser:
     stage.add_argument("--source", type=Path, required=True, help="original Steam installation")
     stage.add_argument("--ue4ss", type=Path, required=True, help="extracted UE4SS v4.0.0 release root")
     stage.add_argument("--signatures", type=Path, help="extracted Silverfish UE4SS_Signatures folder")
+    stage.add_argument("--cpp-runtime", type=Path, help="locally built UE4SS v4.0.0 runtime DLL")
+    stage.add_argument("--cpp-addon", type=Path, help="Silverfish native add-on from the same build")
 
     host = commands.add_parser("host", help="stage a listen session and wait for the guest")
     host.add_argument("--campaign", required=True)
@@ -112,7 +114,8 @@ def _events(directory: Path, limit: int) -> dict:
 async def execute(opts):
     operation = opts.operation
     if operation == "stage":
-        return prepare_game(opts.work, opts.source, opts.ue4ss, opts.signatures)
+        return prepare_game(opts.work, opts.source, opts.ue4ss, opts.signatures,
+                            cpp_runtime=opts.cpp_runtime, cpp_addon=opts.cpp_addon)
     if operation == "host":
         from .service import host_game
         rules = None
