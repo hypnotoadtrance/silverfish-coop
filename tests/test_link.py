@@ -75,6 +75,11 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             request or self.request,
         )
 
+    async def wait_for_host_release(self):
+        async with asyncio.timeout(3):
+            while self.host._current is not None:
+                await asyncio.sleep(0.01)
+
     async def exchange(self, size):
         # Random data exposes fragment ordering and truncation in both directions.
         original = secrets.token_bytes(size)
@@ -318,6 +323,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.connect_guest())["reason"], "guest_already_connected")
 
         await catalog.disconnect()
+        await self.wait_for_host_release()
         self.assertTrue(self.disconnected.empty())
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertTrue(self.client.game_access)
@@ -343,6 +349,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(inbox.messages.get(), 0.1)
 
         await self.client.disconnect()
+        await self.wait_for_host_release()
         self.assertTrue(self.disconnected.empty())
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertEqual(self.host.guest_endpoint(guest_id), game_endpoint)

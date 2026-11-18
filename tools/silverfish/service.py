@@ -596,6 +596,27 @@ def load_invite(file: Path, build: str) -> dict:
     return invite
 
 
+async def open_admission(transport, invite: dict, request: dict, *, timeout: float,
+                         queue: bool = False, on_wait=None) -> dict:
+    """Retry only bounded, authenticated waiting states reported by the host."""
+    windows = {"guest_already_connected": 2.0}
+    if queue:
+        windows.update(travel_in_progress=25.0, wipe_in_progress=35.0)
+    started = time.monotonic()
+    while True:
+        result = await transport.connect(
+            invite["host"], invite["port"], invite["certificate"], request, timeout=timeout,
+        )
+        if result.get("accepted"):
+            return result
+        reason = result.get("reason")
+        if not isinstance(reason, str) or time.monotonic() - started >= windows.get(reason, 0):
+            return result
+        if on_wait:
+            on_wait(reason)
+        await asyncio.sleep(0.25)
+
+
 async def character_catalog(work: Path, invitation: Path, name: str | None,
                             operation_id: str | None) -> dict:
     invite = load_invite(invitation, staged_build(work))
@@ -603,7 +624,7 @@ async def character_catalog(work: Path, invitation: Path, name: str | None,
     admission.update({"protocol_version": PROTOCOL, "catalog": True})
     client = await link.start_client(catalog_only=True)
     try:
-        result = await client.connect(invite["host"], invite["port"], invite["certificate"], admission)
+        result = await open_admission(client, invite, admission, timeout=6)
         if not result.get("accepted") or result.get("game_access") is not False:
             return {"ok": False, "error": "The host declined character catalog access"}
         if name is None:
@@ -637,11 +658,13 @@ class Client:
         self.server_transitioning = False
         self.stopping = False
 
-    async def connect(self, timeout: float = 6) -> dict:
+    async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
         request["protocol_version"] = PROTOCOL
-        result = await self.transport.connect(self.invite["host"], self.invite["port"],
-                                              self.invite["certificate"], request, timeout=timeout)
+        result = await open_admission(
+            self.transport, self.invite, request, timeout=timeout, queue=queue,
+            on_wait=self.admission_wait if queue else None,
+        )
         if not result.get("accepted") or not self.transport.game_access:
             self.next_retry = time.monotonic() + 3
             raise RuntimeError("Host declined admission")
@@ -668,6 +691,10 @@ class Client:
         self.control.event("client_link_authenticated", character_id=request["character_id"],
                            resumed=bool(result.get("resumed")))
         return result
+
+    def admission_wait(self, reason: str) -> None:
+        self.control.status(active=True, role="client", state="waiting_for_host", wait_reason=reason,
+                            character_id=self.invite["character_id"])
 
     async def open_game_link(self) -> None:
         self.transport.reset_game_endpoint()
@@ -833,7 +860,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             bridge = Bridge(bridge_directory, process)
             client = Client(control, transport, invite, bridge)
             await bridge.wait_for(lambda state: state["state"] == "ready")
-            await client.connect()
+            await client.connect(queue=True)
             await client.open_game_link()
             await client.run()
         except (Exception, asyncio.CancelledError) as error:
