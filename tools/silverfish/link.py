@@ -7,6 +7,7 @@ import inspect
 import ipaddress
 import json
 import logging
+import math
 import ssl
 import struct
 from collections.abc import Awaitable, Callable
@@ -34,6 +35,10 @@ _ALPN = "silverfish-coop-direct/1"
 _TLS_NAME = "silverfish-coop.invalid"
 _ADMISSION_STREAM = 0
 _MAX_ADMISSION = 4096
+_MAX_ACTION_BODY = 32 * 1024
+_MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
+_MAX_ACTIONS = 8
+_ACTION_TIMEOUT = 8.0
 _MAX_CERTIFICATE = 8192
 _ADMISSION_TIMEOUT = 8.0
 _IDLE_TIMEOUT = 12.0
@@ -45,7 +50,7 @@ _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
 _MAX_QUEUED_FRAMES = 256
 _MAX_CACHED_GUESTS = 16
-_MAX_ADMISSION_TASKS = 32
+_MAX_HOST_TASKS = 32
 _APP_ERROR = 0x100
 _LOG = logging.getLogger(__name__)
 
@@ -53,6 +58,15 @@ Address = tuple[str, int]
 Admission = dict[str, Any]
 Admit = Callable[[Admission], Admission | Awaitable[Admission]]
 OnDisconnect = Callable[[str], None | Awaitable[None]]
+Action = dict[str, Any]
+OnRequest = Callable[[str, Action], Action | Awaitable[Action]]
+
+_ACTION_ERRORS = {
+    "disabled": "application requests are disabled",
+    "invalid": "invalid application request",
+    "timed_out": "host application request timed out",
+    "failed": "host application request failed",
+}
 
 
 class LinkError(ConnectionError):
@@ -146,8 +160,8 @@ def _configuration(is_client: bool) -> QuicConfiguration:
         is_client=is_client,
         alpn_protocols=[_ALPN],
         idle_timeout=_IDLE_TIMEOUT,
-        max_data=_MAX_ADMISSION + 1,
-        max_stream_data=_MAX_ADMISSION + 1,
+        max_data=_MAX_ADMISSION + _MAX_ACTION_FRAME * _MAX_ACTIONS,
+        max_stream_data=_MAX_ACTION_FRAME,
         max_datagram_size=1200,
         max_datagram_frame_size=_FRAGMENT_SIZE + _FRAGMENT_HEADER.size + 16,
     )
@@ -186,15 +200,73 @@ def _validate_request(request: Admission) -> None:
     protocol = request.get("protocol_version")
     if type(protocol) is not int or not 1 <= protocol <= 2**31 - 1:
         raise LinkError("invalid protocol_version")
+    if "catalog" in request and type(request["catalog"]) is not bool:
+        raise LinkError("invalid catalog flag")
 
 
 def _validate_response(response: Admission) -> None:
     if not isinstance(response, dict) or type(response.get("accepted")) is not bool:
         raise LinkError("invalid admission response")
+    if "game_access" in response and type(response["game_access"]) is not bool:
+        raise LinkError("invalid game_access flag")
 
 
 def _rejection(reason: str) -> Admission:
     return {"accepted": False, "reason": reason}
+
+
+def _encode_action(message: Action, limit: int = _MAX_ACTION_BODY) -> bytes:
+    if not isinstance(message, dict):
+        raise LinkError("application message must be an object")
+    try:
+        data = json.dumps(message, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        raise LinkError("invalid application message") from None
+    if len(data) > limit:
+        raise LinkError("application message too large")
+    return data
+
+
+def _finite_number(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return result
+
+
+def _decode_action(data: bytes) -> Action:
+    try:
+        message = json.loads(data.decode("utf-8"), parse_float=_finite_number,
+                             parse_constant=_finite_number, object_pairs_hook=_unique_keys)
+    except (ValueError, RecursionError):
+        raise LinkError("invalid application message") from None
+    if not isinstance(message, dict):
+        raise LinkError("application message must be an object")
+    return message
+
+
+def _application_stream(stream_id: int) -> bool:
+    return stream_id > _ADMISSION_STREAM and stream_id % 4 == 0
+
+
+@dataclass
+class _IncomingAction:
+    body: bytearray = field(default_factory=bytearray)
+    deadline: asyncio.TimerHandle | None = None
+    abandoned: bool = False
+
+
+@dataclass
+class _OutgoingAction:
+    response: asyncio.Future[Action]
+    body: bytearray = field(default_factory=bytearray)
 
 
 @dataclass
@@ -258,6 +330,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self.terminated = False
         self.authorized = False
+        self.game_access = False
         self._admission_buffer = bytearray()
         self._admission_finished = False
         self._reassembler = _Reassembler()
@@ -268,7 +341,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         self.transmit()
 
     def forward_game_packet(self, data: bytes) -> None:
-        if not self.authorized or self.terminated or not 0 < len(data) <= _MAX_GAME_PACKET:
+        if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _MAX_GAME_PACKET:
             return
         count = (len(data) + _FRAGMENT_SIZE - 1) // _FRAGMENT_SIZE
         # aioquic 1.3.0 queues DATAGRAM writes until congestion control permits them.
@@ -296,7 +369,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         return None
 
     def _game_payload(self, event: events.DatagramFrameReceived) -> bytes | None:
-        if self.authorized and not self.terminated:
+        if self.authorized and self.game_access and not self.terminated:
             return self._reassembler.receive(event.data, self._loop.time())
         return None
 
@@ -306,15 +379,29 @@ class _HostProtocol(_LinkProtocol):
         super().__init__(*args, **kwargs)
         self.host = host
         self.guest_id: str | None = None
+        self._actions: dict[int, _IncomingAction] = {}
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.StreamDataReceived):
-            payload = self._admission_payload(event)
-            if payload is not None:
-                if len(self.host._tasks) < _MAX_ADMISSION_TASKS:
-                    self.host._spawn(self._respond(payload))
-                else:
-                    self.close(error_code=_APP_ERROR, reason_phrase="host busy")
+            if event.stream_id == _ADMISSION_STREAM:
+                payload = self._admission_payload(event)
+                if payload is not None:
+                    if len(self.host._tasks) < _MAX_HOST_TASKS:
+                        self.host._spawn(self._respond(payload))
+                    else:
+                        self.close(error_code=_APP_ERROR, reason_phrase="host busy")
+            else:
+                self._read_action(event)
+        elif isinstance(event, (events.StreamReset, events.StopSendingReceived)):
+            action = self._actions.get(event.stream_id)
+            if action is not None:
+                action.abandoned = True
+                # Cancel partial reads. Submitted callbacks can finish, so disconnection
+                # and timeout are never guarantees about whether the action took effect.
+                if action.deadline is not None and isinstance(event, events.StreamReset):
+                    action.deadline.cancel()
+                    action.deadline = None
+                    self._actions.pop(event.stream_id)
         elif isinstance(event, events.DatagramFrameReceived):
             packet = self._game_payload(event)
             if packet is not None:
@@ -322,8 +409,53 @@ class _HostProtocol(_LinkProtocol):
         elif isinstance(event, events.ConnectionTerminated):
             self.terminated = True
             self.authorized = False
+            for action in self._actions.values():
+                if action.deadline is not None:
+                    action.deadline.cancel()
+            self._actions.clear()
             if self.guest_id is not None:
                 self.host._spawn(self.host._release(self))
+
+    def _read_action(self, event: events.StreamDataReceived) -> None:
+        stream_id = event.stream_id
+        if not self.authorized or not _application_stream(stream_id):
+            self.close(error_code=_APP_ERROR, reason_phrase="unexpected application stream")
+            return
+
+        action = self._actions.get(stream_id)
+        if action is None:
+            if len(self._actions) >= _MAX_ACTIONS or len(self.host._tasks) >= _MAX_HOST_TASKS:
+                self.close(error_code=_APP_ERROR, reason_phrase="application request limit exceeded")
+                return
+            action = self._actions[stream_id] = _IncomingAction()
+            action.deadline = self._loop.call_later(_ACTION_TIMEOUT, self._action_read_timeout)
+        if action.deadline is None:
+            return
+        if len(action.body) + len(event.data) > _MAX_ACTION_BODY:
+            self.close(error_code=_APP_ERROR, reason_phrase="application request too large")
+            return
+        action.body.extend(event.data)
+        if event.end_stream:
+            action.deadline.cancel()
+            action.deadline = None
+            if len(self.host._tasks) >= _MAX_HOST_TASKS:
+                self.close(error_code=_APP_ERROR, reason_phrase="host busy")
+                return
+            self.host._spawn(self._respond_to_action(stream_id, action))
+
+    def _action_read_timeout(self) -> None:
+        self.close(error_code=_APP_ERROR, reason_phrase="application stream timed out")
+
+    async def _respond_to_action(self, stream_id: int, action: _IncomingAction) -> None:
+        try:
+            if not self.authorized or self.terminated or action.abandoned:
+                return
+            response = await self.host._run_action(self, bytes(action.body))
+            if self.authorized and not self.terminated and not action.abandoned:
+                self._quic.send_stream_data(stream_id, response, end_stream=True)
+                self.transmit()
+        finally:
+            self._actions.pop(stream_id, None)
 
     async def _respond(self, payload: bytes) -> None:
         try:
@@ -338,17 +470,19 @@ class _HostProtocol(_LinkProtocol):
 
 
 class HostLink:
-    """One admitted guest at a time, with a stable Unreal UDP endpoint per guest."""
+    """One admitted link at a time, with stable UDP endpoints for game play."""
 
     def __init__(
         self,
         game_address: Address,
         admit: Admit,
         on_disconnect: OnDisconnect | None,
+        on_request: OnRequest | None = None,
     ) -> None:
         self._game_address = game_address
         self._admit_callback = admit
         self._disconnect_callback = on_disconnect
+        self._request_callback = on_request
         self._guest_sockets: dict[str, asyncio.DatagramTransport] = {}
         self._current: _HostProtocol | None = None
         self._lock = asyncio.Lock()
@@ -365,19 +499,63 @@ class HostLink:
         return _address(transport) if transport is not None else None
 
     def connected(self, guest_id: str) -> bool:
+        """Return whether the guest currently has an admitted game link."""
         protocol = self._current
-        return bool(protocol and protocol.guest_id == guest_id and protocol.authorized)
+        return bool(protocol and protocol.guest_id == guest_id and protocol.authorized and protocol.game_access)
 
     async def release_guest(self, guest_id: str) -> bool:
         """Retire a disconnected guest's cached UDP endpoint after its grace period."""
         async with self._lock:
-            if self._current is not None and self._current.guest_id == guest_id:
+            if self._current and self._current.guest_id == guest_id and self._current.game_access:
                 return False
             transport = self._guest_sockets.pop(guest_id, None)
             if transport is None:
                 return False
             transport.close()
             return True
+
+    async def _create_game_route(self, guest_id: str) -> asyncio.DatagramTransport:
+        transport = None
+
+        def receive(data: bytes, _: Address) -> None:
+            if transport is not None and self._guest_sockets.get(guest_id) is transport:
+                self._from_game(guest_id, data)
+
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _LocalUdp(receive),
+            local_addr=(self._game_address[0], 0),
+            remote_addr=self._game_address,
+        )
+        return transport
+
+    async def refresh_game_routes(self) -> None:
+        """Rebuild Unreal relay routes after hard travel without closing the QUIC link.
+
+        Call once the new Unreal listener is ready. Reconnects alone continue to
+        reuse existing routes. A reserved guest gets a fresh route on readmission.
+        """
+        async with self._lock:
+            if self._closed:
+                raise LinkError("host link is closed")
+            refreshed: dict[str, asyncio.DatagramTransport] = {}
+            protocol = self._current
+            if protocol and protocol.authorized and protocol.game_access and protocol.guest_id is not None:
+                guest_id = protocol.guest_id
+                try:
+                    route = await self._create_game_route(guest_id)
+                except OSError:
+                    raise LinkError("could not refresh the Unreal relay route") from None
+                if self._closed:
+                    route.close()
+                    raise LinkError("host link is closed")
+                if protocol.authorized:
+                    refreshed[guest_id] = route
+                else:
+                    route.close()
+
+            old_routes, self._guest_sockets = self._guest_sockets, refreshed
+            for route in old_routes.values():
+                route.close()
 
     def _spawn(self, request: Awaitable[None]) -> None:
         task = asyncio.create_task(request)
@@ -397,47 +575,67 @@ class HostLink:
             if self._current is not None:
                 return _encode(_rejection("guest_already_connected"))
 
-            transport = self._guest_sockets.get(guest_id)
-            new_transport = transport is None
-            keep_transport = False
+            transport = None
             try:
-                if new_transport:
-                    if len(self._guest_sockets) >= _MAX_CACHED_GUESTS:
-                        return _encode(_rejection("guest_endpoint_capacity"))
-                    receive = lambda data, _: self._from_game(guest_id, data)
-                    transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
-                        lambda: _LocalUdp(receive),
-                        local_addr=(self._game_address[0], 0),
-                        remote_addr=self._game_address,
-                    )
-
                 async with asyncio.timeout(_ADMISSION_TIMEOUT):
                     response = self._admit_callback(request)
                     if inspect.isawaitable(response):
                         response = await response
-                _validate_response(response)
-                if response["accepted"]:
+                if isinstance(response, dict) and response.get("accepted") is True:
+                    # Take ownership of a game reservation before validating the
+                    # result or opening a relay. Failures below release it.
                     protocol.guest_id = guest_id
+                    protocol.game_access = response.get("game_access") is not False
                     self._current = protocol
-                    try:
-                        payload = _encode(response)
-                    except LinkError:
-                        await self._release_locked(protocol)
-                        raise
-                    if protocol.terminated or self._closed:
-                        await self._release_locked(protocol)
-                        return _encode(_rejection("host_unavailable"))
-                    self._guest_sockets[guest_id] = transport
-                    keep_transport = True
-                    protocol.authorized = True
+                _validate_response(response)
+                payload = _encode(response)
+                if not response["accepted"]:
                     return payload
-                return _encode(response)
+                if protocol.terminated or self._closed:
+                    return _encode(_rejection("host_unavailable"))
+
+                if protocol.game_access and guest_id not in self._guest_sockets:
+                    if len(self._guest_sockets) >= _MAX_CACHED_GUESTS:
+                        return _encode(_rejection("guest_endpoint_capacity"))
+                    transport = await self._create_game_route(guest_id)
+                if protocol.terminated or self._closed:
+                    return _encode(_rejection("host_unavailable"))
+                if transport is not None:
+                    self._guest_sockets[guest_id] = transport
+                protocol.authorized = True
+                return payload
             except Exception:
                 _LOG.warning("Host link admission failed")
                 return _encode(_rejection("admission_failed"))
             finally:
-                if new_transport and transport is not None and not keep_transport:
-                    transport.close()
+                if not protocol.authorized and self._current is protocol:
+                    if transport is not None:
+                        transport.close()
+                    await self._release_locked(protocol)
+
+    async def _run_action(self, protocol: _HostProtocol, body: bytes) -> bytes:
+        if self._closed or self._current is not protocol or protocol.guest_id is None:
+            return _encode_action({"error": "failed"})
+        if self._request_callback is None:
+            return _encode_action({"error": "disabled"})
+        try:
+            payload = _decode_action(body)
+        except LinkError:
+            return _encode_action({"error": "invalid"})
+        try:
+            async with asyncio.timeout(_ACTION_TIMEOUT):
+                result = self._request_callback(protocol.guest_id, payload)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not isinstance(result, dict):
+                    raise LinkError("invalid application callback response")
+                _encode_action(result)
+                return _encode_action({"result": result}, limit=_MAX_ACTION_FRAME)
+        except TimeoutError:
+            return _encode_action({"error": "timed_out"})
+        except Exception:
+            _LOG.warning("Host application request failed")
+            return _encode_action({"error": "failed"})
 
     async def _release(self, protocol: _HostProtocol) -> None:
         async with self._lock:
@@ -448,7 +646,9 @@ class HostLink:
             return
         self._current = None
         protocol.authorized = False
-        if self._disconnect_callback is None:
+        was_game_link = protocol.game_access
+        protocol.game_access = False
+        if not was_game_link or self._disconnect_callback is None:
             return
         try:
             async with asyncio.timeout(_ADMISSION_TIMEOUT):
@@ -459,7 +659,7 @@ class HostLink:
             _LOG.warning("Host link disconnect callback failed")
 
     def _to_game(self, protocol: _HostProtocol, data: bytes) -> None:
-        if self._current is protocol and protocol.authorized:
+        if self._current is protocol and protocol.authorized and protocol.game_access:
             transport = self._guest_sockets.get(protocol.guest_id)
             if transport is not None:
                 transport.sendto(data)
@@ -492,10 +692,13 @@ async def start_host(
     identity: ServerIdentity,
     admit: Admit,
     on_disconnect: OnDisconnect | None = None,
+    *,
+    on_request: OnRequest | None = None,
 ) -> HostLink:
+    """Open a private game relay and optionally serve admitted application requests."""
     if not _is_loopback(game_host):
         raise ValueError("Unreal relay endpoint must be a loopback address")
-    link = HostLink((game_host, game_port), admit, on_disconnect)
+    link = HostLink((game_host, game_port), admit, on_disconnect, on_request)
     configuration = _configuration(is_client=False)
     configuration.certificate = identity.certificate
     configuration.private_key = identity.private_key
@@ -514,20 +717,29 @@ class _ClientProtocol(_LinkProtocol):
         self.handshake = asyncio.Event()
         self.reply = asyncio.Event()
         self.response: Admission | None = None
+        self._actions: dict[int, _OutgoingAction] = {}
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.HandshakeCompleted):
             self.handshake.set()
         elif isinstance(event, events.StreamDataReceived):
-            payload = self._admission_payload(event)
-            if payload is not None:
-                try:
-                    self.response = _decode(payload)
-                    _validate_response(self.response)
-                    self.authorized = self.response["accepted"]
-                except LinkError:
-                    self.response = None
-                self.reply.set()
+            if event.stream_id == _ADMISSION_STREAM:
+                payload = self._admission_payload(event)
+                if payload is not None:
+                    try:
+                        self.response = _decode(payload)
+                        _validate_response(self.response)
+                        self.authorized = self.response["accepted"]
+                        self.game_access = self.authorized and self.response.get("game_access", True)
+                    except LinkError:
+                        self.response = None
+                    self.reply.set()
+            else:
+                self._read_action_response(event)
+        elif isinstance(event, (events.StreamReset, events.StopSendingReceived)):
+            action = self._actions.get(event.stream_id)
+            if action is not None and not action.response.done():
+                action.response.set_exception(LinkError("application request stream closed"))
         elif isinstance(event, events.DatagramFrameReceived):
             packet = self._game_payload(event)
             if packet is not None:
@@ -537,6 +749,55 @@ class _ClientProtocol(_LinkProtocol):
             self.authorized = False
             self.handshake.set()
             self.reply.set()
+            for action in self._actions.values():
+                if not action.response.done():
+                    action.response.set_exception(LinkError("link disconnected during application request"))
+
+    async def request(self, body: bytes, timeout: float) -> Action:
+        if len(self._actions) >= _MAX_ACTIONS:
+            raise LinkError("too many application requests pending")
+        stream_id = self._quic.get_next_available_stream_id()
+        action = self._actions[stream_id] = _OutgoingAction(self._loop.create_future())
+        try:
+            self._quic.send_stream_data(stream_id, body, end_stream=True)
+            self.transmit()
+            async with asyncio.timeout(timeout):
+                return await action.response
+        except TimeoutError:
+            raise LinkError("application request timed out") from None
+        finally:
+            self._actions.pop(stream_id, None)
+            if not action.response.done():
+                action.response.cancel()
+
+    def _read_action_response(self, event: events.StreamDataReceived) -> None:
+        stream_id = event.stream_id
+        if (not self.authorized or not _application_stream(stream_id)
+                or stream_id >= self._quic.get_next_available_stream_id()):
+            self.close(error_code=_APP_ERROR, reason_phrase="unexpected application response")
+            return
+        action = self._actions.get(stream_id)
+        if action is None or action.response.done():
+            return
+        if len(action.body) + len(event.data) > _MAX_ACTION_FRAME:
+            action.response.set_exception(LinkError("application response too large"))
+            self.close(error_code=_APP_ERROR, reason_phrase="application response too large")
+            return
+        action.body.extend(event.data)
+        if not event.end_stream:
+            return
+        try:
+            envelope = _decode_action(bytes(action.body))
+            result = envelope.get("result")
+            if envelope.keys() == {"result"} and isinstance(result, dict):
+                action.response.set_result(result)
+                return
+            error = envelope.get("error")
+            if envelope.keys() == {"error"} and isinstance(error, str) and error in _ACTION_ERRORS:
+                raise LinkError(_ACTION_ERRORS[error])
+            raise LinkError("invalid application response")
+        except LinkError as error:
+            action.response.set_exception(error)
 
     async def keepalive(self) -> None:
         while self.authorized and not self.terminated:
@@ -569,9 +830,11 @@ async def _open_client_protocol(client: ClientLink, address: Address, configurat
 class ClientLink:
     """Runs a local UDP tunnel and preserves its address across QUIC reconnects."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, catalog_only: bool = False) -> None:
         self._lock = asyncio.Lock()
         self._closed = False
+        self._catalog_only = catalog_only
+        self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _ClientProtocol | None = None
         self._context = None
         self._keepalive: asyncio.Task[None] | None = None
@@ -579,7 +842,14 @@ class ClientLink:
 
     @property
     def address(self) -> Address:
+        if self._transport is None:
+            raise LinkError("client link has no local Unreal endpoint")
         return _address(self._transport)
+
+    @property
+    def game_access(self) -> bool:
+        protocol = self._protocol
+        return bool(protocol and self.connected and protocol.game_access)
 
     @property
     def connected(self) -> bool:
@@ -595,6 +865,8 @@ class ClientLink:
         timeout: float = 10.0,
     ) -> Admission:
         _validate_request(request)
+        if self._catalog_only and request.get("catalog") is not True:
+            raise LinkError("this client requires catalog admission")
         payload = _encode(request)
         pinned, _ = _load_pinned_certificate(certificate_pem)
 
@@ -621,6 +893,8 @@ class ClientLink:
                     if protocol.response is None or protocol.terminated:
                         raise LinkError("link admission failed")
                     if protocol.response["accepted"]:
+                        if self._catalog_only and protocol.game_access:
+                            raise LinkError("host did not grant catalog-only admission")
                         self._protocol = protocol
                         self._context = context
                         self._keepalive = asyncio.create_task(protocol.keepalive())
@@ -636,11 +910,25 @@ class ClientLink:
                 if entered and not keep_context:
                     await context.__aexit__(None, None, None)
 
+    async def request(self, payload: Action, *, timeout: float = 5.0) -> Action:
+        """Send one reliable request as this link's admitted guest.
+
+        A timeout or disconnect can occur after the application applied the
+        request. Include an application transaction identifier when retrying.
+        """
+        if (type(timeout) not in (int, float) or not 0 < timeout <= 3600
+                or not math.isfinite(timeout)):
+            raise ValueError("application timeout must be positive and at most one hour")
+        protocol = self._protocol
+        if protocol is None or not protocol.authorized or protocol.terminated:
+            raise LinkError("link is not admitted")
+        return await protocol.request(_encode_action(payload), timeout)
+
     def _from_game(self, data: bytes, address: Address) -> None:
         if not _is_loopback(address[0]) or not 0 < len(data) <= _MAX_GAME_PACKET:
             return
         protocol = self._protocol
-        if protocol is not None and protocol.authorized:
+        if protocol is not None and self.game_access:
             if self._game_endpoint is None:
                 self._game_endpoint = address
             if self._game_endpoint == address:
@@ -651,7 +939,7 @@ class ClientLink:
         self._game_endpoint = None
 
     def _to_game(self, data: bytes) -> None:
-        if self._game_endpoint is not None and not self._closed:
+        if self._transport is not None and self._game_endpoint is not None and not self._closed:
             self._transport.sendto(data, self._game_endpoint)
 
     async def _disconnect_locked(self) -> None:
@@ -674,14 +962,19 @@ class ClientLink:
             try:
                 await self._disconnect_locked()
             finally:
-                self._transport.close()
+                if self._transport is not None:
+                    self._transport.close()
 
 
-async def start_client(local_host: str = "127.0.0.1", local_port: int = 0) -> ClientLink:
-    if not _is_loopback(local_host):
-        raise ValueError("client Unreal endpoint must be a loopback address")
-    client = ClientLink()
-    client._transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
-        lambda: _LocalUdp(client._from_game), local_addr=(local_host, local_port),
-    )
+async def start_client(
+    local_host: str = "127.0.0.1", local_port: int = 0, *, catalog_only: bool = False,
+) -> ClientLink:
+    """Open a client, optionally without an Unreal loopback relay socket."""
+    client = ClientLink(catalog_only=catalog_only)
+    if not catalog_only:
+        if not _is_loopback(local_host):
+            raise ValueError("client Unreal endpoint must be a loopback address")
+        client._transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _LocalUdp(client._from_game), local_addr=(local_host, local_port),
+        )
     return client

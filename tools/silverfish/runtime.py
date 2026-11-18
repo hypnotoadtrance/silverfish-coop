@@ -23,6 +23,12 @@ STOCK_PACKAGES = ("SilverFish-Windows.pak", "SilverFish-Windows.utoc",
                   "SilverFish-Windows.ucas", "global.utoc", "global.ucas")
 MAP = "/Game/Classes/Maps/PlaytestMap_01"
 MENU = "/Game/Classes/Maps/MainMenu_P"
+DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
+DEATH_PATCH_HASHES = {
+    ".pak": "75e7144577253917f6da7312ef5e585b12fb728226a22b0938323751a6b555cd",
+    ".ucas": "26ccbb17669b9de03bef98b1fc552a91cc430b7530a9baca93f0cad6addae5b4",
+    ".utoc": "d34b8791c49c88c4d81e7fff3aeefbf29e1c27c60c179c999bd45464e9321f4d",
+}
 
 
 def write_text(path: Path, data: str) -> None:
@@ -125,6 +131,20 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None)
     return metadata
 
 
+def has_native_death_patch(work: Path) -> bool:
+    packs = work / "stage" / PAKS
+    files = {suffix: packs / (DEATH_PATCH + suffix) for suffix in DEATH_PATCH_HASHES}
+    if not any(path.exists() for path in files.values()):
+        return False
+    for suffix, path in files.items():
+        if not path.is_file():
+            raise ValueError("Incomplete locally generated death lab patch")
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != DEATH_PATCH_HASHES[suffix]:
+                raise ValueError("The local death lab patch has an unqualified file fingerprint")
+    return True
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -133,6 +153,8 @@ def staged_build(work: Path) -> str:
     game_build = metadata.get("game_build")
     if not isinstance(game_build, str) or len(game_build) != 64:
         raise ValueError("Stage game fingerprint is invalid")
+    if has_native_death_patch(work):
+        return hashlib.sha256((game_build + ":native-death-lab:1").encode("ascii")).hexdigest()
     return game_build
 
 
@@ -166,6 +188,9 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     profile.mkdir(parents=True, exist_ok=True)
     bridge.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SILVERFISH_COOP_BRIDGE=str(bridge))
+    env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
+    if has_native_death_patch(work):
+        env["SILVERFISH_COOP_NATIVE_DEATH"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -203,11 +228,49 @@ class Bridge:
     def __init__(self, directory: Path, process: subprocess.Popen):
         self.directory = directory
         self.process = process
+        self.input_namespace = uuid.uuid4()
+        self.input_offset = 0
+        self.death_offset = 0
+
+    def interactions(self) -> list[str]:
+        """Consume complete local input records once, even if writing is in progress."""
+        try:
+            with (self.directory / "input.tsv").open("rb") as stream:
+                stream.seek(self.input_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        results = []
+        for line in batch[:end].splitlines():
+            action, _, count = line.partition(b"\t")
+            if action == b"interact" and count.isdigit() and len(count) <= 12:
+                results.append(uuid.uuid5(self.input_namespace, count.decode("ascii")).hex)
+        return results
+
+    def native_deaths(self) -> list[tuple[str, str]]:
+        try:
+            with (self.directory / "death.tsv").open("rb") as stream:
+                stream.seek(self.death_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.death_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.split(b"\t")
+            if (len(fields) == 3 and fields[0] == b"downed" and fields[1] in (b"local", b"guest")
+                    and fields[2].isdigit() and len(fields[2]) <= 12):
+                identifier = uuid.uuid5(self.input_namespace, "death" + fields[2].decode("ascii")).hex
+                events.append((fields[1].decode("ascii"), identifier))
+        return events
 
     def snapshot(self) -> dict | None:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
-            data = {"pawns": {}}
+            data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             for line in text.splitlines():
                 fields = line.split("\t")
                 if fields[0] == "schema" and fields[1:] == ["1"]:
@@ -222,6 +285,70 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields[0] == "player" and len(fields) >= 6:
+                    data["player_effects"][fields[1]] = {
+                        "state": fields[2], "crouched": fields[3] == "1",
+                        "speed": _finite(fields[4]), "jump_velocity": _finite(fields[5]),
+                    }
+                elif fields[0] == "player-visual" and len(fields) == 4:
+                    data.setdefault("player_visuals", {})[fields[1]] = {
+                        "input_gate": fields[2] == "1", "marker": fields[3] == "1",
+                    }
+                elif fields[0] == "native-damage-canary" and len(fields) == 8:
+                    data["native_damage_canary"] = {
+                        "slot": fields[1], "guest_before": _finite(fields[2]), "guest_after": _finite(fields[3]),
+                        "host_before": _finite(fields[4]), "host_after": _finite(fields[5]),
+                        "binding_restored": fields[6] == "1", "sequence": int(fields[7]),
+                    }
+                elif fields[0] == "native-death-pawn" and len(fields) == 3:
+                    data.setdefault("native_dead_flags", {})[fields[1]] = fields[2] == "1"
+                elif fields[0] == "native-death" and len(fields) >= 3:
+                    data["native_death_hook"] = {"state": fields[1], "sequence": int(fields[2])}
+                elif fields[0] == "native-scene" and len(fields) == 18:
+                    keys = ("active_map", "saved_level", "entrance", "rest_level", "bed", "instance_seed",
+                            "game_seconds", "weather_offset", "ongoing_storm", "artifact_area_count",
+                            "temporary_activation_count", "storm_activation_count", "storm_seed",
+                            "storm_activated", "storm_class", "status", "message")
+                    numeric = {"instance_seed", "game_seconds", "weather_offset", "artifact_area_count",
+                               "temporary_activation_count", "storm_activation_count", "storm_seed"}
+                    flags = {"ongoing_storm", "storm_activated"}
+                    data["native_scene"] = {
+                        key: None if value == "-" else _finite(value) if key in numeric
+                        else value == "1" if key in flags else value
+                        for key, value in zip(keys, fields[1:], strict=True)
+                    }
+                elif fields[0] == "native-rule" and len(fields) == 3:
+                    data.setdefault("native_rules", {})[fields[1]] = int(fields[2])
+                elif fields[0] == "native-reputation" and len(fields) == 3:
+                    data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
+                elif fields[0] == "native-quest" and len(fields) == 7:
+                    data["native_quest"] = {
+                        "id": fields[1], "state": fields[2], "step": fields[3], "final_step": fields[4],
+                        "reward_cash": fields[5], "message": fields[6],
+                    }
+                elif fields[0] == "native-shop" and len(fields) == 9:
+                    data.setdefault("native_shops", []).append({
+                        "id": fields[1], "actor": fields[2], "location": [_finite(v) for v in fields[3:6]],
+                        "cash": _finite(fields[6]), "state": fields[7], "message": fields[8],
+                    })
+                elif fields[0] == "native-offer" and len(fields) == 8:
+                    data.setdefault("native_offers", []).append({
+                        "shop": fields[1], "bucket": fields[2], "index": int(fields[3]), "asset": fields[4],
+                        "id": None if fields[5] == "-" else fields[5],
+                        "ammo": _finite(fields[6]), "value": _finite(fields[7]),
+                    })
+                elif fields[0] == "wallet" and len(fields) == 2:
+                    data["native_wallet"] = None if fields[1] == "-" else int(fields[1])
+                elif fields[0] == "vitals" and len(fields) == 6:
+                    data["native_vitals_probe"] = {
+                        "mode": fields[1], "host_health": _finite(fields[2]), "guest_health": _finite(fields[3]),
+                        "host_uses_game_slot": fields[4] == "1", "shared_save": fields[5] == "1",
+                    }
+                elif fields[0] == "loot" and len(fields) == 6:
+                    data["loot_actors"].append({
+                        "id": None if fields[1] == "-" else fields[1],
+                        "location": [_finite(axis) for axis in fields[2:5]], "name": fields[5],
+                    })
                 elif fields[0] == "pawn" and len(fields) == 8:
                     data["pawns"][fields[1]] = {"name": fields[2], "health": _finite(fields[3]),
                                                "location": [_finite(axis) for axis in fields[4:7]],
@@ -244,18 +371,27 @@ class Bridge:
             await asyncio.sleep(0.15)
         raise TimeoutError("The game bridge did not reach the requested state")
 
-    async def command(self, action: str, *arguments: str) -> dict:
+    async def command(self, action: str, *arguments: str, timeout: float = 8) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
         write_text(self.directory / "command.tsv", "\t".join(fields) + "\n")
-        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0])
+        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout)
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")
         return status
 
-    async def restore(self, role: str, pawn: dict) -> None:
+    async def walk(self, x: float, y: float, milliseconds: int) -> None:
+        if type(x) not in {int, float} or type(y) not in {int, float}:
+            raise ValueError("Movement requires numeric x and y")
+        if (not math.isfinite(x) or not math.isfinite(y) or math.hypot(x, y) > 1.001
+                or math.hypot(x, y) < 0.01 or type(milliseconds) is not int
+                or not 50 <= milliseconds <= 1000):
+            raise ValueError("Use a normalized planar direction and a duration of 50 to 1000 ms")
+        await self.command("walk", str(x), str(y), str(milliseconds))
+
+    async def restore(self, role: str, pawn: dict) -> dict | None:
         coordinates = pawn.get("location")
         if not isinstance(coordinates, list) or len(coordinates) != 3:
             return
@@ -263,4 +399,4 @@ class Bridge:
             return
         health = pawn.get("health")
         raw_health = str(health) if isinstance(health, (int, float)) and math.isfinite(health) else "-"
-        await self.command("restore", role, raw_health, *(str(axis) for axis in coordinates))
+        return await self.command("restore", role, raw_health, *(str(axis) for axis in coordinates))

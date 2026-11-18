@@ -1,7 +1,18 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if not bridge or bridge == "" then return end
 
+local loot = require("loot")
+local native_death = require("native_death")
+local native_world = require("native_world")
+local players = require("players")
+local vitals = require("vitals")
+local wallet = require("wallet")
+
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
+local travel_maps = {
+    ["/Game/Classes/Maps/PlaytestMap_01"] = true,
+    ["/Game/Classes/Maps/PlaytestMap_02"] = true,
+}
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local command_path = bridge .. "/command.tsv"
 local status_path = bridge .. "/status.tsv"
@@ -79,6 +90,7 @@ local function describe_pawn(pawn, local_player, controller)
         name = pawn:GetFullName(),
         kind = local_player and "local" or "guest",
         controller = valid(controller) and controller:GetFullName() or "",
+        controller_object = controller,
         x = location.X,
         y = location.Y,
         z = location.Z,
@@ -142,7 +154,7 @@ local function inspect()
         end
     end
     for _, details in ipairs(state.pawns) do
-        if valid(details.save) and save_counts[details.save:GetAddress()] > 1 then
+        if vitals.active() or (valid(details.save) and save_counts[details.save:GetAddress()] > 1) then
             details.health = nil
             details.save = nil
         end
@@ -255,6 +267,17 @@ local function run_command(fields, state, current_phase)
         role = "host"
         expected_map = argument
         return "listen travel requested"
+    elseif command == "travel" then
+        if #fields ~= 3 or not travel_maps[argument] or argument == state.map then
+            error("Expected a different supported co-op playtest map", 0)
+        end
+        if role ~= "host" or current_phase ~= "hosting" then
+            error("Zone travel requires the active listen host", 0)
+        end
+        vitals.reset()
+        open_level(state.controller, argument, "listen")
+        expected_map = argument
+        return "zone travel requested"
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -270,6 +293,7 @@ local function run_command(fields, state, current_phase)
         if #fields > 3 or (argument and argument ~= main_menu) then
             error("Expected the packaged title-screen map", 0)
         end
+        vitals.reset()
         if state.map ~= main_menu or state.listening then
             open_level(state.controller, main_menu, "")
             leaving = true
@@ -280,6 +304,17 @@ local function run_command(fields, state, current_phase)
     elseif command == "restore" then
         return restore_pawn(fields, state, current_phase)
     end
+    local result = players.command(fields, state, current_phase)
+    if result and fields[2] == "player-state" and fields[4] == "standing" then
+        native_death.rearm(fields[3])
+    end
+    result = result
+        or native_death.command(fields, state, current_phase)
+        or loot.command(fields, state, current_phase)
+        or vitals.command(fields, state, current_phase)
+        or wallet.command(fields, state, current_phase)
+        or native_world.command(fields, state, current_phase)
+    if result then return result end
     error("Unknown command", 0)
 end
 
@@ -317,6 +352,20 @@ local function write_status(state, current_phase, failure)
                 details.x, details.y, details.z, details.controller)
         end
     end
+    if not failure then
+        for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        local vitals_ok, vitals_row = pcall(vitals.row, state, current_phase, status_row)
+        if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
+        for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_death.rows(state, current_phase, status_row)) do
+            rows[#rows + 1] = row
+        end
+        local native_ok, native_rows = pcall(native_world.rows, state, current_phase, status_row)
+        if native_ok then
+            for _, row in ipairs(native_rows) do rows[#rows + 1] = row end
+        end
+    end
     if failure then rows[#rows + 1] = status_row("diagnostic", failure) end
 
     local temporary = status_path .. ".tmp"
@@ -341,6 +390,7 @@ local function tick()
         return
     end
     local current_phase = phase(state)
+    native_death.sync(state, current_phase)
     local fields = read_command()
     if fields then
         local accepted, message = pcall(run_command, fields, state, current_phase)
@@ -348,10 +398,17 @@ local function tick()
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
         current_phase = phase(state)
+        native_death.sync(state, current_phase)
     end
-    write_status(state, current_phase)
+    local projected, failure = pcall(function()
+        vitals.sync(state, current_phase)
+        players.sync(state, current_phase)
+    end)
+    write_status(state, current_phase, not projected and failure or nil)
 end
 
+players.start(bridge)
+native_death.start(bridge)
 LoopAsync(250, function()
     if not tick_queued then
         tick_queued = true

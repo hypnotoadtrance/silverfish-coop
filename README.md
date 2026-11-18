@@ -65,7 +65,7 @@ Action responses have an `id` and an `ok` flag. Events carry the session generat
 
 ## What persists
 
-The host writes a versioned campaign snapshot, a previous snapshot for recovery, and host-issued character identities under `campaigns/<campaign>/save`. This build stores the test map, host position, and guest character position. The separate `game-user` folders isolate any stock game writes. Rules for full inventory and progression, Steam Invite, quest and wallet synchronization, downed/revive, and zone travel remain future work.
+The host writes a versioned campaign snapshot, a previous snapshot for recovery, and host-issued character identities under `campaigns/<campaign>/save`. This build stores the test map, character positions, the co-op gameplay ledger, and the host's observed native world state. The separate `game-user` folders isolate any stock game writes. The playtest fixtures cover the shared wallet, owned inventories, revive, and travel. See the [native integration status](docs/NATIVE-INTEGRATION.md) for the full-campaign work.
 
 Keep stages, saves, host identity keys, invitations, and extracted assets outside Git. The repository contains mod code, tooling, and docs.
 
@@ -82,3 +82,41 @@ Run the optional Windows integration test against an existing staged workspace.
 ```
 
 It starts two headless staged game processes, joins through an encrypted loopback relay, tests both deliberate reconnect and dropped packets, restarts the host, and verifies the guest's existing character returns. It records the results in the generated validation campaign. The optional vanilla path is used for a before-and-after hash comparison.
+
+## Playtest gameplay
+
+Enable `--fixtures` on the host to run the two-player mechanics test on the shipped playtest maps. Both processes still use the normal Direct IP path. The fixture gives the session one world pickup and a controlled way to exercise damage, rewards, and purchases.
+
+Use the invitation to list and create characters before starting the guest game. Pass `--character` to select one of the returned IDs. Omitting it selects the character specified in the invitation.
+
+```powershell
+& $sfPython -m tools.silverfish characters --invite 'C:\Path\To\Received.invite.json'
+& $sfPython -m tools.silverfish create-character --invite 'C:\Path\To\Received.invite.json' --name Scout
+& $sfPython -m tools.silverfish join --profile scout --invite 'C:\Path\To\Received.invite.json' --character $sfCharacterId
+```
+
+Playtest operators and AI clients can schedule bounded native movement and submit party interactions locally. Use `status` to read the resulting pawn positions, independent inventories, downed state, shared cash, travel epoch, and pending respawns. The guest receives the host's authoritative gameplay state over the authenticated connection. Check `gameplay_fresh` alongside the displayed game connection state.
+
+```powershell
+& $sfPython -m tools.silverfish action --profile scout walk --x 0 --y 1 --milliseconds 300
+& $sfPython -m tools.silverfish action --profile scout interact --target playtest-toy
+& $sfPython -m tools.silverfish action --campaign expedition test-damage --target guest --amount 100
+& $sfPython -m tools.silverfish action --campaign expedition interact --target $sfCharacterId
+& $sfPython -m tools.silverfish action --campaign expedition travel --target /Game/Classes/Maps/PlaytestMap_02
+```
+
+For an operation that changes state, an explicit `--operation-id` lets a caller retry with the same ID and arguments after a lost response. The host persists recent receipts. A retry with different arguments is rejected. A claimed loot stack stays claimed across restarts.
+
+To exercise item retention, start a test campaign with `--fixtures --fixture-keep-slots 1 --fixture-backpacks`. Record the host location with `action --campaign expedition rest`. When all active participants are downed, the host freezes the roster. Each player can use `action … keep --keep ITEM=COUNT` within the selection window. Owner-only backpacks appear in the structured gameplay state and can be recovered through `interact --target BACKPACK_ID`.
+
+`test-quest-reward` grants a controlled personal item to each eligible character and credits the party once. `buy --target training-supplies` exercises an atomic balance, stock, and inventory update. The party balance projects into the staged host's native cash flag. The fixture inventories are kept by the co-op save service.
+
+## Native integration labs
+
+The staged host reports placed merchant stock, saved scene fields, and an allowlisted authored quest probe. These are checkpoints for development of native campaign integration. The `vitals-probe` and `vitals-reset` commands verify transient guest save ownership in a fixture session. The generated death overlay is qualified for the sampled Steam build and uses a separate stage. See the [local cooked-patch tool](tools/cooked_patch/README.md).
+
+```powershell
+& $sfPython tests/live_smoke.py --work .work --gameplay --wipe --zones --native-probe --native-quest
+```
+
+Full stock inventory and equipment routing, native purchases and quest turn-in, natural zone exits, stock combat, and Steam Invite are development work. Gameplay fixtures and the native labs run from the staged workspace.

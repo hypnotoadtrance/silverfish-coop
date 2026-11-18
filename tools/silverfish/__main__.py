@@ -51,6 +51,9 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--bind", default="127.0.0.1", help="local IP to bind for authenticated Direct IP")
     host.add_argument("--port", type=_port, default=7777)
     host.add_argument("--headless", action="store_true")
+    host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
+    host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
+    host.add_argument("--fixture-backpacks", action="store_true", help="drop unretained test inventory in owner-only bags")
 
     invite = commands.add_parser("invite", help="create a private guest invitation file")
     invite.add_argument("--campaign", required=True)
@@ -62,6 +65,14 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--profile", required=True)
     join.add_argument("--invite", type=Path, required=True)
     join.add_argument("--headless", action="store_true")
+    join.add_argument("--character", help="character ID selected from the guest's catalog")
+
+    catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
+    catalog.add_argument("--invite", type=Path, required=True)
+    create = commands.add_parser("create-character", help="create a character before joining")
+    create.add_argument("--invite", type=Path, required=True)
+    create.add_argument("--name", required=True)
+    create.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID on retry")
 
     inspect = commands.add_parser("status", help="read the latest structured session status")
     _target(inspect)
@@ -71,7 +82,18 @@ def parser() -> argparse.ArgumentParser:
 
     action = commands.add_parser("action", help="perform a supported local action")
     _target(action)
-    action.add_argument("action", choices=["checkpoint", "drop-link", "reconnect", "stop"])
+    action.add_argument("action", choices=[
+        "checkpoint", "drop-link", "reconnect", "stop", "walk", "interact", "test-damage", "travel",
+        "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
+        "native-death-probe", "native-damage-probe",
+    ])
+    action.add_argument("--target", help="character ID, loot ID, or full destination map path")
+    action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
+    action.add_argument("--amount", type=int, help="controlled damage amount for fixture tests")
+    action.add_argument("--x", type=float, help="normalized world X movement")
+    action.add_argument("--y", type=float, help="normalized world Y movement")
+    action.add_argument("--milliseconds", type=int, help="movement duration, from 50 to 1000")
+    action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     return cli
 
 
@@ -93,14 +115,23 @@ async def execute(opts):
         return prepare_game(opts.work, opts.source, opts.ue4ss, opts.signatures)
     if operation == "host":
         from .service import host_game
+        rules = None
+        if opts.fixture_keep_slots is not None or opts.fixture_backpacks:
+            if not opts.fixtures or (opts.fixture_keep_slots is not None and opts.fixture_keep_slots < 0):
+                raise ValueError("Wipe fixture settings require --fixtures and a nonnegative slot count")
+            rules = {"keep_slots": opts.fixture_keep_slots, "drop_backpacks": opts.fixture_backpacks}
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
-                        opts.bind, opts.port, opts.headless)
+                        opts.bind, opts.port, opts.headless, opts.fixtures, rules)
         return {"ok": True, "state": "stopped"}
     if operation == "join":
         from .service import join_game
         await join_game(opts.work, select_run(opts.work, "clients", opts.profile),
-                        opts.invite, opts.headless)
+                        opts.invite, opts.headless, opts.character)
         return {"ok": True, "state": "stopped"}
+    if operation in {"characters", "create-character"}:
+        from .service import character_catalog
+        return await character_catalog(opts.work, opts.invite, getattr(opts, "name", None),
+                                       getattr(opts, "operation_id", None))
     if operation == "invite":
         directory = select_run(opts.work, "campaigns", opts.campaign) / "run"
         return await submit(directory, "invite", name=opts.name, character=opts.character,
@@ -111,7 +142,15 @@ async def execute(opts):
         return status(directory)
     if operation == "events":
         return _events(directory, opts.tail)
-    return await submit(directory, opts.action)
+    retained = {}
+    for value in opts.keep or ():
+        item, separator, count = value.partition("=")
+        if not item or not separator or item in retained or not count.isdecimal() or int(count) < 1:
+            raise ValueError("Each retained item needs a distinct ID and positive count")
+        retained[item] = int(count)
+    return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
+                        amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
+                        retained=retained if opts.action == "keep" else None)
 
 
 def main() -> int:

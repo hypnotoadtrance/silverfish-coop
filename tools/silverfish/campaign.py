@@ -303,8 +303,8 @@ class CampaignStore:
         return {"guest_id": guest_id, "credential": credential}
 
     @staticmethod
-    def _add_character(candidate, guest_id, name, state):
-        character_id = str(uuid.uuid4())
+    def _add_character(candidate, guest_id, name, state, character_id=None):
+        character_id = character_id or str(uuid.uuid4())
         candidate["characters"][character_id] = {
             "guest_id": guest_id,
             "name": name,
@@ -346,6 +346,38 @@ class CampaignStore:
 
     def _public_character(self, character_id):
         return {"character_id": character_id, **copy.deepcopy(self._data["characters"][character_id])}
+
+    def linked_character_catalog(self, guest_id):
+        """Only for an application session already authenticated by this store."""
+        with self._mutex:
+            self._require_open()
+            if guest_id not in self._data["guests"]:
+                raise AuthenticationError("Unknown campaign guest.")
+            return [
+                {"character_id": character_id, "name": character["name"]}
+                for character_id, character in self._data["characters"].items()
+                if character["guest_id"] == guest_id
+            ]
+
+    def create_linked_character(self, guest_id, name, operation_id):
+        """Create once for the owner of an authenticated application session."""
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            raise CharacterError("Invalid character creation operation ID.")
+        with self._mutex:
+            self._require_open()
+            if guest_id not in self._data["guests"]:
+                raise AuthenticationError("Unknown campaign guest.")
+            name = _name(name)
+            character_id = str(uuid.uuid5(uuid.UUID(guest_id), operation_id))
+            existing = self._data["characters"].get(character_id)
+            if existing is not None:
+                if existing["guest_id"] != guest_id or existing["name"] != name:
+                    raise CharacterError("Character creation operation ID is already in use.")
+            else:
+                candidate = copy.deepcopy(self._data)
+                self._add_character(candidate, guest_id, name, {}, character_id)
+                self._commit(candidate)
+            return {"character_id": character_id, "name": name}
 
     def list_characters(self, guest_id, credential):
         """Return only the authenticated guest's persistent characters."""

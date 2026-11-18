@@ -23,3 +23,6 @@ clients/
 stage/
 *.uasset
 *.umap
+
+*.uexp
+*.ubulk
