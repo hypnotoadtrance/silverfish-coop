@@ -166,6 +166,26 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
                 return None
             result["approach"] = {"target": move[2], "host_pawn": move[3], "guest_pawn": move[4],
                                   "host_distance_cm": distances[0], "guest_distance_cm": distances[1]}
+        impacts = [row for row in rows if row[0] == "native-campaign-npc-approach-impact"]
+        if impacts and viewer == "host":
+            impact, = impacts
+            geometry, = [row for row in rows if row[0] == "native-campaign-npc-approach-geometry"]
+            move = result.get("approach", {})
+            if (len(impact) != 6 or len(geometry) != 8 or not move
+                    or impact[1:3] != geometry[1:3] or impact[1:3] != [MAP, move["target"]]):
+                return None
+            sweep = float(geometry[3])
+            floors, placements = map(int, geometry[4:6])
+            time_of_impact, hit_distance, penetration_depth = map(float, impact[3:])
+            guest_path = move["guest_pawn"].partition(" ")[2]
+            component_path = geometry[7].partition(" ")[2]
+            if (sweep != 350 or not 0 < placements <= floors or geometry[6] != "guest_hit"
+                    or not guest_path or not component_path.startswith(guest_path + ".")
+                    or not 0 < time_of_impact <= 1 or not 1 <= hit_distance <= sweep - 25
+                    or penetration_depth != 0):
+                return None
+            result["approach_impact"] = {"target": impact[2], "component": geometry[7], "time": time_of_impact,
+                                         "distance_cm": hit_distance, "penetration_depth_cm": penetration_depth}
         refresh = [row for row in rows if row[0] == "native-campaign-npc-refresh"]
         if refresh and viewer == "host":
             entry, = refresh
@@ -488,7 +508,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                         and approach_pair(server, standing=not combat) == (host_pawn, guest_pawn)
                         and target in snapshot["host"]["members"]
                         and (not combat or stock_guest_hit(snapshot["host"], host_pawn, guest_pawn, natural["host"]["members"]))
-                        and (not flayer_combat or stock_flayer_infection(server, snapshot["host"])))
+                        and (not flayer_combat or (snapshot["host"].get("approach_impact", {}).get("target") == target
+                                                  and stock_flayer_infection(server, snapshot["host"]))))
 
             label = (f"No stock {family} attack verified detached guest combat" if combat
                      else "The approached cohort did not yield stock client replicas")
@@ -497,6 +518,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             if combat:
                 evidence["stock_combat"] = snapshot["host"]["combat"]
             if flayer_combat:
+                evidence["flayer_approach_impact"] = snapshot["host"]["approach_impact"]
                 evidence["stock_melee_sickness"] = snapshot["host"]["melee_sickness"]
         else:
             server, client, snapshot = await wait(f"No fixture-free stock {family} proof appeared", proved)

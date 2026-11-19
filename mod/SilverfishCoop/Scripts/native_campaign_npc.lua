@@ -187,7 +187,9 @@ end
 
 local function forward_melee_trace(trace, target, guest, location)
     local start, facing = point(target:K2_GetActorLocation()), point(target:GetActorForwardVector())
-    if not start or not facing or distance(start, location) > flayer_sweep - flayer_sweep_margin then return "sweep_range" end
+    if not start or not facing then return "sweep_range" end
+    local reach = distance(start, location)
+    if reach > flayer_sweep - flayer_sweep_margin then return "sweep_range" end
     local dx, dy = location.X - start.X, location.Y - start.Y
     local length = math.sqrt(dx ^ 2 + dy ^ 2)
     local facing_length = math.sqrt(facing.X ^ 2 + facing.Y ^ 2)
@@ -198,14 +200,25 @@ local function forward_melee_trace(trace, target, guest, location)
     local hit = {}
     local found = trace:LineTraceSingle(target, start, location, 0, false, {}, 0, hit, true, trace_color, trace_color, 0)
     hit = hit.OutHit or hit
-    if found ~= true or hit.bBlockingHit ~= true then return "clear" end
+    if found ~= true then return "clear" end
     local component = hit.Component and hit.Component:Get()
     local component_name = valid(component) and component:GetFullName() or "-"
-    if hit.bStartPenetrating == true then return "start_penetrating", component_name end
-    if not valid(component) or not same(component:GetOwner(), guest.pawn) then return "other_hit", component_name end
+    -- UE4SS copies both packed HitResult flags through the same unmasked byte in Lua out tables.
+    -- Verify the native trace's distance from its start before accepting its blocking component.
+    local impact = { time = hit.Time, distance = hit.Distance, depth = hit.PenetrationDepth }
+    if not finite(impact.time) or not finite(impact.distance) or not finite(impact.depth)
+        or impact.time < 0 or impact.time > 1 or impact.distance < 0
+        or impact.distance > flayer_sweep - flayer_sweep_margin or impact.depth < 0
+        or math.abs(impact.distance - impact.time * reach) > 1 then
+        return "invalid_impact", component_name, impact
+    end
+    if impact.time == 0 or impact.distance < 1 or impact.depth > 0 then
+        return "start_penetrating", component_name, impact
+    end
+    if not valid(component) or not same(component:GetOwner(), guest.pawn) then return "other_hit", component_name, impact end
     local collision = component:GetCollisionEnabled()
-    if collision ~= 1 and collision ~= 3 then return "guest_collision_unqualified" end
-    return "guest_hit", component_name
+    if collision ~= 1 and collision ~= 3 then return "guest_collision_unqualified", component_name, impact end
+    return "guest_hit", component_name, impact
 end
 
 local function place_pair(world, host, guest, target, cohort)
@@ -252,7 +265,8 @@ local function place_pair(world, host, guest, target, cohort)
                         and distance(guest_at, anchor) <= approach_radius then
                         if flayer then
                             diagnostics.placements = diagnostics.placements + 1
-                            diagnostics.trace, diagnostics.component = forward_melee_trace(trace, target, guest, guest_at)
+                            diagnostics.trace, diagnostics.component, diagnostics.impact =
+                                forward_melee_trace(trace, target, guest, guest_at)
                             if diagnostics.trace == "start_penetrating" then
                                 diagnostics.penetrations = diagnostics.penetrations + 1
                             elseif diagnostics.trace == "other_hit" then
@@ -283,9 +297,11 @@ local function place_pair(world, host, guest, target, cohort)
         end
     end
     if diagnostics then
-        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d penetrations=%d obstructions=%d trace=%s component=%s origin=(%.1f,%.1f,%.1f)",
+        local impact = diagnostics.impact or {}
+        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d penetrations=%d obstructions=%d trace=%s component=%s origin=(%.1f,%.1f,%.1f) impact=(%s,%s,%s)",
             diagnostics.floors, diagnostics.placements, diagnostics.penetrations, diagnostics.obstructions,
-            diagnostics.trace, diagnostics.component or "-", anchor.X, anchor.Y, anchor.Z), 0)
+            diagnostics.trace, diagnostics.component or "-", anchor.X, anchor.Y, anchor.Z,
+            tostring(impact.time or "-"), tostring(impact.distance or "-"), tostring(impact.depth or "-")), 0)
     end
     error("stock_husk_approach_no_safe_floor_pair", 0)
 end
@@ -406,6 +422,9 @@ local function read_rows(state, phase, status_row)
         if geometry then
             rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, flayer_sweep,
                 geometry.floors, geometry.placements, geometry.trace, geometry.component)
+            local impact = geometry.impact
+            rows[#rows + 1] = status_row("native-campaign-npc-approach-impact", state.map, approach.member,
+                impact.time, impact.distance, impact.depth)
         end
     end
     return rows
