@@ -78,6 +78,8 @@ The staged stock interaction input dispatches a scoped revive through the cooked
 
 Two-player runs repeated the stock one-hour sleep, guest refusal, and wipe recovery at the authored beds in Borough, Scav Bar, Dead End, Black Lake, and Artifact Forge. The party left each area through an authored exit before wiping. Both characters returned to the host's exact rest site with full native health, and the original save hashes matched in each run.
 
+At Dead Bridge, a three-player run used the stock reputation function to test the bed at −600 and +300 State reputation in an isolated campaign. A hostile host at the bed could neither open the sleep screen nor advance the clock. At +300 the stock screen accepted one hour of sleep. Both guests were refused on the host and on their own clients. The party left Dead Bridge and wiped, then returned to the exact bed arrow at 250 health per player. All nine original save hashes matched.
+
 A separate run downed the guest with stock lethal damage, then moved the party through a host-authorized Playtest zone transition. The same character stayed downed in its replacement pawn and through a same-port restart. The campaign ledger kept 0 HP and the detached stock save kept the 1 HP minimum used to prevent stock death. The host revived the restored guest to 25 HP, and the guest's view returned to standing. Guest-initiated travel was refused and the original save hashes matched.
 
 The five-instance marker run verified the two-part local exclamation above the downed guest for the host and the three other guests. The downed guest received no self-marker and stayed crouched with zero jump velocity. Clients used the host's current character ID and position because each client assigns its own names to replicated pawns. All marker actors cleared on revival. The same run verified reconnect, stock Observatory rest and party wipe, and all nine original save hashes.
@@ -177,6 +179,8 @@ An Observatory headless fixture first verified the stock standard SMG trigger on
 The SG 71-A fired one guest-owned shell into nine stock buckshot projectiles per press. The guest emptied the exact seven-shell load, refused nonmatching reserve ammunition, and reloaded two independent five-shell stacks in two presses. The exact weapon kept ten shells after restart, and the original save hashes matched.
 
 The SG 71-B Custom and SG 71-A Suppressed passed the same stock primary and reload sequence. Every round produced nine pellets. The suppressed receiver held five shells and preserved the other reserve stack when full. The verified magazine and exact inventory rows restored after restart.
+
+The Fennec 5.7 and Black Fox each fired the exact stock 5.7 AP projectile and reloaded from separately tracked 5.7 AP stacks. The Model 1931 used the same stock input path with 9 mm Ball. All three weapon GUIDs and their magazine values restored after restart.
 
 Borough's stock board withheld the Dead Bridge turret photography contract at zero host XP. At 4 stock host XP the catalog grew from three offers to seven, and the guest accepted the new contract. The party traveled through the authored Scientist door, where the guest bought a camera. In Dead Bridge the guest equipped that exact camera. The stock photo targets recorded full visibility for each of the two distinct turrets. A separate press of the original primary input with neither target in frame reached the host and left the quest step unchanged.
 

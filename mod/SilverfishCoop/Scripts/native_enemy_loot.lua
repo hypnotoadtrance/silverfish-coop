@@ -6,6 +6,7 @@ local profiles = require("native_enemy_loot_registry")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local refinery = "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"
 local cqc_class = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C"
 local cqc_name = profiles[dead_bridge].names[1]
 local bandit_class = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C"
@@ -369,6 +370,65 @@ local function claim(state, phase, fields)
     return "typed stock enemy ammunition claim verified"
 end
 
+local function refinery_approach(state, pawn, point, before, facing, reach)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local capsule = pawn.CapsuleComponent
+    if not valid(trace) or not valid(capsule) or not same(capsule:GetOwner(), pawn)
+        or not same(capsule:GetClass(), StaticFindObject("/Script/Engine.CapsuleComponent")) then
+        error("native_enemy_loot_fixture_floor_scope_unavailable", 0)
+    end
+    local half_height = capsule:GetScaledCapsuleHalfHeight()
+    if not finite(half_height) or half_height < 20 or half_height > 150 then
+        error("native_enemy_loot_fixture_floor_scope_unavailable", 0)
+    end
+    local ignored = {pawn}
+    for _, detail in ipairs(state.pawns or {}) do
+        if valid(detail.pawn) and not same(detail.pawn, pawn) then ignored[#ignored + 1] = detail.pawn end
+    end
+    local color = {R = 0, G = 0, B = 0, A = 1}
+    local top, bottom = point.Z + 130, point.Z - 190
+    local limit = math.min(reach, 250) - 25
+    local moved = false
+    for _, distance in ipairs({135, 175, 105}) do
+        for step = 0, 7 do
+            local bearing = step * math.pi / 4
+            local x, y = point.X + distance * math.cos(bearing), point.Y + distance * math.sin(bearing)
+            local hit = {}
+            local found = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom},
+                0, false, ignored, 0, hit, true, color, color, 0)
+            hit = hit.OutHit or hit
+            local floor, normal = hit.ImpactPoint, hit.ImpactNormal
+            if found == true and floor and normal and finite(floor.Z) and finite(normal.Z) and normal.Z >= .72
+                and floor.Z >= bottom and floor.Z < top - 1 then
+                local z = floor.Z + half_height + 2
+                local at = {X = x, Y = y, Z = z}
+                if limit > distance and distance^2 + (z - point.Z)^2 <= limit^2 and pawn:K2_TeleportTo(at, facing) then
+                    moved = true
+                    local actual = pawn:K2_GetActorLocation()
+                    if actual and finite(actual.X) and finite(actual.Y) and finite(actual.Z)
+                        and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - z)^2 <= 12^2
+                        and (actual.X - point.X)^2 + (actual.Y - point.Y)^2 + (actual.Z - point.Z)^2 <= limit^2 then
+                        local checked, clear = pcall(shell_view.clear_line, pawn, point)
+                        if checked and clear == true then
+                            pawn:ForceNetUpdate()
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if moved then
+        if not pawn:K2_TeleportTo(before, facing) then error("mutation_unverified_enemy_loot_fixture_rollback", 0) end
+        local actual = pawn:K2_GetActorLocation()
+        if not actual or not finite(actual.X) or not finite(actual.Y) or not finite(actual.Z)
+            or (actual.X - before.X)^2 + (actual.Y - before.Y)^2 + (actual.Z - before.Z)^2 > 12^2 then
+            error("mutation_unverified_enemy_loot_fixture_rollback", 0)
+        end
+        pawn:ForceNetUpdate()
+    end
+end
+
 local function approach(state, phase, fields)
     local host = fixtures and ordinary_host(state, phase)
     local guest
@@ -386,6 +446,14 @@ local function approach(state, phase, fields)
     local reach = pawn.InteractionRange
     if not finite(reach) or reach <= 0 or reach > 1000 or not before or not finite(before.Z) then
         error("native_enemy_loot_fixture_unavailable", 0)
+    end
+    if cqc and state.map == refinery then
+        if not finite(before.X) or not finite(before.Y)
+            or not refinery_approach(state, pawn, {X = x, Y = y, Z = z}, before, facing, reach) then
+            error("native_enemy_loot_fixture_no_floor_with_shell_line", 0)
+        end
+        escrow = {world = state.world, status = "approached", pawn = name, guid = guid, actor = "-", slot = "-"}
+        return "stock enemy loot approach verified"
     end
     for _, offset in ipairs({{123, 0}, {-123, 0}, {0, 123}, {0, -123}}) do
         local candidate = {X = x + offset[1], Y = y + offset[2], Z = math.max(z + 94, before.Z)}

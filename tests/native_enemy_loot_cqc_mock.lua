@@ -331,3 +331,26 @@ assert(moves == 2 and shots == 1 and location == start and scout_save.PlayerHeal
 local aim = fixture.rows(state, "hosting", table.pack)[1]
 assert(aim[2] == refinery and aim[3] == target_name and aim[9] >= 640 and aim[10] == 0)
 print("Refinery headless shot fires one stock pulse from a clear lane, then restores the exact floor-checked starting pose")
+
+local positions, rays, blocked = {}, 0, false
+scout.InteractionRange = 250
+objects["/Script/Engine.CapsuleComponent"] = scout.CapsuleComponent:GetClass()
+objects["/Script/Engine.CameraComponent"] = scout.Camera:GetClass()
+objects["/Script/Engine.Default__KismetSystemLibrary"].LineTraceSingle = function(_, _, from, to, channel, _, _, _, hit)
+    assert(channel == 0)
+    if from.X == to.X and from.Y == to.Y then
+        hit.ImpactPoint, hit.ImpactNormal = {X = from.X, Y = from.Y, Z = 0}, {X = 0, Y = 0, Z = 1}
+        return true
+    end
+    assert(to.X == 0 and to.Y == 0 and to.Z == 48)
+    positions[#positions + 1], rays = location, rays + 1
+    return blocked or rays == 1
+end
+local shell_approach = {"request", "native-enemy-loot-approach", "scout", guid, "0", "0", "8"}
+assert(automatic.command(shell_approach, state, "hosting") == "stock enemy loot approach verified")
+assert(rays == 2 and positions[1].X == 135 and positions[1].Y == 0 and location == positions[2])
+assert(location.X < positions[1].X and location.Y > 0 and location.Z == 90)
+location, blocked = start, true
+refused(automatic, shell_approach, "native_enemy_loot_fixture_no_floor_with_shell_line")
+assert(location == start and rays > 2)
+print("Refinery headless shell approach selects a clear alternate floor and restores the original if every ray is blocked")
