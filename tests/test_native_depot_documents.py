@@ -89,7 +89,7 @@ class DepotDocumentsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.act("native-quest-turnin"))["effect"], "native_quest_already_settled")
         self.assertEqual(self.host.party["economy"]["wallet"], 1370)
 
-    async def test_scav_stock_catalog_identifies_the_experimental_offer(self):
+    async def test_scav_stock_catalog_identifies_the_verified_offer(self):
         self.bridge.command.return_value = {
             "state": "hosting", "map": SCAV_BAR, "sequence": 11,
             "native_bounty_board": {"map": SCAV_BAR, "pawn": PAWN, "board": BOARD},
@@ -97,7 +97,7 @@ class DepotDocumentsTests(unittest.IsolatedAsyncioTestCase):
                                       "reason": "", "entries": {CONTRACT.quest_id: {"state": "offer"}}}},
         }
         result = await native_turret_photo.offers(self.host, self.bridge, GUEST, None)
-        self.assertEqual(result["native_bounty_board"]["quests"], [{"id": CONTRACT.quest_id, "state": "offer", "co_op": "experimental"}])
+        self.assertEqual(result["native_bounty_board"]["quests"], [{"id": CONTRACT.quest_id, "state": "offer", "co_op": "verified"}])
         with self.assertRaisesRegex(party.RuleError, "native_turret_photo_board_unavailable"):
             await native_turret_photo.preflight(self.host, self.bridge, GUEST)
 
