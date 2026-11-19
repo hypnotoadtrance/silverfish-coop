@@ -66,6 +66,6 @@ assert(sequence == 1 and camera.RelativeRotation.Yaw == 90 and pawn.InteractionT
 
 chosen = sibling
 local accepted, failure = pcall(input.command, request, state, "connected")
-assert(not accepted and failure == "native_loot_crate_stock_fixture_focus_unavailable:another crate box")
+assert(not accepted and failure:find("native_loot_crate_stock_fixture_focus_unavailable:another crate box", 1, true) == 1)
 assert(sequence == 1 and camera.RelativeRotation.Yaw == 90 and pawn.InteractionTarget_Component == nil)
 print("New crate fixture requires exact stock LookTrace and restores the camera")

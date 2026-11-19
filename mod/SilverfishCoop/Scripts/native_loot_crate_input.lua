@@ -191,7 +191,8 @@ local function fixture_focus(pawn, box)
             end
         end
         local focused = pawn.InteractionTarget_Component
-        error("native_loot_crate_stock_fixture_focus_unavailable:" .. (valid(focused) and focused:GetFullName() or "-"), 0)
+        error(string.format("native_loot_crate_stock_fixture_focus_unavailable:%s eye=(%.1f,%.1f,%.1f) box=(%.1f,%.1f,%.1f)",
+            valid(focused) and focused:GetFullName() or "-", eye.X, eye.Y, eye.Z, center.X, center.Y, center.Z), 0)
     end)
     local restored, matches = pcall(function()
         if not same(pawn.Camera, camera) or not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then return false end

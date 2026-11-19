@@ -17,6 +17,7 @@ local permanent_field = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
 local item_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local max_inventory, max_effects = 4096, 256
+local crate_fixture_trace_color = {R = 0, G = 0, B = 0, A = 1}
 
 local maps, names = {}, {}
 for _, profile in ipairs(registry) do
@@ -235,22 +236,46 @@ function loot.qualify(state, phase, pawn_name, requested_crate, allow_distant)
         position = position, distance = distance }
 end
 
-function loot.approach_fixture(state, phase, pawn_name, requested_crate)
-    local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
-    local pawn, point = scope.pawn, scope.position
-    local rotation = pawn:K2_GetActorRotation()
-    if scope.profile.index > 3 then
-        local root = scope.crate:K2_GetActorLocation()
-        local dx, dy = point.X - root.X, point.Y - root.Y
-        local horizontal = math.sqrt(dx * dx + dy * dy)
-        if finite(horizontal) and horizontal > 1 then
-            -- Stock focus should approach the actual query box side of the cabinet first.
-            for _, distance in ipairs({180, 130, 220}) do
-                for _, height in ipairs({50, 100, 0}) do
-                    local at = {X = point.X + distance * dx / horizontal, Y = point.Y + distance * dy / horizontal, Z = point.Z + height}
-                    if pawn:K2_TeleportTo(at, rotation) then
-                        local valid_scope, current = pcall(loot.qualify, state, phase, pawn_name, requested_crate)
-                        if valid_scope then
+local function crate_fixture_floor(state, phase, scope, pawn_name, requested_crate, rotation)
+    local pawn, box, point = scope.pawn, scope.box, scope.position
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local capsule, camera = pawn.CapsuleComponent, pawn.Camera
+    local origin, box_extent = pawn:K2_GetActorLocation(), box:GetScaledBoxExtent()
+    if not valid(trace) or not valid(capsule) or not same(capsule:GetOwner(), pawn) or not valid(camera)
+        or not same(camera:GetOwner(), pawn) or not origin or not box_extent or not finite(box_extent.Z) or box_extent.Z <= 0 then
+        error("native_loot_crate_fixture_floor_scope_unavailable", 0)
+    end
+    local half_height = capsule:GetScaledCapsuleHalfHeight()
+    if not finite(half_height) or half_height < 20 or half_height > 150 then
+        error("native_loot_crate_fixture_capsule_unavailable", 0)
+    end
+    local ignore = {scope.crate}
+    for _, detail in ipairs(state.pawns) do
+        if valid(detail.pawn) then ignore[#ignore + 1] = detail.pawn end
+    end
+    local forward = box:GetForwardVector()
+    local bearing = forward and finite(forward.X) and finite(forward.Y) and math.atan(forward.Y, forward.X) or 0
+    local moved = false
+    for _, distance in ipairs({125, 155, 195, 225}) do
+        for _, turn in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
+            local angle = bearing + math.rad(turn)
+            local x, y = point.X + distance * math.cos(angle), point.Y + distance * math.sin(angle)
+            local top, bottom = point.Z + 135, point.Z - 235
+            local hit = {}
+            local found = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom},
+                0, false, ignore, 0, hit, true, crate_fixture_trace_color, crate_fixture_trace_color, 0)
+            hit = hit.OutHit or hit
+            local floor, normal = hit.ImpactPoint, hit.ImpactNormal
+            if found == true and floor and normal and finite(floor.Z) and finite(normal.Z) and normal.Z >= 0.7
+                and floor.Z >= bottom and floor.Z < top - 1 then
+                local at = {X = x, Y = y, Z = floor.Z + half_height + 2}
+                if pawn:K2_TeleportTo(at, rotation) then
+                    moved = true
+                    local actual, eye = pawn:K2_GetActorLocation(), camera:K2_GetComponentLocation()
+                    if actual and eye and finite(eye.Z) and eye.Z > point.Z + box_extent.Z + 12
+                        and (actual.X - at.X)^2 + (actual.Y - at.Y)^2 + (actual.Z - at.Z)^2 <= 18^2 then
+                        local checked, current = pcall(loot.qualify, state, phase, pawn_name, requested_crate)
+                        if checked then
                             pawn:ForceNetUpdate()
                             return current
                         end
@@ -259,6 +284,16 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
             end
         end
     end
+    if moved and not pawn:K2_TeleportTo(origin, rotation) then error("mutation_unverified_native_loot_crate_fixture_floor_rollback", 0) end
+    if moved then pawn:ForceNetUpdate() end
+    error("native_loot_crate_fixture_no_floor_above_focus_plane", 0)
+end
+
+function loot.approach_fixture(state, phase, pawn_name, requested_crate)
+    local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
+    local pawn, point = scope.pawn, scope.position
+    local rotation = pawn:K2_GetActorRotation()
+    if scope.profile.index > 3 then return crate_fixture_floor(state, phase, scope, pawn_name, requested_crate, rotation) end
     for _, distance in ipairs({ 180, 240, 130 }) do
         for _, offset in ipairs({ { distance, 0 }, { -distance, 0 }, { 0, distance }, { 0, -distance } }) do
             for _, height in ipairs({ 50, 100, 0 }) do
