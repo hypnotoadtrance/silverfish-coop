@@ -14,7 +14,7 @@ add_library(SilverfishCoopNative SHARED
     campaign_npc.cpp enemy_loot.cpp finite_shop.cpp flood_jammer.cpp fresh_clock.cpp quest_rewards.cpp
     guest_armor.cpp guest_clock.cpp guest_consumable.cpp guest_item.cpp guest_npc.cpp guest_primary_input.cpp guest_regen.cpp guest_reload_input.cpp guest_sickness.cpp
     interaction_input.cpp inventory_census.cpp inventory_wipe.cpp
-    inventory_view.cpp item_roundtrip.cpp loot_crate_input.cpp loot_escrow.cpp
+    inventory_view.cpp item_roundtrip.cpp loot_crate_input.cpp loot_escrow.cpp mosby_station_input.cpp
     nothing_return.cpp pickup.cpp save_copy.cpp shared_loot.cpp shop_view.cpp
     stock_rest.cpp transport_items.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)

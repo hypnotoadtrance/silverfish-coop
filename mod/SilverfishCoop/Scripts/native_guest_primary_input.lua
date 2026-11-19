@@ -71,7 +71,7 @@ local function emit(path, fields)
 end
 
 local function drain_held(current, address)
-    if not held_event_path or binding.kind ~= "smg" or type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function" then
+    if not held_event_path or binding.kind ~= "smg-standard" or type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function" then
         return 0
     end
     local emitted, last = 0, nil
@@ -133,7 +133,7 @@ function primary.command(fields, state, phase)
     if action == "native-guest-held-fire-fixture" then
         local edge = fields[4]
         if not held_enabled or not fixtures or #fields ~= 4 or fields[3] ~= current.name
-            or not same_context(current, binding) or binding.kind ~= "smg" or (edge ~= "press" and edge ~= "release")
+            or not same_context(current, binding) or binding.kind ~= "smg-standard" or (edge ~= "press" and edge ~= "release")
             or type(SilverfishProbeNativeGuestHeldFire) ~= "function" then
             error("The stock held input fixture requires the exact scoped headless SMG guest", 0)
         end
@@ -165,7 +165,7 @@ function primary.command(fields, state, phase)
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or (kind ~= "camera" and not weapon_profiles.paths[kind])
-        or (held_enabled and kind == "smg" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
+        or (held_enabled and kind == "smg-standard" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
@@ -202,7 +202,7 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)
     end
-    if held_enabled and binding.kind == "smg" and standing(current)
+    if held_enabled and binding.kind == "smg-standard" and standing(current)
         and type(SilverfishReadNativeGuestHeldFire) == "function" then
         local address = current.pawn:GetAddress()
         local stroke, owner, guid, proof = SilverfishReadNativeGuestHeldFire(address)

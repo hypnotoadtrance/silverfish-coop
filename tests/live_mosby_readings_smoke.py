@@ -201,6 +201,13 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         replay = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
         assert (replay["effect"], replay["armor"]) == ("native_quest_already_settled", completed["armor"])
         evidence["completed"] = completed
+        standing = json.loads((run / "status.json").read_text(encoding="utf-8"))
+        if standing["gameplay"]["players"]["host"]["downed"]:
+            await action(authority, tape.APPROACH, "--target", "host")
+            revival = await action(client, "interact", "--target", "host")
+            assert (revival["effect"], revival["target"], revival["health"]) == ("revive", "host", 25.0), revival
+            await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("host", {}).get("downed") is False)
+            evidence["revived_host_before_restart"] = revival
 
         await stop(host_process, authority)
         await stop(guest_process, client)

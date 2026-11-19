@@ -39,15 +39,27 @@ namespace
     constexpr auto armor_weight = STR("Weight_36_1CC3CC9C4DAD1ADFEBC9D5B45765C95D");
     constexpr auto carry_bonus = STR("CaryBonus_43_3DF7AA974A13A7ADF22D3BA63B29FEF2");
     constexpr std::array guid_words{STR("A"), STR("B"), STR("C"), STR("D")};
-    constexpr std::array damage_fields{
-        STR("Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"), STR("ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4"),
-        STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772"), STR("Stabbing_8_64710D2D4AB4232B4DD604AC3CD0219C"),
-        STR("Slashing_10_58FFFE444BD41CE5D15EAA80BC0D9DF1"), STR("Fire_12_2B415A724C533C075B6BB390B76BF247"),
-        STR("Poison_14_68E96E324AD705A7F95362BBC781E220"), STR("Electric_16_8F945E8C491C5825EC19E3837E266D48"),
-        STR("Radiation_18_E8FC71B2490E3C6050B6B999C65A13CB"), STR("Acid_20_F4C551B34F620FDF72D2F2A64DE15F3E"),
-        STR("OverPressure_22_3355FA8E45511902B20DD69D844D5020"),
+    constexpr double bomber_slash = 0.2;
+    constexpr double bomber_acid = 0.2;
+    struct ResistanceField
+    {
+        const U::TCHAR* name;
+        std::string_view refusal;
+        double expected;
     };
-    constexpr std::array expected_resistance{0.0, 0.0, 0.0, 0.1, 0.2, 0.1, 0.0, 0.1, 0.0, 0.2, 0.0};
+    constexpr std::array damage_fields{
+        ResistanceField{STR("Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"), "native_guest_armor_kinetic_unqualified", 0.0},
+        ResistanceField{STR("ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4"), "native_guest_armor_penetration_unqualified", 0.0},
+        ResistanceField{STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772"), "native_guest_armor_blunt_unqualified", 0.0},
+        ResistanceField{STR("Stabbing_8_64710D2D4AB4232B4DD604AC3CD0219C"), "native_guest_armor_stabbing_unqualified", 0.1},
+        ResistanceField{STR("Slashing_10_58FFFE444BD41CE5D15EAA80BC0D9DF1"), "native_guest_armor_slash_unqualified", bomber_slash},
+        ResistanceField{STR("Fire_12_2B415A724C533C075B6BB390B76BF247"), "native_guest_armor_fire_unqualified", 0.1},
+        ResistanceField{STR("Poison_14_68E96E324AD705A7F95362BBC781E220"), "native_guest_armor_poison_unqualified", 0.0},
+        ResistanceField{STR("Electric_16_8F945E8C491C5825EC19E3837E266D48"), "native_guest_armor_electric_unqualified", 0.1},
+        ResistanceField{STR("Radiation_18_E8FC71B2490E3C6050B6E999C65A13CB"), "native_guest_armor_radiation_unqualified", 0.0},
+        ResistanceField{STR("Acid_20_F4C551B34F620FDF72D2F2A64DE15F3E"), "native_guest_armor_acid_unqualified", bomber_acid},
+        ResistanceField{STR("OverPressure_22_3355FA8E45511902B20DD69D844D5020"), "native_guest_armor_overpressure_unqualified", 0.0},
+    };
     constexpr int max_items = 4096;
     constexpr int max_clients = 4;
 
@@ -299,7 +311,7 @@ namespace
         U::UScriptStruct *body_type{}, *resist_type{};
         U::FStructProperty *body_resist{}, *helm_resist{}, *default_resist{};
 
-        bool bind(U::UObject* pawn, U::UObject* defaults)
+        std::string_view bind(U::UObject* pawn, U::UObject* defaults)
         {
             body = field<U::FStructProperty>(pawn, STR("Armor_Struct"));
             helm = field<U::FStructProperty>(pawn, STR("Helm_Struct"));
@@ -313,54 +325,65 @@ namespace
             helm_resist = field<U::FStructProperty>(helm_type, resistance);
             default_resist = field<U::FStructProperty>(defaults, STR("Resistance"));
             helm_weight = field<U::FDoubleProperty>(helm_type, armor_weight);
-            return body && helm && resist && carry && minimum && body_type && helm_type && resist_type &&
-                body->GetStruct().Get() == body_type && helm->GetStruct().Get() == helm_type &&
-                resist->GetStruct().Get() == resist_type && body_resist && helm_resist && default_resist && helm_weight &&
-                body_resist->GetStruct().Get() == resist_type && helm_resist->GetStruct().Get() == resist_type &&
-                default_resist->GetStruct().Get() == resist_type && field<U::FObjectProperty>(pawn, STR("PowerArmor")) &&
-                !object(pawn, STR("PowerArmor"));
+            if (!body || !body_type || body->GetStruct().Get() != body_type)
+                return "native_guest_armor_body_struct_unqualified";
+            if (!helm || !helm_type || !helm_weight || helm->GetStruct().Get() != helm_type)
+                return "native_guest_armor_helmet_struct_unqualified";
+            if (!resist || !resist_type || !body_resist || !helm_resist || !default_resist ||
+                resist->GetStruct().Get() != resist_type || body_resist->GetStruct().Get() != resist_type ||
+                helm_resist->GetStruct().Get() != resist_type || default_resist->GetStruct().Get() != resist_type)
+                return "native_guest_armor_damage_struct_unqualified";
+            if (!carry || !minimum)
+                return "native_guest_armor_weight_fields_unqualified";
+            if (!field<U::FObjectProperty>(pawn, STR("PowerArmor")) || object(pawn, STR("PowerArmor")))
+                return "native_guest_armor_power_armor_unqualified";
+            return {};
         }
 
-        bool prepare(U::UObject* pawn, U::UObject* defaults, void* next_body, void* next_resist,
-                     double& helmet_weight, double& threshold) const
+        std::string_view prepare(U::UObject* pawn, U::UObject* defaults, void* next_body, void* next_resist,
+                                 double& helmet_weight, double& threshold) const
         {
-            struct Scalar { const U::TCHAR* source; const U::TCHAR* dest; double value; };
+            struct Scalar { const U::TCHAR* source; const U::TCHAR* dest; std::string_view refusal; double value; };
             constexpr std::array scalars{
-                Scalar{STR("Weight"), armor_weight, 0.5},
-                Scalar{STR("SpeedMod"), STR("SpeedMod_5_3D8A954E435B2C83978893A2C5C5D69E"), 1.0},
-                Scalar{STR("NoiseMod"), STR("Move_Noise_11_E2EDC7A04D5942755A28FE9479BE0793"), 0.9},
-                Scalar{STR("VisibilityMod"), STR("VisibilityMod_13_E33F6D50463CE2650C61E29B5C66545D"), 0.9},
-                Scalar{STR("CarryWeight_Bonus"), carry_bonus, 5.0},
+                Scalar{STR("Weight"), armor_weight, "native_guest_armor_body_weight_unqualified", 0.5},
+                Scalar{STR("SpeedMod"), STR("SpeedMod_5_3D8A954E435B2C83978893A2C5C5D69E"), "native_guest_armor_speed_unqualified", 1.0},
+                Scalar{STR("NoiseMod"), STR("Move_Noise_11_E2EDC7A04D5942755A28FE9479BE0793"), "native_guest_armor_noise_unqualified", 0.9},
+                Scalar{STR("VisibilityMod"), STR("VisibilityMod_13_E33F6D50463CE2650C61E29B5C66545D"), "native_guest_armor_visibility_unqualified", 0.9},
+                Scalar{STR("CarryWeight_Bonus"), carry_bonus, "native_guest_armor_carry_bonus_unqualified", 5.0},
             };
             for (const auto& scalar : scalars)
             {
                 auto* source = field<U::FDoubleProperty>(defaults, scalar.source);
                 auto* dest = field<U::FDoubleProperty>(body_type, scalar.dest);
-                if (!source || !dest || source->GetPropertyValueInContainer(defaults) != scalar.value) return false;
+                if (!source || !dest || source->GetPropertyValueInContainer(defaults) != scalar.value) return scalar.refusal;
                 dest->SetPropertyValueInContainer(next_body, scalar.value);
             }
             auto* sprint = field<U::FBoolProperty>(body_type, STR("CanSprint_8_6852FE6E4BFD0ADB2A5474983720198A"));
             auto* walk = field<U::FObjectProperty>(body_type, STR("WalkSFXLayer_40_5B99B98249FDD245846185B23C70CE5F"));
             auto* defaults_walk = field<U::FObjectProperty>(defaults, STR("Walk_SFXLayer"));
-            if (!sprint || !walk || !defaults_walk || walk->GetPropertyClass().Get() != defaults_walk->GetPropertyClass().Get() ||
-                !boolean(defaults, STR("CanSprint"), true)) return false;
+            if (!sprint || !boolean(defaults, STR("CanSprint"), true))
+                return "native_guest_armor_sprint_unqualified";
+            if (!walk || !defaults_walk || walk->GetPropertyClass().Get() != defaults_walk->GetPropertyClass().Get())
+                return "native_guest_armor_walk_sound_unqualified";
             sprint->SetPropertyValueInContainer(next_body, true);
             walk->SetObjectPropertyValue(walk->ContainerPtrToValuePtr<void>(next_body), object(defaults, STR("Walk_SFXLayer")));
             const auto* default_damage = default_resist->ContainerPtrToValuePtr<void>(defaults);
             const auto* worn_helmet = helm->ContainerPtrToValuePtr<void>(pawn);
             const auto* helmet_damage = helm_resist->ContainerPtrToValuePtr<void>(worn_helmet);
             helmet_weight = helm_weight->GetPropertyValueInContainer(worn_helmet);
-            if (helmet_weight != 0.0) return false;
+            if (helmet_weight != 0.0) return "native_guest_armor_helmet_weight_unqualified";
             body_resist->CopyCompleteValue(body_resist->ContainerPtrToValuePtr<void>(next_body), default_damage);
-            for (std::size_t i = 0; i < damage_fields.size(); ++i)
+            for (const auto& damage : damage_fields)
             {
-                auto* property = field<U::FDoubleProperty>(resist_type, damage_fields[i]);
-                if (!property || property->GetPropertyValueInContainer(default_damage) != expected_resistance[i] ||
-                    property->GetPropertyValueInContainer(helmet_damage) != 0.0) return false;
-                property->SetPropertyValueInContainer(next_resist, expected_resistance[i]);
+                auto* property = field<U::FDoubleProperty>(resist_type, damage.name);
+                if (!property || property->GetPropertyValueInContainer(default_damage) != damage.expected)
+                    return damage.refusal;
+                if (property->GetPropertyValueInContainer(helmet_damage) != 0.0)
+                    return "native_guest_armor_helmet_damage_unqualified";
+                property->SetPropertyValueInContainer(next_resist, damage.expected);
             }
             threshold = 25.0; // Stock ApplyArmorStats computes 20 plus the wearer's body carry bonus.
-            return true;
+            return {};
         }
     };
 
@@ -469,8 +492,8 @@ namespace
             inventory.weight->GetPropertyValueInContainer(approved) != 0.5)
             return report(lua, false, "native_guest_armor_exact_class_required");
         Projection projection;
-        if (!projection.bind(scope.pawn, defaults))
-            return report(lua, false, "native_guest_armor_stock_projection_unqualified");
+        if (const auto error = projection.bind(scope.pawn, defaults); !error.empty())
+            return report(lua, false, error);
         auto* body = projection.body->ContainerPtrToValuePtr<void>(scope.pawn);
         auto* resist = projection.resist->ContainerPtrToValuePtr<void>(scope.pawn);
         Copy original_bag(inventory.backpack, bag);
@@ -490,12 +513,15 @@ namespace
         U::FScriptArrayHelper prepared(inventory.backpack, next_bag.value);
         if (!worn) prepared.RemoveValues(index, 1);
         proof.after = prepared.Num();
-        if (!projection.prepare(scope.pawn, defaults, next_body.value, next_resist.value, helmet_weight, proof.minimum) ||
-            !inventory.carry(scope.guest, bag, worn ? 0.5 : 0.0, helmet_weight, proof.carry_before) ||
-            !inventory.carry(scope.guest, next_bag.value, 0.5, helmet_weight, proof.carry_after) || !scope.current())
-            return report(lua, false, "native_guest_armor_stock_projection_unqualified");
-        proof.slash = expected_resistance[4];
-        proof.acid = expected_resistance[9];
+        if (const auto error = projection.prepare(
+                scope.pawn, defaults, next_body.value, next_resist.value, helmet_weight, proof.minimum); !error.empty())
+            return report(lua, false, error, proof);
+        if (!inventory.carry(scope.guest, bag, worn ? 0.5 : 0.0, helmet_weight, proof.carry_before) ||
+            !inventory.carry(scope.guest, next_bag.value, 0.5, helmet_weight, proof.carry_after))
+            return report(lua, false, "native_guest_armor_carry_weights_unqualified", proof);
+        if (!scope.current()) return report(lua, false, "native_guest_armor_exact_owner_required", proof);
+        proof.slash = bomber_slash;
+        proof.acid = bomber_acid;
         const auto old_carry = projection.carry->GetPropertyValueInContainer(scope.pawn);
         const auto old_minimum = projection.minimum->GetPropertyValueInContainer(scope.pawn);
         const auto matches = [&] {

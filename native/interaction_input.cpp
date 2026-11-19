@@ -1,4 +1,5 @@
 #include "interaction_input.hpp"
+#include "mosby_station_input.hpp"
 
 #include <array>
 #include <atomic>
@@ -502,6 +503,7 @@ namespace
     {
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
+        silverfish::mosby_station_input::route(iteration, actor, function, parameters);
     }
 
     bool exact_dispatch(Unreal::UObject* pawn, Unreal::UFunction* function)
@@ -803,6 +805,19 @@ namespace
 
 namespace silverfish::native_interaction_input
 {
+    Unreal::UObject* current_guest_pawn(std::uintptr_t requested)
+    {
+        if (!available() || scope.host || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;
+        auto* pawn = scope.pawn.Get();
+        return pawn && reinterpret_cast<std::uintptr_t>(pawn) == requested ? pawn : nullptr;
+    }
+
+    bool guest_interaction_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
+    {
+        return pawn && current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn && standing(pawn) &&
+            actor && component && interaction_in_reach(pawn, actor, component);
+    }
+
     bool consume_current_press(Unreal::UObject* pawn)
     {
         if (!available() || !event_depth || !event_source_matches || event_consumed || !pawn ||
@@ -857,6 +872,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
+        mosby_station_input::register_lua(lua);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 
@@ -867,6 +883,7 @@ namespace silverfish::native_interaction_input
         scope = {};
         wire_board = {};
         dialogue_input = {};
+        mosby_station_input::clear_scope();
         first = count = event_depth = 0;
         event_source_matches = event_consumed = false;
     }

@@ -1,6 +1,11 @@
 local input = {}
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
-local sources = { ["city-copper-wire"] = true, ["city-paladin-brandy"] = true }
+local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local sources = {
+    ["city-copper-wire"] = city,
+    ["city-paladin-brandy"] = city,
+    ["scientist-blank-data-tape"] = scientist,
+}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 
@@ -68,8 +73,8 @@ function input.press(state, phase, profile)
     local host = phase == "hosting" and state.server == false
     local guest = phase == "connected" and state.server == true
     local inspect, press = SilverfishReadNativeAuthoredPickup, SilverfishProbeNativeInteractInput
-    if not headless or (not guest and not (host and host_fixtures)) or not state.listening or state.map ~= city
-        or profile.map ~= city or not sources[profile.source] or type(inspect) ~= "function" or type(press) ~= "function" then
+    if not headless or (not guest and not (host and host_fixtures)) or not state.listening or profile.map ~= state.map
+        or sources[profile.source] ~= state.map or type(inspect) ~= "function" or type(press) ~= "function" then
         error("authored_pickup_stock_input_fixture_unavailable", 0)
     end
     local detail = state.local_pawn

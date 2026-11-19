@@ -40,21 +40,22 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         scope = f"native-guest-primary-scope\t{MAP}\t{PAWN}\t{GUID}\t"
         held = f"native-guest-held-fire\t{MAP}\t{PAWN}\t{GUID}\t15\theld\theadless-fixture\n"
         fixture = f"native-guest-held-fire-fixture\t{MAP}\t{PAWN}\t{GUID}\t15\t15\tpress\n"
-        status.write_text(base + scope + "smg\tstock_held\n" + held + fixture, encoding="utf-8")
+        status.write_text(base + scope + "smg-standard\tstock_held\n" + held + fixture, encoding="utf-8")
         report = self.bridge.snapshot()
         self.assertEqual(report["native_guest_held_fire"], {
             "map": MAP, "pawn": PAWN, "guid": GUID, "stroke": 15, "state": "held", "proof": "headless-fixture",
         })
         self.assertEqual(report["native_guest_held_fire_fixture"]["sequence"], 15)
-        status.write_text(base + scope + "light-pistol\tstock_held\n" + held + fixture, encoding="utf-8")
-        self.assertNotIn("native_guest_held_fire", self.bridge.snapshot())
-        self.assertNotIn("native_guest_held_fire_fixture", self.bridge.snapshot())
+        for other in ("smg", "light-pistol"):
+            status.write_text(base + scope + other + "\tstock_held\n" + held + fixture, encoding="utf-8")
+            self.assertNotIn("native_guest_held_fire", self.bridge.snapshot())
+            self.assertNotIn("native_guest_held_fire_fixture", self.bridge.snapshot())
 
     def test_snapshot_allows_completed_fixture_with_no_held_state(self):
         status = self.directory / "status.tsv"
         status.write_text(
             f"schema\t1\nsession\tclient\tconnected\t{MAP}\t0\t1\n"
-            f"native-guest-primary-scope\t{MAP}\t{PAWN}\t{GUID}\tsmg\tstock_held\n"
+            f"native-guest-primary-scope\t{MAP}\t{PAWN}\t{GUID}\tsmg-standard\tstock_held\n"
             f"native-guest-held-fire-fixture\t{MAP}\t{PAWN}\t{GUID}\t40\t38\trelease\n",
             encoding="utf-8",
         )

@@ -1593,7 +1593,7 @@ class Bridge:
                 primary = data.get("native_guest_primary_scope", {})
                 for name in ("native_guest_held_fire", "native_guest_held_fire_fixture"):
                     held_input = data.get(name)
-                    if held_input and (data["state"] != "connected" or primary.get("kind") != "smg"
+                    if held_input and (data["state"] != "connected" or primary.get("kind") != "smg-standard"
                             or data.get("map") != held_input["map"]
                             or any(held_input[field] != primary.get(field) for field in ("map", "pawn", "guid"))):
                         del data[name]

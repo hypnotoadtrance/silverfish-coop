@@ -91,7 +91,11 @@ class Authority:
         current = self.strokes.get(character)
         if edge == "press":
             if current and (current.guid, current.token) == (guid, token):
-                return {KEY: current.receipt(self.host.last_game)}
+                try:
+                    return {KEY: current.receipt(self.host.last_game)}
+                except RuntimeError:
+                    self._fail_closed()
+                    raise
             area = self.host.last_game.get("map")
             pawn = self.host.native_recipients().get(character, {}).get("pawn")
             if not current and token not in self.used and pawn and self._eligible(character, area, pawn, guid):
@@ -115,8 +119,10 @@ class Authority:
         try:
             snapshot = await self._command(bridge, "start", pawn, guid, str(LEASE_MS))
         except RuntimeError as error:
-            if str(error) in {"native_guest_smg_hold_ineligible", "native_guest_smg_hold_busy",
-                              "native_guest_smg_hold_exact_owner_required"}:
+            if str(error) in {"authoritative_guest_pawn_required", "detached_guest_save_required",
+                              "authenticated_guest_detached_save_required", "native_guest_smg_hold_ineligible",
+                              "native_guest_smg_hold_busy", "native_guest_smg_hold_exact_owner_required",
+                              "native_guest_smg_hold_exact_weapon_required", "native_guest_smg_hold_scope_unavailable"}:
                 raise party.RuleError(str(error)) from error
             self._fail_closed()
             raise

@@ -619,7 +619,7 @@ namespace
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
-        if (next.completed.function.Get() && !next.seat.host && next.item->kind == "smg" && held_enabled())
+        if (next.completed.function.Get() && !next.seat.host && next.item->kind == "smg-standard" && held_enabled())
             bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
     }
@@ -649,7 +649,7 @@ namespace
 
     bool scoped_held_fire()
     {
-        return scope.item && scope.item->kind == "smg" && !scope.seat.host && held_enabled();
+        return scope.item && scope.item->kind == "smg-standard" && !scope.seat.host && held_enabled();
     }
 
     void discard_held(Clock::time_point now)
