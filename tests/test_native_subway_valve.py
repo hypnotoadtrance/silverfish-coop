@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish import native_host_save, native_subway_valve as valve, native_wire_board, party
 from tools.silverfish.campaign import CampaignFormatError
@@ -77,36 +77,61 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             valve.parse_objective(bad, "hosting", valve.SUBWAY)
 
+    def test_scene_reports_exact_components_without_calling_live_sludge_closed(self):
+        fields = ["native-subway-valve-scene", valve.SUBWAY, "settling", "host", "-", "absent", "present", "retired", "1"]
+        proof = valve.parse_scene(fields, "hosting", valve.SUBWAY)
+        self.assertEqual((proof["box"], proof["sludge"], proof["audio"], proof["powered"]), ("absent", "present", "retired", True))
+        with self.assertRaises(ValueError):
+            valve.parse_scene([*fields[:2], "closed", *fields[3:]], "hosting", valve.SUBWAY)
+
     async def test_only_exact_current_visit_commits_the_stock_activation_once(self):
         host = authority()
         before = host.party
         proof = objective()
         closed = snapshot("closed", proof)
-        bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot("settling", proof)), wait_for=AsyncMock(return_value=closed))
+        settling = snapshot("settling", proof)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[settling, settling]), wait_for=AsyncMock(return_value=closed))
         with self.assertRaisesRegex(party.RuleError, "stale_visit"):
             await valve.activate(host, bridge, CHARACTER, OTHER)
         bridge.command.assert_not_awaited()
         host.checkpoint_native.assert_not_awaited()
-        receipt = await valve.activate(host, bridge, CHARACTER, EPOCH)
+        with patch.object(valve.asyncio, "sleep", new_callable=AsyncMock) as fade:
+            receipt = await valve.activate(host, bridge, CHARACTER, EPOCH)
+        fade.assert_awaited_once_with(1)
         self.assertEqual((receipt["quest_id"], receipt["actor"], receipt["step"], receipt["objective"]),
                          (valve.QUEST, CHARACTER, 2, proof))
         self.assertEqual(host.party["native_quests"][valve.QUEST]["objective"], proof)
         self.assertEqual(before["native_quests"][valve.QUEST]["step"], 1)
-        bridge.command.assert_awaited_once_with(valve.ACTIVATE, PAWN, EPOCH, timeout=8)
+        self.assertEqual(bridge.command.await_args_list, [call(valve.ACTIVATE, PAWN, EPOCH, timeout=8),
+                                                         call(valve.FINALIZE, PAWN, EPOCH, timeout=8)])
         self.assertTrue(bridge.wait_for.await_args.args[0](closed))
         self.assertEqual(host.checkpoint_native.await_count, 2)
         self.assertEqual((await valve.activate(host, bridge, CHARACTER, EPOCH))["effect"], "native_subway_valve_already_closed")
-        self.assertEqual(bridge.command.await_count, 1)
+        self.assertEqual(bridge.command.await_count, 2)
 
     async def test_unknown_post_dispatch_result_fences_the_current_save(self):
         host = authority()
         bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot("settling", objective())),
                                  wait_for=AsyncMock(side_effect=asyncio.CancelledError))
-        with self.assertRaises(asyncio.CancelledError):
+        with patch.object(valve.asyncio, "sleep", new_callable=AsyncMock), self.assertRaises(asyncio.CancelledError):
             await valve.activate(host, bridge, "host", EPOCH)
         self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
         self.assertEqual(host.party["native_quests"][valve.QUEST]["step"], 1)
         self.assertEqual(host.checkpoint_native.await_count, 1)
+
+    async def test_exact_stock_lock_mismatch_fences_scene_and_keeps_previous_gamerule_state(self):
+        host = authority()
+        before = host.party
+        proof = objective()
+        settling = snapshot("settling", proof)
+        settling[valve.SCENE].update(box="present", sludge="present", audio="retired")
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[settling, RuntimeError("stock_subway_valve_scene_stock_box_still_present")]),
+                                 snapshot=Mock(return_value=settling))
+        with patch.object(valve.asyncio, "sleep", new_callable=AsyncMock), self.assertRaisesRegex(RuntimeError, "box=present"):
+            await valve.activate(host, bridge, "host", EPOCH)
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+        self.assertIs(host.party, before)
+        host.checkpoint_native.assert_awaited_once()
 
     async def test_client_renders_only_verified_stock_completion_in_its_current_visit(self):
         local = {"state": "connected", "map": valve.SUBWAY, valve.SCENE: {"state": "present", "pawn": PAWN, "epoch": None},

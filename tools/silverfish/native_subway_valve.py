@@ -19,8 +19,8 @@ VALVE = f"ValveSwitch_BP_C {ROOT}ValveSwitch_BP_C_1"
 TRIGGER = f"Quest_Trigger_BP_C {ROOT}Quest_Trigger_BP_C_1"
 ARTIFACT = "/Game/Classes/Items/Artifacts/Art_AcidResist.Art_AcidResist_C"
 HELMET = "/Game/Classes/Armor_Items/Helm_HazOp.Helm_HazOp_C"
-PREFLIGHT, APPROACH, START, TURN_IN, XP_FIXTURE, ACTIVATE, PROJECT, CAPTURE, GRANT, POSITION, PRESS = (
-    f"{TAG}-{verb}" for verb in ("preflight", "approach", "start", "turn-in", "xp-fixture", "activate", "project",
+PREFLIGHT, APPROACH, START, TURN_IN, XP_FIXTURE, ACTIVATE, FINALIZE, PROJECT, CAPTURE, GRANT, POSITION, PRESS = (
+    f"{TAG}-{verb}" for verb in ("preflight", "approach", "start", "turn-in", "xp-fixture", "activate", "finalize", "project",
                                  "reward-capture", "reward-grant", "position-fixture", "input-fixture")
 )
 BOARD_KEY, OBJECTIVE, SCENE, REWARD = (KEY + "_" + part for part in ("board", "objective", "scene", "reward"))
@@ -78,15 +78,24 @@ def parse_objective(fields, phase, area):
 
 
 def parse_scene(fields, phase, area):
-    if len(fields) not in (4, 5) or area != SUBWAY or fields[1] != SUBWAY or fields[2] not in ("present", "settling", "closed"):
+    if len(fields) not in (4, 5, 9) or area != SUBWAY or fields[1] != SUBWAY or fields[2] not in ("present", "settling", "closed"):
         raise ValueError("Invalid Flood Control scene")
     state, owner = fields[2:4]
-    if phase == "hosting" and len(fields) == 4 and owner == "host":
-        return dict(map=area, state=state, pawn=None, epoch=None)
-    if (phase == "connected" and len(fields) == 5 and _pawn_name(owner, area)
-            and (fields[4] == "-" or valid_epoch(fields[4]))):
-        return dict(map=area, state=state, pawn=owner, epoch=None if fields[4] == "-" else fields[4])
-    raise ValueError("Invalid Flood Control local scene scope")
+    epoch = fields[4] if len(fields) >= 5 else "-"
+    status = dict(map=area, state=state, pawn=None, epoch=None if epoch == "-" else epoch)
+    if phase == "connected" and len(fields) in (5, 9) and _pawn_name(owner, area) and (epoch == "-" or valid_epoch(epoch)):
+        status["pawn"] = owner
+    elif phase != "hosting" or len(fields) not in (4, 9) or owner != "host" or epoch != "-":
+        raise ValueError("Invalid Flood Control local scene scope")
+    if len(fields) == 9:
+        box, sludge, audio, powered = fields[5:9]
+        actors = ("present", "retired", "absent")
+        derived = ("present" if box == sludge == audio == "present" else
+                   "closed" if box == "absent" and sludge != "present" and audio != "present" else "settling")
+        if box not in ("present", "absent") or sludge not in actors or audio not in actors or powered not in ("0", "1") or derived != state:
+            raise ValueError("Invalid Flood Control presentation proof")
+        status.update(box=box, sludge=sludge, audio=audio, powered=powered == "1")
+    return status
 
 
 def parse_reward(fields, phase, area):
@@ -199,8 +208,22 @@ async def activate(host, bridge, character, epoch):
         objective = snapshot.get(OBJECTIVE, {})
         if (objective.get("pawn"), objective.get("epoch"), objective.get("flag")) != (pawn, epoch, 1):
             raise RuntimeError("The stock valve did not verify the qualified pawn, visit and closed flag")
-        closed = await bridge.wait_for(lambda row: row.get("state") == "hosting" and row.get("map") == SUBWAY
-                                       and row.get(OBJECTIVE) == objective and row.get(SCENE, {}).get("state") == "closed", 5)
+        def verified(row):
+            return (row.get("state") == "hosting" and row.get("map") == SUBWAY
+                    and row.get(OBJECTIVE) == objective and row.get(SCENE, {}).get("state") == "closed")
+
+        closed = snapshot
+        if not verified(snapshot):
+            await asyncio.sleep(1)  # Preserve the exact stock audio component's one-second FadeOut.
+            try:
+                closed = await _call(host, bridge, FINALIZE, SUBWAY, pawn, epoch)
+                if not verified(closed):
+                    closed = await bridge.wait_for(verified, 5)
+            except (party.RuleError, TimeoutError) as error:
+                latest = bridge.snapshot() or host.last_game
+                scene = latest.get(SCENE, {})
+                proof = ", ".join(f"{key}={scene.get(key, 'unknown')}" for key in ("state", "box", "sludge", "audio"))
+                raise RuntimeError(f"mutation_unverified_stock_subway_valve_scene: {error} ({proof})") from error
         host.last_game, host.last_seen = closed, time.monotonic()
         candidate = party.load_party(host.party)
         record = {"quest_id": QUEST, "step": 2, "actor": character, "objective": objective}
@@ -334,7 +357,7 @@ async def project_client(client):
     if (game.get("state") != "connected" or game.get("map") != SUBWAY or not client.host_session or not valid_epoch(epoch)
             or client.needs_travel or client.server_transitioning or time.monotonic() - client.gameplay_seen >= 2.5
             or party_view.get("step") not in (2, -10) or (proof.get("map"), proof.get("valve"), proof.get("trigger"), proof.get("flag"))
-            != (SUBWAY, VALVE, TRIGGER, 1) or local.get("state") == "closed" or local.get("epoch") == epoch
+            != (SUBWAY, VALVE, TRIGGER, 1) or local.get("epoch") == epoch
             or not _pawn_name(local.get("pawn"), SUBWAY) or local["pawn"] != game.get("pawns", {}).get("local", {}).get("name")):
         return
     snapshot = await client.bridge.command(PROJECT, epoch, local["pawn"], timeout=3)

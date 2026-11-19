@@ -222,7 +222,17 @@ local function subway_scene(state)
     local audio, audio_state = placed(world, audio_path, audio_class)
     if sludge_state == "foreign" or audio_state == "foreign" then return end
     return {world = world, control = control, box = box, sludge = sludge, audio = audio,
+        sludge_state = sludge_state, audio_state = audio_state,
         closed = count == 0 and not sludge and not audio, present = count == 1 and sludge ~= nil and audio ~= nil}
+end
+
+local function qualified_retirement(scene)
+    return (not scene.sludge or scene.sludge.bReplicates == false) and (not scene.audio or scene.audio.bReplicates == false)
+end
+
+local function retire_scene_actors(scene)
+    if scene.sludge then scene.sludge:K2_DestroyActor() end
+    if scene.audio then scene.audio:K2_DestroyActor() end
 end
 
 local function actor_for(context, state, phase, name)
@@ -267,6 +277,7 @@ local function activate(state, phase, pawn_name, epoch)
     local scene = subway_scene(state)
     local trigger = scene and placed(scene.world, trigger_path, trigger_class)
     if not valid_id(epoch, "[^0-9a-f]") or not scene or not scene.present or not scene.control:HasAuthority()
+        or not qualified_retirement(scene)
         or not trigger or not trigger:HasAuthority() or trigger.ForceComplete ~= true or trigger.Target_QuestStep ~= 1
         or trigger.Add_QuestStep ~= 1 or not trigger.TrackedQuest or not same(trigger.TrackedQuest.DataTable, StaticFindObject(table_path))
         or trigger.TrackedQuest.RowName:ToString() ~= board.quest_id or not map_entries(trigger.Rep_OnComplete, {[2] = 20})
@@ -290,6 +301,30 @@ local function activate(state, phase, pawn_name, epoch)
     end
     action_reply = {world = context.world, pawn = pawn_name, epoch = epoch, before = before, after = after}
     return "stock Flood Control valve and quest transition verified"
+end
+
+local function finalize(state, phase, pawn_name, epoch)
+    local context = canonical(state, phase)
+    local scene, proof = subway_scene(state), action_reply
+    if not scene or not scene.control:HasAuthority() or not proof or not same(context.world, proof.world)
+        or proof.pawn ~= pawn_name or proof.epoch ~= epoch or not valid_id(epoch, "[^0-9a-f]")
+        or not qualified_retirement(scene) then refuse("scene_finalization_scope_unavailable") end
+    if scene.box then refuse("scene_stock_box_still_present") end
+    local before = progress(context)
+    if before.step ~= 2 or before.flag ~= 1 or before.cash ~= proof.after.cash or before.xp ~= proof.after.xp
+        or before.advantage ~= proof.after.advantage or not unchanged_reputation(proof.after, before) then
+        refuse("scene_stock_objective_changed")
+    end
+    -- The stock live callback fades the audio and advances the quest. Its saved-flag level initialization
+    -- removes these two exact actors. Match that scene here without replaying the level script or quest.
+    local checked, stable = pcall(function()
+        retire_scene_actors(scene)
+        local after = progress(context)
+        return matches(context) and after.step == before.step and after.flag == before.flag and after.cash == before.cash
+            and after.xp == before.xp and after.advantage == before.advantage and unchanged_reputation(before, after)
+    end)
+    if not checked or not stable then error("mutation_unverified_stock_subway_valve_scene_finalization", 0) end
+    return "exact Flood Control authority presentation requested"
 end
 
 local function identity(row)
@@ -459,12 +494,11 @@ end
 local function project(state, phase, epoch, name)
     local scene = replica(state, phase)
     if not scene or not valid_id(epoch, "[^0-9a-f]") or name ~= scene.pawn:GetFullName()
-        or (scene.sludge and scene.sludge.bReplicates ~= false) or (scene.audio and scene.audio.bReplicates ~= false)
+        or not qualified_retirement(scene)
         or not valid(StaticFindObject(valve_class .. ":Lock_Valve")) then refuse("exact_replica_required") end
     if not scene.closed then
         if scene.box then scene.control:Lock_Valve() end
-        if scene.sludge then scene.sludge:K2_DestroyActor() end
-        if scene.audio then scene.audio:K2_DestroyActor() end
+        retire_scene_actors(scene)
     end
     projected = {world = scene.world, pawn = scene.pawn, epoch = epoch, connection = scene.connection}
     return "exact local Flood Control presentation requested"
@@ -569,6 +603,8 @@ function valve.command(fields, state, phase)
     if operation == "activate" and #fields == 4 then
         action_reply = nil
         return activate(state, phase, fields[3], fields[4])
+    elseif operation == "finalize" and #fields == 4 then
+        return finalize(state, phase, fields[3], fields[4])
     elseif operation == "project" and #fields == 4 then
         return project(state, phase, fields[3], fields[4])
     elseif operation == "reward-capture" or operation == "reward-grant" then
@@ -590,7 +626,8 @@ function valve.rows(state, phase, row)
     if phase == "hosting" then
         local scene = subway_scene(state)
         local side = scene and (scene.closed and "closed" or scene.present and "present" or "settling")
-        if side then rows[#rows+1] = row("native-subway-valve-scene", area, side, "host") end
+        if side then rows[#rows+1] = row("native-subway-valve-scene", area, side, "host", "-",
+            scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0) end
         if fixture_reply and scene and same(scene.world, fixture_reply.world) then
             rows[#rows+1] = row("native-subway-valve-fixture", area, fixture_reply.pawn, fixture_reply.operation)
         end
@@ -622,7 +659,8 @@ function valve.rows(state, phase, row)
             local current = projected and same(scene.world, projected.world) and same(scene.pawn, projected.pawn)
                 and same(scene.connection, projected.connection)
             local surface = scene.closed and "closed" or scene.present and "present" or "settling"
-            rows[#rows+1] = row("native-subway-valve-scene", area, surface, scene.pawn:GetFullName(), current and projected.epoch or "-")
+            rows[#rows+1] = row("native-subway-valve-scene", area, surface, scene.pawn:GetFullName(), current and projected.epoch or "-",
+                scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0)
         end
     end
     return rows
