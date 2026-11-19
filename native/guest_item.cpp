@@ -608,8 +608,11 @@ namespace
         auto* source = item_class->GetClassDefaultObject().Get();
         auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
-        const auto units = ammo_fixture ? ammo_fixture->fixture_units : magazine_fixture;
+        const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
+        const auto units = ammo_fixture ? ammo_fixture->fixture_units :
+            magazine ? std::min(magazine_fixture, magazine->capacity) : magazine_fixture;
         if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
+            (magazine && capacity != magazine->capacity) ||
             (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) : capacity < units))
             return result(lua, false, "stock_guest_weapon_seed_schema_unavailable");
         AmmoStackSchema stack;

@@ -13,7 +13,7 @@ from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.silverfish.guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
+from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SEVEN_AP, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
@@ -22,9 +22,10 @@ DEFAULT_WEAPONS = ("light-pistol-suppressed", "smg-standard")
 
 
 async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
-    uses_45 = any(WEAPONS[kind].magazine.ammo == FORTY_FIVE_BALL for kind in kinds)
-    only_9mm = all(WEAPONS[kind].magazine.ammo == NINE_MM_BALL for kind in kinds)
-    prefix = "stock-buckshot" if "sg-71-a" in kinds else "stock-45-ball" if uses_45 else "stock-9mm"
+    families = {WEAPONS[kind].magazine.ammo for kind in kinds}
+    only_9mm = families == {NINE_MM_BALL}
+    artifact_prefixes = {TWELVE_GAUGE_BUCK: "stock-buckshot", FIVE_SEVEN_AP: "stock-57-ap", FORTY_FIVE_BALL: "stock-45-ball"}
+    prefix = next((label for ammo, label in artifact_prefixes.items() if ammo in families), "stock-9mm")
     name = prefix + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     client = ("--profile", name)
@@ -86,22 +87,26 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
         pressed = (await action(client, "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
         return await receipt("native_guest_reload_input", pressed["sequence"])
 
-    async def read_45_reserve(owner, expected):
-        inventory = (await action(client, "native-inventory-list"))["native_inventory"]
-        assert inventory["owner"] == owner and inventory["next_offset"] is None, inventory
-        rows = [row for row in inventory["items"] if row["guid"] in expected
-                or row["class_path"] == FORTY_FIVE_BALL.item_path]
-        assert all(row["class_path"] == FORTY_FIVE_BALL.item_path and row["source"] == "backpack"
-                   and row["stackable"] is True for row in rows), rows
+    async def read_reserve(owner, ammo, expected):
+        rows = []
+        offset = 0
+        while offset is not None:
+            inventory = (await action(client, "native-inventory-list", "--target", str(offset)))["native_inventory"]
+            assert (inventory["owner"], inventory["offset"]) == (owner, offset), inventory
+            rows.extend(row for row in inventory["items"] if row["guid"] in expected or row["class_path"] == ammo.item_path)
+            next_offset = inventory["next_offset"]
+            assert next_offset is None or next_offset > offset, inventory
+            offset = next_offset
+        assert all(row["class_path"] == ammo.item_path and row["source"] == "backpack" and row["stackable"] is True for row in rows), rows
         assert [(row["guid"], row["quantity"]) for row in rows] == [
             (guid, remaining) for guid, remaining in expected.items() if remaining
         ], rows
         return rows
 
-    async def reload_45(owner, guid, capacity, reserve):
+    async def reload_first_stacks(owner, guid, capacity, ammo, reserve):
         steps = []
         loaded = 0
-        rows = await read_45_reserve(owner, reserve)
+        rows = await read_reserve(owner, ammo, reserve)
         while loaded < capacity and rows:
             first = rows[0]
             before = sum(reserve.values())
@@ -113,7 +118,7 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             ), (first, refilled)
             loaded += transferred
             reserve[first["guid"]] -= transferred
-            remaining = await read_45_reserve(owner, reserve)
+            remaining = await read_reserve(owner, ammo, reserve)
             steps.append({"receipt": refilled, "stacks_before": rows, "stacks_after": remaining})
             rows = remaining
         assert steps, reserve
@@ -127,27 +132,31 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
         invitation = await ask("invite", *host, "--name", "Stock weapon tester", "--character", "Gunsmith")
         guest = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         first = await enroll()
-        reserve_45 = {}
+        tracked = {family: {} for family in families if family != NINE_MM_BALL}
+        wrong_keys = {FORTY_FIVE_BALL: "nonmatching_reserve", TWELVE_GAUGE_BUCK: "buckshot_nonmatching_reserve",
+                      FIVE_SEVEN_AP: "57_ap_nonmatching_reserve"}
         held_ammo = NINE_MM_BALL
         for kind in kinds:
             profile = WEAPONS[kind]
             capacity = profile.magazine.capacity
             ammo = profile.magazine.ammo
-            wrong_key = "buckshot_nonmatching_reserve" if ammo == TWELVE_GAUGE_BUCK else "nonmatching_reserve"
-            check_wrong_ammo = ammo in (FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK) and wrong_key not in evidence
+            wrong_key = wrong_keys.get(ammo)
+            check_wrong_ammo = wrong_key is not None and wrong_key not in evidence
             if check_wrong_ammo:
+                assert held_ammo != ammo
                 nonmatching_guid = await seed_reserve()
-                if held_ammo == FORTY_FIVE_BALL:
-                    reserve_45[nonmatching_guid] = held_ammo.fixture_units
+                if held_ammo in tracked:
+                    tracked[held_ammo][nonmatching_guid] = held_ammo.fixture_units
+            initially_loaded = min(capacity, 7)
             guid = uuid.uuid4().hex.upper()
             seeded = (await action(host, "native-guest-weapon-seed", "--kind", kind, "--item-guid", guid))["native_guest_weapon"]
-            assert seeded["guid"] == guid and seeded["stored_ammo"] == 7, seeded
+            assert (seeded["guid"], seeded["stored_ammo"]) == (guid, initially_loaded), seeded
             equipped = (await action(client, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
-            assert (equipped["guid"], equipped["stored_ammo"], equipped["actor_ammo"]) == (guid, 7, 7), equipped
+            assert (equipped["guid"], equipped["stored_ammo"], equipped["actor_ammo"]) == (guid, initially_loaded, initially_loaded), equipped
             await wait(client_run, lambda s: (scope := s.get("game", {}).get("native_guest_primary_scope", {}))
                        and (scope["guid"], scope["kind"]) == (guid, kind))
             shots = []
-            for loaded in range(7, 0, -1):
+            for loaded in range(initially_loaded, 0, -1):
                 press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
                 assert press["guid"] == guid and press["stock_wrappers"] == 2, press
                 shot = await receipt("native_guest_primary_input", press["sequence"])
@@ -166,11 +175,14 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
                 evidence[wrong_key] = {"guid": nonmatching_guid, "refused": wrong_ammo["error"]}
 
             reserve_guid = await seed_reserve()
-            second_reserve = await seed_reserve() if ammo == TWELVE_GAUGE_BUCK else None
+            second_reserve = await seed_reserve() if ammo in (TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP) else None
             steps = None
-            if ammo == FORTY_FIVE_BALL:
-                reserve_45[reserve_guid] = ammo.fixture_units
-                steps = await reload_45(invitation["character_id"], guid, capacity, reserve_45)
+            if ammo in tracked:
+                reserve = tracked[ammo]
+                reserve[reserve_guid] = ammo.fixture_units
+                if second_reserve:
+                    reserve[second_reserve] = ammo.fixture_units
+                steps = await reload_first_stacks(invitation["character_id"], guid, capacity, ammo, reserve)
                 refilled = steps[-1]["receipt"]
             else:
                 refilled = await reload_input()
@@ -188,14 +200,12 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
                                          "projectile": ammo.projectile_path}
             if steps:
                 evidence["weapons"][kind]["stock_reload_steps"] = steps
-            if ammo == TWELVE_GAUGE_BUCK:
-                second = await reload_input()
-                assert (refilled["after"], refilled["reserve_before"], refilled["reserve_after"]) == (5, 10, 5), refilled
-                assert (second["guid"], second["before"], second["after"],
-                        second["reserve_before"], second["reserve_after"]) == (guid, 5, 10, 5, 0), second
-                evidence["weapons"][kind].update(
-                    second_reserve_guid=second_reserve, first_stack_reload=refilled, stock_reload=second
-                )
+            if second_reserve:
+                evidence["weapons"][kind].update(second_reserve_guid=second_reserve, first_stack_reload=steps[0]["receipt"])
+                if initially_loaded == capacity:
+                    assert len(steps) == 1 and refilled["after"] == capacity
+                    assert any(row["guid"] == second_reserve and row["quantity"] == ammo.fixture_units
+                               for row in steps[0]["stacks_after"]), steps
             held_ammo = ammo
         await stop(host, authority)
         await stop(client, guest)
@@ -208,8 +218,10 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             saved = (await action(client, "native-guest-weapon-inspect", "--target", item["guid"]))["native_guest_weapon"]
             assert (saved["guid"], saved["stored_ammo"]) == (item["guid"], item["stock_reload"]["after"]), saved
             item["stock_restart"] = saved
-        if uses_45:
-            evidence["45_reserve_after_restart"] = await read_45_reserve(invitation["character_id"], reserve_45)
+        restart_keys = {FORTY_FIVE_BALL: "45_reserve_after_restart", TWELVE_GAUGE_BUCK: "buckshot_reserve_after_restart",
+                        FIVE_SEVEN_AP: "57_ap_reserve_after_restart"}
+        for ammo, expected in tracked.items():
+            evidence[restart_keys[ammo]] = await read_reserve(invitation["character_id"], ammo, expected)
         evidence["verified"] = True
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))

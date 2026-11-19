@@ -19,13 +19,12 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
     def test_ordinary_pistol_classes_are_exact(self):
         for kind, blueprint in {
             "army-pistol": "Wep_ArmyPistol", "pistol": "Wep_Pistol",
-            "pistol-02": "Wep_Pistol02", "tac-pistol": "Wep_TacPistol",
+            "pistol-02": "Wep_Pistol02", "tac-pistol": "Wep_TacPistol", "model-1931": "Wep_Pistol_Long",
         }.items():
             path = f"/Game/Classes/Weapons/{blueprint}.{blueprint}_C"
             self.assertEqual(native_guest_weapon.FIRE_CLASSES[kind], path)
             self.assertIn(path, native_guest_weapon.CLASS_PATHS)
             self.assertIn(kind, native_guest_weapon.SEED_KINDS)
-        self.assertNotIn("pistol-long", native_guest_weapon.PRIMARY_KINDS)
         self.assertNotIn("1911-02", native_guest_weapon.PRIMARY_KINDS)
 
     def test_exact_45_ball_profiles_only(self):
@@ -42,20 +41,35 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
         })
 
-    def test_only_stock_sg_71_a_uses_buckshot(self):
+    def test_only_qualified_sg_71_variants_use_buckshot(self):
         ammo = guest_weapon_profiles.TWELVE_GAUGE_BUCK
         self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
                          (4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, 9))
         profiles = [profile for profile in guest_weapon_profiles.FIREARMS
                     if profile.magazine and profile.magazine.ammo == ammo]
-        self.assertEqual([(profile.kind, profile.blueprint, profile.magazine.capacity) for profile in profiles],
-                         [("sg-71-a", "Wep_ShotGun_SemiAuto", 10)])
+        self.assertEqual([(p.kind, p.blueprint, p.magazine.capacity, p.magazine.burst_length, p.magazine.fire_rate) for p in profiles],
+                         [("sg-71-a", "Wep_ShotGun_SemiAuto", 10, 1, 0.2),
+                          ("sg-71-b", "Wep_ShotGun_SemiAuto_02", 10, 1, 0.2),
+                          ("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", 5, 1, 0.2)])
+        self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
+        self.assertFalse({"Wep_ShotGun_SemiAuto_03_UBGL", "Wep_ShotGun_FullAuto"} & {p.blueprint for p in profiles})
+
+    def test_exact_fennec_ap_profiles_use_one_stock_projectile(self):
+        ammo = guest_weapon_profiles.FIVE_SEVEN_AP
+        self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
+                         (11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7, 1))
+        profiles = [p for p in guest_weapon_profiles.FIREARMS if p.magazine and p.magazine.ammo == ammo]
+        self.assertEqual([(p.kind, p.blueprint, p.magazine.capacity, p.magazine.burst_length, p.magazine.fire_rate) for p in profiles],
+                         [("fennec-57", "Wep_Pistol_Fennec_01", 17, 1, 0.06),
+                          ("black-fox", "Wep_Pistol_Fennec_02", 17, 1, 0.06)])
+        self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
 
     def test_only_audited_magazines_use_first_stack_reload(self):
         same_stack = {profile.kind for profile in guest_weapon_profiles.FIREARMS
                       if profile.magazine and profile.magazine.reload_first_stack}
         self.assertEqual(same_stack, {
-            "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol", "sg-71-a",
+            "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
+            "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox",
         })
 
 

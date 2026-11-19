@@ -27,7 +27,8 @@ FORTY_FIVE_BALL = StockAmmo("forty_five_ball", 1, "45Cal_Ball", "Ammo_Magnum_BP"
 TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
-STOCK_AMMO = (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK)
+FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
+STOCK_AMMO = (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP)
 
 
 @dataclass(frozen=True)
@@ -69,4 +70,13 @@ FIREARMS = (
             Magazine(12, 1, 0.15, True, FORTY_FIVE_BALL, reload_first_stack=True)),
     Firearm("sg-71-a", "Wep_ShotGun_SemiAuto", True,
             Magazine(10, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
+    Firearm("sg-71-b", "Wep_ShotGun_SemiAuto_02", True,
+            Magazine(10, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
+    Firearm("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", True,
+            Magazine(5, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
+    Firearm("model-1931", "Wep_Pistol_Long", True, Magazine(10, 1, 0.1, True, reload_first_stack=True)),
+    Firearm("fennec-57", "Wep_Pistol_Fennec_01", True,
+            Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
+    Firearm("black-fox", "Wep_Pistol_Fennec_02", True,
+            Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
 )

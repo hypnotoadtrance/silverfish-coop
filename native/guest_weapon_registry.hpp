@@ -24,6 +24,8 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Magnum.Projectile_Pistol_Magnum_C"), 10, 1};
     inline constexpr StockAmmo twelve_gauge_buck{4, STR("12Gauge_Buck"),
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
+    inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
+        STR("/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_AP.Projectile_5-7_AP_C"), 7, 1};
 
     struct Profile
     {
@@ -52,5 +54,10 @@ namespace silverfish::guest_weapon_profiles
         Profile{"1911-fancy", STR("/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},
         Profile{"heavy-pistol", STR("/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C"), true, 12, 1, 0.15, true, &forty_five_ball, true},
         Profile{"sg-71-a", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
+        Profile{"sg-71-b", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_02.Wep_ShotGun_SemiAuto_02_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
+        Profile{"sg-71-a-suppressed", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_Suppressed.Wep_ShotGun_SemiAuto_Suppressed_C"), true, 5, 1, 0.2, true, &twelve_gauge_buck, true},
+        Profile{"model-1931", STR("/Game/Classes/Weapons/Wep_Pistol_Long.Wep_Pistol_Long_C"), true, 10, 1, 0.1, true, &nine_mm_ball, true},
+        Profile{"fennec-57", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_01.Wep_Pistol_Fennec_01_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
+        Profile{"black-fox", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_02.Wep_Pistol_Fennec_02_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
     };
 }

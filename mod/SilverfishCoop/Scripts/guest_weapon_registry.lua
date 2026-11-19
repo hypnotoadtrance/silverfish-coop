@@ -14,6 +14,11 @@ for _, row in ipairs({
     { "1911-fancy", "/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C" },
     { "heavy-pistol", "/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C" },
     { "sg-71-a", "/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C", true, "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C" },
+    { "sg-71-b", "/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_02.Wep_ShotGun_SemiAuto_02_C", true, "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C" },
+    { "sg-71-a-suppressed", "/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_Suppressed.Wep_ShotGun_SemiAuto_Suppressed_C", true, "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C" },
+    { "model-1931", "/Game/Classes/Weapons/Wep_Pistol_Long.Wep_Pistol_Long_C", true },
+    { "fennec-57", "/Game/Classes/Weapons/Wep_Pistol_Fennec_01.Wep_Pistol_Fennec_01_C", true, "/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C" },
+    { "black-fox", "/Game/Classes/Weapons/Wep_Pistol_Fennec_02.Wep_Pistol_Fennec_02_C", true, "/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C" },
 }) do
     local kind, path, headless, ammo = table.unpack(row)
     profiles.paths[kind] = path
