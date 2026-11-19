@@ -94,7 +94,7 @@ def parse_shopkeep_progress(fields, pawn: str) -> dict:
     result = dict(zip(SHOPKEEP_PROGRESS, map(int, fields[3:6])))
     if (any(not 0 <= value < 2**31 for value in result.values())
             or fields[-1] == "opened-first" and result["meet"] != 1
-            or fields[-1] == "opened-repeat" and result["meet"] < 2):
+            or fields[-1] == "opened-repeat" and result["meet"] < 1):
         raise ValueError("Invalid stock ShopKeep reception state")
     return {**result, "effect": fields[-1]}
 
@@ -295,7 +295,7 @@ class DialogueSessions:
                     raise party.RuleError(str(error)) from error
                 raise
             if (observed["connection"] != scope[4]
-                    or observed["progress"] != dict(before, meet=before["meet"] + 1, effect=marker)):
+                    or observed["progress"] != dict(before, meet=max(before["meet"], 1), effect=marker)):
                 raise RuntimeError("The stock ShopKeep first-meet flag did not verify")
             revision = await host.checkpoint_native(bridge)
             host.native_checkpoint_unsafe = False

@@ -27,6 +27,24 @@ class RestartWipeGuardTests(unittest.IsolatedAsyncioTestCase):
             verify_checkpoint=lambda data: native_host_save.verify_checkpoint(self.profile, data),
         )
 
+    def test_native_health_limits_keep_the_restored_host_downed_and_match_stock_revive(self):
+        host = Mock(native_guest=True, native_zones=True, native_profile=self.profile)
+        host.party = party.load_party(None)
+        party.add_player(host.party, "host")
+        party.add_player(host.party, "traveler")
+        host.party["players"]["host"].update(health=0, downed=True)
+        host.last_game = {"state": "hosting", "pawns": {
+            "local": {"max_health": 250}, "guest": {"name": "OtherPawn", "max_health": 400},
+        }}
+        host.native_recipients.return_value = {"traveler": {"alias": "guest", "pawn": "TravelersPawn"}}
+
+        Host.sync_native_health_limits(host)
+
+        self.assertEqual(host.party["players"]["host"]["health"], 0)
+        self.assertEqual(host.party["players"]["host"]["max_health"], 250)
+        self.assertTrue(host.party["players"]["host"]["downed"])
+        self.assertEqual(host.party["players"]["traveler"]["max_health"], party.BASE_MAX_HEALTH)
+
     def guard(self, status):
         return RestartWipeGuard(status, wall=lambda: self.wall, clock=lambda: self.clock)
 

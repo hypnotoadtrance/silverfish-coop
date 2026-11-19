@@ -259,7 +259,7 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         assert standing["game"]["native_death_hook"]["sequence"] == 0
         revive, = (row for row in await events(guest_owner)
                    if (row.get("event"), row.get("effect"), row.get("target")) == ("local_interaction", "revive", "host"))
-        assert revive["health"] == max(1, reunited["gameplay"]["players"]["host"]["max_health"] * 0.1), revive
+        assert revive["health"] == health == max(1, reunited["gameplay"]["players"]["host"]["max_health"] * 0.1), revive
         assert not any(row.get("event") == "party_respawn_committed" for row in await events(host_owner))
         evidence["stock_revive"] = {"receipt": revive, "native_health": health, "host": stock_body(standing),
                                     "guest": stock_body(standing, "guest")}

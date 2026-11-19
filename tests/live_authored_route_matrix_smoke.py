@@ -121,7 +121,11 @@ async def verify(work, vanilla, routes):
             if not door:
                 assert leg["group_probe"][field] == "clear", leg
             current = await paired(route.destination, current["zone_epoch"])
-            arrival = current["game"].get("native_authored_arrival", {})
+            journal = (run / "events.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
+            event, = [entry for line in journal if line.endswith("\n") and
+                      (entry := json.loads(line)).get("event") == "zone_travel_ready"
+                      and entry.get("generation") == current["generation"] and entry.get("epoch") == current["zone_epoch"]]
+            arrival = event["authored_arrival"]
             assert arrival.get("actor", "").endswith("." + route.arrival_actor) or (
                 arrival.get("actor", "").endswith(":" + route.arrival_actor)
             ), arrival

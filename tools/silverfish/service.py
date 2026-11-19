@@ -532,6 +532,26 @@ class Host:
         return {key: self.last_game[key] for key in ("native_scene", "native_rules", "native_reputation", "native_seed")
                 if key in self.last_game}
 
+    def sync_native_health_limits(self) -> None:
+        if (not self.native_guest or not self.native_zones or self.native_profile is None
+                or self.last_game.get("state") != "hosting"):
+            return
+        pawns = self.last_game.get("pawns", {})
+        exact = {"host": pawns.get("local", {})}
+        for character, owner in self.native_recipients().items():
+            pawn = pawns.get(owner["alias"], {})
+            if pawn.get("name") == owner["pawn"]:
+                exact[character] = pawn
+        for character, pawn in exact.items():
+            maximum = pawn.get("max_health")
+            player = self.party["players"].get(character)
+            if (not player or type(maximum) not in (int, float) or not math.isfinite(maximum)
+                    or maximum < 1 or player["max_health"] == maximum):
+                continue
+            if not player["downed"]:
+                player["health"] = maximum if player["health"] == player["max_health"] else min(player["health"], maximum)
+            player["max_health"] = maximum
+
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
@@ -827,8 +847,10 @@ class Host:
         except (OSError, RuntimeError, ValueError):
             self.stopping = True
             raise
+        arrival = observed.get("native_authored_arrival") if authored_plan else None
         self.control.event("zone_travel_ready", source=current, destination=destination,
-                           entrance=entrance, epoch=self.zone_epoch, revision=revision)
+                           entrance=entrance, epoch=self.zone_epoch, revision=revision,
+                           **({"authored_arrival": arrival} if arrival else {}))
         return {"ok": True, "map": destination, "entrance": entrance,
                 "travel_epoch": self.zone_epoch, "revision": revision}
 
@@ -2818,6 +2840,7 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            self.sync_native_health_limits()
             await native_flood_jammer.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
                                         for row in self.last_game.get("native_guest_regen", {}).values()):

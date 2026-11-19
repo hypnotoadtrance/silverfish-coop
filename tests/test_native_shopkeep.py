@@ -43,7 +43,7 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
             if command == dialogue.SHOPKEEP_OPEN:
                 self.assertEqual(arguments, (connection, str(meet), "400", "2"))
                 effect = "opened-repeat" if meet else "opened-first"
-                meet += 1
+                meet = max(meet, 1)
             if command == dialogue.SHOPKEEP_CASH:
                 self.assertEqual(arguments, (dialogue.SHOPKEEP_FIRST, "1", connection))
                 effect = "cash-granted"
@@ -61,7 +61,7 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first["row"], first["effect"], first["revision"]), (dialogue.SHOPKEEP_FIRST, "opened-first", 21))
         self.assertEqual(await send("first", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE, operation), first)
         second = await send("second", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE)
-        self.assertEqual((second["row"], second["effect"], second["progress"]["meet"]), (dialogue.SHOPKEEP_ROOT, "opened-repeat", 2))
+        self.assertEqual((second["row"], second["effect"], second["progress"]["meet"]), (dialogue.SHOPKEEP_ROOT, "opened-repeat", 1))
         with self.assertRaisesRegex(ValueError, "choice_expired"):
             await send("second", dialogue.CHOOSE, first["token"] + "@1")
         with self.assertRaisesRegex(ValueError, "choice_unavailable"):
@@ -70,7 +70,7 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((accepted["row"], accepted["effect"]), (dialogue.SHOPKEEP_ROOT, "cash-granted"))
         self.assertEqual(granted, [members["first"]["pawn"]])
         self.assertEqual(host.checkpoint_native.await_count, 4)
-        self.assertEqual(meet, 2)
+        self.assertEqual(meet, 1)
 
     async def test_merchant_handoff_requires_native_response_and_verified_view(self):
         number, token = 6, "1" * 32

@@ -97,12 +97,12 @@ end
 function profile.open(context, before)
     local key = FName(profile.first_flag, EFindName.FNAME_Find)
     if key:GetComparisonIndex() == 0 or key:ToString() ~= profile.first_flag or not math.tointeger(before.meet)
-        or before.meet < 0 or before.meet >= 2147483647 then refuse("meet_flag_unqualified") end
+        or before.meet < 0 or before.meet > 2147483647 then refuse("meet_flag_unqualified") end
     local checked, after = pcall(function()
         context.instance:Add_PointTo_SaveFlag(key, 1, true, false)
         return read(context)
     end)
-    if not checked or after.meet ~= before.meet + 1 or after.cash ~= before.cash or after.xp ~= before.xp then
+    if not checked or after.meet ~= math.max(before.meet, 1) or after.cash ~= before.cash or after.xp ~= before.xp then
         error("mutation_unverified_native_dialogue_shopkeep_meet_flag", 0)
     end
     return after, before.meet == 0 and "opened-first" or "opened-repeat"
