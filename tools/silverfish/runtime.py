@@ -312,6 +312,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_HEADLESS", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES", None)
@@ -381,6 +382,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_EXPANDED_ZONES"] = "1"
     if guest_reload_input:
         env["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT"] = "1"
+        if headless:
+            env["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES"] = "1"
     if guest_primary_input:
         env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT"] = "1"
         if headless:

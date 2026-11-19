@@ -101,3 +101,23 @@ class StageBackendTests(unittest.TestCase):
 
             runtime.launch(self.work, self.work / "profile", self.work / "bridge", headless=False)
             self.assertNotIn("-RenderOffScreen", game.call_args.args[0])
+
+    @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
+    def test_reload_fixture_requires_headless_client_with_reload_input(self):
+        self.install_cpp_fixture()
+        fixture_flag = "SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES"
+        input_flag = "SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT"
+        paths = self.work, self.work / "profile", self.work / "bridge"
+        with patch.dict(os.environ), patch("tools.silverfish.win_job.GameProcess") as game:
+            os.environ.pop(fixture_flag, None)
+            runtime.launch(*paths, headless=True, native_zones=True, guest_reload_input=True)
+            self.assertEqual(game.call_args.kwargs["env"][fixture_flag], "1")
+            self.assertEqual(game.call_args.kwargs["env"][input_flag], "1")
+
+            os.environ[fixture_flag] = "1"
+            runtime.launch(*paths, headless=False, native_zones=True, guest_reload_input=True)
+            self.assertNotIn(fixture_flag, game.call_args.kwargs["env"])
+            self.assertEqual(game.call_args.kwargs["env"][input_flag], "1")
+
+            runtime.launch(*paths, headless=True, native_zones=True)
+            self.assertNotIn(fixture_flag, game.call_args.kwargs["env"])
