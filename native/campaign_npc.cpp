@@ -1,9 +1,11 @@
 #include "campaign_npc.hpp"
+#include "guest_sickness.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -31,6 +33,7 @@ namespace
     using Iteration = Hook::TCallbackIterationData<void>;
     using Lua = RC::LuaMadeSimple::Lua;
     using Clock = std::chrono::steady_clock;
+    using SicknessSnapshot = silverfish::native_guest_sickness::SicknessSnapshot;
 
     constexpr auto world_package = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P");
     constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
@@ -38,6 +41,9 @@ namespace
     constexpr auto director_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.DynaimicSpawnControler_BP_C_1");
     constexpr auto initial_path = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C:Spawn_InitialActors");
     constexpr auto refresh_path = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C:RefreshEnemies");
+    constexpr auto living_count_path = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C:Calc_LivingNPCs");
+    constexpr auto marker_check_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnIsValid");
+    constexpr auto pool_path = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/CrossRoadsSquadPool.CrossRoadsSquadPool");
     constexpr auto spawner_class = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C");
     constexpr auto spawner_prefix = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.AI_Spawner_Squad_BP_C_");
     constexpr auto spawn_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnSquadFromData");
@@ -50,6 +56,10 @@ namespace
     constexpr auto npc_base = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto initialize_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:InitializeAI");
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
+    constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
+    constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto combat_watch_time = std::chrono::seconds(45);
+    constexpr int flayer_infection = 8;
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto instance_class = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
@@ -118,6 +128,27 @@ namespace
     bool exact(U::UObject* value, const U::TCHAR* path)
     {
         return live(value) && value->GetClassPrivate() == find<U::UClass>(path);
+    }
+
+    enum class NpcFamily { Unknown, Husk, Flayer };
+
+    NpcFamily npc_family(U::UObject* actor)
+    {
+        auto* type = actor ? actor->GetClassPrivate() : nullptr;
+        if (!type) return NpcFamily::Unknown;
+        static const U::FName husk{STR("NPC_Zomb_01_C")};
+        static const U::FName flayer{STR("NPC_Flayer_C")};
+        const auto name = type->GetFName();
+        if (name == husk && exact(actor, npc_class)) return NpcFamily::Husk;
+        if (name == flayer && exact(actor, flayer_class)) return NpcFamily::Flayer;
+        return NpcFamily::Unknown;
+    }
+
+    bool squad_spawner(U::UObject* actor)
+    {
+        static const U::FName type{STR("AI_Spawner_Squad_BP_C")};
+        auto* actor_type = actor ? actor->GetClassPrivate() : nullptr;
+        return actor_type && actor_type->GetFName() == type && exact(actor, spawner_class);
     }
 
     bool in_level(U::UObject* actor, U::UWorld* world)
@@ -207,7 +238,7 @@ namespace
 
     bool placed_spawner(U::UObject* actor, U::UWorld* world)
     {
-        if (!exact(actor, spawner_class) || !in_level(actor, world)) return false;
+        if (!squad_spawner(actor) || !in_level(actor, world)) return false;
         auto* arrow = object(actor, STR("Arrow_Leader"));
         if (!exact(arrow, STR("/Script/Engine.ArrowComponent")) || arrow->GetOuterPrivate() != actor) return false;
         const std::wstring_view prefix{spawner_prefix};
@@ -403,6 +434,13 @@ namespace
         Counts counts;
     };
 
+    struct RefreshObservation
+    {
+        U::FWeakObjectPtr marker, data;
+        bool used{}, running{};
+        int calls{};
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr world, driver;
@@ -412,6 +450,7 @@ namespace
         SavedSquad saved_squad;
         ClientBirths client_births;
         Flayers flayers;
+        RefreshObservation refresh;
         Clock::time_point next_census{};
         Counts counts;
     } scope;
@@ -434,12 +473,30 @@ namespace
         Handles before, units;
     } flayer_load;
 
+    struct CombatWatch
+    {
+        U::FWeakObjectPtr world, host, guest, host_save, guest_save;
+        Handles cohort;
+        Clock::time_point until;
+        NpcFamily family{NpcFamily::Husk};
+        const U::FFrame* damage_frame{};
+        const U::FFrame* melee_frame{};
+        U::FWeakObjectPtr pending_attacker, attacker;
+        double host_at_arm{}, host_before{}, guest_before{}, host_at_hit{}, guest_at_hit{}, guest_after{};
+        double pending_guest_after{};
+        bool pending_health_debit{};
+        SicknessSnapshot sickness_at_arm{}, pending_sickness{}, sickness_before{}, sickness_after{};
+        int attempts{}, guest_hits{}, host_hits{};
+    } combat_watch;
+
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
         Hook::ERROR_ID};
     bool operate{};
     bool publish_flayers{};
     bool veto_flayer_spawns{};
+    bool watch_combat{};
+    bool refresh_fixture{};
 
     void update_scope(const Network& active)
     {
@@ -447,6 +504,7 @@ namespace
         scope = {};
         attempt = {};
         flayer_load = {};
+        combat_watch = {};
         scope.world = active.world;
         scope.driver = active.driver;
         scope.seat = active.seat;
@@ -489,7 +547,7 @@ namespace
     void inspect_saved_squad(Iteration& call, U::UObject* receiver, U::FFrame& frame)
     {
         auto* function = frame.Node();
-        if (function != find<U::UFunction>(load_squad_path) || !exact(receiver, spawner_class)) return;
+        if (!squad_spawner(receiver) || function != find<U::UFunction>(load_squad_path)) return;
         auto* caller = frame.PreviousFrame();
         if (!caller || !caller->Node()) return;
         auto* antfarm = caller->Object();
@@ -600,6 +658,150 @@ namespace
             object(controller, STR("Pawn")) == actor && byte_field(controller, STR("Role")) == 3;
     }
 
+    U::UObject* one_remote_pawn(const Network& active)
+    {
+        auto* clients = field<U::FArrayProperty>(active.driver, STR("ClientConnections"));
+        auto* element = clients ? U::CastField<U::FObjectProperty>(clients->GetInner()) : nullptr;
+        if (!element) return nullptr;
+        U::FScriptArrayHelper rows(clients, clients->ContainerPtrToValuePtr<void>(active.driver));
+        if (rows.Num() != 1) return nullptr;
+        auto* connection = get_object(element, rows.GetRawPtr());
+        auto* control = object(connection, STR("PlayerController"));
+        auto* pawn = object(control, STR("Pawn"));
+        auto* type = find<U::UClass>(STR("/Script/Engine.NetConnection"));
+        if (!live(connection) || !type || !connection->IsA(type) || object(connection, STR("Driver")) != active.driver ||
+            !exact(control, controller_class) || object(connection, STR("OwningActor")) != control ||
+            object(control, STR("Player")) != connection || !exact(pawn, pawn_class) ||
+            object(pawn, STR("Controller")) != control || object(pawn, STR("As Game Instance FP")) != active.instance ||
+            !in_level(pawn, active.world) || !in_level(control, active.world) || byte_field(pawn, STR("Role")) != 3 ||
+            byte_field(control, STR("Role")) != 3) return nullptr;
+        return pawn;
+    }
+
+    bool read_health(U::UObject* save, double& result)
+    {
+        auto* property = field<U::FDoubleProperty>(save, STR("PlayerHealth"));
+        if (!property) return false;
+        result = property->GetPropertyValueInContainer(save);
+        return std::isfinite(result) && result >= 0;
+    }
+
+    bool combat_current()
+    {
+        if (Clock::now() >= combat_watch.until) return false;
+        const auto active = network(U::Cast<U::UWorld>(combat_watch.world.Get()));
+        auto* director = find<U::UObject>(director_path);
+        auto* host = combat_watch.host.Get();
+        auto* guest = combat_watch.guest.Get();
+        auto* canonical = combat_watch.host_save.Get();
+        auto* detached = combat_watch.guest_save.Get();
+        return host && guest && canonical && detached && canonical != detached && active.seat == Seat::Host &&
+            exact_director(director, active) && local_pawn(director, active) == host && one_remote_pawn(active) == guest &&
+            object(active.instance, STR("SaveSlot_Ref")) == canonical && object(guest, STR("Save")) == detached;
+    }
+
+    bool stock_npc_for_combat(U::UObject* actor, U::UWorld* world, NpcFamily family)
+    {
+        auto* infection = field<U::FIntProperty>(actor, STR("Melee_Infection"));
+        const bool flayer = family == NpcFamily::Flayer;
+        return stock_npc_authority(actor, flayer ? flayer_class : npc_class, world) && stock_npc_controller(actor, world) &&
+            bool_field(actor, STR("Alive"), true) && infection &&
+            infection->GetPropertyValueInContainer(actor) == (flayer ? flayer_infection : 0);
+    }
+
+    bool current_sickness(SicknessSnapshot& result)
+    {
+        return silverfish::native_guest_sickness::read_exact(combat_watch.guest.Get(), combat_watch.guest_save.Get(),
+            combat_watch.host_save.Get(), result);
+    }
+
+    bool same_stock_sickness(const SicknessSnapshot& first, const SicknessSnapshot& second)
+    {
+        return first.host_found == second.host_found && first.host_sickness == second.host_sickness;
+    }
+
+    void before_stock_melee(U::UObject* receiver, U::FFrame& frame)
+    {
+        if (!watch_combat || combat_watch.damage_frame || combat_watch.melee_frame ||
+            (receiver != combat_watch.guest.Get() && receiver != combat_watch.host.Get()) || !combat_current()) return;
+        auto* parent = frame.PreviousFrame();
+        auto* attacker = parent ? parent->Object() : nullptr;
+        auto* function = frame.Node();
+        auto* instigator = field<U::FObjectProperty>(function, STR("Instigator"));
+        if (!attacker || !contains(combat_watch.cohort, attacker) || parent->Node() != find<U::UFunction>(melee_path) ||
+            function != find<U::UFunction>(player_damage_path) || function->GetNumParms() != 7 || function->GetReturnProperty() ||
+            !instigator || !instigator->HasAnyPropertyFlags(U::CPF_Parm) || instigator->HasAnyPropertyFlags(U::CPF_OutParm) ||
+            instigator->GetOffset_Internal() != 0x150 || get_object(instigator, frame.Locals()) != attacker ||
+            !stock_npc_for_combat(attacker, U::Cast<U::UWorld>(combat_watch.world.Get()), combat_watch.family) ||
+            object(attacker, STR("CombatTarget")) != receiver ||
+            !read_health(combat_watch.host_save.Get(), combat_watch.host_before) ||
+            !read_health(combat_watch.guest_save.Get(), combat_watch.guest_before)) return;
+        if (combat_watch.family == NpcFamily::Flayer && receiver == combat_watch.guest.Get())
+        {
+            if (!current_sickness(combat_watch.pending_sickness) ||
+                !same_stock_sickness(combat_watch.pending_sickness, combat_watch.sickness_at_arm)) return;
+            combat_watch.melee_frame = parent;
+            combat_watch.pending_health_debit = false;
+        }
+        ++combat_watch.attempts;
+        combat_watch.damage_frame = &frame;
+        combat_watch.pending_attacker = attacker;
+    }
+
+    void after_stock_melee(Iteration& call, U::UObject* receiver)
+    {
+        combat_watch.damage_frame = nullptr;
+        auto* attacker = combat_watch.pending_attacker.Get();
+        if (!combat_watch.melee_frame) combat_watch.pending_attacker.Reset();
+        double current_host{}, current_guest{};
+        if (call.OriginalFunctionCallPrevented() || !attacker || !combat_current() ||
+            !read_health(combat_watch.host_save.Get(), current_host) || !read_health(combat_watch.guest_save.Get(), current_guest)) return;
+        if (current_host < combat_watch.host_before) ++combat_watch.host_hits;
+        if (receiver != combat_watch.guest.Get() || current_guest >= combat_watch.guest_before ||
+            current_host != combat_watch.host_before || current_host != combat_watch.host_at_arm) return;
+        if (combat_watch.melee_frame)
+        {
+            combat_watch.pending_guest_after = current_guest;
+            combat_watch.pending_health_debit = true;
+            return;
+        }
+        if (combat_watch.guest_hits++ == 0)
+        {
+            combat_watch.attacker = attacker;
+            combat_watch.host_at_hit = current_host;
+            combat_watch.guest_at_hit = combat_watch.guest_before;
+            combat_watch.guest_after = current_guest;
+        }
+    }
+
+    void after_flayer_swing(Iteration& call, U::UObject* actor)
+    {
+        combat_watch.melee_frame = nullptr;
+        const bool measured = combat_watch.pending_health_debit;
+        const bool exact_attacker = combat_watch.pending_attacker.Get() == actor;
+        combat_watch.pending_health_debit = false;
+        combat_watch.pending_attacker.Reset();
+        if (!measured || !exact_attacker || call.OriginalFunctionCallPrevented() || !combat_current()) return;
+        SicknessSnapshot after;
+        double host{}, guest{};
+        if (!current_sickness(after) || !read_health(combat_watch.host_save.Get(), host) ||
+            !read_health(combat_watch.guest_save.Get(), guest) || host != combat_watch.host_at_arm ||
+            guest != combat_watch.pending_guest_after) return;
+        const auto& before = combat_watch.pending_sickness;
+        const auto delta = static_cast<std::int64_t>(after.guest_sickness) - before.guest_sickness;
+        if (!same_stock_sickness(before, after) || !after.guest_found || delta < 1 || delta > flayer_infection ||
+            after.infect_reads - before.infect_reads != 1 || after.infect_writes - before.infect_writes != 1) return;
+        if (combat_watch.guest_hits++ == 0)
+        {
+            combat_watch.attacker = actor;
+            combat_watch.host_at_hit = host;
+            combat_watch.guest_at_hit = combat_watch.guest_before;
+            combat_watch.guest_after = guest;
+            combat_watch.sickness_before = before;
+            combat_watch.sickness_after = after;
+        }
+    }
+
     void observe_flayer_load(Iteration& call, U::UObject* receiver, U::FFrame& frame)
     {
         const auto observed = std::move(flayer_load);
@@ -652,8 +854,9 @@ namespace
         if ((name != init_name && name != perceive_name) ||
             function != find<U::UFunction>(name == init_name ? initialize_path : perceive_path) ||
             function->GetReturnProperty() || byte_field(receiver, STR("Role")) != 1) return;
-        const bool flayers = exact(receiver, flayer_class);
-        if (flayers ? !publish_flayers : (!operate || !exact(receiver, npc_class))) return;
+        const auto family = npc_family(receiver);
+        const bool flayers = family == NpcFamily::Flayer;
+        if (family == NpcFamily::Unknown || !(flayers ? publish_flayers : operate)) return;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
         if (active.seat != Seat::Client || !in_level(receiver, active.world)) return;
         update_scope(active);
@@ -698,7 +901,15 @@ namespace
         static const U::FName spawn_name{STR("SpawnSquadFromData")};
         static const U::FName load_name{STR("LoadSquad")};
         static const U::FName init_name{STR("InitializeAI")};
+        static const U::FName perceive_name{STR("Proscess_TargetPerception")};
+        static const U::FName damage_name{STR("DealDamage")};
         const auto name = frame.Node()->GetFName();
+        if (watch_combat && name == damage_name)
+        {
+            before_stock_melee(receiver, frame);
+            return;
+        }
+        if (name != spawn_name && name != load_name && name != init_name && name != perceive_name) return;
 
         if (name == init_name && attempt.frame && frame.PreviousFrame() == attempt.frame &&
             frame.Node() == find<U::UFunction>(initialize_path))
@@ -715,14 +926,14 @@ namespace
         }
         if (name == init_name && frame.Node() == find<U::UFunction>(initialize_path) && byte_field(receiver, STR("Role")) == 3)
         {
-            const bool flayers = exact(receiver, flayer_class);
-            if (flayers || exact(receiver, npc_class))
+            const auto family = npc_family(receiver);
+            if (family != NpcFamily::Unknown)
             {
                 const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
                 if (active.seat == Seat::Client && in_level(receiver, active.world))
                 {
                     update_scope(active);
-                    auto& births = flayers ? scope.flayers.client_births : scope.client_births;
+                    auto& births = family == NpcFamily::Flayer ? scope.flayers.client_births : scope.client_births;
                     ++births.local_initializations;
                     births.last_actor = receiver;
                     auto* parent = frame.PreviousFrame();
@@ -733,7 +944,7 @@ namespace
         }
         prevent_replica_brain(call, receiver, frame.Node());
 
-        if (name != spawn_name || !exact(receiver, spawner_class)) return;
+        if (name != spawn_name || !squad_spawner(receiver)) return;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
         if (active.seat == Seat::Client)
         {
@@ -758,6 +969,12 @@ namespace
         }
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
+        if (refresh && scope.refresh.running)
+        {
+            ++scope.refresh.calls;
+            scope.refresh.marker = receiver;
+            if (exact(data, data_class)) scope.refresh.data = data;
+        }
         const auto source = data_index(data);
         if (source < 0 || !bool_field(data, STR("ForceWander"), true)) return;
 
@@ -780,6 +997,16 @@ namespace
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!hook_ready()) return;
+        if (combat_watch.damage_frame == &frame)
+        {
+            after_stock_melee(call, receiver);
+            return;
+        }
+        if (combat_watch.melee_frame == &frame)
+        {
+            after_flayer_swing(call, receiver);
+            return;
+        }
         if (flayer_load.frame == &frame && flayer_load.marker.Get() == receiver)
         {
             observe_flayer_load(call, receiver, frame);
@@ -954,6 +1181,248 @@ namespace
         return 27;
     }
 
+    bool stock_script(U::UFunction* function, U::UClass* owner, int parameters, int size)
+    {
+        return function && owner && function->GetOuterPrivate() == owner && function->GetNumParms() == parameters &&
+            function->GetParmsSize() == size && !function->GetReturnProperty() &&
+            !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
+    }
+
+    struct RefreshSchema
+    {
+        U::UFunction* count = find<U::UFunction>(living_count_path);
+        U::UFunction* check = find<U::UFunction>(marker_check_path);
+        U::UFunction* refresh = find<U::UFunction>(refresh_path);
+        U::FIntProperty* count_result = field<U::FIntProperty>(count, STR("NPCs"));
+        U::FBoolProperty* radius = field<U::FBoolProperty>(check, STR("CheckRadius"));
+        U::FBoolProperty* eligible{};
+
+        bool bind(U::UObject* director)
+        {
+            auto* type = director->GetClassPrivate();
+            if (!stock_script(count, type, 1, sizeof(std::int32_t)) || !stock_script(refresh, type, 0, 0) ||
+                !stock_script(check, find<U::UClass>(spawner_class), 2, 2) || !count_result ||
+                !count_result->HasAllPropertyFlags(U::CPF_Parm | U::CPF_OutParm) || count_result->GetOffset_Internal() != 0 ||
+                !radius || !radius->HasAnyPropertyFlags(U::CPF_Parm) || radius->HasAnyPropertyFlags(U::CPF_OutParm) ||
+                !radius->IsNativeBool() || radius->GetOffset_Internal() != 0) return false;
+            for (auto* parameter : U::TFieldRange<U::FProperty>(check, U::EFieldIterationFlags::IncludeDeprecated))
+            {
+                if (parameter == radius || !parameter->HasAnyPropertyFlags(U::CPF_Parm)) continue;
+                if (eligible || parameter->HasAnyPropertyFlags(U::CPF_ReturnParm)) return false;
+                eligible = U::CastField<U::FBoolProperty>(parameter);
+                if (!eligible || !eligible->HasAnyPropertyFlags(U::CPF_OutParm) || eligible->GetArrayDim() != 1 ||
+                    !eligible->IsNativeBool() || eligible->GetOffset_Internal() != 1) return false;
+            }
+            return eligible != nullptr;
+        }
+    };
+
+    int stock_refresh(const Lua& lua)
+    {
+        std::int32_t population = -1, capacity = -1;
+        int markers = -1, eligible = -1;
+        std::int64_t previous = -1, current = -1;
+        RefreshObservation observed;
+        const auto reply = [&](std::string_view status) {
+            lua.set_string(status);
+            lua.set_integer(population);
+            lua.set_integer(capacity);
+            lua.set_integer(markers);
+            lua.set_integer(eligible);
+            lua.set_integer(observed.calls);
+            push_name(lua, observed.marker.Get());
+            push_name(lua, observed.data.Get());
+            lua.set_integer(previous);
+            lua.set_integer(current);
+            return 10;
+        };
+        if (!hook_ready() || !refresh_fixture || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2))
+            return reply("refresh_scope_unavailable");
+        const auto address = lua.get_integer();
+        const bool invoke = lua.get_bool();
+        const auto active = network(find<U::UWorld>(world_path));
+        auto* director = find<U::UObject>(director_path);
+        if (active.seat != Seat::Host || !exact_director(director, active) || byte_field(director, STR("Role")) != 3)
+            return reply("refresh_scope_unavailable");
+        auto* host = local_pawn(director, active);
+        auto* antfarm = object(director, STR("Antfarm"));
+        auto* pool = object(director, STR("AmbientSquadPool"));
+        if (address <= 0 || !host || reinterpret_cast<std::uintptr_t>(host) != static_cast<std::uintptr_t>(address) ||
+            !one_remote_pawn(active) || !exact(antfarm, antfarm_class) || !in_level(antfarm, active.world) ||
+            object(antfarm, STR("GameInstance")) != active.instance || !live(object(antfarm, STR("LoadedCell"))) ||
+            !live(pool) || pool->GetPathName() != pool_path) return reply("refresh_scope_unavailable");
+        update_scope(active);
+        previous = current = scope.receipts;
+
+        RefreshSchema schema;
+        auto* limit = field<U::FIntProperty>(director, STR("MaxNPCs"));
+        auto* list = field<U::FArrayProperty>(director, STR("Spawns_Reinforcments"));
+        auto* entry = list ? U::CastField<U::FObjectProperty>(list->GetInner()) : nullptr;
+        if (!limit || !entry || !schema.bind(director)) return reply("refresh_schema_unavailable");
+        capacity = limit->GetPropertyValueInContainer(director);
+        if (capacity != 12) return reply("refresh_capacity_unverified");
+        director->ProcessEvent(schema.count, &population);
+        if (population < 0 || population > 4096) return reply("refresh_population_unverified");
+
+        U::FScriptArrayHelper rows(list, list->ContainerPtrToValuePtr<void>(director));
+        markers = rows.Num();
+        if (markers < 0 || static_cast<std::size_t>(markers) > marker_numbers.size()) return reply("refresh_markers_unverified");
+        Actors candidates;
+        for (int index = 0; index < markers; ++index)
+        {
+            auto* marker = get_object(entry, rows.GetRawPtr(index));
+            if (!placed_spawner(marker, active.world) || byte_field(marker, STR("Role")) != 3 ||
+                byte_field(marker, STR("Usage")) != 3 || std::ranges::find(candidates, marker) != candidates.end())
+                return reply("refresh_markers_unverified");
+            candidates.push_back(marker);
+        }
+        eligible = 0;
+        for (auto* marker : candidates)
+        {
+            std::array<unsigned char, 2> parameters{};
+            schema.radius->SetPropertyValueInContainer(parameters.data(), true);
+            marker->ProcessEvent(schema.check, parameters.data());
+            eligible += schema.eligible->GetPropertyValueInContainer(parameters.data()) ? 1 : 0;
+        }
+        if (population >= capacity) return reply("population_cap");
+        if (eligible == 0) return reply("no_eligible_marker");
+        if (!invoke) return reply("eligible");
+        if (scope.refresh.used) return reply("refresh_already_used");
+        scope.refresh = {};
+        scope.refresh.used = scope.refresh.running = true;
+        director->ProcessEvent(schema.refresh, nullptr);
+        scope.refresh.running = false;
+        observed = scope.refresh;
+        current = scope.receipts;
+        if (current > previous) return reply("stock_husk");
+        if (observed.calls == 0) return reply("no_stock_attempt");
+        auto* data = observed.data.Get();
+        if (!data) return reply("stock_selection_unverified");
+        return reply(data_index(data) < 0 ? "stock_other_squad" : "stock_husk_unverified");
+    }
+
+    int arm_combat(const Lua& lua)
+    {
+        const auto reply = [&](bool ok) { lua.set_bool(ok); return 1; };
+        const auto arguments = lua.get_stack_size();
+        if (!hook_ready() || !watch_combat || (arguments != 4 && arguments != 5) || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_integer(4) || (arguments == 5 && !lua.is_string(5))) return reply(false);
+        const auto host_address = lua.get_integer();
+        const auto guest_address = lua.get_integer();
+        const auto save_address = lua.get_integer();
+        const auto source_address = lua.get_integer();
+        const bool flayer = arguments == 5 && lua.get_string() == "flayer";
+        if (arguments == 5 && (!flayer || !publish_flayers || !veto_flayer_spawns)) return reply(false);
+        const auto family = flayer ? NpcFamily::Flayer : NpcFamily::Husk;
+        const auto active = network(find<U::UWorld>(world_path));
+        auto* director = find<U::UObject>(director_path);
+        if (active.seat != Seat::Host || !exact_director(director, active)) return reply(false);
+        update_scope(active);
+        auto* host = local_pawn(director, active);
+        auto* guest = one_remote_pawn(active);
+        auto* canonical = object(active.instance, STR("SaveSlot_Ref"));
+        auto* detached = object(guest, STR("Save"));
+        const auto matches = [](auto* candidate, auto address) {
+            return candidate && address > 0 && reinterpret_cast<std::uintptr_t>(candidate) == static_cast<std::uintptr_t>(address);
+        };
+        double host_health{}, guest_health{};
+        SicknessSnapshot initial_sickness;
+        auto& registered = flayer ? scope.flayers.latest : scope.latest;
+        auto* data = registered.data.Get();
+        const auto qualified_stock = flayer
+            ? registered.stage == "stock_antfarm" && exact(data, data_class) && data->GetPathName() == flayer_squad
+            : data_index(data) >= 0;
+        if (!matches(host, host_address) || !matches(guest, guest_address) || !matches(detached, save_address) ||
+            !exact(detached, save_class) || detached == canonical || !read_health(canonical, host_health) || host_health <= 0 ||
+            !read_health(detached, guest_health) || guest_health <= 0 || registered.replicated <= 0 ||
+            registered.cohort.size() != static_cast<std::size_t>(registered.replicated) ||
+            !qualified_stock || !placed_spawner(registered.spawner.Get(), active.world) ||
+            (flayer && !silverfish::native_guest_sickness::read_exact(guest, detached, canonical, initial_sickness))) return reply(false);
+        bool includes_source = false;
+        for (const auto& handle : registered.cohort)
+        {
+            auto* actor = handle.Get();
+            if (!stock_npc_for_combat(actor, active.world, family)) return reply(false);
+            includes_source |= matches(actor, source_address);
+        }
+        if (!includes_source) return reply(false);
+        combat_watch = {};
+        combat_watch.world = active.world;
+        combat_watch.host = host;
+        combat_watch.guest = guest;
+        combat_watch.host_save = canonical;
+        combat_watch.guest_save = detached;
+        combat_watch.cohort = registered.cohort;
+        combat_watch.family = family;
+        combat_watch.host_at_arm = host_health;
+        combat_watch.sickness_at_arm = initial_sickness;
+        combat_watch.until = Clock::now() + combat_watch_time;
+        return reply(true);
+    }
+
+    int read_combat(const Lua& lua)
+    {
+        if (!hook_ready() || !watch_combat || lua.get_stack_size() != 0 || !combat_current()) return 0;
+        auto* guest = combat_watch.guest.Get();
+        auto* host = combat_watch.host.Get();
+        U::UObject* acquired{};
+        for (const auto& handle : combat_watch.cohort)
+        {
+            if (auto* actor = handle.Get(); live(actor) && object(actor, STR("CombatTarget")) == guest)
+            {
+                acquired = actor;
+                break;
+            }
+        }
+        double host_now{}, guest_now{};
+        if (!read_health(combat_watch.host_save.Get(), host_now) || !read_health(combat_watch.guest_save.Get(), guest_now)) return 0;
+        lua.set_string(combat_watch.guest_hits ? "stock_guest_health_debit" : "watching_stock_melee");
+        push_name(lua, host);
+        push_name(lua, guest);
+        push_name(lua, combat_watch.attacker.Get());
+        push_name(lua, acquired);
+        lua.set_integer(combat_watch.attempts);
+        lua.set_integer(combat_watch.guest_hits);
+        lua.set_integer(combat_watch.host_hits);
+        lua.set_number(combat_watch.host_at_arm);
+        lua.set_number(combat_watch.host_at_hit);
+        lua.set_number(host_now);
+        lua.set_number(combat_watch.guest_at_hit);
+        lua.set_number(combat_watch.guest_after);
+        lua.set_number(guest_now);
+        return 14;
+    }
+
+    int read_combat_sickness(const Lua& lua)
+    {
+        if (!hook_ready() || !watch_combat || lua.get_stack_size() != 0 || combat_watch.family != NpcFamily::Flayer ||
+            combat_watch.guest_hits <= 0 || !combat_current()) return 0;
+        SicknessSnapshot current;
+        if (!current_sickness(current) || !same_stock_sickness(combat_watch.sickness_at_arm, current)) return 0;
+        const auto& before = combat_watch.sickness_before;
+        const auto& after = combat_watch.sickness_after;
+        push_name(lua, combat_watch.host.Get());
+        push_name(lua, combat_watch.guest.Get());
+        push_name(lua, combat_watch.attacker.Get());
+        lua.set_integer(before.guest_sickness);
+        lua.set_integer(after.guest_sickness);
+        lua.set_integer(before.host_sickness);
+        lua.set_integer(after.host_sickness);
+        lua.set_integer(current.host_sickness);
+        lua.set_integer(before.infect_reads);
+        lua.set_integer(after.infect_reads);
+        lua.set_integer(before.infect_writes);
+        lua.set_integer(after.infect_writes);
+        lua.set_integer(flayer_infection);
+        return 13;
+    }
+
+    int clear_combat(const Lua&)
+    {
+        if (watch_combat && U::IsInGameThreadRaw()) combat_watch = {};
+        return 0;
+    }
+
     int reset(const Lua&)
     {
         silverfish::campaign_npc::clear_scope();
@@ -970,6 +1439,9 @@ namespace silverfish::campaign_npc
         operate = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE");
         publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
         veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
+        const bool headless_fixture = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_FIXTURES");
+        watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
+        refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             on_pre, {false, false, STR("SilverfishCoopNative"), STR("Qualify natural CrossRoads Husk squads")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
@@ -985,7 +1457,7 @@ namespace silverfish::campaign_npc
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
-                if ((name != load_name && (name != spawn_name || !operate)) || !exact(receiver, spawner_class)) return;
+                if ((name != load_name && (name != spawn_name || !operate)) || !squad_spawner(receiver)) return;
                 const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
                 if (active.seat != Seat::Client) return;
                 if (name == spawn_name) prevent_client_spawn(call, receiver, frame, active);
@@ -1014,12 +1486,12 @@ namespace silverfish::campaign_npc
         callbacks[6] = Hook::RegisterBeginPlayPreCallback(
             [](Iteration&, U::AActor* candidate) {
                 if (!hook_ready()) return;
-                const bool flayers = exact(candidate, flayer_class);
-                if ((!flayers && !exact(candidate, npc_class)) || byte_field(candidate, STR("Role")) != 3) return;
+                const auto family = npc_family(candidate);
+                if (family == NpcFamily::Unknown || byte_field(candidate, STR("Role")) != 3) return;
                 const auto active = network(candidate->GetWorld(), true);
                 if (active.seat != Seat::Client || !in_level(candidate, active.world)) return;
                 update_scope(active);
-                auto& births = flayers ? scope.flayers.client_births : scope.client_births;
+                auto& births = family == NpcFamily::Flayer ? scope.flayers.client_births : scope.client_births;
                 ++births.local_begins;
                 births.last_actor = candidate;
                 births.last_caller.Reset();
@@ -1055,6 +1527,14 @@ namespace silverfish::campaign_npc
     {
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
+        if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);
+        if (watch_combat)
+        {
+            lua.register_function("SilverfishArmCampaignNpcCombat", arm_combat);
+            lua.register_function("SilverfishReadCampaignNpcCombat", read_combat);
+            lua.register_function("SilverfishReadCampaignNpcCombatSickness", read_combat_sickness);
+            lua.register_function("SilverfishClearCampaignNpcCombat", clear_combat);
+        }
     }
 
     void clear_scope()
@@ -1064,6 +1544,7 @@ namespace silverfish::campaign_npc
             scope = {};
             attempt = {};
             flayer_load = {};
+            combat_watch = {};
         }
     }
 }

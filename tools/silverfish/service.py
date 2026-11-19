@@ -13,7 +13,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_dream, native_enemy_loot, native_finite_shop,
+from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop,
                native_gold, native_green, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_turret_photo,
@@ -25,7 +25,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment
-from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, GOLD_NEXUS,
+from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
@@ -35,7 +35,8 @@ PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
-                        native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT, native_turret_photo.CAPTURE,
+                        native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
+                        native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER, native_computer_board.PREFLIGHT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -124,7 +125,8 @@ class Host:
                  verify_native_roster: bool = False, persist_native_guest: bool = False, matrix_supported: bool = False,
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
-                 broker_input: bool = False, wipe_view_enabled: bool = False, wire_board_enabled: bool = False):
+                 guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
+                 wire_board_enabled: bool = False, host_camera_input: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -152,9 +154,12 @@ class Host:
         self.native_shop_view = native_shop_view
         self.native_loot_input = native_loot_input
         self.guest_regen = guest_regen
+        self.guest_sickness = guest_sickness
         self.broker_input = broker_input
         self.wipe_view_enabled = wipe_view_enabled
         self.wire_board_enabled = wire_board_enabled
+        self.camera_ready_at = {}
+        self.host_camera_input = native_turret_photo.HostCameraInput() if host_camera_input else None
         self.wipe_view = None
         self.last_crate_intent = 0
         if authored_zones and expanded_zones:
@@ -1213,8 +1218,12 @@ class Host:
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
-            if native_gold.valid_guid(equipped.get("guid")) and equipped.get("kind") in ("smg", "light-pistol", "nagant-scoped"):
+            kind = equipped.get("kind")
+            if native_gold.valid_guid(equipped.get("guid")) and kind in ("smg", "light-pistol", "nagant-scoped"):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
+            if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
+                    and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
+                gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=DEAD_BRIDGE, quest=native_turret_photo.QUEST_ID)
         return {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
                 "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
 
@@ -1301,6 +1310,12 @@ class Host:
                 result = await native_turret_photo.preflight(self, bridge, character)
             elif action == native_turret_photo.CAPTURE:
                 result = await native_turret_photo.advance(self, bridge, character, action, target)
+            elif action == native_turret_photo.BOARD_LIST:
+                result = await native_turret_photo.offers(self, bridge, character, target)
+            elif action == native_turret_photo.SHUTTER:
+                result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
+            elif action == native_computer_board.PREFLIGHT and target is None:
+                result = await native_computer_board.preflight(self, bridge, character)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1523,12 +1538,14 @@ class Host:
             await self.checkpoint_native(bridge, candidate)
             self.party = candidate
 
-    def invite(self, request: dict) -> dict:
-        address = request.get("address") or self.bind
+    def _invitation_address(self, address) -> str:
+        address = address or self.bind
         if (not isinstance(address, str) or not address.strip() or len(address) > 253
                 or any(character.isspace() for character in address) or address in {"0.0.0.0", "::"}):
             raise ValueError("Supply a reachable host address for the invitation")
-        guest = self.store.issue_invitation(request.get("name"), request.get("character"))
+        return address
+
+    def _write_invitation(self, guest: dict, address: str, event: str) -> dict:
         file = self.control.run / "invites" / f"{guest['guest_id']}.invite.json"
         write_json(file, {
             "schema": 1, "certificate": self.identity.certificate_pem,
@@ -1543,8 +1560,34 @@ class Host:
             "native_wipe_view": self.wipe_view_enabled,
             "native_wire_board": self.wire_board_enabled,
         })
-        self.control.event("invite_created", guest_id=guest["guest_id"], character_id=guest["character_id"])
+        self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
+
+    def invite(self, request: dict) -> dict:
+        address = self._invitation_address(request.get("address"))
+        guest = self.store.issue_invitation(request.get("name"), request.get("character"))
+        return self._write_invitation(guest, address, "invite_created")
+
+    def refresh_invitation(self, request: dict) -> dict:
+        guest = request.get("target")
+        try:
+            if not isinstance(guest, str) or str(uuid.UUID(guest)) != guest:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError("Choose an existing invitation's exact guest ID") from error
+        folder = self.control.run.resolve() / "invites"
+        file = folder / f"{guest}.invite.json"
+        if file.resolve() != file or not file.is_file():
+            raise ValueError("The campaign's original invitation is unavailable")
+        invite = read_json(file, limit=32_768)
+        if (not isinstance(invite, dict) or invite.get("schema") != 1 or invite.get("guest_id") != guest
+                or invite.get("certificate") != self.identity.certificate_pem or not isinstance(invite.get("host"), str)):
+            raise ValueError("The invitation does not belong to this campaign host")
+        linked = self.store.list_characters(guest, invite.get("credential"))
+        if invite.get("character_id") not in {character["character_id"] for character in linked}:
+            raise ValueError("The invitation's selected character is unavailable")
+        address = self._invitation_address(invite["host"])
+        return self._write_invitation(invite, address, "invite_refreshed")
 
     async def place_new_guest(self, bridge: Bridge, pawn: dict) -> dict | None:
         host = _pawn(self.last_game, "local")
@@ -1738,6 +1781,8 @@ class Host:
             try:
                 if action == "invite":
                     result = self.invite(request)
+                elif action == "refresh-invite":
+                    result = self.refresh_invitation(request)
                 elif action == "native-return-to-rest":
                     if request.get("target") is not None:
                         raise ValueError("The terminal dream uses the original saved rest location")
@@ -1780,12 +1825,16 @@ class Host:
                 elif (action == "native-finite-shop-approach" and self.fixtures
                       and self.last_game.get("map") in native_finite_shop.MERCHANTS):
                     character = self.roles().get(request.get("target") or "guest")
-                    member = self.native_recipients().get(character)
-                    if not member or not member["connected"]:
-                        raise ValueError("Choose an enrolled finite merchant guest")
-                    self.last_game = await bridge.command(action, member["pawn"], timeout=5)
+                    if character == "host" and self.last_game["map"] == native_finite_shop.SCIENTIST_SHOP:
+                        pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                    else:
+                        member = self.native_recipients().get(character)
+                        pawn = member["pawn"] if member and member["connected"] else None
+                    if not pawn:
+                        raise ValueError("Choose an enrolled participant at the qualified merchant")
+                    self.last_game = await bridge.command(action, pawn, timeout=5)
                     self.last_seen = time.monotonic()
-                    result = {"pawn": member["pawn"], "actor": native_finite_shop.MERCHANTS[self.last_game["map"]]}
+                    result = {"pawn": pawn, "actor": native_finite_shop.MERCHANTS[self.last_game["map"]]}
                 elif (action == "native-finite-shop-wallet-fixture" and self.fixtures
                       and self.last_game.get("map") in native_finite_shop.MERCHANTS):
                     amount = request.get("amount")
@@ -1800,6 +1849,9 @@ class Host:
                     candidate["economy"].update(wallet=amount, native_wallet_active=True)
                     result = {"wallet": amount, "revision": await self.checkpoint_native(bridge, candidate)}
                     self.party = candidate
+                elif action in native_finite_shop.ACTIONS:
+                    result = await native_finite_shop.perform(self, bridge, "host", action, request.get("target"),
+                                                              request.get("operation_id") or path.stem)
                 elif action in native_guest_npc.HOST_ACTIONS:
                     result = await native_guest_npc.host_fixture(self, bridge, action, request.get("target"))
                 elif action == native_enemy_loot.BANK:
@@ -1820,6 +1872,37 @@ class Host:
                     if proof.get("member") != target or proof.get("map") != CROSSROADS:
                         raise RuntimeError("The stock Husk approach did not verify both exact pawns")
                     result = {"native_campaign_npc_approach": proof}
+                elif action == "native-campaign-npc-refresh" and self.native_guest and self.native_zones and self.fixtures:
+                    mode = request.get("target")
+                    if self.last_game.get("map") != CROSSROADS or mode not in ("inspect", "refresh"):
+                        raise ValueError("Choose inspect or refresh for the stock CrossRoads director")
+                    self.last_game = await bridge.command(action, mode, timeout=8)
+                    self.last_seen = time.monotonic()
+                    proof = self.last_game.get("native_campaign_npc_refresh", {})
+                    if (proof.get("map"), proof.get("mode")) != (CROSSROADS, mode):
+                        raise RuntimeError("The stock CrossRoads director did not return a matching receipt")
+                    result = {"native_campaign_npc_refresh": proof}
+                elif action == "native-guest-sickness-fixture" and self.guest_sickness and self.fixtures:
+                    alias, amount = request.get("target") or "guest", request.get("amount")
+                    owner = self.native_recipients().get(self.roles().get(alias))
+                    if not owner or not owner["connected"] or type(amount) is not int or not -120 <= amount <= 120 or amount == 0:
+                        raise ValueError("Choose a connected guest and a nonzero signed stock dose from -120 to 120")
+                    pawn = owner["pawn"]
+                    try:
+                        self.last_game = await bridge.command(action, pawn, str(amount), timeout=6)
+                    except RuntimeError as error:
+                        if "mutation_unverified_" in str(error):
+                            self.native_checkpoint_unsafe = True
+                        raise
+                    self.last_seen = time.monotonic()
+                    receipt = self.last_game.get("native_guest_sickness_fixture", {})
+                    proof = self.last_game.get("native_guest_sickness", {}).get(pawn, {})
+                    if (receipt.get("map"), receipt.get("pawn"), receipt.get("amount"), receipt.get("state")) != (
+                        self.last_game.get("map"), pawn, amount, "stock_infection_verified"
+                    ) or not proof.get("infect_writes"):
+                        self.native_checkpoint_unsafe = True
+                        raise RuntimeError("The stock sickness action did not verify the detached recipient")
+                    result = {"native_guest_sickness_fixture": receipt, "native_guest_sickness": proof}
                 elif action in ("native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture") and self.native_guest and self.fixtures:
                     target = request.get("target")
                     if action in ("native-enemy-loot-watch", "native-bandit-aim-fixture"):
@@ -1925,13 +2008,58 @@ class Host:
                     result = await native_turret_photo.preflight(self, bridge, "host")
                 elif action == native_turret_photo.CAPTURE:
                     result = await native_turret_photo.advance(self, bridge, "host", action, request.get("target"))
+                elif action == native_turret_photo.CAPTURE_FIXTURE and self.fixtures:
+                    actor = self.roles().get("guest")
+                    result = await native_turret_photo.advance(self, bridge, actor, action, request.get("target"))
+                elif action == native_turret_photo.HOST_AIM_FIXTURE:
+                    result = await native_turret_photo.aim_host_fixture(self, bridge, request.get("target"))
+                elif action == native_turret_photo.HOST_EQUIP_FIXTURE and self.host_camera_input and self.fixtures:
+                    pawn = native_turret_photo._pawn(self, "host", DEAD_BRIDGE)
+                    guid = request.get("target")
+                    if not native_gold.valid_guid(guid):
+                        raise ValueError("Choose an exact camera from the host inventory")
+                    try:
+                        self.last_game = await bridge.command(action, pawn, guid, timeout=5)
+                    except RuntimeError as error:
+                        if str(error).startswith("mutation_unverified_"):
+                            self.native_checkpoint_unsafe = self.stopping = True
+                        raise
+                    self.last_seen = time.monotonic()
+                    proof = self.last_game.get("native_host_camera_equip_fixture", {})
+                    if tuple(proof.get(field) for field in ("map", "pawn", "guid", "state")) != (
+                        DEAD_BRIDGE, pawn, guid, "stock_camera_equipped"
+                    ):
+                        self.native_checkpoint_unsafe = self.stopping = True
+                        raise RuntimeError("Headless camera equipment did not verify the exact stock item")
+                    result = {"native_host_camera_equip_fixture": proof}
+                elif action == native_turret_photo.HOST_INPUT_FIXTURE and self.host_camera_input and self.fixtures:
+                    pawn = native_turret_photo._pawn(self, "host", native_turret_photo.DEAD_BRIDGE)
+                    scope = self.last_game.get("native_host_camera_scope", {})
+                    if scope.get("pawn") != pawn:
+                        raise ValueError("Equip the exact stock camera on the enrolled test host")
+                    self.last_game = await bridge.command(action, pawn, timeout=5)
+                    self.last_seen = time.monotonic()
+                    proof = self.last_game.get("native_host_camera_fixture", {})
+                    if (proof.get("map"), proof.get("pawn"), proof.get("guid"), proof.get("stock_wrappers")) != (
+                        native_turret_photo.DEAD_BRIDGE, pawn, scope.get("guid"), 2
+                    ) or not 0 < proof.get("sequence", 0) < 2**53:
+                        raise RuntimeError("The host stock shutter input did not verify")
+                    result = {"native_host_camera_fixture": proof}
+                elif action == native_turret_photo.BOARD_LIST:
+                    result = await native_turret_photo.offers(self, bridge, "host", request.get("target"))
                 elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:
                     result = await native_turret_photo.xp_fixture(self, bridge)
+                elif action == native_computer_board.PREFLIGHT and request.get("target") is None:
+                    result = await native_computer_board.preflight(self, bridge, "host")
+                elif action == native_computer_board.APPROACH and self.fixtures:
+                    actor = self.roles().get(request.get("target") or "host")
+                    result = await native_computer_board.approach(self, bridge, actor)
                 elif action == native_wire_quest.APPROACH:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_wire_quest.approach(self, bridge, actor)
                 elif action == native_wire_board.FIXTURE and self.wire_board_enabled and self.fixtures:
-                    self.last_game = await bridge.command(native_wire_board.FIXTURE, timeout=4)
+                    selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action in ("native-broker-issue-fixture", "native-broker-drill-issue-fixture") and self.fixtures:
                     quest_id = native_broker.DRILL_ID if action == "native-broker-drill-issue-fixture" else native_broker.QUEST_ID
@@ -2035,14 +2163,18 @@ class Host:
                 elif action in ("native-exit-position", "native-exit-wall-probe") and self.native_zones and self.fixtures:
                     target = request.get("target")
                     entrance = request.get("entrance")
+                    placing = action == "native-exit-position"
                     if target not in self.roles():
                         raise ValueError("Specify a current player for the exit fixture")
                     if entrance is not None:
                         source = self.last_game.get("map")
                         legacy_tag = any(area == source and tag == entrance for (area, _), tag in AUTHORED_EXITS.items())
-                        expanded_tag = (action == "native-exit-wall-probe" and self.expanded_zones
-                                        and any(route.source == source and route.entrance == entrance
-                                                for route in AUTHORED_ROUTES))
+                        expanded_matches = sum(route.source == source and route.entrance == entrance
+                                               and (not placing or route.kind == "overlap")
+                                               for route in AUTHORED_ROUTES) if self.expanded_zones else 0
+                        if placing and expanded_matches > 1:
+                            raise ValueError("The staged entrance selects multiple authored overlap exits")
+                        expanded_tag = expanded_matches > 0
                         if not (legacy_tag or expanded_tag):
                             raise ValueError("Choose an authored exit entrance tag in the host's current map")
                     alias, binding = self.role_pawn(target)
@@ -2050,7 +2182,6 @@ class Host:
                         raise ValueError("The exit fixture pawn is unavailable")
                     arguments = [action, binding.pawn if binding else alias]
                     position = request.get("exit_position")
-                    placing = action == "native-exit-position"
                     if placing:
                         if position not in ("near", "inside", "far"):
                             raise ValueError("Choose a position for the exit fixture")
@@ -2331,7 +2462,7 @@ class Host:
                 if self.should_keep_native_scope():
                     with contextlib.suppress(OSError):
                         write_text(bridge.directory / "native-events-heartbeat", stamp)
-                if self.wire_board_enabled and game.get("map") == BOROUGH:
+                if self.wire_board_enabled and game.get("map") in native_wire_board.MAPS:
                     with contextlib.suppress(OSError):
                         write_text(bridge.directory / native_wire_board.HEARTBEAT, stamp)
             await asyncio.sleep(.4)
@@ -2364,6 +2495,10 @@ class Host:
         async def wire_action(action, _operation, target):
             if action == native_wire_quest.PREFLIGHT:
                 return await native_wire_quest.preflight(self, bridge, "host")
+            if action == native_computer_board.PREFLIGHT:
+                return await native_computer_board.preflight(self, bridge, "host")
+            if action == native_turret_photo.PREFLIGHT:
+                return await native_turret_photo.preflight(self, bridge, "host")
             return await native_quest.action(self, bridge, "host", action, target)
 
         while not self.stopping:
@@ -2374,6 +2509,10 @@ class Host:
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True
                 raise RuntimeError("A stock guest regeneration update failed authority readback")
+            if self.guest_sickness and any(row["state"].startswith("mutation_unverified_")
+                                           for row in self.last_game.get("native_guest_sickness", {}).values()):
+                self.native_checkpoint_unsafe = True
+                raise RuntimeError("A stock guest sickness update failed authority readback")
             now = time.monotonic()
             if self.native_backend:
                 self.deliver_native_deaths(bridge)
@@ -2383,6 +2522,8 @@ class Host:
                     await self.advance_dream(bridge, transport)
             if not self.stopping:
                 await self.service_guest_native_requests(bridge)
+                if self.host_camera_input:
+                    await self.host_camera_input.sync(self, bridge)
                 if wire_board:
                     snapshot = await wire_board.sync(self.last_game, self.zone_epoch,
                                                      not self.transitioning and not self.party["wipe"], wire_action)
@@ -2447,7 +2588,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     native_zone_walls: bool = False, start_zone: str | None = None, max_guests: int = 1,
                     expanded_zones: bool = False, native_shop_view: bool = False,
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
-                    start_preset: str | None = None, world_seed: int | None = None) -> None:
+                    guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -2461,8 +2602,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
     wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
+    host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
         raise ValueError("Restage the native host to enable stock guest regeneration")
+    if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
+        raise ValueError("Restage the native host to enable stock guest sickness")
     if native_events and native_backend != "cpp":
         raise ValueError("--native-events requires the staged C++ lab")
     if native_guest and not native_events:
@@ -2526,7 +2670,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_events=native_events, native_guest=native_guest, native_zones=native_zones,
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                             guest_regen=guest_regen, native_wipe_view=wipe_view_enabled)
+                             guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
+                             native_wipe_view=wipe_view_enabled)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             extraction_rules = {}
@@ -2605,8 +2750,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               world_flush_supported=bool(authored and native_profile and staged_script(work, "native_world_flush.lua")),
                               expanded_zones=expanded_zones,
                               native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                              guest_regen=guest_regen, broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
-                              wire_board_enabled=wire_board_enabled,
+                              guest_regen=guest_regen, guest_sickness=guest_sickness,
+                              broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
+                              wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -2899,7 +3045,7 @@ class Client:
             timeout = 15
         if action == "native-quest-turnin" and target == native_wire_quest.QUEST_ID:
             timeout = 22
-        if action == native_turret_photo.CAPTURE or target == native_turret_photo.QUEST_ID:
+        if action in (native_turret_photo.CAPTURE, native_turret_photo.SHUTTER) or target in (native_turret_photo.QUEST_ID, native_computer_board.QUEST_ID):
             timeout = 20
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
@@ -2929,16 +3075,19 @@ class Client:
         member = self.gameplay.get("players", {}).get(self.viewer_role, {})
         equipment = self.gameplay.get("native_equipped_weapon", {})
         area, host_pawn, guid, kind = (equipment.get(key) for key in ("map", "pawn", "guid", "kind"))
+        camera = kind == "camera" and area == DEAD_BRIDGE and equipment.get("quest") == native_turret_photo.QUEST_ID
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         # Cooked authority and autonomous pawns have independent object names.
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and kind in ("smg", "light-pistol", "nagant-scoped"))
+                    and native_gold.valid_guid(guid) and (camera or kind in ("smg", "light-pistol", "nagant-scoped")))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
             try:
                 command = ("native-guest-primary-scope", *scope) if scope else ("native-guest-primary-clear",)
+                if scope and camera:
+                    command += (native_turret_photo.QUEST_ID,)
                 self.last_game = await self.bridge.command(*command, timeout=2)
                 observed = self.last_game.get("native_guest_primary_scope", {})
                 if scope and tuple(observed.get(key) for key in ("map", "pawn", "guid", "kind")) != scope:
@@ -2956,11 +3105,13 @@ class Client:
             if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
                 continue
             operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
+            action = native_turret_photo.SHUTTER if event_kind == "camera" else "native-guest-weapon-fire"
+            event = "native_guest_camera_shutter" if event_kind == "camera" else "native_guest_primary_input"
             try:
-                result = await self.gameplay_action("native-guest-weapon-fire", operation, event_guid)
-                self.control.event("native_guest_primary_input", operation_id=operation, sequence=sequence, **result)
+                result = await self.gameplay_action(action, operation, event_guid)
+                self.control.event(event, operation_id=operation, sequence=sequence, **result)
             except (ValueError, OSError, RuntimeError) as error:
-                self.control.event("native_guest_primary_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
+                self.control.event(event + "_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
     async def service_crate_interaction(self, active: bool) -> None:
         if not self.invite.get("native_loot_input"):
@@ -3065,7 +3216,7 @@ class Client:
         features = (
             (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
-            (self.wire_board is not None, (BOROUGH,), native_wire_board.HEARTBEAT),
+            (self.wire_board is not None, native_wire_board.MAPS, native_wire_board.HEARTBEAT),
         )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
@@ -3236,7 +3387,8 @@ class Client:
                 elif action == native_guest_npc.CLIENT_ACTION:
                     result = await native_guest_npc.client_fixture(self, action)
                 elif action == native_wire_board.FIXTURE and self.wire_board:
-                    self.last_game = await self.bridge.command(native_wire_board.FIXTURE, timeout=4)
+                    selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await self.bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action == "native-guest-reload-input-fixture":
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")

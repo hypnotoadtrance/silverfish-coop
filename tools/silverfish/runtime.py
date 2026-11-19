@@ -263,7 +263,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
            expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
-           guest_regen: bool = False, broker_input: bool = False, native_wipe_view: bool = False):
+           guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
+           broker_input: bool = False, native_wipe_view: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -275,6 +276,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_REGEN", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
     env.pop("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES", None)
@@ -284,6 +286,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_INPUT", None)
@@ -298,6 +301,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Native guest ownership requires native event scope")
     if guest_regen and (not native_guest or not native_zones):
         raise ValueError("Stock guest regeneration requires native campaign guest ownership")
+    if guest_sickness and (not native_guest or not native_zones):
+        raise ValueError("Stock guest sickness requires native campaign guest ownership")
     if native_zones and backend != "cpp":
         raise ValueError("Natural exit handling requires a staged C++ game")
     if native_zone_walls and not native_zones:
@@ -306,6 +311,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Stock guest reload input requires a staged native client")
     if guest_primary_input and (port is not None or not native_zones):
         raise ValueError("Stock guest primary input requires a staged native client")
+    if host_camera_input and (port is None or not native_guest or not native_zones):
+        raise ValueError("Stock host camera input requires a staged native campaign host")
     if guest_inventory_view and (port is not None or not native_zones):
         raise ValueError("The guest inventory view requires a staged native client")
     if native_shop_view and (not native_zones or port is not None and not native_guest):
@@ -324,6 +331,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_GUEST_SAVE"] = "1"
     if guest_regen:
         env["SILVERFISH_COOP_NATIVE_GUEST_REGEN"] = "1"
+    if guest_sickness:
+        env["SILVERFISH_COOP_NATIVE_GUEST_SICKNESS"] = "1"
     if native_zones:
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
@@ -345,6 +354,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES"] = "1"
+    if host_camera_input:
+        env["SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT"] = "1"
     if guest_inventory_view:
         env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
     if native_shop_view:
@@ -406,6 +417,7 @@ class Bridge:
         self.inventory_view_offset = 0
         self.inventory_equip_offset = 0
         self.primary_input_offset = 0
+        self.host_camera_input_offset = 0
         self.shop_view_offset = 0
         self.broker_input_offset = 0
         self.wire_board_offset = 0
@@ -466,10 +478,30 @@ class Bridge:
             if (len(fields) != 6 or fields[0] != "native-guest-primary-intent"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
                     or not 0 < (sequence := int(fields[1])) < 2**53
-                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol", "nagant-scoped")
+                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol", "nagant-scoped", "camera")
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
                 continue
             events.append((sequence, *fields[2:]))
+        return events
+
+    def native_host_camera_requests(self) -> list[tuple[int, str, str, str]]:
+        try:
+            with (self.directory / "native-host-camera-events").open("rb") as stream:
+                stream.seek(self.host_camera_input_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.host_camera_input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) == 5 and fields[0] == "native-host-camera-intent"
+                    and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
+                    and 0 < (sequence := int(fields[1])) < 2**53
+                    and 0 < len(fields[2]) <= 256 and 0 < len(fields[3]) <= 512
+                    and valid_guid(fields[4])):
+                events.append((sequence, fields[2], fields[3], fields[4]))
         return events
 
     def native_inventory_equip_requests(self) -> list[tuple[int, str, str, str, str]]:
@@ -674,7 +706,7 @@ class Bridge:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
-            quest_rows = []
+            quest_rows, board_rows = [], []
             matrix_rows = []
             for line in text.splitlines():
                 fields = line.split("\t")
@@ -812,6 +844,17 @@ class Bridge:
                     balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
                     photo.update(zip(balances, map(int, fields[10:])))
                     data["native_turret_photo"] = photo
+                elif fields[0] == "native-bounty-board" and len(fields) == 4:
+                    data["native_bounty_board"] = dict(zip(("map", "pawn", "board"), fields[1:]))
+                elif fields[0] == "native-computer-board" and len(fields) == 15 and fields[14] in ("0", "1"):
+                    proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
+                    for name, value in zip(("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after"), fields[6:12]):
+                        proof[name] = None if value == "-" else int(value)
+                    proof.update(objective_guid=fields[12], objective_owner=fields[13], can_turn_in=fields[14] == "1", reputation={})
+                    data["native_computer_board"] = proof
+                elif (fields[0] == "native-computer-board-reputation" and len(fields) == 4
+                      and fields[1] in ("2", "4", "5") and "native_computer_board" in data):
+                    data["native_computer_board"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
                 elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
@@ -869,15 +912,47 @@ class Bridge:
                     data["native_campaign_npc_approach"] = {"map": fields[1], "member": fields[2], "host_pawn": fields[3],
                                                            "guest_pawn": fields[4], "host_distance": _finite(fields[5]),
                                                            "guest_distance": _finite(fields[6])}
+                elif fields[0] == "native-campaign-npc-refresh" and len(fields) == 13:
+                    keys = ("population", "capacity", "markers", "eligible_markers", "stock_calls")
+                    data["native_campaign_npc_refresh"] = {
+                        "map": fields[1], "mode": fields[2], "state": fields[3],
+                        **dict(zip(keys, map(int, fields[4:9]))),
+                        "spawner": fields[9], "data": fields[10],
+                        "husk_receipts_before": int(fields[11]), "husk_receipts_after": int(fields[12]),
+                    }
+                elif fields[0] == "native-campaign-npc-combat" and len(fields) == 16:
+                    identifiers = ("map", "state", "host_pawn", "guest_pawn", "attacker", "current_target")
+                    counters = ("attempts", "guest_hits", "host_hits")
+                    health = ("host_baseline", "host_at_hit", "host_current", "guest_before", "guest_after", "guest_current")
+                    data["native_campaign_npc_combat"] = {
+                        **dict(zip(identifiers, fields[1:7])), **dict(zip(counters, map(int, fields[7:10]))),
+                        **dict(zip(health, map(_finite, fields[10:]))),
+                    }
+                elif fields[0] == "native-campaign-npc-melee-sickness" and len(fields) == 15:
+                    identities = ("map", "host_pawn", "guest_pawn", "attacker")
+                    counters = ("guest_before", "guest_after", "host_before", "host_after", "host_current",
+                                "reads_before", "reads_after", "writes_before", "writes_after", "stock_dose")
+                    data["native_campaign_npc_melee_sickness"] = {
+                        **dict(zip(identities, fields[1:5])), **dict(zip(counters, map(int, fields[5:]))),
+                    }
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol", "nagant-scoped"):
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol", "nagant-scoped", "camera"):
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
                 elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
+                elif fields[0] == "native-host-camera-ready" and len(fields) == 4 and valid_guid(fields[3]):
+                    data["native_host_camera_ready"] = dict(zip(("map", "pawn", "guid"), fields[1:]))
+                elif fields[0] == "native-host-camera-scope" and len(fields) == 5 and fields[4] == "stock_held" and valid_guid(fields[3]):
+                    data["native_host_camera_scope"] = dict(zip(("map", "pawn", "guid", "mode"), fields[1:]))
+                elif fields[0] == "native-host-camera-fixture" and len(fields) == 6 and valid_guid(fields[3]):
+                    data["native_host_camera_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
+                                                          "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
+                elif fields[0] == "native-host-camera-equip-fixture" and len(fields) == 5 and valid_guid(fields[3]):
+                    data["native_host_camera_equip_fixture"] = dict(zip(("map", "pawn", "guid", "state"), fields[1:]))
                 elif fields[0] == "native-guest-bandage" and len(fields) == 13 and fields[12] in ("0", "1"):
                     data["native_guest_bandage"] = {"state": fields[1], "map": fields[2], "pawn": fields[3], "guid": fields[4],
                                                    "quantity_before": int(fields[5]), "quantity_after": int(fields[6]),
@@ -892,6 +967,21 @@ class Bridge:
                         effect.update(zip(keys, map(_finite, fields[5:])))
                         effect["pulses"] = int(fields[4])
                     data.setdefault("native_guest_regen", {})[fields[3]] = effect
+                elif fields[0] == "native-guest-sickness" and len(fields) == 11:
+                    keys = ("infect_reads", "infect_writes", "slow_reads", "slow_writes",
+                            "guest_sickness", "host_sickness", "guest_before", "guest_after")
+                    values = tuple(map(int, fields[3:]))
+                    if any(value < 0 for value in values[:4]):
+                        raise ValueError("Stock guest sickness counters must be nonnegative")
+                    data.setdefault("native_guest_sickness", {})[fields[1]] = {
+                        "state": fields[2], **dict(zip(keys, values)),
+                    }
+                elif fields[0] == "native-guest-sickness-status" and len(fields) == 3:
+                    data.setdefault("native_guest_sickness", {})[fields[1]] = {"state": fields[2]}
+                elif fields[0] == "native-guest-sickness-fixture" and len(fields) == 5:
+                    data["native_guest_sickness_fixture"] = {
+                        "map": fields[1], "pawn": fields[2], "amount": int(fields[3]), "state": fields[4],
+                    }
                 elif fields[0] == "native-guest-revive" and len(fields) == 6:
                     data.setdefault("native_guest_revivals", {})[fields[2]] = {
                         "map": fields[1], "pawn": fields[2], "owner": fields[3], "health": _finite(fields[4]), "maximum": _finite(fields[5]),
@@ -1148,7 +1238,7 @@ class Bridge:
                 elif fields[0] == "native-reputation" and len(fields) == 3:
                     data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
                 elif fields[0] in ("native-quest-catalog", "native-quest-entry", "native-quest-reward-item"):
-                    quest_rows.append(fields)
+                    (board_rows if len(fields) >= 2 and fields[1] == "board" else quest_rows).append(fields)
                 elif fields[0] == "native-matrix" or fields[0].startswith("native-matrix-"):
                     matrix_rows.append(fields)
                 elif fields[0] == "native-quest" and len(fields) == 7:
@@ -1225,6 +1315,11 @@ class Bridge:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))
                     except ValueError:
                         data["native_quest_catalog_error"] = "invalid_stock_report"
+                if board_rows:
+                    try:
+                        data["native_bounty_offers"] = parse_quest_catalog(board_rows, sequence=data.get("sequence"), board=True)
+                    except ValueError:
+                        data["native_bounty_board_error"] = "invalid_stock_report"
                 if matrix_rows:
                     try:
                         data["native_matrix"] = parse_matrix_report(matrix_rows)

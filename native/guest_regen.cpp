@@ -153,20 +153,12 @@ namespace
             return found;
         }
 
-        bool bind(Address requested, Address detached, Address canonical)
+        bool bind_player(U::UObject* player, Address detached, Address canonical)
         {
-            auto* pawn_class = find<U::UClass>(pawn_path);
             auto* save_class = find<U::UClass>(save_path);
             auto* instance_class = find<U::UClass>(instance_path);
             auto* controller_class = find<U::UClass>(controller_path);
-            if (!pawn_class || !save_class || !instance_class || !controller_class) return false;
-            U::UObject* player{};
-            U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
-                if (address(candidate) != requested) return RC::LoopAction::Continue;
-                if (exact(candidate, pawn_class)) player = candidate;
-                return RC::LoopAction::Break;
-            });
-            if (!player) return false;
+            if (!exact(player, find<U::UClass>(pawn_path)) || !save_class || !instance_class || !controller_class) return false;
             auto* actual_world = static_cast<U::AActor*>(player)->GetWorld();
             auto* game = object(actual_world, STR("OwningGameInstance"));
             auto* control = object(player, STR("Controller"));
@@ -184,6 +176,17 @@ namespace
             driver = object(actual_world, STR("NetDriver"));
             connection = object(control, STR("Player"));
             return current();
+        }
+
+        bool bind(Address requested, Address detached, Address canonical)
+        {
+            U::UObject* player{};
+            U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+                if (address(candidate) != requested) return RC::LoopAction::Continue;
+                player = candidate;
+                return RC::LoopAction::Break;
+            });
+            return bind_player(player, detached, canonical);
         }
     };
 
@@ -587,6 +590,12 @@ namespace
         }
         return 0;
     }
+}
+
+bool silverfish::native_guest_regen::qualifies_detached_guest(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached,
+                                                             RC::Unreal::UObject* stock)
+{
+    return U::IsInGameThreadRaw() && Scope{}.bind_player(pawn, address(detached), address(stock));
 }
 
 void silverfish::native_guest_regen::register_lua(RC::LuaMadeSimple::Lua& lua)

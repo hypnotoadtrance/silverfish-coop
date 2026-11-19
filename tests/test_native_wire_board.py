@@ -24,7 +24,8 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
         control = SimpleNamespace(event=Mock())
         view = wire.WireBoardView(bridge, control)
-        action = AsyncMock(return_value={"native_wire_quest": {"state": "missing"}})
+        proof = {"map": wire.BOROUGH, "board": wire.BOARD, "id": wire.QUEST, "pawn": "Player_FP_C authority"}
+        action = AsyncMock(return_value={"native_wire_quest": {**proof, "state": "missing"}})
         bridge.native_wire_board_requests.return_value = request(1, 1, "view")
         await view.sync(frame(0, 0, "armed"), "epoch", True, action)
         action.assert_not_awaited()
@@ -36,7 +37,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
 
         bridge.native_wire_board_requests.return_value = request(2, 1, "start")
         bridge.command.return_value = frame(2, 1, "missing")
-        action.return_value = {"native_wire_quest": {"state": "active"}}
+        action.return_value = {"native_wire_quest": {**proof, "state": "active"}}
         await view.sync(frame(2, 1, "starting"), "epoch", True, action)
         await view.sync(frame(2, 1, "starting"), "epoch", True, action)
         self.assertEqual([call.args[0] for call in action.await_args_list],
@@ -48,3 +49,55 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.await_count, 3)
         self.assertIn("native_wire_board_stale_confirmation",
                       [call.kwargs.get("reason") for call in control.event.call_args_list])
+
+    async def test_selection_and_redemption_are_bound_to_the_exact_board_and_contract(self):
+        pawn = "Player_FP_C receiving-client"
+        computer = wire.native_computer_board.QUEST_ID
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
+        action = AsyncMock()
+        view = wire.WireBoardView(bridge, SimpleNamespace(event=Mock()))
+
+        async def press(area, quest, sequence, opened, kind, expected):
+            board = wire.BOARDS[area]
+            scope = {"map": area, "pawn": pawn, "board": board, "quest": quest, "sequence": sequence, "open": opened}
+            snapshot = {"map": area, "pawns": {"local": {"name": pawn}},
+                        "native_wire_board": {**scope, "state": wire.WAITING[kind]}}
+            bridge.native_wire_board_requests.return_value = [(sequence, opened, kind, area, pawn, board, quest)]
+            bridge.command.return_value = {**snapshot, "native_wire_board": {**scope, "state": expected}}
+            result = await view.sync(snapshot, area, True, action)
+            return result["native_wire_board"]["state"]
+
+        borough = wire.BOROUGH
+        action.return_value = {"native_wire_quest": {"map": borough, "board": wire.BOARD, "id": wire.QUEST, "state": "missing"}}
+        self.assertEqual(await press(borough, wire.QUEST, 1, 1, "view", "offer"), "offer")
+        self.assertEqual(await press(borough, computer, 2, 1, "start", "unavailable"), "unavailable")
+        self.assertEqual(action.await_count, 1)
+
+        proof = {"quest": computer, "step_after": 1, "objective_guid": "A" * 32}
+        action.return_value = {"native_computer_board": {**proof, "map": borough, "board": wire.BOARD, "can_turn_in": False}}
+        self.assertEqual(await press(borough, computer, 3, 3, "view", "elsewhere"), "elsewhere")
+        self.assertEqual(await press(borough, computer, 4, 3, "turnin", "unavailable"), "unavailable")
+        self.assertEqual(action.await_count, 2)
+
+        scientist = wire.SCIENTIST_SHOP
+        action.return_value = {"native_computer_board": {
+            **proof, "map": scientist, "board": wire.BOARDS[scientist], "can_turn_in": True,
+        }}
+        photo = wire.native_turret_photo.QUEST_ID
+        self.assertEqual(await press(scientist, photo, 5, 5, "view", "unavailable"), "loading")
+        self.assertEqual(action.await_count, 2)
+        self.assertEqual(await press(scientist, computer, 6, 6, "view", "ready"), "ready")
+        action.return_value = {"quest_id": computer, "step": -10}
+        self.assertEqual(await press(scientist, computer, 7, 6, "turnin", "completed"), "completed")
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", computer))
+
+    async def test_photo_menu_tracks_the_stock_offer_and_final_step(self):
+        view = wire.WireBoardView(None, None)
+        quest = wire.native_turret_photo.QUEST_ID
+        action = AsyncMock(side_effect=wire.party.RuleError("stock_turret_photo_quest_not_offered"))
+        self.assertEqual(await view._inspect(wire.BOROUGH, wire.BOARD, quest, "event", action), "not_offered")
+        action.side_effect = None
+        proof = {"map": wire.BOROUGH, "target": wire.BOARD, "quest": quest}
+        for step, expected in ((None, "offer"), (1, "missing"), (2, "missing"), (3, "ready"), (-10, "completed")):
+            action.return_value = {"native_turret_photo": {**proof, "step_after": step}}
+            self.assertEqual(await view._inspect(wire.BOROUGH, wire.BOARD, quest, "event", action), expected)

@@ -6,7 +6,10 @@ local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
-local kinds = { smg = true, ["light-pistol"] = true, ["nagant-scoped"] = true }
+local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local camera_quest = "Photo_DB_Turrets"
+local kinds = { smg = true, ["light-pistol"] = true, ["nagant-scoped"] = true, camera = true }
 local event_path, is_downed, binding, fixture_proof
 
 local function valid(object)
@@ -116,18 +119,27 @@ function primary.command(fields, state, phase)
         return "stock guest primary input verified"
     end
 
-    local guid, kind = fields[5], fields[6]
-    if #fields ~= 6 or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
+    local guid, kind, quest = fields[5], fields[6], fields[7]
+    local camera = kind == "camera"
+    if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
+        or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or not kinds[kind] or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
-        error("The authenticated stock weapon selection is unavailable", 0)
+        error("The authenticated stock equipment selection is unavailable", 0)
     end
     if binding and (not same_context(current, binding) or binding.guid ~= guid or binding.kind ~= kind) then
         primary.reset()
     end
-    local accepted, status = SilverfishSetNativeGuestPrimaryScope(current.pawn:GetAddress(),
-        current.controller:GetAddress(), current.world:GetAddress(), guid, kind)
+    local accepted, status
+    if camera then
+        if not valid(StaticFindObject(camera_path)) then LoadAsset(camera_path) end
+        accepted, status = SilverfishSetNativeGuestPrimaryScope(current.pawn:GetAddress(),
+            current.controller:GetAddress(), current.world:GetAddress(), guid, kind, quest)
+    else
+        accepted, status = SilverfishSetNativeGuestPrimaryScope(current.pawn:GetAddress(),
+            current.controller:GetAddress(), current.world:GetAddress(), guid, kind)
+    end
     if not accepted or (status ~= "stock_held" and status ~= "host_equipped") then
         primary.reset()
         error(tostring(status or "stock_guest_primary_scope_unavailable"), 0)

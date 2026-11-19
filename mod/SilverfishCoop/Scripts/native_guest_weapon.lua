@@ -6,6 +6,8 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local smg_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
 local pistol_path = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
+local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local weapon_kinds = {
     [smg_path] = "smg",
     [pistol_path] = "light-pistol",
@@ -16,7 +18,11 @@ local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 
-local function equipped_guid(pawn, save)
+local function same(left, right)
+    return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
+end
+
+local function equipped_guid(pawn, save, world)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
     local held_class = held:GetClass()
@@ -37,6 +43,11 @@ local function equipped_guid(pawn, save)
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
+    if world and class_name == camera_path and held:HasAuthority() and not held:IsActorBeingDestroyed()
+        and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
+        and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
+        return guid:find("[^0]") and guid or nil, "camera"
+    end
     return guid:find("[^0]") and guid or nil, weapon_kinds[class_name]
 end
 
@@ -68,9 +79,9 @@ function guest_weapon.command(fields, state, phase)
     end
     local pawn, detached = guest_save.exact_item_context(state, phase, name)
     if equipped_target then
-        local readable, equipped = false, nil
-        if pawn and detached then readable, equipped = pcall(equipped_guid, pawn, detached) end
-        if not readable or not equipped then
+        local readable, equipped, kind = false, nil, nil
+        if pawn and detached then readable, equipped, kind = pcall(equipped_guid, pawn, detached) end
+        if not readable or not equipped or not kind then
             observation = {map = state.map, action = action, pawn = name, guid = "equipped", ok = false,
                 status = "guest_weapon_no_qualified_equipped_item"}
             return "native guest reload refused"
@@ -119,7 +130,7 @@ function guest_weapon.rows(state, phase, status_row)
     for _, detail in ipairs(state.guests) do
         local ok, guid, kind = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
-            if pawn and save then return equipped_guid(pawn, save) end
+            if pawn and save then return equipped_guid(pawn, save, state.map == camera_map and state.world or nil) end
         end)
         if ok and guid and kind then
             rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind)

@@ -7,13 +7,16 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local combat_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT") == "1"
+local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == "1"
+local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
     husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
-        stages = { stock_initial = true, stock_refresh = true } },
+        stages = { stock_initial = true, stock_refresh = true }, combat_radii = { 550, 680, 820 } },
     flayer = { name = "NPC_Flayer_C", path = "/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C", limit = 2,
-        stages = { stock_antfarm = true } },
+        stages = { stock_antfarm = true }, combat_radii = { 425, 510, 635 } },
 }
 local view = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer" and "flayer" or "husk"
@@ -26,7 +29,7 @@ local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local trace_color = { R = 0, G = 0, B = 0, A = 0 }
 local approach_radius, readback_tolerance = 4000, 60
-local active, approach
+local active, approach, refresh
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -41,7 +44,7 @@ local function exact(object, path)
 end
 
 function campaign_npc.clear()
-    active, approach = nil, nil
+    active, approach, refresh = nil, nil, nil
     if enabled and type(SilverfishClearCampaignNpc) == "function" then SilverfishClearCampaignNpc() end
 end
 
@@ -73,7 +76,7 @@ local function paired(state, phase)
         or driver.ClientConnections:GetArrayNum() ~= 1 or not same(driver.ClientConnections[1], connection) then return end
     local enrolled, saved = guest_save.exact_item_context(state, phase, guest.name)
     if same(enrolled, guest.pawn) and same(saved, guest.pawn.Save) and not same(saved, host.pawn.Save) then
-        return host, guest
+        return host, guest, saved
     end
 end
 
@@ -157,20 +160,45 @@ local function at(pawn, target, tolerance)
     return current and distance(current, target) <= tolerance and current
 end
 
+local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored)
+    local covered = floor_at(trace, host, anchor, anchor.X - math.cos(angle) * 3500,
+        anchor.Y - math.sin(angle) * 3500, ignored)
+    local exposed = floor_at(trace, guest, anchor, x, y, ignored)
+    if not covered or not exposed or math.abs(exposed.Z - anchor.Z) > 120 then return end
+    for _, actor in ipairs(cohort) do
+        local location = point(actor:K2_GetActorLocation())
+        if not location or distance(covered, location) < 2500 then return end
+    end
+    local hit = {}
+    local blocked = trace:LineTraceSingle(guest.pawn, exposed, anchor, 0, false,
+        { host.pawn, guest.pawn }, 0, hit, true, trace_color, trace_color, 0)
+    hit = hit.OutHit or hit
+    local component = hit.Component and hit.Component:Get()
+    if blocked == false or (blocked == true and valid(component) and same(component:GetOwner(), target)) then
+        return covered, exposed
+    end
+end
+
 local function place_pair(world, host, guest, target, cohort)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local anchor = point(target:K2_GetActorLocation())
     if not valid(trace) or not anchor then error("stock_husk_approach_geometry_unavailable", 0) end
     local ignored = { host.pawn, guest.pawn }
     for _, actor in ipairs(cohort) do ignored[#ignored + 1] = actor end
-    for _, radius in ipairs({ 2800, 2200, 3400, 1800 }) do
+    local radii = combat_fixture and types[view].combat_radii or { 2800, 2200, 3400, 1800 }
+    for _, radius in ipairs(radii) do
         for step = 0, 11 do
             local angle = step * math.pi / 6
             local x, y = anchor.X + math.cos(angle) * radius, anchor.Y + math.sin(angle) * radius
-            local dx, dy = -math.sin(angle) * 150, math.cos(angle) * 150
-            local first = floor_at(trace, host, anchor, x + dx, y + dy, ignored)
-            local second = floor_at(trace, guest, anchor, x - dx, y - dy, ignored)
-            if first and second and math.abs(first.Z - second.Z) <= 120 then
+            local first, second
+            if combat_fixture then
+                first, second = safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored)
+            else
+                local dx, dy = -math.sin(angle) * 150, math.cos(angle) * 150
+                first = floor_at(trace, host, anchor, x + dx, y + dy, ignored)
+                second = floor_at(trace, guest, anchor, x - dx, y - dy, ignored)
+            end
+            if first and second and (combat_fixture or math.abs(first.Z - second.Z) <= 120) then
                 local ok, first_read, second_read = pcall(function()
                     if host.pawn:K2_TeleportTo(first, host.facing) ~= true
                         or not at(host.pawn, first, readback_tolerance)
@@ -203,16 +231,41 @@ local function place_pair(world, host, guest, target, cohort)
 end
 
 function campaign_npc.command(fields, state, phase)
+    if fields[2] == "native-campaign-npc-refresh" then
+        local mode = fields[3]
+        if not refresh_fixture or view ~= "husk" or #fields ~= 3 or (mode ~= "inspect" and mode ~= "refresh")
+            or type(SilverfishStockCampaignNpcRefresh) ~= "function" then error("stock_husk_refresh_fixture_unavailable", 0) end
+        local host = paired(state, phase)
+        if not host then error("stock_husk_refresh_exact_pair_unavailable", 0) end
+        local receipt = table.pack(SilverfishStockCampaignNpcRefresh(host.pawn:GetAddress(), mode == "refresh"))
+        if receipt.n ~= 10 then error("stock_husk_refresh_receipt_unavailable", 0) end
+        for index = 1, receipt.n do if receipt[index] == "" then receipt[index] = "-" end end
+        refresh = { world = state.world:GetAddress(), mode = mode, receipt = receipt }
+        return "stock Husk director result reported"
+    end
     if fields[2] ~= "native-campaign-npc-approach" then return end
     if not fixture or #fields ~= 3 then error("stock_husk_approach_fixture_disabled", 0) end
     approach = nil
-    local host, guest = paired(state, phase)
+    local host, guest, detached = paired(state, phase)
     if not host then error("stock_husk_approach_exact_pair_unavailable", 0) end
     local target, cohort = stock_member(state.world, host.pawn, fields[3])
     if not target then error("stock_husk_approach_cohort_member_unavailable", 0) end
     local first, second = placement(host.pawn), placement(guest.pawn)
     if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
-    local host_distance, guest_distance = place_pair(state.world, first, second, target, cohort)
+    if combat_fixture then
+        local flayer = view == "flayer"
+        local family = flayer and { view } or {}
+        if (flayer and not detached_sickness) or type(SilverfishArmCampaignNpcCombat) ~= "function"
+            or not SilverfishArmCampaignNpcCombat(host.pawn:GetAddress(), guest.pawn:GetAddress(),
+                detached:GetAddress(), target:GetAddress(), table.unpack(family)) then
+            error("stock_" .. view .. "_combat_scope_unavailable", 0)
+        end
+    end
+    local placed, host_distance, guest_distance = pcall(place_pair, state.world, first, second, target, cohort)
+    if not placed then
+        if combat_fixture and type(SilverfishClearCampaignNpcCombat) == "function" then SilverfishClearCampaignNpcCombat() end
+        error(host_distance, 0)
+    end
     approach = { world = state.world:GetAddress(), member = fields[3], host = host.name, guest = guest.name,
         host_distance = host_distance, guest_distance = guest_distance }
     return "verified headless pair placement near an exact stock " .. view
@@ -250,8 +303,7 @@ local function family_rows(state, pawn, host, status_row, family, topic)
     return rows
 end
 
-function campaign_npc.rows(state, phase, status_row)
-    if not enabled then return {} end
+local function read_rows(state, phase, status_row)
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -269,12 +321,36 @@ function campaign_npc.rows(state, phase, status_row)
     for _, row in ipairs(family_rows(state, pawn, host, status_row, secondary, "native-campaign-npc-" .. secondary)) do
         rows[#rows + 1] = row
     end
+    if host and refresh and refresh.world == active then
+        rows[#rows + 1] = status_row("native-campaign-npc-refresh", map, refresh.mode,
+            table.unpack(refresh.receipt, 1, refresh.receipt.n))
+    end
+    if host and combat_fixture and type(SilverfishReadCampaignNpcCombat) == "function" then
+        local receipt = table.pack(SilverfishReadCampaignNpcCombat())
+        if receipt.n == 14 then
+            for index = 1, receipt.n do if receipt[index] == "" then receipt[index] = "-" end end
+            rows[#rows + 1] = status_row("native-campaign-npc-combat", map, table.unpack(receipt, 1, receipt.n))
+        end
+        if view == "flayer" and type(SilverfishReadCampaignNpcCombatSickness) == "function" then
+            local infection = table.pack(SilverfishReadCampaignNpcCombatSickness())
+            if infection.n == 13 then
+                rows[#rows + 1] = status_row("native-campaign-npc-melee-sickness", map, table.unpack(infection))
+            end
+        end
+    end
     if host and approach and approach.world == active and state.local_pawn.name == approach.host
         and state.guests and #state.guests == 1 and state.guests[1].name == approach.guest then
         rows[#rows + 1] = status_row("native-campaign-npc-approach", state.map, approach.member,
             approach.host, approach.guest, approach.host_distance, approach.guest_distance)
     end
     return rows
+end
+
+function campaign_npc.rows(state, phase, status_row)
+    if not enabled then return {} end
+    local ok, result = pcall(read_rows, state, phase, status_row)
+    if ok then return result end
+    return { status_row("native-campaign-npc-diagnostic", state.map, phase, tostring(result):sub(1, 512)) }
 end
 
 return campaign_npc

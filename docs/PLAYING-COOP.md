@@ -63,6 +63,8 @@ Leave the host and guest launchers running during a brief network interruption. 
 
 Reuse the invitation and character selection for a later session. Keep the host campaign's `save` and `game-user` directories together. The native campaign uses both for its checkpoint and stock save generations. Restart the host with the same campaign name and native flags. Its saved zone is selected on startup.
 
+After staging the same updated build on both PCs, the host can run `action --campaign expedition refresh-invite --target GUEST_ID`. This updates the existing invitation for that guest's current endpoint and build fingerprint. It keeps the guest and selected character IDs.
+
 Use the guest's `stop` action to close that guest instance. Use the host's `checkpoint` and `stop` actions for a saved shutdown.
 
 ## Optional stock campaign mode
@@ -93,6 +95,8 @@ The current stage has qualified stock paths for selected rest points, exits, tra
 
 At the supported CrossRoads crate, interact to open it. The shared loot panel appears while a player stands within reach of the opened crate. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At supported finite merchants, the purchase overlay uses Up and Down to select, Enter to confirm, and Backspace to cancel or close.
 
+The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
+
 At Borough's Copper Stop board, use Interact to view the contract and press it again to accept or turn in when prompted. The prompt closes when you look away or move out of range. The board's co-op prompt currently handles Copper Stop.
 
 ## Machine-readable controls
@@ -122,6 +126,7 @@ The authored campaign supports local reads for the current native scope. Use the
 ```powershell
 & $sfPython @sfCli action --profile scout native-inventory-list
 & $sfPython @sfCli action --profile scout native-quest-list --target stock
+& $sfPython @sfCli action --profile scout native-bounty-board-list
 & $sfPython @sfCli action --profile scout native-wire-quest-preflight
 & $sfPython @sfCli action --profile scout native-finite-shop-list
 & $sfPython @sfCli action --profile scout native-loot-inspect
@@ -130,5 +135,11 @@ The authored campaign supports local reads for the current native scope. Use the
 Inventory and quest listings expose `next_offset`. To page the guest inventory, pass the offset in `--target`. The host version of `native-inventory-list` uses `--target` for the enrolled role and `--amount` for the offset. For stock quests, use a target such as `stock@8`. For a confirmed merchant quote, use `native-finite-shop-buy --target GUID@PRICE` or `native-finite-shop-sell --target GUID@PRICE`. Use `native-finite-shop-sale-quote --target GUID` before confirming a sale. During a qualified stock wipe, use `native-wipe-items` and `keep --keep GUID=1` for whole-row selection. The owner's `gameplay.native_backpacks` lists exact recovery IDs and death positions for `native-wipe-recover --target BACKPACK_ID`.
 
 At Borough's Copper Stop board, `native-wire-quest-preflight` reports the current step and checks for the interacting player's or host's exact Copper Wire. Use `native-quest-start --target Clt_Wire` and `native-quest-turnin --target Clt_Wire` within the board's stock interaction range. Eligible guests who are offline receive their queued personal rewards when they return to the campaign.
+
+Within reach of the Borough or Scientist board, `native-bounty-board-list` shows the actual offers the host qualifies for. Pass `next_offset` as `--target` to read the next page. The `co_op` field identifies the supported contracts.
+
+At Borough's board, use Up and Down to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos. Interact checks the selected contract. Press it again to accept or redeem when the panel prompts you. At the Scientist's board, the same controls redeem Find a Computer Board for the player carrying it.
+
+The Dead Bridge photography contract unlocks on Borough's board at 4 host XP. Equip a stock camera and center a turret before pressing primary input. Either player can take either photo. For scripted actions, use `native-turret-photo-capture --target turret-13` or `--target turret-15` while framing the matching turret. The host verifies the shot in the game and records each turret once. Return to Borough and use `native-quest-turnin --target Photo_DB_Turrets` for the shared cash and personal XP.
 
 The raw run directories are `campaigns/<campaign>/run` and `clients/<profile>/run` under the chosen workspace. Keep their credentials, invitation files, saves, and generated stage outside commits. The CLI emits telemetry without requiring tools to read the invitation contents.

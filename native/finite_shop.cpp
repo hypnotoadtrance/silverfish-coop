@@ -157,10 +157,35 @@ namespace
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
         bool camera_only{};
+        bool host{};
     };
+
+    bool qualified_host_connection(const Context& context)
+    {
+        auto* controller = read_object(context.pawn, STR("Controller"));
+        auto* driver = read_object(context.world, STR("NetDriver"));
+        auto* player = read_object(controller, STR("Player"));
+        auto* local_type = find<Unreal::UClass>(STR("/Script/Engine.LocalPlayer"));
+        auto* players = field<Unreal::FArrayProperty>(context.instance, STR("LocalPlayers"));
+        auto* local_field = players ? Unreal::CastField<Unreal::FObjectProperty>(players->GetInner()) : nullptr;
+        if (!context.camera_only || !authority(context.pawn, context.world) ||
+            !exact(controller, find<Unreal::UClass>(controller_class)) || !authority(controller, context.world) ||
+            !read_bool(controller, STR("Loading"), false) || !live(player) || !local_type || !player->IsA(local_type) ||
+            !live(driver) || !local_field || !field<Unreal::FObjectProperty>(driver, STR("ServerConnection")) ||
+            read_object(driver, STR("ServerConnection")) || read_object(driver, STR("World")) != context.world ||
+            read_object(player, STR("PlayerController")) != controller || read_object(controller, STR("Pawn")) != context.pawn ||
+            read_object(context.world, STR("OwningGameInstance")) != context.instance ||
+            read_object(context.instance, STR("As Player FP")) != context.pawn ||
+            read_object(context.pawn, STR("As Game Instance FP")) != context.instance ||
+            read_object(context.instance, STR("SaveSlot_Ref")) != context.stock ||
+            read_object(context.pawn, STR("Save")) != context.stock || context.guest != context.stock) return false;
+        Unreal::FScriptArrayHelper local_players(players, players->ContainerPtrToValuePtr<void>(context.instance));
+        return local_players.Num() == 1 && local_field->GetObjectPropertyValue(local_players.GetRawPtr()) == player;
+    }
 
     bool qualified_connection(const Context& context)
     {
+        if (context.host) return qualified_host_connection(context);
         auto* controller_type = find<Unreal::UClass>(controller_class);
         auto* local_type = find<Unreal::UClass>(STR("/Script/Engine.LocalPlayer"));
         auto* net_type = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
@@ -253,7 +278,7 @@ namespace
         return mode == 1 || mode == 3;
     }
 
-    std::string_view bind_context(const std::array<Address, 5>& input, Context& context)
+    std::string_view bind_context(const std::array<Address, 5>& input, Context& context, bool allow_host = false)
     {
         const MerchantProfile* profile = nullptr;
         for (const auto& listed : merchants)
@@ -285,11 +310,12 @@ namespace
         context.instance = read_object(context.world, STR("OwningGameInstance"));
         context.stock = read_object(context.instance, STR("SaveSlot_Ref"));
         context.guest = read_object(context.pawn, STR("Save"));
+        context.host = allow_host && context.camera_only && context.guest == context.stock;
         auto* save_type = find<Unreal::UClass>(save_class);
         if (!authority(context.pawn, context.world) || !read_bool(context.pawn, STR("Dead"), false))
-            return "shop_exact_standing_guest_unavailable";
+            return context.host ? "shop_exact_standing_host_unavailable" : "shop_exact_standing_guest_unavailable";
         if (!exact(context.instance, find<Unreal::UClass>(instance_class)) || !exact(context.stock, save_type) ||
-            !exact(context.guest, save_type) || context.stock == context.guest ||
+            !exact(context.guest, save_type) || (!context.host && context.stock == context.guest) ||
             address(context.stock) != input[2] || address(context.guest) != input[1] ||
             read_object(context.shop, STR("As Game Instance FP")) != context.instance)
             return "shop_exact_guest_and_canonical_saves_unavailable";
@@ -304,14 +330,16 @@ namespace
                 return "shop_scientist_cash_counter_unavailable";
         }
         if (!qualified_connection(context))
-            return "shop_exact_guest_connection_unavailable";
+            return context.host ? "shop_exact_host_connection_unavailable" : "shop_exact_guest_connection_unavailable";
         if (!context.panel || read_object(context.panel, STR("Target")) != context.shop ||
             read_object(context.panel, STR("GameInstanceFP")) != context.instance)
             return "shop_exact_offscreen_quote_panel_unavailable";
         auto* health = field<Unreal::FDoubleProperty>(context.guest, STR("PlayerHealth"));
         const auto hp = health ? health->GetPropertyValueInContainer(context.guest) : 0.0;
-        if (!std::isfinite(hp) || hp <= 0.0) return "shop_standing_guest_health_unavailable";
-        if (!qualified_reach(context)) return "shop_guest_outside_stock_reach";
+        if (!std::isfinite(hp) || hp <= 0.0)
+            return context.host ? "shop_standing_host_health_unavailable" : "shop_standing_guest_health_unavailable";
+        if (!qualified_reach(context))
+            return context.host ? "shop_host_outside_stock_reach" : "shop_guest_outside_stock_reach";
         return {};
     }
 
@@ -729,7 +757,7 @@ namespace
         }
 
         Context context;
-        if (const auto state = bind_context(input, context); !state.empty()) return response(lua, false, state);
+        if (const auto state = bind_context(input, context, true); !state.empty()) return response(lua, false, state);
         Layout layout;
         if (!layout.bind(context)) return response(lua, false, "shop_reflected_layout_unavailable");
         if (!layout.verify_saved(context, false)) return response(lua, false, "shop_exact_stock_save_record_unavailable");

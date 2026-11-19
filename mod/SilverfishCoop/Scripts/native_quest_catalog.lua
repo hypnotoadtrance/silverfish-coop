@@ -81,7 +81,7 @@ local function quest_entry(source, id, quest)
         if ok and path then items[#items + 1] = { index = index - 1, path = path } end
     end
     -- "ready" describes the final step. Stock turn-in still checks objective items and conditions.
-    local status = source == "stock" and "template" or step == -10 and "completed"
+    local status = source == "stock" and "template" or source == "board" and "offered" or step == -10 and "completed"
         or step > 0 and step == final_step and "ready"
         or step > 0 and step < final_step and "active" or "inactive"
     return { id = id, state = status, step = step, final_step = final_step, cash = cash, xp = xp,
@@ -127,18 +127,21 @@ local function collect(source, total, limit, visit, status_row)
     return rows
 end
 
-local function active_rows(save, status_row)
-    local quests = save.ActiveQuests
-    return collect("active", #quests, active_limit, function(accept)
+local function map_rows(source, quests, limit, status_row)
+    return collect(source, #quests, limit, function(accept)
         quests:ForEach(function(raw_key, raw_value)
             return accept(function()
                 local key = raw_key:get()
                 local id = quest_identity(key:ToString(), key)
                 if not id then return end
-                return quest_entry("active", id, raw_value:get())
+                return quest_entry(source, id, raw_value:get())
             end)
         end)
     end, status_row)
+end
+
+function catalog.board_rows(contracts, status_row)
+    return map_rows("board", contracts, stock_limit, status_row)
 end
 
 local function stock_rows(status_row)
@@ -180,7 +183,7 @@ function catalog.rows(state, phase, status_row)
     if cached and cached.world == world_address and cached.save == save_address and cached.time == now then
         return cached.rows
     end
-    local active_ok, active = pcall(active_rows, save, status_row)
+    local active_ok, active = pcall(map_rows, "active", save.ActiveQuests, active_limit, status_row)
     local stock_ok, stock = pcall(stock_rows, status_row)
     if not same(pawn.Save, save) or not same(instance.SaveSlot_Ref, save) then
         cached = nil

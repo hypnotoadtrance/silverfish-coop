@@ -32,6 +32,7 @@ namespace
     constexpr int ammo_unit_value = 12;
     constexpr double ammo_unit_weight = 0.014;
     constexpr auto borough_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough");
+    constexpr auto scientist_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -39,6 +40,7 @@ namespace
     constexpr auto weapon_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C");
     constexpr auto wire_path = STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C");
+    constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto quest_path = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
@@ -170,7 +172,7 @@ namespace
         return find<U::UWorld>(path.c_str()) == world ? world : nullptr;
     }
 
-    enum class PartyWorld { borough, current_campaign };
+    enum class PartyWorld { borough, scientist, current_campaign };
 
     struct Party
     {
@@ -189,7 +191,7 @@ namespace
         {
             auto* pawn_class = find<U::UClass>(pawn_path);
             world = location == PartyWorld::current_campaign ? current_campaign_world(pawn_address, pawn_class) :
-                find<U::UWorld>(borough_world_path);
+                find<U::UWorld>(location == PartyWorld::scientist ? scientist_world_path : borough_world_path);
             if (!live(world)) return false;
             auto* save_class = find<U::UClass>(save_path);
             auto* controller_class = find<U::UClass>(controller_path);
@@ -272,7 +274,8 @@ namespace
 
     enum class WirePhase { active, complete };
 
-    bool wire_recipe(U::UObject* stock, U::UClass* weapon, U::UClass* ammo, WirePhase phase)
+    bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
+                          U::UClass* weapon, U::UClass* ammo, WirePhase phase)
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -282,16 +285,15 @@ namespace
         auto* final_step = field<U::FIntProperty>(type, STR("Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"));
         auto* objectives = field<U::FArrayProperty>(type, STR("Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"));
         auto* objective = objectives ? U::CastField<U::FClassProperty>(objectives->GetInner()) : nullptr;
-        auto* wire = find<U::UClass>(wire_path);
         auto* consumed = field<U::FBoolProperty>(type, STR("ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333"));
         auto* items = field<U::FArrayProperty>(type, STR("Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"));
         auto* item = items ? U::CastField<U::FClassProperty>(items->GetInner()) : nullptr;
         auto* xp = field<U::FIntProperty>(type, STR("Reward_PlayerXp_44_8ED601354EEC8BFBAC19B8BE0F25C797"));
         auto* cash = field<U::FIntProperty>(type, STR("Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"));
-        const U::FName id{STR("Clt_Wire"), U::FNAME_Find};
+        const U::FName id{quest, U::FNAME_Find};
         if (!type || !key || !row || row->GetStruct().Get() != type || key->GetOffset_Internal() != 0 ||
-            !step || !final_step || !objective || !wire || !consumed || !item || !xp || !cash ||
-            id.IsNone() || id.ToString() != STR("Clt_Wire")) return false;
+            !step || !final_step || !objective || !wanted || !consumed || !item || !xp || !cash ||
+            id.IsNone() || id.ToString() != quest) return false;
         const auto layout = U::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
         if (row->GetOffset_Internal() != layout.ValueOffset) return false;
@@ -308,14 +310,20 @@ namespace
             found = row->ContainerPtrToValuePtr<void>(entry);
         }
         if (!found || final_step->GetPropertyValueInContainer(found) != 2 || !consumed->GetPropertyValueInContainer(found) ||
-            xp->GetPropertyValueInContainer(found) != 1 || cash->GetPropertyValueInContainer(found) != 0) return false;
+            xp->GetPropertyValueInContainer(found) != 1 || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
         const auto current_step = step->GetPropertyValueInContainer(found);
         if (phase == WirePhase::complete ? current_step != -10 : current_step != 1 && current_step != 2) return false;
         U::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(found));
-        if (requested.Num() != 1 || objective->GetObjectPropertyValue(requested.GetRawPtr()) != wire) return false;
+        if (requested.Num() != 1 || objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted) return false;
         U::FScriptArrayHelper rewards(items, items->ContainerPtrToValuePtr<void>(found));
-        return rewards.Num() == 2 && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == weapon &&
+        if (!weapon && !ammo) return rewards.Num() == 0;
+        return weapon && ammo && rewards.Num() == 2 && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == weapon &&
             item->GetObjectPropertyValue(rewards.GetRawPtr(1)) == ammo;
+    }
+
+    bool wire_recipe(U::UObject* stock, U::UClass* weapon, U::UClass* ammo, WirePhase phase)
+    {
+        return weapon && ammo && objective_recipe(stock, STR("Clt_Wire"), find<U::UClass>(wire_path), 0, weapon, ammo, phase);
     }
 
     struct Inventory
@@ -348,12 +356,11 @@ namespace
             return structure && structure->GetArrayDim() == 1 && structure->GetStruct().Get() == type;
         }
 
-        bool bind()
+        bool bind(bool reward_defaults = true)
         {
             auto* guid_type = find<U::UScriptStruct>(guid_path);
             auto* payload_type = find<U::UScriptStruct>(payload_path);
-            if (!save_class || !base_class || !weapon_class || !weapon_class->IsChildOf(base_class) ||
-                !ammo_class || !ammo_class->IsChildOf(base_class) || !type || !equipment || !same_type(row) ||
+            if (!save_class || !base_class || !type || !equipment || !same_type(row) ||
                 !same_type(equipment->GetInner()) || !same_type(armor) || !same_type(helmet) || !item ||
                 item->GetMetaClass().Get() != base_class || !ammo || !weight || !value || !tag || !data || !payload_type ||
                 data->GetStruct().Get() != payload_type || !never_drop || !guid || !guid_type ||
@@ -363,6 +370,8 @@ namespace
                 words[i] = field<U::FIntProperty>(guid_type, guid_names[i]);
                 if (!words[i] || words[i]->GetOffset_Internal() != static_cast<int>(i * sizeof(std::uint32_t))) return false;
             }
+            if (!reward_defaults) return true;
+            if (!weapon_class || !weapon_class->IsChildOf(base_class) || !ammo_class || !ammo_class->IsChildOf(base_class)) return false;
             ammo_defaults = ammo_class->GetClassDefaultObject().Get();
             auto* weapon_defaults = weapon_class->GetClassDefaultObject().Get();
             auto* count = field<U::FIntProperty>(ammo_defaults, STR("Ammo"));
@@ -614,34 +623,47 @@ namespace
         return enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == count;
     }
 
+    template <bool ComputerBoard>
     int stage_objective(const Lua& lua)
     {
-        const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
+        const auto fail = [&](std::string_view reason) {
+            if constexpr (ComputerBoard)
+            {
+                const auto wire = reason.find("wire_objective");
+                if (wire != std::string_view::npos)
+                    return reply(lua, false, std::format("{}computer_board_{}", reason.substr(0, wire), reason.substr(wire + 5)));
+            }
+            return reply(lua, false, reason);
+        };
+        constexpr auto location = ComputerBoard ? PartyWorld::scientist : PartyWorld::borough;
         std::array<Address, 3> args{};
         if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args)) return fail("wire_objective_stage_unavailable");
         const auto objective_id = read_guid(lua.get_string());
         if (objective_id == Guid{}) return fail("wire_objective_guid_required");
         Party party;
         Inventory inventory;
-        if (!party.read(args[0], args[1], args[2], true)) return fail("wire_objective_exact_detached_guest_required");
-        if (!inventory.bind() || !wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active))
-            return fail("wire_objective_active_recipe_required");
-        auto* wire = find<U::UClass>(wire_path);
-        auto* defaults = wire ? wire->GetClassDefaultObject().Get() : nullptr;
-        if (!wire || !wire->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            !bool_value(defaults, STR("Stacks"), false)) return fail("wire_objective_nonstackable_stock_class_required");
-        const auto is_wire = [&](const void* row) {
-            return inventory.item->GetObjectPropertyValue(inventory.item->ContainerPtrToValuePtr<void>(row)) == wire;
+        if (!party.read(args[0], args[1], args[2], true, location)) return fail("wire_objective_exact_detached_guest_required");
+        auto* wanted = find<U::UClass>(ComputerBoard ? board_item_path : wire_path);
+        const auto matches_recipe = [&] {
+            if constexpr (ComputerBoard)
+                return objective_recipe(party.stock, STR("Clt_ComputerBoard"), wanted, 800, nullptr, nullptr, WirePhase::active);
+            return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
         };
+        if (!inventory.bind(!ComputerBoard) || !matches_recipe())
+            return fail("wire_objective_active_recipe_required");
+        auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
+        if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            !bool_value(defaults, STR("Stacks"), false)) return fail("wire_objective_nonstackable_stock_class_required");
+        const auto is_objective = [&](const void* row) { return inventory.klass(row) == wanted; };
 
         Inventory::Match source;
         if (!inventory.locate(party.detached, objective_id, source) || source.count != 1 || source.backpack_index < 0 ||
-            !is_wire(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
+            !is_objective(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(source.row);
         if (ammo < 0 || ammo > 1) return fail("wire_objective_single_item_required");
         bool host_conflict = false;
         if (!inventory.visit(party.stock, [&](const void* row, bool, int) {
-                host_conflict |= is_wire(row) || inventory.identity(row) == objective_id;
+                host_conflict |= is_objective(row) || inventory.identity(row) == objective_id;
             })) return fail("wire_objective_host_inventory_unqualified");
         if (host_conflict) return fail("wire_objective_canonical_item_conflict");
 
@@ -701,8 +723,7 @@ namespace
         };
         const auto same_party_and_recipe = [&] {
             Party current;
-            return current.read(args[0], args[1], args[2], true) && party.same_identity(current) &&
-                wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
+            return current.read(args[0], args[1], args[2], true, location) && party.same_identity(current) && matches_recipe();
         };
         if (!same_party_and_recipe() || !protected_unchanged(0)) return fail("wire_objective_authority_or_inventory_changed");
 
@@ -891,7 +912,8 @@ namespace
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStageWireQuestObjective", stage_objective);
+    lua.register_function("SilverfishStageWireQuestObjective", stage_objective<false>);
+    lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<true>);
     lua.register_function("SilverfishCaptureWireRewards", capture);
     lua.register_function("SilverfishVerifyWireRewards", verify_template);
     lua.register_function("SilverfishGrantWireRewards", grant);

@@ -100,6 +100,47 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
                 return None
             result["approach"] = {"target": move[2], "host_pawn": move[3], "guest_pawn": move[4],
                                   "host_distance_cm": distances[0], "guest_distance_cm": distances[1]}
+        refresh = [row for row in rows if row[0] == "native-campaign-npc-refresh"]
+        if refresh and viewer == "host":
+            entry, = refresh
+            if len(entry) != 13 or entry[1] != MAP or entry[2] not in {"inspect", "refresh"}:
+                return None
+            population, cap, markers, eligible, calls = map(int, entry[4:9])
+            before, after = map(int, entry[11:])
+            if min(population, cap, markers, eligible, before) < -1 or not 0 <= calls <= 1 or after < before:
+                return None
+            if (markers >= 0 and eligible > markers) or (entry[2] == "inspect" and (calls != 0 or before != after)):
+                return None
+            result["stock_refresh"] = {"mode": entry[2], "state": entry[3], "population": population, "capacity": cap,
+                                       "markers": markers, "eligible_markers": eligible, "stock_calls": calls,
+                                       "spawner": entry[9], "squad_data": entry[10],
+                                       "husk_receipts_before": before, "husk_receipts_after": after}
+        combat = [row for row in rows if row[0] == "native-campaign-npc-combat"]
+        if combat and viewer == "host":
+            attack, = combat
+            if len(attack) != 16 or attack[1] != MAP:
+                return None
+            attempts, guest_hits, host_hits = map(int, attack[7:10])
+            health = tuple(map(float, attack[10:]))
+            if min(attempts, guest_hits, host_hits) < 0 or not all(math.isfinite(hp) and hp >= 0 for hp in health):
+                return None
+            result["combat"] = {"state": attack[2], "host_pawn": attack[3], "guest_pawn": attack[4],
+                                "attacker": attack[5], "currently_targeting_guest": attack[6],
+                                "attempts": attempts, "guest_hits": guest_hits, "host_hits": host_hits,
+                                **dict(zip(("host_baseline", "host_at_hit", "host_current", "guest_before",
+                                            "guest_after", "guest_current"), health))}
+        infection = [row for row in rows if row[0] == "native-campaign-npc-melee-sickness"]
+        if infection and viewer == "host":
+            hit, = infection
+            if len(hit) != 15 or hit[1] != MAP or not all(hit[2:5]):
+                return None
+            integers = tuple(map(int, hit[5:]))
+            if any(value < 0 for value in integers[5:9]) or integers[-1] != 8:
+                return None
+            fields = ("guest_before", "guest_after", "host_before", "host_after", "host_current",
+                      "reads_before", "reads_after", "writes_before", "writes_after", "stock_dose")
+            result["melee_sickness"] = {"host_pawn": hit[2], "guest_pawn": hit[3], "attacker": hit[4],
+                                        **dict(zip(fields, integers, strict=True))}
         return result
     except (IndexError, OSError, ValueError):
         return None
@@ -133,9 +174,41 @@ def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bo
                 and (report["spawn_denials"] > 0 or not require_denial))
 
 
+def stock_guest_hit(report: dict, host: str, guest: str, members: list[str]) -> bool:
+    attack = report.get("combat", {})
+    return (attack.get("state") == "stock_guest_health_debit" and attack["host_pawn"] == host
+            and attack["guest_pawn"] == guest and attack["attacker"] in members
+            and attack["attempts"] >= attack["guest_hits"] > 0 and attack["host_hits"] == 0
+            and attack["host_baseline"] == attack["host_at_hit"] == attack["host_current"] > 0
+            and 0 <= attack["guest_current"] <= attack["guest_after"] < attack["guest_before"])
+
+
+def healthy_guest_sickness(server: dict, pawn: str) -> dict:
+    rows = server.get("game", {}).get("native_guest_sickness", {})
+    row = rows.get(pawn, {})
+    counters = ("infect_reads", "infect_writes", "slow_reads", "slow_writes")
+    return row if (set(rows) == {pawn} and row.get("state") in {"watching", "redirected_infection", "redirected_sickness_tick"}
+                   and all(type(row.get(key)) is int and row[key] >= 0 for key in counters)
+                   and all(type(row.get(key)) is int for key in ("guest_sickness", "host_sickness"))) else {}
+
+
+def stock_flayer_infection(server: dict, report: dict) -> bool:
+    damage, infection = report.get("combat", {}), report.get("melee_sickness", {})
+    if not infection or not damage:
+        return False
+    scoped = healthy_guest_sickness(server, infection["guest_pawn"])
+    exact = ("host_pawn", "guest_pawn", "attacker")
+    return bool(scoped and all(infection[key] == damage[key] for key in exact)
+                and 1 <= infection["guest_after"] - infection["guest_before"] <= infection["stock_dose"] == 8
+                and infection["host_before"] == infection["host_after"] == infection["host_current"] == scoped["host_sickness"]
+                and scoped["infect_reads"] >= infection["reads_after"] == infection["reads_before"] + 1
+                and scoped["infect_writes"] >= infection["writes_after"] == infection["writes_before"] + 1)
+
+
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
-                   flayer_veto: bool = False, join_only: bool = False) -> None:
+                   flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
+                   stock_refresh: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
@@ -150,10 +223,15 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     for flag in ("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE", "SILVERFISH_COOP_NATIVE_NPC_TEST",
                  "SILVERFISH_COOP_NATIVE_NPC_HOSTILE", "SILVERFISH_COOP_NATIVE_FIXTURES",
                  "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH",
-                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"):
+                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT",
+                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH"):
         environment.pop(flag, None)
     if replicate:
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE"] = "1"
+    if combat:
+        environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT"] = "1"
+    if stock_refresh:
+        environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH"] = "1"
     if family == "flayer":
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
         if replicate:
@@ -162,9 +240,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
+    flayer_combat = combat and family == "flayer"
     evidence = {"map": MAP, "family": family, "mode": "replicated" if replicate else "observed",
-                "verification_scope": "join" if join_only else "encounter", "approach_requested": approach,
-                "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto}
+                "verification_scope": "join" if join_only else "combat" if combat else "encounter", "approach_requested": approach,
+                "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
+                "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat}
     last_frames = {"host": None, "guest": None}
     client_history = {"frames": 0, "network_frames": 0, "max_local_authority": 0,
                       "max_local_begins": 0, "max_local_initializations": 0,
@@ -253,7 +333,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     and "first_client_local_birth_frame" not in evidence)
         return guest_npcs["replicated"] == guest_npcs["spawn_denials"] == guest_npcs["ai_denials"] == 0
 
-    def approach_pair(server):
+    def approach_pair(server, *, standing=True):
         game = server.get("game", {})
         pawns = game.get("pawns", {})
         host_pawn, guest_pawn = pawns.get("local", {}), pawns.get("guest", {})
@@ -266,13 +346,17 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if (scope.get("state") != "bound" or scope.get("pawn") != guest_name or len(connections) != 1
                 or connections[0].get("state") != "ready" or connections[0].get("pawn") != guest_name
                 or connections[0].get("controller") != guest_pawn.get("controller")
-                or participant.get("character_id") != invitation["character_id"] or participant.get("downed") is not False):
+                or participant.get("character_id") != invitation["character_id"]
+                or (standing and participant.get("downed") is not False)):
             return None
         return host_name, guest_name
 
     try:
+        fixture_flags = ("--fixtures",) if approach else ()
+        if flayer_combat:
+            fixture_flags += ("--native-guest-sickness",)
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
-                    "--native-events", "--native-guest", "--start-zone", MAP, *(("--fixtures",) if approach else ()))
+                    "--native-events", "--native-guest", "--start-zone", MAP, *fixture_flags)
         await wait("The CrossRoads host did not start", lambda server, _, __: server.get("state") == "hosting", 45)
         invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
@@ -285,9 +369,26 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             _, _, joined = await wait(f"The guest did not finish joining the stock {family} world", initial_join)
             evidence.update({"verified": True, "host": joined["host"], "guest": joined["guest"]})
             return
+        if stock_refresh:
+            await wait("No exact enrolled pair for the stock director inspection",
+                       lambda server, client, _: paired(server, client) and approach_pair(server), 35)
+
+            async def director_report(mode):
+                await command("action", *primary, "native-campaign-npc-refresh", "--target", mode)
+                _, _, snapshot = await wait(f"Stock director did not report {mode}", lambda _, __, frame:
+                    (frame["host"] or {}).get("stock_refresh", {}).get("mode") == mode, 6)
+                return snapshot["host"]
+
+            inspection = await director_report("inspect")
+            evidence["stock_refresh_inspection"] = inspection["stock_refresh"]
+            if inspection["stock_refresh"]["state"] == "eligible" and not stock_cohort(inspection, replicate, family):
+                refreshed = await director_report("refresh")
+                evidence["stock_refresh_result"] = refreshed["stock_refresh"]
         if approach:
             def ready(server, client, snapshot):
-                return paired(server, client) and stock_cohort(snapshot["host"], True, family) and approach_pair(server)
+                pair = approach_pair(server)
+                return (paired(server, client) and stock_cohort(snapshot["host"], True, family) and pair
+                        and (not flayer_combat or healthy_guest_sickness(server, pair[1])))
 
             before, _, natural = await wait(f"No stock {family} cohort and enrolled pair appeared", ready)
             evidence["before_approach"] = {"host": natural["host"], "guest": natural["guest"]}
@@ -299,11 +400,19 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 move = (snapshot["host"] or {}).get("approach", {})
                 return (proved(server, client, snapshot) and move.get("target") == target
                         and (move.get("host_pawn"), move.get("guest_pawn")) == (host_pawn, guest_pawn)
-                        and approach_pair(server) == (host_pawn, guest_pawn)
-                        and target in snapshot["host"]["members"])
+                        and approach_pair(server, standing=not combat) == (host_pawn, guest_pawn)
+                        and target in snapshot["host"]["members"]
+                        and (not combat or stock_guest_hit(snapshot["host"], host_pawn, guest_pawn, natural["host"]["members"]))
+                        and (not flayer_combat or stock_flayer_infection(server, snapshot["host"])))
 
-            server, client, snapshot = await wait("The approached cohort did not yield stock client replicas", approached, 45)
+            label = (f"No stock {family} attack verified detached guest combat" if combat
+                     else "The approached cohort did not yield stock client replicas")
+            server, client, snapshot = await wait(label, approached, 38 if combat else 45)
             evidence["approach"] = snapshot["host"]["approach"]
+            if combat:
+                evidence["stock_combat"] = snapshot["host"]["combat"]
+            if flayer_combat:
+                evidence["stock_melee_sickness"] = snapshot["host"]["melee_sickness"]
         else:
             server, client, snapshot = await wait(f"No fixture-free stock {family} proof appeared", proved)
         if client.get("character_id") != invitation["character_id"]:
@@ -374,6 +483,9 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
+    parser.add_argument("--combat", action="store_true", help="observe a stock melee attack against the exact detached guest")
+    parser.add_argument("--stock-refresh", action="store_true",
+                        help="inspect stock Husk reinforcement readiness and permit one eligible stock director refresh")
     parser.add_argument("--join-only", action="store_true", help="verify stock cohort start and guest map admission only")
     parser.add_argument("--replicate", action="store_true", help="enable the exact native encounter cohort replication canary")
     parser.add_argument("--approach", action="store_true",
@@ -381,6 +493,14 @@ if __name__ == "__main__":
     parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
+    if options.combat or options.stock_refresh:
+        if options.join_only:
+            parser.error("--combat and --stock-refresh require full encounter verification")
+        options.replicate = options.approach = True
+    if options.stock_refresh and options.cohort != "husk":
+        parser.error("--stock-refresh requires the Husk encounter test")
+    if options.combat and options.cohort == "flayer":
+        options.flayer_veto = True
     if (options.require_client_denial or options.approach) and not options.replicate:
         parser.error("--require-client-denial and --approach require --replicate")
     if options.flayer_veto and options.cohort != "flayer":
@@ -396,4 +516,4 @@ if __name__ == "__main__":
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
-                         join_only=options.join_only))
+                         join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh))

@@ -63,12 +63,18 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         raise party.RuleError("native_finite_shop_unavailable")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
-    member = host.native_recipients().get(character)
-    if not member or not member["connected"] or host.party["wipe"] is not None or character in host.party["pending_spawns"]:
-        raise party.RuleError("native_finite_shop_guest_unavailable")
+    if character == "host":
+        if area != SCIENTIST_SHOP or action not in ACTIONS[:2]:
+            raise party.RuleError("native_scientist_host_camera_purchase_only")
+        pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
+    else:
+        member = host.native_recipients().get(character)
+        pawn = member["pawn"] if member and member["connected"] else None
+    if not pawn or host.party["wipe"] is not None or character in host.party["pending_spawns"]:
+        reason = "native_finite_shop_host_unavailable" if character == "host" else "native_finite_shop_guest_unavailable"
+        raise party.RuleError(reason)
     if host.party["players"][character]["downed"]:
         raise party.RuleError("downed")
-    pawn = member["pawn"]
     listing_only = action == "native-finite-shop-list"
     quote_only = action == "native-finite-shop-sale-quote"
     sale = quote_only or action == "native-finite-shop-sell"

@@ -16,6 +16,7 @@ local native_broker_quest = require("native_broker_quest")
 local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
+local native_computer_board = require("native_computer_board")
 local native_turret_photo_quest = require("native_turret_photo_quest")
 local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
@@ -58,8 +59,10 @@ local native_guest_weapon = require("native_guest_weapon")
 local native_guest_npc = require("native_guest_npc")
 local native_guest_reload_input = require("native_guest_reload_input")
 local native_guest_primary_input = require("native_guest_primary_input")
+local native_host_camera = require("native_host_camera")
 local native_guest_consumable = require("native_guest_consumable")
 local native_guest_regen = require("native_guest_regen")
+local native_guest_sickness = require("native_guest_sickness")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
@@ -387,6 +390,7 @@ local function run_command(fields, state, current_phase)
         native_shop_view.clear()
         native_campaign_npc.clear()
         native_guest_primary_input.reset()
+        native_host_camera.reset()
         native_loot_crate_input.clear()
         native_loot_view.clear()
         native_broker_input.clear()
@@ -768,13 +772,16 @@ local function run_command(fields, state, current_phase)
         or native_guest_npc.command(fields, state, current_phase)
         or native_guest_reload_input.command(fields, state, current_phase)
         or native_guest_primary_input.command(fields, state, current_phase)
+        or native_host_camera.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
+        or native_guest_sickness.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
         or native_loot_crate_input.command(fields, state, current_phase)
         or native_loot_view.command(fields, state, current_phase)
         or native_wire_quest.command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
+        or native_computer_board.command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
@@ -890,14 +897,17 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_sickness.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1028,12 +1038,14 @@ local function observe_session()
             observed = inspect()
             observed_phase = phase(observed)
         end
+        native_guest_sickness.sync(observed, observed_phase)
         return observed, observed_phase
     end)
     if not ok then
         local diagnostic = tostring(state)
         local cleared, failure = pcall(function()
             native_hazard.clear("game bridge observation failed")
+            native_guest_sickness.clear()
             guest_save.clear()
         end)
         if not cleared then diagnostic = diagnostic .. " / " .. tostring(failure) end
@@ -1051,6 +1063,7 @@ local function tick()
     native_shop_view.sync(state, current_phase)
     native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
+    native_host_camera.sync(state, current_phase)
     native_enemy_loot.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
@@ -1128,6 +1141,7 @@ native_inventory_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
 native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
+native_host_camera.start(bridge, players.is_downed)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)

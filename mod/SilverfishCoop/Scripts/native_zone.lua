@@ -5,6 +5,7 @@ local routes = require("zone_maps")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local fixture_mode = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local expanded_fixtures = expanded and fixture_mode and require("authored_wall_routes") or {}
 local event_path
 local expanded_event_path
@@ -304,6 +305,136 @@ local function probe_player(state, selector)
     return match
 end
 
+local function expanded_overlap(map, tag)
+    if not expanded or not fixture_mode or not headless or not tag then return end
+    local selected
+    for _, route in ipairs(expanded_fixtures[map] or {}) do
+        if route.kind == "overlap" and route.entrance == tag then
+            if selected then error("The staged entrance selects multiple authored overlap exits", 0) end
+            selected = route
+        end
+    end
+    return selected
+end
+
+local function finite(number)
+    return type(number) == "number" and number == number and math.abs(number) < 1e8
+end
+
+local function vector(point)
+    return point and finite(point.X) and finite(point.Y) and finite(point.Z)
+end
+
+local function side_of(point, center, axis)
+    return (point.X - center.X) * axis.X + (point.Y - center.Y) * axis.Y + (point.Z - center.Z) * axis.Z
+end
+
+local function approach_anchor(state, tag, center, extent)
+    local anchor
+    for _, marker in ipairs(FindAllOf("LevelExit_Spawn_BP_C") or {}) do
+        if valid(marker) and same(marker:GetWorld(), state.world) and marker.EntranceTag
+            and marker.EntranceTag:ToString() == tag and valid(marker.Arrow) and same(marker.Arrow:GetOwner(), marker) then
+            if anchor then error("The authored exit has multiple approach references", 0) end
+            anchor = marker.Arrow:K2_GetComponentLocation()
+        end
+    end
+    local host = state.local_pawn and state.local_pawn.pawn
+    if not vector(anchor) and valid(host) then anchor = host:K2_GetActorLocation() end
+    local radius = math.max(extent.X, extent.Y) + 2500
+    if vector(anchor) and (anchor.X - center.X)^2 + (anchor.Y - center.Y)^2 <= radius^2 then return anchor end
+    return center
+end
+
+local function place_expanded_overlap(state, details, route, position)
+    local pawn = details.pawn
+    local exit = placed_actor("Level_Exit_BP_C", route.actor, state.world)
+    local exit_class = StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
+    local box_class = StaticFindObject("/Script/Engine.BoxComponent")
+    local world_name = state.map .. "." .. state.map:match("[^/]+$")
+    local box = valid(exit) and exit.Box
+    local tag = valid(exit) and exit["Entrance Tag"]
+    if type(tag) == "userdata" then tag = tag:ToString() end
+    if state.server ~= false or state.listening ~= true or state.world:GetFullName() ~= "World " .. world_name
+        or not valid(exit) or not same(exit:GetClass(), exit_class) or not exit:HasAuthority() or exit:IsActorBeingDestroyed()
+        or exit:GetFullName() ~= "Level_Exit_BP_C " .. world_name .. ":PersistentLevel." .. route.actor
+        or tag ~= route.entrance or not valid(box) or not same(box:GetClass(), box_class) or not same(box:GetOwner(), exit)
+        or not exit:GetActorEnableCollision() or not box:GetGenerateOverlapEvents() then
+        error("The exact expanded stock overlap or its collision box is unavailable", 0)
+    end
+    local collision = box:GetCollisionEnabled()
+    if (collision ~= 1 and collision ~= 3) or box:GetCollisionResponseToChannel(2) ~= 1 then
+        error("The authored exit box does not overlap player capsules", 0)
+    end
+    local center, extent = box:K2_GetComponentLocation(), box:GetScaledBoxExtent()
+    local first, second, up = box:GetForwardVector(), box:GetRightVector(), box:GetUpVector()
+    local original, facing = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
+    local capsule = pawn.CapsuleComponent
+    local height = valid(capsule) and same(capsule:GetOwner(), pawn) and capsule:GetScaledCapsuleHalfHeight()
+    local radius = valid(capsule) and capsule:GetScaledCapsuleRadius()
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not vector(center) or not vector(extent) or not vector(first) or not vector(second) or not vector(up)
+        or not vector(original) or not facing or not finite(facing.Pitch) or not finite(facing.Yaw) or not finite(facing.Roll)
+        or not finite(height) or height < 20 or height > 150 or not finite(radius) or radius < 10 or radius > 100
+        or not valid(trace) then error("The expanded exit fixture could not read the stock box or pawn geometry", 0) end
+    if math.min(extent.X, extent.Y, extent.Z) < 1 or math.max(extent.X, extent.Y, extent.Z) > 50000
+        or math.abs(up.Z) < .7 then
+        error(string.format("The stock exit box is outside the staging bounds (half extents %.1f, %.1f, %.1f, up %.3f)",
+            extent.X, extent.Y, extent.Z, up.Z), 0)
+    end
+    local normal, tangent, width, length = first, second, extent.X, extent.Y
+    if extent.Y < extent.X then normal, tangent, width, length = second, first, extent.Y, extent.X end
+    local anchor = approach_anchor(state, route.entrance, center, extent)
+    local sign = side_of(anchor, center, normal) < 0 and -1 or 1
+    local lane_limit = math.max(0, length - radius - 35)
+    local lane = math.max(-lane_limit, math.min(lane_limit, side_of(anchor, center, tangent)))
+    local inside = position == "inside"
+    local depth = inside and math.max(0, width - radius - 45) or width + radius + (position == "far" and 2250 or 130)
+    local index = details.kind == "guest" and (tonumber((details.slot or ""):match("^guest(%d+)$")) or 1) or 0
+    local assigned = ({[0] = 0, 180, -180, 360, -360})[index] or 0
+    local top = math.max(anchor.Z, center.Z - math.max(0, extent.Z - height)) + 325
+    local bottom = math.min(anchor.Z, center.Z - extent.Z) - 400
+    local ignored, color = {exit}, {R = 0, G = 0, B = 0, A = 0}
+    for _, detail in ipairs(state.pawns) do
+        if valid(detail.pawn) then ignored[#ignored + 1] = detail.pawn end
+    end
+    local moved = false
+    for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do
+        local side = math.max(-lane_limit, math.min(lane_limit, lane + offset))
+        local x = center.X + depth * sign * normal.X + side * tangent.X
+        local y = center.Y + depth * sign * normal.Y + side * tangent.Y
+        local hit = {}
+        local found = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom},
+            0, false, ignored, 0, hit, true, color, color, 0)
+        hit = hit.OutHit or hit
+        local surface = hit.Component and hit.Component:Get()
+        if found == true and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= .7
+            and hit.ImpactPoint.Z < top - 1 and hit.ImpactPoint.Z >= bottom and valid(surface)
+            and surface:GetCollisionObjectType() == 0 then
+            local point = {X = x, Y = y, Z = hit.ImpactPoint.Z + height + 3}
+            local in_box = math.abs(side_of(point, center, first)) <= extent.X
+                and math.abs(side_of(point, center, second)) <= extent.Y and math.abs(side_of(point, center, up)) <= extent.Z
+            if in_box == inside and pawn:K2_TeleportTo(point, facing) then
+                moved = true
+                local actual = pawn:K2_GetActorLocation()
+                if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= 70^2
+                    and box:IsOverlappingActor(pawn) == inside then
+                    pawn:ForceNetUpdate()
+                    return "positioned authoritative pawn " .. position .. " the stock " .. route.actor
+                end
+            end
+        end
+    end
+    if moved then
+        if not pawn:K2_TeleportTo(original, facing) then error("The expanded exit fixture could not restore the pawn", 0) end
+        local actual = pawn:K2_GetActorLocation()
+        if not vector(actual) or (actual.X - original.X)^2 + (actual.Y - original.Y)^2 + (actual.Z - original.Z)^2 > 70^2 then
+            error("The expanded exit fixture could not verify the restored pawn", 0)
+        end
+        pawn:ForceNetUpdate()
+    end
+    error("No verified stock floor at the requested expanded overlap position", 0)
+end
+
 local function place_at_named_door(state, pawn, door, direction, rotation, distance)
     local marker = valid(door.LevelExit_Spawn_BP) and door.LevelExit_Spawn_BP.ChildActor
     local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
@@ -456,6 +587,12 @@ function zone.command(fields, state, phase)
         error("Expected native-exit-position with a pawn and near, inside, or far", 0)
     end
     local route = routes[state.map]
+    local authored = expanded_overlap(state.map, entrance)
+    local legacy = route.fixture and route.entrance == entrance and route
+        or (route.secondary and route.secondary.entrance == entrance and route.secondary)
+    if authored and (not legacy or legacy.fixture ~= authored.actor) then
+        return place_expanded_overlap(state, probe_player(state, slot), authored, position)
+    end
     if entrance and route.entrance ~= entrance then
         if not route.secondary or route.secondary.entrance ~= entrance then
             error("The requested entrance does not select an authored exit in this map", 0)

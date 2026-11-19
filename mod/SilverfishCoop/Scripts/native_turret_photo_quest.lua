@@ -1,12 +1,18 @@
 local photo = {}
+local quest_catalog = require("native_quest_catalog")
 local guest_save = require("guest_save")
 local players = require("players")
 
 local id, final_step, cash_reward, xp_reward = "Photo_DB_Turrets", 3, 700, 1
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
+local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
-local world_names = { [borough] = borough .. ".Borough", [bridge] = bridge .. ".DeadBridge_P" }
-local board_path = world_names[borough] .. ":PersistentLevel.BountyBoard_BP_C_3"
+local world_names = { [borough] = borough .. ".Borough", [scientist] = scientist .. ".Shop_Scientist_01",
+    [bridge] = bridge .. ".DeadBridge_P" }
+local boards = {
+    [borough] = {path = world_names[borough] .. ":PersistentLevel.BountyBoard_BP_C_3", kind = 5},
+    [scientist] = {path = world_names[scientist] .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 4},
+}
 local turret_prefix = world_names[bridge] .. ":PersistentLevel.Turret_MechGun_01_BP_C_"
 local targets = { ["turret-13"] = turret_prefix .. "13", ["turret-15"] = turret_prefix .. "15" }
 local board_type = 5
@@ -53,9 +59,11 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local operations = {
     ["native-turret-photo-preflight"] = "preflight", ["native-turret-photo-start"] = "start",
     ["native-turret-photo-capture"] = "capture", ["native-turret-photo-turn-in"] = "turn_in",
+    ["native-turret-photo-capture-fixture"] = "capture",
     ["native-turret-photo-xp-fixture"] = "xp_fixture",
+    ["native-host-camera-aim-fixture"] = "aim_fixture",
 }
-local last
+local last, last_board
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -168,11 +176,12 @@ local function actor_context(state, phase, name)
 end
 
 local function board_for(context, inspect_offer_only)
-    local board = StaticFindObject(board_path)
-    if context.map ~= borough or not exact(board, "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C")
-        or board:GetFullName() ~= "BountyBoard_BP_C " .. board_path or not same(board:GetWorld(), context.world)
+    local placement = boards[context.map]
+    local board = placement and StaticFindObject(placement.path)
+    if not exact(board, "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C")
+        or board:GetFullName() ~= "BountyBoard_BP_C " .. placement.path or not same(board:GetWorld(), context.world)
         or not same(board["As Game Instance FP"], context.instance) or not board:HasAuthority()
-        or board:IsActorBeingDestroyed() or board.TurnIn_ID ~= board_type or board.BountyBoard_RedeemableHere ~= true
+        or board:IsActorBeingDestroyed() or board.TurnIn_ID ~= placement.kind or board.BountyBoard_RedeemableHere ~= true
         or board.Display_GlobalContracts ~= false or board.AcceptAllGlobalContracts ~= true
         or board.ShowAllContracts ~= false then fail("board_unqualified") end
     local box = board.Box
@@ -215,7 +224,7 @@ local function stock_table()
 end
 
 local function stock_offer(context, board)
-    if read_flag(context.instance, "PlayerKill_InBorough") > 0 then fail("board_refuses_player") end
+    if context.map == borough and read_flag(context.instance, "PlayerKill_InBorough") > 0 then fail("board_refuses_player") end
     board:Configure_Stock()
     local offered = row_at(board.Contracts, context.key)
     if not offered or offered[fields.step] ~= 1 then fail("quest_not_offered") end
@@ -304,23 +313,30 @@ local function stock_target(context, target, source)
     return component, owner
 end
 
-local function capture(context, source, before, target)
+local function capture(context, source, before, target, aim_fixture)
     if before.step ~= 1 and before.step ~= 2 then fail("quest_not_active") end
     local camera, guid = equipped_camera(context)
-    local frame = frustum(camera, context)
     local component, owner = stock_target(context, target, source)
-    if not within(frame.Translation, xyz(owner:K2_GetActorLocation()), component.MaxVisibleDistance) then fail("target_out_of_range") end
-    local output = {}
-    local checked, returned = pcall(function() return component:TakePhoto(frame, output) end)
-    local read, after = pcall(read_progress, context)
-    if not checked or not read or not same(context.pawn.Save, context.own_save)
-        or not same(context.host.Save, context.save) or after.cash ~= before.cash or after.xp ~= before.xp
-        or after.rep ~= before.rep then error("mutation_unverified_stock_turret_photo_capture", 0) end
-    local score = output.Visibility or returned
-    if not finite(score) or score < 0 or score > 1 then error("mutation_unverified_stock_turret_photo_score", 0) end
-    if after.step == before.step and score < 0.75 then fail("target_not_in_stock_frame") end
-    if after.step ~= before.step + 1 then error("mutation_unverified_stock_turret_photo_progress", 0) end
-    return after, guid, score
+    local function take_stock_photo()
+        local frame = frustum(camera, context)
+        if not within(frame.Translation, xyz(owner:K2_GetActorLocation()), component.MaxVisibleDistance) then fail("target_out_of_range") end
+        local output = {}
+        local checked, returned = pcall(function() return component:TakePhoto(frame, output) end)
+        local read, after = pcall(read_progress, context)
+        if not checked or not read or not same(context.pawn.Save, context.own_save)
+            or not same(context.host.Save, context.save) or after.cash ~= before.cash or after.xp ~= before.xp
+            or after.rep ~= before.rep then error("mutation_unverified_stock_turret_photo_capture", 0) end
+        local score = output.Visibility or returned
+        if not finite(score) or score < 0 or score > 1 then error("mutation_unverified_stock_turret_photo_score", 0) end
+        if after.step == before.step and score < 0.75 then fail("target_not_in_stock_frame") end
+        if after.step ~= before.step + 1 then error("mutation_unverified_stock_turret_photo_progress", 0) end
+        return after, guid, score
+    end
+    if aim_fixture then
+        local pose = require("native_turret_photo_aim_fixture")
+        return pose.capture(context, camera, component, owner, target, take_stock_photo)
+    end
+    return take_stock_photo()
 end
 
 local function turn_in(context, before)
@@ -343,21 +359,46 @@ local function turn_in(context, before)
 end
 
 function photo.command(command, state, phase)
+    if command[2] == "native-bounty-board-list" then
+        last_board = nil
+        if #command ~= 3 or type(command[3]) ~= "string" or #command[3] > 512 or command[3]:find("%c") then
+            fail("board_arguments_unqualified")
+        end
+        local context = actor_context(state, phase, command[3])
+        local board = board_for(context)
+        board:Configure_Stock()
+        if not board.Contracts or not same(context.host.Save, context.save) or not same(context.pawn.Save, context.own_save) then
+            fail("board_offers_unavailable")
+        end
+        last_board = {scope = context, board = board:GetFullName(), time = os.time(),
+            entries = quest_catalog.board_rows(board.Contracts, table.pack)}
+        return "qualified stock board offers"
+    end
     local verb = operations[command[2]]
     if not verb then return end
     last = nil
-    if #command ~= (verb == "capture" and 5 or 3) or type(command[3]) ~= "string"
+    local field_action = verb == "capture" or verb == "aim_fixture"
+    if #command ~= (field_action and 5 or 3) or type(command[3]) ~= "string"
         or #command[3] > 512 or command[3]:find("%c") then fail("arguments_unqualified") end
     local context = actor_context(state, phase, command[3])
     local source = stock_table()
     local before, after, guid, visibility = read_progress(context)
     local target = "-"
-    if verb == "capture" then
+    if field_action then
         target = command[4]
         -- The host supplies the durable prior step after checking its per-target receipt ledger.
         if tonumber(command[5]) ~= before.step then fail("step_changed") end
-        after, guid, visibility = capture(context, source, before, target)
+        if verb == "aim_fixture" then
+            if not fixtures or (before.step ~= 1 and before.step ~= 2) then fail("aim_fixture_unavailable") end
+            local camera, identity = equipped_camera(context)
+            local component, owner = stock_target(context, target, source)
+            require("native_turret_photo_aim_fixture").aim_host(context, camera, component, owner, target)
+            guid = identity
+        else
+            after, guid, visibility = capture(context, source, before, target, command[2] == "native-turret-photo-capture-fixture")
+        end
     else
+        if (verb == "turn_in" or verb == "xp_fixture") and context.map ~= borough then fail("borough_board_required") end
         local board = board_for(context, verb == "xp_fixture")
         target = board:GetFullName()
         if verb ~= "xp_fixture" and before.step == "-" then stock_offer(context, board) end
@@ -381,18 +422,31 @@ function photo.command(command, state, phase)
 end
 
 function photo.rows(state, phase, status_row)
+    local result = {}
+    local list = last_board
+    if list then
+        local scope = list.scope
+        if phase == "hosting" and state.map == scope.map and same(scope.world, state.world) and os.time() <= list.time + 2
+            and valid(scope.pawn) and same(scope.pawn.Save, scope.own_save) and same(scope.host.Save, scope.save) then
+            result[1] = status_row("native-bounty-board", scope.map, scope.name, list.board)
+            for _, fields in ipairs(list.entries) do result[#result + 1] = status_row(table.unpack(fields, 1, fields.n)) end
+        else
+            last_board = nil
+        end
+    end
     local proof = last
-    if not proof then return {} end
+    if not proof then return result end
     local scope, before, after = proof.context, proof.before, proof.after
     if phase ~= "hosting" or state.map ~= scope.map or not same(state.world, scope.world)
         or not valid(scope.host) or not valid(scope.pawn) or not same(scope.host.Save, scope.save)
         or not same(scope.pawn.Save, scope.own_save) then
         last = nil
-        return {}
+        return result
     end
-    return {status_row("native-turret-photo", proof.verb, scope.map, scope.name, id, proof.target,
+    result[#result + 1] = status_row("native-turret-photo", proof.verb, scope.map, scope.name, id, proof.target,
         proof.guid, proof.visibility, before.step, after.step, before.cash, after.cash, before.xp, after.xp,
-        before.rep, after.rep)}
+        before.rep, after.rep)
+    return result
 end
 
 return photo

@@ -5,7 +5,7 @@ import re
 from typing import TypedDict
 
 
-_LIMITS = {"active": 64, "stock": 128}
+_LIMITS = {"active": 64, "stock": 128, "board": 128}
 _TOTAL_LIMIT = 1024
 _ITEM_LIMIT = 8
 _PAGE_SIZE = 8
@@ -42,6 +42,11 @@ class QuestCatalog(TypedDict):
     sequence: int
     active: CatalogSource
     stock: CatalogSource
+
+
+class BoardCatalog(TypedDict):
+    sequence: int
+    board: CatalogSource
 
 
 def _integer(text: str, minimum: int = 0, maximum: int = 2_147_483_647) -> int:
@@ -84,6 +89,8 @@ def _entry(source: str, fields: Sequence[str]) -> QuestEntry:
 
     if source == "stock":
         expected = "template"
+    elif source == "board":
+        expected = "offered"
     elif step == -10:
         expected = "completed"
     elif 0 < step <= final_step:
@@ -130,10 +137,10 @@ def _verify(source: str, report: CatalogSource) -> None:
         raise ValueError("Quest catalog completeness disagrees with its summary")
 
 
-def parse(rows: Iterable[Sequence[str]], *, sequence: int | None) -> QuestCatalog | None:
-    """Read both catalog scopes and retain the enclosing bridge sequence."""
+def parse(rows: Iterable[Sequence[str]], *, sequence: int | None, board=False) -> QuestCatalog | BoardCatalog | None:
+    """Read the requested catalog from one complete bridge frame."""
     reports: dict[str, CatalogSource] = {}
-    seen: dict[str, set[str]] = {"active": set(), "stock": set()}
+    seen: dict[str, set[str]] = {source: set() for source in _LIMITS}
     for fields in rows:
         if not fields or not isinstance(fields[0], str) or fields[0] not in _TAGS:
             continue
@@ -168,20 +175,22 @@ def parse(rows: Iterable[Sequence[str]], *, sequence: int | None) -> QuestCatalo
 
     if not reports:
         return None
-    if reports.keys() != _LIMITS.keys() or type(sequence) is not int or sequence < 1:
+    if reports.keys() != ({"board"} if board else {"active", "stock"}) or type(sequence) is not int or sequence < 1:
         raise ValueError("Quest catalog has no complete current bridge frame")
     for source, report in reports.items():
         _verify(source, report)
+    if board:
+        return {"sequence": sequence, "board": reports["board"]}
     return {"sequence": sequence, "active": reports["active"], "stock": reports["stock"]}
 
 
-def page(catalog: QuestCatalog, selection: str | None) -> dict:
+def page(catalog: QuestCatalog | BoardCatalog, selection: str | None, *, board=False) -> dict:
     if selection is None:
         selection = "active@0"
     if not isinstance(selection, str):
         raise ValueError("Choose active or stock and an optional quest catalog offset")
     source, separator, start = selection.partition("@")
-    if source not in _LIMITS:
+    if source not in _LIMITS or source not in catalog or source == "board" and not board:
         raise ValueError("Choose active or stock for the quest catalog")
     offset = _integer(start, maximum=_LIMITS[source]) if separator else 0
     report = catalog[source]

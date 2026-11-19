@@ -1,18 +1,27 @@
 """Record two distinct stock photo targets and settle the authored contract once."""
 
 import time
+import uuid
 
-from . import native_loot, native_rewards, native_wire_quest, party
+from . import native_computer_board, native_loot, native_quest_catalog, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .travel import BOROUGH, DEAD_BRIDGE
 
 QUEST_ID = "Photo_DB_Turrets"
 PREFLIGHT = "native-turret-photo-preflight"
 CAPTURE = "native-turret-photo-capture"
+CAPTURE_FIXTURE = "native-turret-photo-capture-fixture"
+SHUTTER = "native-turret-photo-shutter"
 XP_FIXTURE = "native-turret-photo-xp-fixture"
-ACTIONS = {PREFLIGHT: "preflight", "native-turret-photo-start": "start", CAPTURE: "capture",
-           "native-turret-photo-turn-in": "turn_in", XP_FIXTURE: "xp_fixture"}
+BOARD_LIST = "native-bounty-board-list"
+HOST_INPUT_FIXTURE = "native-host-camera-input-fixture"
+HOST_AIM_FIXTURE = "native-host-camera-aim-fixture"
+HOST_EQUIP_FIXTURE = "native-host-camera-equip-fixture"
+ACTIONS = {PREFLIGHT: "preflight", "native-turret-photo-start": "start", CAPTURE: "capture", CAPTURE_FIXTURE: "capture",
+           "native-turret-photo-turn-in": "turn_in", XP_FIXTURE: "xp_fixture", HOST_AIM_FIXTURE: "aim_fixture"}
 TARGETS = {"turret-13", "turret-15"}
+BOARDS = native_computer_board.BOARDS
+SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, native_computer_board.QUEST_ID}
 
 
 def _pawn(host, character, area):
@@ -45,8 +54,33 @@ async def _command(host, bridge, action, pawn, area, target, *arguments):
 
 
 async def preflight(host, bridge, character):
-    pawn = _pawn(host, character, BOROUGH)
-    return {"native_turret_photo": await _command(host, bridge, PREFLIGHT, pawn, BOROUGH, native_wire_quest.BOARD)}
+    area = host.last_game.get("map")
+    if area not in BOARDS:
+        raise party.RuleError("native_turret_photo_board_unavailable")
+    pawn = _pawn(host, character, area)
+    return {"native_turret_photo": await _command(host, bridge, PREFLIGHT, pawn, area, BOARDS[area])}
+
+
+async def offers(host, bridge, character, offset):
+    if offset is not None and (not isinstance(offset, str) or not offset.isascii() or not offset.isdigit()
+                               or len(offset) > 3 or int(offset) > 128):
+        raise party.RuleError("native_bounty_board_offset_invalid")
+    area = host.last_game.get("map")
+    if area not in BOARDS:
+        raise party.RuleError("native_bounty_board_unavailable")
+    pawn = _pawn(host, character, area)
+    snapshot = await bridge.command(BOARD_LIST, pawn, timeout=5)
+    proof = snapshot.get("native_bounty_board", {})
+    catalog = snapshot.get("native_bounty_offers", {})
+    if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("board")) != (
+            "hosting", area, area, pawn, BOARDS[area]
+    ) or "board" not in catalog or catalog.get("sequence") != snapshot.get("sequence"):
+        raise RuntimeError("The native board did not verify the current stock offers")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    rows = native_quest_catalog.page(catalog, f"board@{int(offset or 0)}", board=True)
+    for quest in rows["quests"]:
+        quest["co_op"] = "verified" if quest["id"] in SUPPORTED else "unqualified"
+    return {"native_bounty_board": {**proof, **rows}}
 
 
 async def xp_fixture(host, bridge):
@@ -69,13 +103,119 @@ async def xp_fixture(host, bridge):
         raise
 
 
-async def advance(host, bridge, character, action, target=None):
-    area = DEAD_BRIDGE if action == CAPTURE else BOROUGH
+async def shutter(host, bridge, character, camera, operation):
+    pawn = _pawn(host, character, DEAD_BRIDGE)
+    if not valid_guid(camera) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("native_turret_photo_shutter_invalid")
+    request = [SHUTTER, camera, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != request:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if character == "host":
+        equipped = host.last_game.get("native_host_camera_scope", {})
+        valid_selection = (equipped.get("map"), equipped.get("pawn"), equipped.get("guid"), equipped.get("mode")) == (
+            DEAD_BRIDGE, pawn, camera, "stock_held"
+        )
+    else:
+        equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
+        valid_selection = (equipped.get("kind"), equipped.get("guid")) == ("camera", camera)
+    if not valid_selection:
+        raise party.RuleError("native_turret_photo_exact_camera_unavailable")
+    quest = host.party.get("native_quests", {}).get(QUEST_ID, {})
+    if quest.get("step") not in (1, 2):
+        raise party.RuleError("native_turret_photo_no_active_capture")
+    now = time.monotonic()
+    if now < host.camera_ready_at.get(character, 0):
+        raise party.RuleError("native_turret_photo_shutter_cooling_down")
+    host.camera_ready_at[character] = now + 3
+    for target in sorted(TARGETS - quest.get("photos", {}).keys()):
+        try:
+            return await advance(host, bridge, character, CAPTURE, target, expected_camera=camera,
+                                 shutter_request=(operation, request))
+        except party.RuleError as error:
+            if str(error) not in {"stock_turret_photo_target_out_of_range", "stock_turret_photo_target_not_in_stock_frame"}:
+                raise
+    raise party.RuleError("native_turret_photo_no_target_in_frame")
+
+
+async def aim_host_fixture(host, bridge, target):
+    pawn = _pawn(host, "host", DEAD_BRIDGE)
+    quest = host.party.get("native_quests", {}).get(QUEST_ID, {})
+    step = quest.get("step")
+    scope = host.last_game.get("native_host_camera_scope", {})
+    if (not host.fixtures or not host.host_camera_input or step not in (1, 2)
+            or not isinstance(target, str) or target not in TARGETS - quest.get("photos", {}).keys()
+            or scope.get("pawn") != pawn or not valid_guid(scope.get("guid"))):
+        raise party.RuleError("native_turret_photo_host_fixture_unavailable")
+    try:
+        proof = await _command(host, bridge, HOST_AIM_FIXTURE, pawn, DEAD_BRIDGE, target, target, str(step))
+    except RuntimeError as error:
+        if str(error).startswith("mutation_unverified_"):
+            host.native_checkpoint_unsafe = True
+            host.stopping = True
+        raise
+    if (proof["camera"] != scope["guid"] or proof["step_before"] != step or proof["step_after"] != step
+            or proof["visibility"] is not None):
+        raise RuntimeError("Headless camera placement did not verify the exact host and unchanged contract")
+    return {"native_turret_photo": proof}
+
+
+class HostCameraInput:
+    def __init__(self):
+        self.next_scope = 0.0
+        self.latest = 0
+
+    async def sync(self, host, bridge):
+        events = bridge.native_host_camera_requests()
+        try:
+            pawn = _pawn(host, "host", DEAD_BRIDGE)
+        except party.RuleError:
+            return
+        active = host.party.get("native_quests", {}).get(QUEST_ID, {}).get("step") in (1, 2)
+        ready = host.last_game.get("native_host_camera_ready", {})
+        guid = ready.get("guid")
+        if not active or (ready.get("map"), ready.get("pawn")) != (DEAD_BRIDGE, pawn) or not valid_guid(guid):
+            return
+        for sequence, area, event_pawn, camera in events:
+            if sequence <= self.latest or (area, event_pawn, camera) != (DEAD_BRIDGE, pawn, guid):
+                continue
+            self.latest = sequence
+            operation = uuid.uuid5(bridge.input_namespace, f"{host.zone_epoch}:{pawn}:camera:{sequence}").hex
+            try:
+                result = await shutter(host, bridge, "host", guid, operation)
+                host.control.event("native_host_camera_shutter", sequence=sequence, operation_id=operation,
+                                   step=result["step"], guid=guid)
+            except (OSError, RuntimeError, ValueError) as error:
+                host.control.event("native_host_camera_shutter_rejected", sequence=sequence, operation_id=operation,
+                                   reason=str(error))
+            if host.stopping or host.party.get("native_quests", {}).get(QUEST_ID, {}).get("step") not in (1, 2):
+                return
+        now = time.monotonic()
+        if now < self.next_scope:
+            return
+        self.next_scope = now + .65
+        try:
+            snapshot = await bridge.command("native-host-camera-scope", DEAD_BRIDGE, pawn, guid, QUEST_ID, timeout=2)
+        except (OSError, RuntimeError) as error:
+            host.control.event("native_host_camera_scope_rejected", pawn=pawn, reason=str(error))
+            return
+        proof = snapshot.get("native_host_camera_scope", {})
+        if (proof.get("map"), proof.get("pawn"), proof.get("guid")) == (DEAD_BRIDGE, pawn, guid):
+            host.last_game, host.last_seen = snapshot, time.monotonic()
+
+
+async def advance(host, bridge, character, action, target=None, *, expected_camera=None, shutter_request=None):
+    capturing = action in (CAPTURE, CAPTURE_FIXTURE)
+    area = DEAD_BRIDGE if capturing else host.last_game.get("map")
+    if not capturing and area not in BOARDS:
+        raise party.RuleError("native_turret_photo_board_unavailable")
     pawn = _pawn(host, character, area)
     current = host.party.get("native_quests", {}).get(QUEST_ID, {})
     photos = current.get("photos", {})
     step = current.get("step")
-    if action == CAPTURE:
+    if capturing:
         if not isinstance(target, str) or target not in TARGETS or step not in (1, 2, 3, -10):
             raise party.RuleError("native_turret_photo_requires_expected_target")
         if target in photos:
@@ -86,7 +226,9 @@ async def advance(host, bridge, character, action, target=None):
         arguments = (target, str(step))
         expected = step + 1
     else:
-        target = native_wire_quest.BOARD
+        target = BOARDS[area]
+        if action == "native-turret-photo-turn-in" and area != BOROUGH:
+            raise party.RuleError("stock_turret_photo_borough_board_required")
         if action == "native-turret-photo-start" and step is not None:
             return {"effect": "native_quest_present", **current}
         if action == "native-turret-photo-turn-in" and step == -10:
@@ -108,8 +250,9 @@ async def advance(host, bridge, character, action, target=None):
             raise RuntimeError("Stock photo progress or shared balances did not match the committed transition")
         candidate = party.load_party(host.party)
         record = {"quest_id": QUEST_ID, "step": expected, "actor": character, "photos": dict(photos)}
-        if action == CAPTURE:
-            if not valid_guid(proof.get("camera")) or proof.get("visibility") is None or not .75 <= proof["visibility"] <= 1:
+        if capturing:
+            if (not valid_guid(proof.get("camera")) or expected_camera is not None and proof.get("camera") != expected_camera
+                    or proof.get("visibility") is None or not .75 <= proof["visibility"] <= 1):
                 raise RuntimeError("The stock photo did not verify the guest's exact camera and framing")
             record["photos"][target] = dict(target=target, camera=proof["camera"], visibility=proof["visibility"], actor=character)
         if expected == -10:
@@ -123,11 +266,17 @@ async def advance(host, bridge, character, action, target=None):
             candidate["economy"]["native_wallet_active"] = True
             record.update(recipients=members, cash=cash, xp=xp, wallet=proof["cash_after"], commune_rep=proof["rep_after"])
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
+        result = {"effect": "native_quest_changed", **record, "native_turret_photo": proof}
+        if shutter_request:
+            identifier, request = shutter_request
+            receipts = candidate["receipts"].setdefault(character, [])
+            receipts.append({"id": identifier, "request": request, "result": result})
+            del receipts[:-party.RECENT_ACTIONS]
         revision = await host.checkpoint_native(bridge, candidate)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_turret_photo_committed", action=ACTIONS[action], target=target, revision=revision, **record)
-        return {"effect": "native_quest_changed", **record, "native_turret_photo": proof}
+        return result
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

@@ -42,26 +42,37 @@ namespace
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36");
     constexpr auto completed_path =
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37");
+    constexpr auto bridge_world = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
+    constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
+    constexpr auto camera_primary_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C:Use_Item_Primary");
+    constexpr std::string_view camera_quest = "Photo_DB_Turrets";
+    constexpr auto camera_quest_name = STR("Photo_DB_Turrets");
+    constexpr auto quest_struct = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
+    constexpr auto quest_step = STR("Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A");
+    constexpr auto quest_end = STR("Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B");
+    constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto item_class = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
     constexpr auto item_guid = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
+    constexpr auto item_ammo = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
     constexpr auto scope_lease = std::chrono::seconds(2);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
     constexpr auto release_lease = std::chrono::seconds(12);
     constexpr std::size_t receipt_limit = 8;
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
 
-    struct Weapon
+    struct Equipment
     {
         std::string_view kind;
         const U::TCHAR* path;
     };
 
-    constexpr std::array weapons{
-        Weapon{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C")},
-        Weapon{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")},
-        Weapon{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C")},
+    constexpr std::array equipment{
+        Equipment{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C")},
+        Equipment{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")},
+        Equipment{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C")},
+        Equipment{"camera", camera_path},
     };
 
     template <typename T>
@@ -114,14 +125,22 @@ namespace
             size == value.size() && value[0] == '1';
     }
 
-    bool enabled()
+    bool guest_enabled()
     {
         return env("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") && env("SILVERFISH_COOP_NATIVE_ZONE");
     }
 
-    bool fixtures()
+    bool host_enabled()
     {
-        return env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES");
+        return env("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT") && env("SILVERFISH_COOP_NATIVE_ZONE");
+    }
+
+    bool enabled() { return host_enabled() != guest_enabled(); }
+
+    bool fixtures(bool host)
+    {
+        return env("SILVERFISH_COOP_HEADLESS") &&
+            env(host ? "SILVERFISH_COOP_NATIVE_FIXTURES" : "SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES");
     }
 
     Address address(U::UObject* value) { return reinterpret_cast<Address>(value); }
@@ -149,20 +168,21 @@ namespace
         U::FObjectProperty* source{};
     };
 
-    struct Client
+    struct LocalPlayer
     {
         U::FWeakObjectPtr world{}, controller{}, pawn{}, local{}, instance{}, driver{}, server{};
-        U::FWeakObjectPtr held{};
+        U::FWeakObjectPtr held{}, stock{};
         bool mirrored{};
+        bool host{};
     };
 
     struct Scope
     {
-        Client client{};
+        LocalPlayer seat{};
         U::FWeakObjectPtr action{};
         Wrapper started{}, completed{};
         Clock::time_point expires{};
-        const Weapon* weapon{};
+        const Equipment* item{};
         Guid guid{};
         std::string text;
         std::uint64_t generation{};
@@ -170,7 +190,7 @@ namespace
 
     struct CapturedPress
     {
-        Client client{};
+        LocalPlayer seat{};
         U::FWeakObjectPtr action{};
         Wrapper completed{};
         Clock::time_point expires{};
@@ -187,26 +207,37 @@ namespace
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
-    bool current_client(const Client& client)
+    bool current_player(const LocalPlayer& seat)
     {
-        auto* world = client.world.Get();
-        auto* controller = client.controller.Get();
-        auto* pawn = client.pawn.Get();
-        auto* local = client.local.Get();
-        auto* instance = client.instance.Get();
-        auto* driver = client.driver.Get();
-        auto* server = client.server.Get();
+        auto* world = seat.world.Get();
+        auto* controller = seat.controller.Get();
+        auto* pawn = seat.pawn.Get();
+        auto* local = seat.local.Get();
+        auto* instance = seat.instance.Get();
+        auto* driver = seat.driver.Get();
+        auto* server = seat.server.Get();
         auto* role = field<U::FByteProperty>(pawn, STR("Role"));
-        if (!live(world) || !live(pawn) || !role || role->GetPropertyValueInContainer(pawn) != 2 ||
+        if (!live(world) || !live(pawn) || !role || role->GetPropertyValueInContainer(pawn) != (seat.host ? 3 : 2) ||
             !false_field(pawn, STR("bActorIsBeingDestroyed")) || !live(controller) ||
             !false_field(controller, STR("bActorIsBeingDestroyed")) ||
             static_cast<U::AActor*>(pawn)->GetWorld() != world || static_cast<U::AActor*>(controller)->GetWorld() != world ||
-            !live(local) || !live(instance) || !live(driver) || !live(server) ||
+            !live(local) || !live(instance) || !live(driver) ||
             object_field(pawn, STR("Controller")) != controller || object_field(controller, STR("Pawn")) != pawn ||
             object_field(controller, STR("Player")) != local || object_field(local, STR("PlayerController")) != controller ||
             object_field(world, STR("OwningGameInstance")) != instance || object_field(world, STR("NetDriver")) != driver ||
-            object_field(driver, STR("World")) != world || object_field(driver, STR("ServerConnection")) != server ||
-            object_field(server, STR("Driver")) != driver) return false;
+            object_field(driver, STR("World")) != world || object_field(driver, STR("ServerConnection")) != server) return false;
+        if (seat.host)
+        {
+            auto* stock = seat.stock.Get();
+            auto* controller_role = field<U::FByteProperty>(controller, STR("Role"));
+            if (server || !field<U::FObjectProperty>(driver, STR("ServerConnection")) ||
+                !controller_role || controller_role->GetPropertyValueInContainer(controller) != 3 ||
+                instance->GetClassPrivate() != find<U::UClass>(instance_path) ||
+                object_field(instance, STR("As Player FP")) != pawn || object_field(pawn, STR("As Game Instance FP")) != instance ||
+                !live(stock) || stock->GetClassPrivate() != find<U::UClass>(save_path) ||
+                object_field(instance, STR("SaveSlot_Ref")) != stock || object_field(pawn, STR("Save")) != stock) return false;
+        }
+        else if (!live(server) || object_field(server, STR("Driver")) != driver) return false;
         auto* players = field<U::FArrayProperty>(instance, STR("LocalPlayers"));
         auto* entry = players ? U::CastField<U::FObjectProperty>(players->GetInner()) : nullptr;
         if (!entry) return false;
@@ -214,57 +245,154 @@ namespace
         return locals.Num() == 1 && entry->GetObjectPropertyValue(locals.GetRawPtr(0)) == local;
     }
 
+    struct ItemRow
+    {
+        U::UScriptStruct* type{};
+        U::FClassProperty* klass{};
+        U::FStructProperty* guid{};
+        U::FIntProperty* ammo{};
+        std::array<U::FIntProperty*, 4> words{};
+
+        bool bind()
+        {
+            type = find<U::UScriptStruct>(item_struct);
+            klass = field<U::FClassProperty>(type, item_class);
+            guid = field<U::FStructProperty>(type, item_guid);
+            ammo = field<U::FIntProperty>(type, item_ammo);
+            auto* guid_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
+            if (!type || !klass || !guid || guid->GetSize() != 16 || !guid_type || guid->GetStruct().Get() != guid_type) return false;
+            constexpr std::array names{STR("A"), STR("B"), STR("C"), STR("D")};
+            for (std::size_t i = 0; i < words.size(); ++i)
+            {
+                words[i] = field<U::FIntProperty>(guid_type, names[i]);
+                if (!words[i] || words[i]->GetOffset_Internal() != static_cast<int>(i * sizeof(std::int32_t))) return false;
+            }
+            return true;
+        }
+
+        U::FArrayProperty* array(U::UObject* save, const U::TCHAR* name) const
+        {
+            auto* rows = field<U::FArrayProperty>(save, name);
+            auto* inner = rows ? U::CastField<U::FStructProperty>(rows->GetInner()) : nullptr;
+            return inner && inner->GetStruct().Get() == type ? rows : nullptr;
+        }
+
+        U::UObject* row_class(const void* row) const
+        {
+            return klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(row));
+        }
+
+        Guid identity(const void* row) const
+        {
+            const auto* raw = guid->ContainerPtrToValuePtr<void>(row);
+            Guid found{};
+            for (std::size_t i = 0; i < found.size(); ++i)
+                found[i] = static_cast<std::uint32_t>(words[i]->GetPropertyValueInContainer(raw));
+            return found;
+        }
+    };
+
     bool matching_local_item(const Scope& current)
     {
-        auto* pawn = current.client.pawn.Get();
+        auto* pawn = current.seat.pawn.Get();
         if (!field<U::FObjectProperty>(pawn, STR("EquipedItem")) || !field<U::FObjectProperty>(pawn, STR("HeldObject")) ||
             object_field(pawn, STR("HeldObject"))) return false;
         auto* held = object_field(pawn, STR("EquipedItem"));
         // Stock held-actor references are not replicated. An authenticated
         // server authorization can cover an otherwise empty local proxy.
-        if (!current.client.mirrored) return held == nullptr;
-        auto* weapon = find<U::UClass>(current.weapon->path);
-        if (!live(held) || held != current.client.held.Get() || !weapon || held->GetClassPrivate() != weapon ||
+        if (!current.seat.mirrored) return !current.seat.host && held == nullptr;
+        auto* item = find<U::UClass>(current.item->path);
+        if (!live(held) || held != current.seat.held.Get() || !item || held->GetClassPrivate() != item ||
             object_field(held, STR("Owner")) != pawn || object_field(held, STR("Instigator")) != pawn ||
-            static_cast<U::AActor*>(held)->GetWorld() != current.client.world.Get()) return false;
+            static_cast<U::AActor*>(held)->GetWorld() != current.seat.world.Get()) return false;
+        if (current.item->kind == "camera")
+        {
+            auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
+            if (!held_by_player || !held_by_player->GetPropertyValueInContainer(held) ||
+                object_field(held, STR("User")) != pawn) return false;
+            if (current.seat.host)
+            {
+                auto* lens = object_field(held, STR("SceneCaptureComponent2D"));
+                auto* target = object_field(lens, STR("TextureTarget"));
+                auto* fov = field<U::FFloatProperty>(lens, STR("FOVAngle"));
+                if (!live(lens) || lens->GetOuterPrivate() != held ||
+                    lens->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.SceneCaptureComponent2D")) ||
+                    !live(target) || target != find<U::UObject>(STR("/Game/Assets/Textures/VirtualTextures/VT_Camera.VT_Camera")) ||
+                    target->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.TextureRenderTarget2D")) || !fov) return false;
+                const auto angle = fov->GetPropertyValueInContainer(lens);
+                if (!std::isfinite(angle) || angle <= 0.0f || angle >= 179.0f) return false;
+            }
+        }
         auto* save = object_field(pawn, STR("Save"));
         if (!live(save) || save->GetClassPrivate() != find<U::UClass>(save_path)) return false;
 
         auto* selected = field<U::FIntProperty>(save, STR("PlayerEquipIndex"));
-        auto* rows = field<U::FArrayProperty>(save, STR("PlayerEquipment"));
-        auto* inner = rows ? U::CastField<U::FStructProperty>(rows->GetInner()) : nullptr;
-        auto* type = find<U::UScriptStruct>(item_struct);
-        auto* klass = field<U::FClassProperty>(type, item_class);
-        auto* guid = field<U::FStructProperty>(type, item_guid);
-        auto* guid_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
-        if (!selected || !inner || !type || inner->GetStruct().Get() != type || !klass ||
-            !guid || guid->GetSize() != 16 || !guid_type || guid->GetStruct().Get() != guid_type) return false;
+        ItemRow schema;
+        if (!selected || !schema.bind()) return false;
+        auto* rows = schema.array(save, STR("PlayerEquipment"));
+        if (!rows) return false;
         U::FScriptArrayHelper items(rows, rows->ContainerPtrToValuePtr<void>(save));
         const auto index = selected->GetPropertyValueInContainer(save);
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
-        if (klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(row)) != weapon) return false;
-        const auto* raw = guid->ContainerPtrToValuePtr<void>(row);
-        constexpr std::array words{STR("A"), STR("B"), STR("C"), STR("D")};
-        for (std::size_t i = 0; i < words.size(); ++i)
+        return schema.row_class(row) == item && schema.identity(row) == current.guid;
+    }
+
+    bool active_photo_quest(U::UObject* save)
+    {
+        auto* type = find<U::UScriptStruct>(quest_struct);
+        auto* map = field<U::FMapProperty>(save, STR("ActiveQuests"));
+        auto* key = map ? U::CastField<U::FNameProperty>(map->GetKeyProp()) : nullptr;
+        auto* row = map ? U::CastField<U::FStructProperty>(map->GetValueProp()) : nullptr;
+        auto* step = field<U::FIntProperty>(type, quest_step);
+        auto* final = field<U::FIntProperty>(type, quest_end);
+        const U::FName id{camera_quest_name, U::FNAME_Find};
+        if (!type || !key || !row || row->GetStruct().Get() != type || key->GetOffset_Internal() != 0 ||
+            !step || !final || id.IsNone() || id.ToString() != camera_quest_name) return false;
+        const auto layout = U::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
+        if (row->GetOffset_Internal() != layout.ValueOffset) return false;
+        auto* quests = map->ContainerPtrToValuePtr<U::FScriptMap>(save);
+        const auto extent = quests->GetMaxIndex();
+        if (quests->Num() < 1 || quests->Num() > extent || extent > 4096) return false;
+        const void* matched{};
+        for (int index = 0; index < extent; ++index)
         {
-            auto* word = field<U::FIntProperty>(guid_type, words[i]);
-            if (!word || static_cast<std::uint32_t>(word->GetPropertyValueInContainer(raw)) != current.guid[i])
-                return false;
+            if (!quests->IsValidIndex(index)) continue;
+            const auto* item = quests->GetData(index, layout);
+            if (!item) return false;
+            if (key->GetPropertyValue(item) != id) continue;
+            if (matched) return false;
+            matched = row->ContainerPtrToValuePtr<void>(item);
         }
-        return true;
+        if (!matched || final->GetPropertyValueInContainer(matched) != 3) return false;
+        const auto active_step = step->GetPropertyValueInContainer(matched);
+        return active_step == 1 || active_step == 2;
     }
 
     bool qualified(const Scope& current, Clock::time_point now)
     {
-        return current.weapon && current.generation == generation.load(std::memory_order_acquire) &&
-            now < current.expires && current_client(current.client) && matching_local_item(current);
+        return current.item && current.generation == generation.load(std::memory_order_acquire) &&
+            now < current.expires && current_player(current.seat) && matching_local_item(current) &&
+            (!current.seat.host || active_photo_quest(current.seat.stock.Get()));
     }
 
-    bool can_act(const Client& client)
+    bool camera_scope(U::UObject* world)
     {
-        auto* pawn = client.pawn.Get();
-        return false_field(client.controller.Get(), STR("Loading")) && false_field(pawn, STR("Dead")) &&
+        auto* camera = find<U::UClass>(camera_path);
+        auto* function = find<U::UFunction>(camera_primary_path);
+        return live(world) && world->GetPathName() == bridge_world && find<U::UWorld>(bridge_world) == world &&
+            camera && function && function->GetOuterPrivate() == camera && function->GetNumParms() == 2 &&
+            function->GetParmsSize() == 16 && !function->GetReturnProperty() &&
+            !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) &&
+            input<U::FBoolProperty>(function, STR("Held"), 0) &&
+            input<U::FDoubleProperty>(function, STR("VarianceScaler"), 8);
+    }
+
+    bool can_act(const LocalPlayer& seat)
+    {
+        auto* pawn = seat.pawn.Get();
+        return false_field(seat.controller.Get(), STR("Loading")) && false_field(pawn, STR("Dead")) &&
             false_field(pawn, STR("IsWeaponBlocked")) && false_field(pawn, STR("UsingItem")) &&
             false_field(pawn, STR("Reloading")) && false_field(pawn, STR("IsChangingAmmo")) &&
             false_field(pawn, STR("Speaking")) && false_field(pawn, STR("HeadUnderWater")) &&
@@ -326,7 +454,8 @@ namespace
         return result;
     }
 
-    std::string_view bind(Scope& next, Address requested_pawn, Address requested_controller, Address requested_world)
+    std::string_view bind(Scope& next, Address requested_pawn, Address requested_controller, Address requested_world,
+                          bool equipping = false)
     {
         auto* pawn_type = find<U::UClass>(pawn_path);
         auto* controller_type = find<U::UClass>(controller_path);
@@ -339,10 +468,10 @@ namespace
             return "stock_guest_primary_classes_unavailable";
         U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
             if (address(candidate) != requested_pawn) return RC::LoopAction::Continue;
-            if (live(candidate) && candidate->GetClassPrivate() == pawn_type) next.client.pawn = candidate;
+            if (live(candidate) && candidate->GetClassPrivate() == pawn_type) next.seat.pawn = candidate;
             return RC::LoopAction::Break;
         });
-        auto* pawn = next.client.pawn.Get();
+        auto* pawn = next.seat.pawn.Get();
         if (!pawn) return "stock_guest_primary_pawn_unavailable";
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         auto* controller = object_field(pawn, STR("Controller"));
@@ -351,19 +480,24 @@ namespace
         auto* server = object_field(driver, STR("ServerConnection"));
         if (address(world) != requested_world || address(controller) != requested_controller ||
             !live(controller) || controller->GetClassPrivate() != controller_type || !live(local) ||
-            !local->IsA(local_type) || !live(server) || !server->IsA(connection_type))
+            !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
-        next.client.world = world;
-        next.client.controller = controller;
-        next.client.instance = object_field(world, STR("OwningGameInstance"));
-        next.client.local = local;
-        next.client.driver = driver;
-        next.client.server = server;
+        if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
+        next.seat.world = world;
+        next.seat.controller = controller;
+        next.seat.instance = object_field(world, STR("OwningGameInstance"));
+        next.seat.local = local;
+        next.seat.driver = driver;
+        next.seat.server = server;
+        if (next.seat.host) next.seat.stock = object_field(next.seat.instance.Get(), STR("SaveSlot_Ref"));
         auto* held = object_field(pawn, STR("EquipedItem"));
-        next.client.mirrored = held != nullptr;
-        next.client.held = held;
+        next.seat.mirrored = held != nullptr;
+        next.seat.held = held;
         next.action = action;
-        if (!current_client(next.client) || !matching_local_item(next)) return "stock_guest_primary_local_equipment_unqualified";
+        if (!current_player(next.seat) || (!equipping && !matching_local_item(next)))
+            return "stock_guest_primary_local_equipment_unqualified";
+        if (next.seat.host && !active_photo_quest(next.seat.stock.Get())) return "stock_host_camera_quest_inactive";
+        if (equipping) return {};
         next.started = bind_wrapper(pawn_type, action, started_path, 2);
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
         return next.started.function.Get() && next.completed.function.Get() ?
@@ -384,16 +518,16 @@ namespace
     void intercept(Iteration& iteration, U::UObject* pawn, U::UFunction* function, const void* arguments)
     {
         if (!available() || !pawn || !function || iteration.OriginalFunctionCallPrevented()) return;
-        const bool released = pawn == press.client.pawn.Get() && function == press.completed.function.Get();
-        const bool started = pawn == scope.client.pawn.Get() && function == scope.started.function.Get();
+        const bool released = pawn == press.seat.pawn.Get() && function == press.completed.function.Get();
+        const bool started = pawn == scope.seat.pawn.Get() && function == scope.started.function.Get();
         if (!released && !started) return;
         const auto now = Clock::now();
         const auto active_generation = generation.load(std::memory_order_acquire);
-        if (released && press.generation == active_generation && now < press.expires && current_client(press.client) &&
+        if (released && press.generation == active_generation && now < press.expires && current_player(press.seat) &&
             verifies_source(press.completed, press.action.Get(), arguments))
         {
             auto* current = object_field(pawn, STR("EquipedItem"));
-            const bool same_actor = press.client.mirrored ? current && current == press.client.held.Get() : !current;
+            const bool same_actor = press.seat.mirrored ? current && current == press.seat.held.Get() : !current;
             press = {};
             if (same_actor) iteration.PreventOriginalFunctionCall();
             return;
@@ -402,10 +536,10 @@ namespace
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented()) return;
         if (press.generation == active_generation && now < press.expires &&
-            press.client.pawn.Get() == pawn && press.client.controller.Get() == scope.client.controller.Get() &&
-            press.client.world.Get() == scope.client.world.Get()) return;
-        press = {scope.client, scope.action, scope.completed, now + release_lease, active_generation};
-        if (!can_act(scope.client) || sequence == max_sequence) return;
+            press.seat.pawn.Get() == pawn && press.seat.controller.Get() == scope.seat.controller.Get() &&
+            press.seat.world.Get() == scope.seat.world.Get()) return;
+        press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
+        if (!can_act(scope.seat) || sequence == max_sequence) return;
         discard_expired(now);
         if (count == receipt_limit) return;
         receipts[(head + count) % receipt_limit] = {++sequence, now + receipt_lifetime};
@@ -419,10 +553,11 @@ namespace
         return 2;
     }
 
-    int set_scope(const Lua& lua)
+    int set_scope(const Lua& lua, bool host)
     {
-        if (!available() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5))
+        const auto size = lua.get_stack_size();
+        if (!available() || (size != 5 && size != 6) || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5) || (size == 6 && !lua.is_string(6)))
             return result(lua, false, "native_guest_primary_exact_scope_required");
         const auto pawn = lua.get_integer();
         const auto controller = lua.get_integer();
@@ -430,18 +565,22 @@ namespace
         const std::string text{lua.get_string()};
         const auto kind = lua.get_string();
         Scope next;
+        next.seat.host = host;
         if (pawn <= 0 || controller <= 0 || world <= 0 || !parse_guid(text, next.guid))
             return result(lua, false, "native_guest_primary_exact_scope_required");
-        for (const auto& candidate : weapons)
-            if (candidate.kind == kind) next.weapon = &candidate;
-        if (!next.weapon) return result(lua, false, "native_guest_primary_weapon_unqualified");
+        for (const auto& candidate : equipment)
+            if (candidate.kind == kind) next.item = &candidate;
+        if (!next.item || (host && next.item->kind != "camera"))
+            return result(lua, false, "native_guest_primary_weapon_unqualified");
+        if ((next.item->kind == "camera") != (size == 6) || (size == 6 && lua.get_string() != camera_quest))
+            return result(lua, false, "native_guest_primary_quest_scope_required");
         const auto now = Clock::now();
-        if (scope.weapon == next.weapon && scope.guid == next.guid && address(scope.client.pawn.Get()) == pawn &&
-            address(scope.client.controller.Get()) == controller && address(scope.client.world.Get()) == world &&
+        if (scope.seat.host == host && scope.item == next.item && scope.guid == next.guid && address(scope.seat.pawn.Get()) == pawn &&
+            address(scope.seat.controller.Get()) == controller && address(scope.seat.world.Get()) == world &&
             qualified(scope, now))
         {
             scope.expires = now + scope_lease;
-            return result(lua, true, scope.client.mirrored ? "stock_held" : "host_equipped");
+            return result(lua, true, scope.seat.mirrored ? "stock_held" : "host_equipped");
         }
         scope = {};
         head = count = 0;
@@ -450,7 +589,7 @@ namespace
         next.text = text;
         next.generation = generation.load(std::memory_order_acquire);
         scope = std::move(next);
-        return result(lua, true, scope.client.mirrored ? "stock_held" : "host_equipped");
+        return result(lua, true, scope.seat.mirrored ? "stock_held" : "host_equipped");
     }
 
     int take(const Lua& lua)
@@ -458,13 +597,13 @@ namespace
         if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
         const auto now = Clock::now();
-        if (pawn != address(scope.client.pawn.Get()) || !qualified(scope, now) || !can_act(scope.client)) return 0;
+        if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now) || !can_act(scope.seat)) return 0;
         discard_expired(now);
         if (!count) return 0;
         lua.set_integer(static_cast<std::int64_t>(receipts[head].sequence));
         lua.set_integer(pawn);
         lua.set_string(scope.text);
-        lua.set_string(scope.weapon->kind);
+        lua.set_string(scope.item->kind);
         head = (head + 1) % receipt_limit;
         --count;
         return 4;
@@ -544,30 +683,136 @@ namespace
 
     int probe(const Lua& lua)
     {
-        if (!available() || !fixtures() || lua.get_stack_size() != 1 || !lua.is_integer(1))
+        if (!available() || !fixtures(scope.seat.host) || lua.get_stack_size() != 1 || !lua.is_integer(1))
             return result(lua, false, "native_guest_primary_fixture_unavailable");
         const auto now = Clock::now();
-        auto* pawn = scope.client.pawn.Get();
+        auto* pawn = scope.seat.pawn.Get();
         auto* action = scope.action.Get();
-        if (lua.get_integer() != address(pawn) || !qualified(scope, now) || !can_act(scope.client))
+        if (lua.get_integer() != address(pawn) || !qualified(scope, now) || !can_act(scope.seat))
             return result(lua, false, "native_guest_primary_fixture_scope_unavailable");
         discard_expired(now);
-        if (count || (press.client.pawn.Get() && now < press.expires) || sequence == max_sequence)
+        if (count || (press.seat.pawn.Get() && now < press.expires) || sequence == max_sequence)
             return result(lua, false, "native_guest_primary_fixture_input_busy");
         ValueFactory factory;
         if (!factory.bind(action, scope.started.value->GetStruct().Get()))
             return result(lua, false, "native_guest_primary_fixture_value_unavailable");
         const auto before = sequence;
         factory.dispatch(pawn, action, scope.started, true);
-        if (press.client.pawn.Get() != pawn || !qualified(scope, Clock::now()))
+        if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
             return result(lua, false, "native_guest_primary_fixture_start_unverified");
         factory.dispatch(pawn, action, scope.completed, false);
-        if (press.client.pawn.Get() || sequence != before + 1 || count != 1)
+        if (press.seat.pawn.Get() || sequence != before + 1 || count != 1)
             return result(lua, false, "native_guest_primary_fixture_release_unverified");
         result(lua, true, "stock_pressed");
         lua.set_integer(static_cast<std::int64_t>(sequence));
         lua.set_integer(2);
         return 4;
+    }
+
+    int equip_host_fixture(const Lua& lua)
+    {
+        if (!available() || !host_enabled() || !fixtures(true) || lua.get_stack_size() != 5 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5))
+            return result(lua, false, "stock_host_camera_fixture_unavailable");
+        const auto pawn_address = lua.get_integer();
+        const auto controller_address = lua.get_integer();
+        const auto world_address = lua.get_integer();
+        Scope next;
+        next.seat.host = true;
+        next.item = &equipment.back();
+        if (pawn_address <= 0 || controller_address <= 0 || world_address <= 0 ||
+            !parse_guid(lua.get_string(), next.guid) || lua.get_string() != camera_quest)
+            return result(lua, false, "stock_host_camera_fixture_identity_unqualified");
+        if (const auto failure = bind(next, pawn_address, controller_address, world_address, true); !failure.empty())
+            return result(lua, false, failure);
+        if (!can_act(next.seat)) return result(lua, false, "stock_host_camera_fixture_pawn_unavailable");
+
+        auto* pawn = next.seat.pawn.Get();
+        auto* stock = next.seat.stock.Get();
+        auto* klass = find<U::UClass>(camera_path);
+        auto* selected = field<U::FIntProperty>(stock, STR("PlayerEquipIndex"));
+        ItemRow schema;
+        if (!klass || !selected || !schema.bind() || !schema.ammo) return result(lua, false, "stock_host_camera_inventory_unavailable");
+        auto* backpack = schema.array(stock, STR("PlayerBackpack"));
+        auto* loadout = schema.array(stock, STR("PlayerEquipment"));
+        if (!backpack || !loadout) return result(lua, false, "stock_host_camera_inventory_unavailable");
+        U::FScriptArrayHelper bag(backpack, backpack->ContainerPtrToValuePtr<void>(stock));
+        U::FScriptArrayHelper slots(loadout, loadout->ContainerPtrToValuePtr<void>(stock));
+        const auto bag_count = bag.Num();
+        const auto slot_count = slots.Num();
+        const auto previous = selected->GetPropertyValueInContainer(stock);
+        if (bag_count < 0 || bag_count > 4096 || slot_count < 1 || slot_count > 4096)
+            return result(lua, false, "stock_host_camera_inventory_unavailable");
+
+        int source_index = -1, target_index = -1, empty_slot = -1;
+        for (int i = 0; i < bag_count; ++i)
+        {
+            const auto* row = bag.GetRawPtr(i);
+            if (schema.identity(row) != next.guid) continue;
+            if (source_index >= 0 || schema.row_class(row) != klass)
+                return result(lua, false, "stock_host_camera_guid_conflict");
+            source_index = i;
+        }
+        for (int i = 0; i < slot_count; ++i)
+        {
+            const auto* row = slots.GetRawPtr(i);
+            if (schema.identity(row) == next.guid)
+            {
+                if (source_index >= 0 || target_index >= 0 || schema.row_class(row) != klass)
+                    return result(lua, false, "stock_host_camera_guid_conflict");
+                target_index = i;
+            }
+            else if (empty_slot < 0 && i != previous && !schema.row_class(row) && schema.identity(row) == Guid{})
+                empty_slot = i;
+        }
+        if (target_index < 0 && (source_index < 0 || empty_slot < 0))
+            return result(lua, false, "stock_host_camera_owned_row_or_empty_slot_unavailable");
+        auto* held = next.seat.held.Get();
+        if (target_index >= 0 && target_index == previous && live(held) && matching_local_item(next))
+            return result(lua, true, "stock_camera_equipped");
+        if (live(held) && (previous < 0 || previous >= slot_count || target_index == previous ||
+            schema.row_class(slots.GetRawPtr(previous)) != held->GetClassPrivate() ||
+            object_field(held, STR("Owner")) != pawn || object_field(held, STR("Instigator")) != pawn))
+            return result(lua, false, "stock_host_camera_previous_equipment_unqualified");
+        const auto* item = source_index >= 0 ? bag.GetRawPtr(source_index) : slots.GetRawPtr(target_index);
+        const auto loaded = schema.ammo->GetPropertyValueInContainer(item);
+        if (loaded != -1 && loaded != 0) return result(lua, false, "stock_host_camera_item_unqualified");
+
+        auto* can_equip = find<U::UFunction>(STR("/Game/Classes/Player/Player_FP.Player_FP_C:Check_CanUseEquipment"));
+        auto* allowed = field<U::FBoolProperty>(can_equip, STR("ReturnValue"));
+        auto* equip = find<U::UFunction>(STR("/Game/Classes/Player/Player_FP.Player_FP_C:Equip_NextItem"));
+        struct Parameters { std::int32_t index{}; bool prev{}; } parameters;
+        auto* index = input<U::FIntProperty>(equip, STR("Index"), offsetof(Parameters, index));
+        auto* prev = input<U::FBoolProperty>(equip, STR("Prev"), offsetof(Parameters, prev));
+        if (!allowed || allowed != can_equip->GetReturnProperty() || allowed->GetOffset_Internal() != 0 ||
+            can_equip->GetOuterPrivate() != pawn->GetClassPrivate() || can_equip->GetNumParms() != 1 ||
+            can_equip->GetParmsSize() != sizeof(bool) || !index || !prev || equip->GetReturnProperty() ||
+            equip->GetOuterPrivate() != pawn->GetClassPrivate() || equip->GetNumParms() != 2 ||
+            equip->GetParmsSize() < offsetof(Parameters, prev) + 1 || equip->GetParmsSize() > sizeof(Parameters) ||
+            equip->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
+            return result(lua, false, "stock_host_camera_equip_schema_unavailable");
+        bool eligible{};
+        pawn->ProcessEvent(can_equip, &eligible);
+        if (!eligible || !current_player(next.seat)) return result(lua, false, "stock_host_camera_equip_refused");
+
+        if (source_index >= 0)
+        {
+            target_index = empty_slot;
+            U::CastField<U::FStructProperty>(loadout->GetInner())->CopyCompleteValue(slots.GetRawPtr(target_index), item);
+            bag.RemoveValues(source_index, 1);
+        }
+        index->SetPropertyValueInContainer(&parameters, target_index);
+        prev->SetPropertyValueInContainer(&parameters, false);
+        pawn->ProcessEvent(equip, &parameters);
+        next.seat.held = object_field(pawn, STR("EquipedItem"));
+        next.seat.mirrored = next.seat.held.Get() != nullptr;
+        auto* actor_ammo = field<U::FIntProperty>(next.seat.held.Get(), STR("Ammo"));
+        if (!current_player(next.seat) || selected->GetPropertyValueInContainer(stock) != target_index ||
+            !matching_local_item(next) || slots.Num() != slot_count || bag.Num() != bag_count - (source_index >= 0 ? 1 : 0) ||
+            !actor_ammo || actor_ammo->GetPropertyValueInContainer(next.seat.held.Get()) != loaded ||
+            schema.ammo->GetPropertyValueInContainer(slots.GetRawPtr(target_index)) != loaded)
+            return result(lua, false, "mutation_unverified_stock_host_camera_equip");
+        return result(lua, true, "stock_camera_equipped");
     }
 }
 
@@ -605,10 +850,24 @@ namespace silverfish::native_guest_primary_input
     {
         if (!enabled()) return;
         clear_scope();
-        lua.register_function("SilverfishSetNativeGuestPrimaryScope", set_scope);
-        lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", take);
-        lua.register_function("SilverfishClearNativeGuestPrimaryScope", clear);
-        if (fixtures()) lua.register_function("SilverfishProbeNativeGuestPrimaryInput", probe);
+        if (host_enabled())
+        {
+            lua.register_function("SilverfishSetNativeHostCameraScope", [](const Lua& lua) { return set_scope(lua, true); });
+            lua.register_function("SilverfishTakeNativeHostCameraIntent", take);
+            lua.register_function("SilverfishClearNativeHostCameraScope", clear);
+            if (fixtures(true))
+            {
+                lua.register_function("SilverfishProbeNativeHostCameraInput", probe);
+                lua.register_function("SilverfishEquipNativeHostCameraFixture", equip_host_fixture);
+            }
+        }
+        else
+        {
+            lua.register_function("SilverfishSetNativeGuestPrimaryScope", [](const Lua& lua) { return set_scope(lua, false); });
+            lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", take);
+            lua.register_function("SilverfishClearNativeGuestPrimaryScope", clear);
+            if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestPrimaryInput", probe);
+        }
     }
 
     void clear_scope()

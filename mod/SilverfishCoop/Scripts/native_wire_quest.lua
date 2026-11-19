@@ -54,6 +54,8 @@ local item_quantity = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 
 local board_id, xp_reward, cash_reward, final_step = 5, 1, 0, 2
+local wire_board = {map = meet.map, world_path = world_path, board_path = board_path,
+    board_name = meet.board_name, board_id = board_id, quest_id = meet.quest_id}
 local preflight_op = "native-wire-quest-preflight"
 local start_op = "native-wire-quest-start"
 local approach_op = "native-wire-quest-approach"
@@ -120,12 +122,12 @@ local function controlled(detail, world, local_player)
         and same(pawn:GetWorld(), world) and same(controller:GetWorld(), world)
 end
 
-local function live_board(world, instance)
-    local board = StaticFindObject(board_path)
-    if not exact(board, board_class) or board:GetFullName() ~= meet.board_name
+local function live_board(world, instance, profile)
+    local board = StaticFindObject(profile.board_path)
+    if not exact(board, board_class) or board:GetFullName() ~= profile.board_name
         or not same(board:GetWorld(), world) or not board:HasAuthority() or board:IsActorBeingDestroyed()
         or not same(board["As Game Instance FP"], instance)
-        or board.TurnIn_ID ~= board_id or board.BountyBoard_RedeemableHere ~= true
+        or board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
         or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= false
         or board.ShowAllContracts ~= false then
         refused("board_unqualified")
@@ -160,13 +162,14 @@ local function in_reach(point, origin, anchor, reach)
         and distance_squared(point, anchor) <= reach ^ 2
 end
 
-local function context_for(state, phase, name, approach)
+local function context_for(state, phase, name, approach, profile)
+    profile = profile or wire_board
     if type(name) ~= "string" or #name > 512 or name:find("%c") or not name:match("^Player_FP_C ") then
         refused("pawn_name_unqualified")
     end
     local host, world = state.local_pawn, state.world
-    if not enabled or phase ~= "hosting" or state.map ~= meet.map or state.listening ~= true or state.server ~= false
-        or not valid(world) or world:GetFullName() ~= "World " .. world_path
+    if not enabled or phase ~= "hosting" or state.map ~= profile.map or state.listening ~= true or state.server ~= false
+        or not valid(world) or world:GetFullName() ~= "World " .. profile.world_path
         or not controlled(host, world, true) or not same(state.controller, host.controller_object) then
         refused("listen_host_unavailable")
     end
@@ -196,13 +199,13 @@ local function context_for(state, phase, name, approach)
     end
     if pawn.Dead ~= false or pawn:GetFullName() ~= name then refused("actor_unavailable") end
 
-    local board, box = live_board(world, instance)
+    local board, box = live_board(world, instance, profile)
     local origin, anchor, reach = interaction_geometry(pawn, board, box)
     if not approach and not in_reach(pawn:K2_GetActorLocation(), origin, anchor, reach) then
         refused("board_out_of_reach")
     end
     return {world = world, host = host.pawn, instance = instance, save = save, interactor = pawn,
-        receiving_save = receiving_save, board = board, key = fname(meet.quest_id),
+        receiving_save = receiving_save, board = board, key = fname(profile.quest_id),
         origin = origin, anchor = anchor, reach = reach}
 end
 
@@ -267,14 +270,19 @@ local function row_for(rows, key)
     return row
 end
 
-function meet.preflight(state, phase, name)
-    local context = context_for(state, phase, name)
+local function stock_quest_table()
     local source = StaticFindObject(quest_table)
     local schema = valid(source) and source:GetRowStruct()
     if not valid(source) or source:GetFullName() ~= "DataTable " .. quest_table
         or not valid(schema) or schema:GetFullName() ~= "UserDefinedStruct " .. quest_schema then
         refused("quest_table_unqualified")
     end
+    return source
+end
+
+function meet.preflight(state, phase, name)
+    local context = context_for(state, phase, name)
+    local source = stock_quest_table()
     context.template = source:FindRow(meet.quest_id)
     context.rewards = recipe(context.template)
     context.objective = context.template[objective_items][1]
@@ -324,9 +332,9 @@ end
 local floor_offsets = {{0, 110}, {110, 0}, {0, -110}, {-110, 0}, {85, 85}, {-85, 85}, {85, -85}, {-85, -85}}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
-local function approach_board(state, phase, name)
+local function approach_board(state, phase, name, profile)
     if not fixtures then refused("fixture_disabled") end
-    local context = context_for(state, phase, name, true)
+    local context = context_for(state, phase, name, true, profile)
     local pawn, board, anchor = context.interactor, context.board, context.anchor
     local capsule = pawn.CapsuleComponent
     local half_height = valid(capsule) and capsule:GetScaledCapsuleHalfHeight()
@@ -357,7 +365,7 @@ local function approach_board(state, phase, name)
                     if same(pawn:GetWorld(), context.world) and in_reach(actual, context.origin, anchor, context.reach)
                         and distance_squared(actual, target) <= 625 then
                         pawn:ForceNetUpdate()
-                        return "exact stock Copper Wire board approach verified"
+                        return profile and "exact stock quest board approach verified" or "exact stock Copper Wire board approach verified"
                     end
                 end
             end
@@ -375,6 +383,12 @@ local function approach_board(state, phase, name)
     end
     refused("fixture_no_safe_stand_point")
 end
+
+meet.stock_board_context = context_for
+meet.stock_board_approach = approach_board
+meet.stock_quest_table = stock_quest_table
+meet.stock_row = row_for
+meet.stock_flag = flag
 
 function meet.command(fields, state, phase)
     local operation = fields[2]

@@ -62,6 +62,7 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--native-guest", action="store_true",
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
+    host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")
@@ -138,7 +139,7 @@ def parser() -> argparse.ArgumentParser:
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
-        "native-campaign-npc-approach",
+        "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",
         "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
@@ -146,7 +147,10 @@ def parser() -> argparse.ArgumentParser:
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
         "native-loot-claim", "native-loot-open-fixture", "native-loot-crate-fixture", "native-loot-view-fixture",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",
-        "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-xp-fixture",
+        "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-capture-fixture", "native-turret-photo-shutter",
+        "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",
+        "native-host-camera-aim-fixture", "native-host-camera-equip-fixture", "refresh-invite",
+        "native-computer-board-preflight", "native-computer-board-approach",
         "native-inventory-list",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
@@ -205,7 +209,8 @@ async def execute(opts):
                         native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
                         native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone, max_guests=opts.max_guests,
                         expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
-                        guest_regen=opts.native_guest_regen, start_preset=opts.native_start_preset,
+                        guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness,
+                        start_preset=opts.native_start_preset,
                         world_seed=opts.native_world_seed,
                         extraction=None if opts.native_extraction_keep is None else (
                             opts.native_extraction_keep, opts.native_extraction_backpacks, opts.native_extraction_lose_slot))

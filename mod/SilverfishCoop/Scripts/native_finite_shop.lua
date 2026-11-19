@@ -1,5 +1,6 @@
 local shop = {}
 local pickup = require("native_pickup")
+local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -20,6 +21,10 @@ local merchants = {
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
 local shop_class = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
+local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
+local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local panel_path = "/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C"
 local widget_library = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local max_money, max_offers = 2147483647, 128
@@ -70,7 +75,29 @@ local function guid(value)
     return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value:find("[^0]") and value or nil
 end
 
-local function merchant(state, phase, pawn_name)
+local function canonical_host(state, detail, pawn_name)
+    local pawn, controller = detail.pawn, state.controller
+    if not exact(pawn, pawn_class) or not exact(controller, controller_class)
+        or not same(detail.controller_object, controller) or not same(pawn.Controller, controller)
+        or not same(controller.Pawn, pawn) or not same(pawn:GetWorld(), state.world)
+        or not same(controller:GetWorld(), state.world) or not pawn:HasAuthority() or not controller:HasAuthority()
+        or not pawn:IsLocallyControlled() or not controller:IsLocalController() or controller.Loading ~= false
+        or pawn:IsActorBeingDestroyed() or controller:IsActorBeingDestroyed() or pawn.Dead ~= false
+        or players.is_downed(pawn) ~= false or pawn:GetFullName() ~= pawn_name then
+        refused("exact_standing_host_unavailable")
+    end
+    local driver, instance = state.world.NetDriver, state.world.OwningGameInstance
+    if not valid(driver) or not same(driver.World, state.world) or valid(driver.ServerConnection)
+        or not exact(instance, instance_class) or not same(instance["As Player FP"], pawn)
+        or not same(pawn["As Game Instance FP"], instance)
+        or not exact(instance.SaveSlot_Ref, save_class) or not same(pawn.Save, instance.SaveSlot_Ref)
+        or not finite(pawn.Save.PlayerHealth) or pawn.Save.PlayerHealth <= 0 then
+        refused("exact_host_canonical_save_unavailable")
+    end
+    return pawn, instance.SaveSlot_Ref
+end
+
+local function merchant(state, phase, pawn_name, allow_host)
     local profile = merchants[state.map]
     if not enabled or not profile or phase ~= "hosting" or not state.listening or state.server ~= false
         or not valid(state.world) then refused("exact_listen_world_unavailable") end
@@ -78,10 +105,18 @@ local function merchant(state, phase, pawn_name)
     if state.world:GetFullName() ~= "World " .. world then refused("exact_listen_world_unavailable") end
     local target_name = "Shop_BP_C " .. world .. ":PersistentLevel." .. profile.actor
     local merchant_data = merchant_data_root .. profile.data .. "." .. profile.data
-    local accepted, pawn, stock = pcall(pickup.enrolled, state, phase, pawn_name)
-    if not accepted or not valid(pawn) or not valid(stock) or same(pawn.Save, stock) or pawn.Dead ~= false
-        or not finite(pawn.Save.PlayerHealth) or pawn.Save.PlayerHealth <= 0 then
-        refused("exact_standing_guest_unavailable")
+    local pawn, stock
+    local detail = state.local_pawn
+    if detail and detail.name == pawn_name then
+        if not allow_host or not profile.barter then refused("scientist_host_camera_only") end
+        pawn, stock = canonical_host(state, detail, pawn_name)
+    else
+        local accepted
+        accepted, pawn, stock = pcall(pickup.enrolled, state, phase, pawn_name)
+        if not accepted or not valid(pawn) or not valid(stock) or same(pawn.Save, stock) or pawn.Dead ~= false
+            or not finite(pawn.Save.PlayerHealth) or pawn.Save.PlayerHealth <= 0 then
+            refused("exact_standing_guest_unavailable")
+        end
     end
     local actor
     for _, candidate in ipairs(FindAllOf("Shop_BP_C") or {}) do
@@ -150,7 +185,7 @@ local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 function shop.fixture_position(state, phase, pawn_name)
     if not fixtures then refused("fixture_unavailable") end
-    local context = merchant(state, phase, pawn_name)
+    local context = merchant(state, phase, pawn_name, true)
     local pawn, actor = context.pawn, context.actor
     local anchor = actor.Box:K2_GetComponentLocation()
     local range = pawn.InteractionRange
@@ -164,13 +199,15 @@ function shop.fixture_position(state, phase, pawn_name)
         refused("fixture_merchant_rotation_unavailable")
     end
     local aim = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
+    local ignored = { actor, pawn }
+    if not same(pawn, state.local_pawn.pawn) then ignored[#ignored + 1] = state.local_pawn.pawn end
     for _, offset in ipairs(offsets) do
         local x, y = anchor.X + offset[1], anchor.Y + offset[2]
         for _, height in ipairs({150, 250, 400}) do
             local hit = {}
             local start, finish = {X = x, Y = y, Z = anchor.Z + height}, {X = x, Y = y, Z = anchor.Z - 380}
             local found = trace:LineTraceSingle(pawn, start, finish, 0, false,
-                { actor, pawn, state.local_pawn.pawn }, 0, hit, true, trace_color, trace_color, 0)
+                ignored, 0, hit, true, trace_color, trace_color, 0)
             hit = hit.OutHit or hit
             if found and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= 0.7
                 and hit.ImpactPoint.Z < start.Z - 1 and hit.ImpactPoint.Z >= finish.Z then
@@ -192,7 +229,7 @@ end
 function shop.command(fields, state, phase)
     local operation = fields[2]
     if operation == "native-finite-shop-approach" then
-        if #fields ~= 3 then refused("fixture_exact_guest_required") end
+        if #fields ~= 3 then refused("fixture_exact_participant_required") end
         return shop.fixture_position(state, phase, fields[3])
     end
     local action = actions[operation]
@@ -203,7 +240,8 @@ function shop.command(fields, state, phase)
     local native = _G[action.native]
     if type(native) ~= "function" then refused("native_merchant_unavailable") end
     local prepared, context, panel = pcall(function()
-        local exact_merchant = merchant(state, phase, fields[3])
+        local allow_host = operation == "native-finite-shop-list" or operation == "native-finite-shop-buy"
+        local exact_merchant = merchant(state, phase, fields[3], allow_host)
         return exact_merchant, quote_panel(exact_merchant)
     end)
     if not prepared then
