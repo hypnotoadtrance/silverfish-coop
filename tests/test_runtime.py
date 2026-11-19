@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from tools.silverfish import runtime
+from tools.silverfish import runtime, service
 
 
 class StageBackendTests(unittest.TestCase):
@@ -18,6 +18,9 @@ class StageBackendTests(unittest.TestCase):
         game.parent.mkdir(parents=True)
         game.write_bytes(b"game fixture")
         self.binaries = game.parent
+        self.scripts = self.binaries / runtime.MOD_SCRIPTS
+        self.scripts.mkdir(parents=True)
+        (self.scripts / "main.lua").write_bytes(b"return nil\n")
         self.manifest = self.stage / "silverfish-coop-stage.json"
         self.metadata = {"schema": 1, "game_build": "a" * 64}
         runtime.write_json(self.manifest, self.metadata)
@@ -33,14 +36,41 @@ class StageBackendTests(unittest.TestCase):
         self.metadata["cpp_death_lab"] = hashes
         runtime.write_json(self.manifest, self.metadata)
 
-    def test_stock_and_cooked_stage_preserve_their_fingerprints(self):
+    def test_stock_and_cooked_stage_have_distinct_fingerprints(self):
         stock = runtime.staged_build(self.work)
-        self.assertEqual(stock, self.metadata["game_build"])
+        self.assertRegex(stock, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(stock, self.metadata["game_build"])
         self.assertIsNone(runtime.native_death_backend(self.work))
         with patch.object(runtime, "has_native_death_patch", return_value=True):
             self.assertEqual(runtime.native_death_backend(self.work), "overlay")
-            expected = hashlib.sha256((stock + ":native-death-lab:1").encode("ascii")).hexdigest()
-            self.assertEqual(runtime.staged_build(self.work), expected)
+            self.assertNotEqual(runtime.staged_build(self.work), stock)
+
+    def test_lua_change_makes_old_invitation_incompatible(self):
+        script = self.scripts / "commands.lua"
+        script.write_bytes(b"return {}\n")
+        build = runtime.staged_build(self.work)
+        invite = self.work / "invite.json"
+        runtime.write_json(invite, {"schema": 1, "game_build": build, "protocol_version": service.PROTOCOL,
+                                   "host": "127.0.0.1", "port": 7777, "guest_id": "guest", "character_id": "scout",
+                                   "certificate": "fixture", "credential": "fixture"})
+        script.write_bytes(b"return {}\r\n")
+        self.assertEqual(service.load_invite(invite, runtime.staged_build(self.work))["game_build"], build)
+
+        script.write_bytes(b"return {'another command'}\n")
+        with self.assertRaisesRegex(ValueError, "game/mod build are incompatible"):
+            service.load_invite(invite, runtime.staged_build(self.work))
+
+        script.unlink()
+        self.assertNotEqual(runtime.staged_build(self.work), build)
+
+    def test_launcher_code_changes_the_peer_fingerprint(self):
+        launcher = self.work / "tools/silverfish/service.py"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(b"PROTOCOL = 1\n")
+        with patch.object(runtime, "REPO", self.work):
+            baseline = runtime.staged_build(self.work)
+            launcher.write_bytes(b"PROTOCOL = 2\n")
+            self.assertNotEqual(runtime.staged_build(self.work), baseline)
 
     def test_cpp_stage_is_distinct_and_rejects_changed_binaries(self):
         stock = runtime.staged_build(self.work)

@@ -37,6 +37,7 @@ MENU = "/Game/Classes/Maps/MainMenu_P"
 CPP_MOD_NAME = "SilverfishCoopNative"
 CPP_RUNTIME_DLL = Path("ue4ss/UE4SS.dll")
 CPP_ADDON_DLL = Path(f"ue4ss/Mods/{CPP_MOD_NAME}/dlls/main.dll")
+MOD_SCRIPTS = Path("ue4ss/Mods/SilverfishCoop/Scripts")
 DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
 DEATH_PATCH_HASHES = {
     ".pak": "75e7144577253917f6da7312ef5e585b12fb728226a22b0938323751a6b555cd",
@@ -216,7 +217,7 @@ def qualified_authored_routes(work: Path) -> bool:
 
 
 def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
-    path = (work / "stage" / SHIPPING).parent / "ue4ss" / "Mods" / "SilverfishCoop" / "Scripts" / name
+    path = (work / "stage" / SHIPPING).parent / MOD_SCRIPTS / name
     return path.is_file() and (marker is None or marker in path.read_text(encoding="utf-8"))
 
 
@@ -229,6 +230,16 @@ def staged_guest_controls(work: Path) -> bool:
     ))
 
 
+def _code_fingerprint(directory: Path, extension: str) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in directory.rglob(f"*{extension}") if item.is_file()):
+        digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        contents = path.read_bytes().replace(b"\r\n", b"\n")
+        digest.update(hashlib.sha256(contents).digest())
+    return digest.hexdigest()
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -237,14 +248,18 @@ def staged_build(work: Path) -> str:
     game_build = metadata.get("game_build")
     if not isinstance(game_build, str) or len(game_build) != 64:
         raise ValueError("Stage game fingerprint is invalid")
+    scripts = (stage / SHIPPING).parent / MOD_SCRIPTS
+    if not (scripts / "main.lua").is_file():
+        raise ValueError("Stage is missing the Silverfish co-op scripts")
+    parts = ["silverfish-coop-content-v1", game_build, _code_fingerprint(scripts, ".lua"),
+             _code_fingerprint(REPO / "tools/silverfish", ".py")]
     backend = native_death_backend(work, metadata)
     if backend == "overlay":
-        return hashlib.sha256((game_build + ":native-death-lab:1").encode("ascii")).hexdigest()
+        parts.append("native-death-lab:1")
     if backend == "cpp":
         native = metadata["cpp_death_lab"]
-        fingerprint = ":".join((game_build, "native-death-cpp", native["runtime"], native["addon"]))
-        return hashlib.sha256(fingerprint.encode("ascii")).hexdigest()
-    return game_build
+        parts.extend(("native-death-cpp", native["runtime"], native["addon"]))
+    return hashlib.sha256(":".join(parts).encode("ascii")).hexdigest()
 
 
 def spare_udp_port() -> int:
@@ -1074,6 +1089,13 @@ class Bridge:
                 elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
                     data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
                                                                  "pawn": fields[3], "guid": fields[4], "state": fields[5]}
+                elif (fields[0] == "native-guest-inventory-use-view" and len(fields) == 6
+                      and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
+                      and 0 < (sequence := int(fields[1])) < 2**53
+                      and 0 < len(fields[2]) <= 256 and 0 < len(fields[3]) <= 512 and valid_guid(fields[4])
+                      and fields[5] in {"selecting", "confirming", "using", "used", "refused"}):
+                    data["native_guest_inventory_use_view"] = {"sequence": sequence, "map": fields[2],
+                                                                "pawn": fields[3], "guid": fields[4], "state": fields[5]}
                 elif fields[0] == "native-bag-projection" and len(fields) == 7:
                     data["native_bag_projection"] = {"map": fields[1], "epoch": fields[2], "owner": fields[3],
                                                      "count": int(fields[4]), "requested": int(fields[5]), "status": fields[6]}

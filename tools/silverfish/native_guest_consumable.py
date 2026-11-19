@@ -7,6 +7,7 @@ from .native_gold import valid_guid
 
 
 ACTION = "native-guest-bandage"
+BANDAGE_CLASS = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 
 
 async def use(host, bridge, character: str, guid: str, operation_id: str) -> dict:

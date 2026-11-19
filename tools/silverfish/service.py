@@ -3115,6 +3115,7 @@ class Client:
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.last_primary_intent = 0
+        self.last_inventory_use = 0
         self.last_crate_intent = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
@@ -3411,6 +3412,46 @@ class Client:
         with contextlib.suppress(OSError, RuntimeError):
             self.last_game = await self.bridge.command("native-inventory-view-equip-result", str(sequence), area, guid, outcome, timeout=2)
 
+    async def service_inventory_use(self, active: bool) -> None:
+        view = self.last_game.get("native_guest_inventory_use_view", {})
+        sequence = view.get("sequence")
+        if view.get("state") != "using" or type(sequence) is not int or not self.last_inventory_use < sequence < 2**53:
+            return
+        self.last_inventory_use = sequence
+        area, pawn, guid = (view.get(key) for key in ("map", "pawn", "guid"))
+        if (not active or self.stopping or not self.host_session or not self.zone_epoch
+                or time.monotonic() - self.gameplay_seen >= 3 or area != self.last_game.get("map")
+                or not pawn or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
+                or not native_gold.valid_guid(guid)):
+            return
+        epoch = self.host_session, self.zone_epoch
+        operation = uuid.uuid5(self.bridge.input_namespace, f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-use:{sequence}").hex
+        outcome = "refused"
+        try:
+            inspected = await self.gameplay_action("native-inventory-list", operation, "0")
+            page = inspected["native_inventory"]
+            if (page["owner"] != self.invite["character_id"] or page["offset"] != 0
+                    or not any(row["guid"] == guid and row["source"] == "backpack"
+                               and row["class_path"] == native_guest_consumable.BANDAGE_CLASS for row in page["items"])):
+                raise ValueError("The selected Bandage is no longer on the authenticated inventory page")
+            current = self.bridge.snapshot() or {}
+            if ((self.host_session, self.zone_epoch) != epoch or current.get("state") != "connected"
+                    or current.get("map") != area or current.get("native_guest_inventory_use_view") != view
+                    or current.get("pawns", {}).get("local", {}).get("name") != pawn):
+                raise ValueError("The inventory Bandage confirmation expired")
+            consumed = await self.gameplay_action(native_guest_consumable.ACTION, operation, guid)
+            report = consumed["native_guest_bandage"]
+            if (report.get("state"), report.get("map"), report.get("guid")) != ("used", area, guid):
+                raise ValueError("The host did not verify use of the selected Bandage")
+            outcome = "used"
+            self.control.event("native_guest_inventory_used", operation_id=operation, view_sequence=sequence, **consumed)
+        except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
+            self.control.event("native_guest_inventory_use_rejected", operation_id=operation, view_sequence=sequence,
+                               reason=str(error))
+        with contextlib.suppress(OSError, RuntimeError):
+            self.last_game = await self.bridge.command("native-inventory-view-use-result", str(sequence), area, guid,
+                                                       outcome, timeout=2)
+
     async def renew_native_interactions(self) -> None:
         features = (
             (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
@@ -3680,6 +3721,7 @@ class Client:
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
             await self.service_inventory_equip(active)
+            await self.service_inventory_use(active)
             if self.shop_view:
                 await self.shop_view.sync(self, active)
             interactions = self.bridge.interactions()

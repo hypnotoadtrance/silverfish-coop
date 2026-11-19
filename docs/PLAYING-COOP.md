@@ -63,7 +63,7 @@ Leave the host and guest launchers running during a brief network interruption. 
 
 Reuse the invitation and character selection for a later session. Keep the host campaign's `save` and `game-user` directories together. The native campaign uses both for its checkpoint and stock save generations. Restart the host with the same campaign name and native flags. Its saved zone is selected on startup.
 
-After staging the same updated build on both PCs, the host can run `action --campaign expedition refresh-invite --target GUEST_ID`. This updates the existing invitation for that guest's current endpoint and build fingerprint. It keeps the guest and selected character IDs.
+The invitation fingerprint covers the game, the staged Lua scripts, the co-op launcher code, and the native add-on when enabled. After both PCs update to the same mod revision, the host can run `action --campaign expedition refresh-invite --target GUEST_ID` to refresh the existing invitation. The guest and selected character IDs stay the same.
 
 Use the guest's `stop` action to close that guest instance. Use the host's `checkpoint` and `stop` actions for a saved shutdown.
 
@@ -84,11 +84,11 @@ Invitations from a current matched native stage also enable the guest's stock in
 | --- | --- |
 | `--native-start-preset wanderer` | Starts a fresh stock Wanderer campaign at the Observatory using Mercy rules. Add `--native-world-seed N` for a fixed initial seed from 1 to 999999. Omit `--start-zone` and the extraction switches when creating this preset. Omit the preset and seed when resuming. |
 | `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
-| `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Live verification covers up to two guests on loopback. |
+| `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Loopback testing covered four guests at once. |
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
-| Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection, Home twice confirms a supported equip, and End closes it. |
+| Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection. Home twice equips supported gear or uses one clean Bandage. End cancels a confirmation or closes the overlay. Reopen it to refresh the inventory. |
 | Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock firearm and reload controls explicitly. The stock primary path handles one shot per press. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.

@@ -9,6 +9,7 @@ local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
+local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local equippable_paths = {
     ["/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
@@ -160,7 +161,9 @@ local function page(fields)
         seen[guid] = true
         local equippable = (source == "backpack" or source == "equipment") and equippable_paths[class] == true
         local name = item:gsub("_", " ")
-        records[#records + 1] = {guid = guid, class = class, equippable = equippable,
+        local usable = source == "backpack" and class == bandage_path
+        if usable then name = "Bandage" end
+        records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
             name = name, label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
     return offset, total, records
@@ -175,7 +178,17 @@ local function show()
         lines[#lines + 1] = (index == row.selection and "> " or "  ") .. entry.label
     end
     local selected = records[row.selection]
-    if row.equip_state == "confirming" then
+    if row.use_state == "confirming" then
+        lines[#lines + 1] = "Use one Bandage? Home confirms. End cancels."
+    elseif row.use_state == "using" then
+        lines[#lines + 1] = "Bandage use pending"
+    elseif row.use_state == "used" then
+        lines[#lines + 1] = "Bandage used. Reopen inventory to refresh."
+    elseif row.use_state == "refused" then
+        lines[#lines + 1] = "Bandage use unavailable. Reopen inventory to refresh."
+    elseif row.use_state == "selecting" then
+        lines[#lines + 1] = "Page Up / Page Down selects. Home uses one Bandage. End closes."
+    elseif row.equip_state == "confirming" then
         lines[#lines + 1] = "Equip " .. selected.name .. "? Home confirms. End cancels."
     elseif row.equip_state == "equipping" then
         lines[#lines + 1] = "Equip pending"
@@ -225,6 +238,7 @@ end
 local function select_item()
     local selected = observation.records[observation.selection]
     observation.equip_state = selected and selected.equippable and "selecting" or "read_only"
+    observation.use_state = selected and selected.usable and "selecting" or nil
     observation.confirm_guid = nil
 end
 
@@ -233,11 +247,11 @@ local function choose(current, action)
     local row = observation
     local selected = row.records[row.selection]
     if action == "back" then
-        if row.equip_state == "confirming" then
+        if row.equip_state == "confirming" or row.use_state == "confirming" then
             select_item()
         elseif ready(current, true) then
             remove_display()
-            row.state, row.equip_state = "closed", nil
+            row.state, row.equip_state, row.use_state = "closed", nil, nil
             emit(current, row.sequence, false)
             return true
         end
@@ -246,6 +260,12 @@ local function choose(current, action)
             local direction = action == "up" and -1 or 1
             row.selection = math.min(#row.records, math.max(1, row.selection + direction))
             select_item()
+        elseif action == "confirm" and selected.usable then
+            if row.use_state == "confirming" and row.confirm_guid == selected.guid then
+                row.request_guid, row.use_state = selected.guid, "using"
+            else
+                row.use_state, row.confirm_guid = "confirming", selected.guid
+            end
         elseif action == "confirm" and selected.equippable then
             if row.equip_state == "confirming" and row.confirm_guid == selected.guid then
                 row.request_guid = selected.guid
@@ -299,7 +319,8 @@ function inventory_view.command(fields, state, phase)
     local operation = fields[2]
     if operation ~= "native-inventory-view-render" and operation ~= "native-inventory-view-unavailable"
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
-        and operation ~= "native-inventory-view-equip-result" then return end
+        and operation ~= "native-inventory-view-equip-result"
+        and operation ~= "native-inventory-view-use-result" then return end
     local current = context(state, phase)
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
@@ -323,6 +344,14 @@ function inventory_view.command(fields, state, phase)
         observation.equip_state = fields[6]
         show()
         return "verified inventory equip result displayed"
+    elseif operation == "native-inventory-view-use-result" then
+        if #fields ~= 6 or observation.use_state ~= "using" or fields[5] ~= observation.request_guid
+            or (fields[6] ~= "used" and fields[6] ~= "refused") or not ready(current, false) then
+            error("The authenticated Bandage result does not match the pending use", 0)
+        end
+        observation.use_state = fields[6]
+        show()
+        return "verified inventory Bandage result displayed"
     end
     if observation.state ~= "pending" then
         error("The authenticated inventory view is already displayed", 0)
@@ -356,6 +385,11 @@ function inventory_view.rows(state, phase, status_row)
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-equip-view", observation.sequence, current.map,
             current.name, selected and selected.guid or "-", observation.equip_state)
+    end
+    if observation.use_state and ready(current, false) then
+        local selected = observation.records[observation.selection]
+        rows[#rows + 1] = status_row("native-guest-inventory-use-view", observation.sequence, current.map,
+            current.name, selected.guid, observation.use_state)
     end
     return rows
 end
