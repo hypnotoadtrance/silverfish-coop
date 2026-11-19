@@ -739,6 +739,26 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     end
     table.insert(ignore, 1, door)
     local candidates = {}
+    local indoor_top
+    if headless and not far and tag == "Refine_DD"
+        and state.map == "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
+        and door:GetFullName() == "Dungeon_TransitionDoor_BP_C " .. state.map
+            .. ".DryDock_P:PersistentLevel.Dungeon_TransitionDoor_BP_C_0" then
+        local start = StaticFindObject(state.map .. ".DryDock_P:PersistentLevel.PlayerStart_1")
+        local point = valid(start) and start:K2_GetActorLocation()
+        if not valid(start) or not same(start:GetWorld(), state.world)
+            or not same(start:GetClass(), StaticFindObject("/Script/Engine.PlayerStart"))
+            or not vector(point) or math.abs(point.X - origin.X + 250) > 2
+            or math.abs(point.Y - origin.Y) > 2 or math.abs(point.Z - origin.Z - 142) > 2
+            or math.abs(direction.X + 1) > .01 or math.abs(direction.Y) > .01 or math.abs(direction.Z) > .01 then
+            error("The exact Dry Dock spawn near the Refinery door changed", 0)
+        end
+        -- Start the floor ray inside the room at the stock spawn height.
+        indoor_top = point.Z + 40
+        local local_pawn = state.local_pawn and state.local_pawn.pawn
+        local side = same(local_pawn, pawn) and 1 or -1
+        candidates = {{250, side * 65}, {218, side * 75}, {250, 0}}
+    end
     for _, length in ipairs(far and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
         for _, offset in ipairs({ 0, 90, -90 }) do
             candidates[#candidates + 1] = {length, offset}
@@ -754,7 +774,8 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
             end
         end
     end
-    local top, bottom = math.max(anchor.Z, origin.Z) + 185, math.min(anchor.Z, origin.Z) - (far and 550 or 325)
+    local top = indoor_top or math.max(anchor.Z, origin.Z) + 185
+    local bottom = math.min(anchor.Z, origin.Z) - (far and 550 or 325)
     for _, offset in ipairs(candidates) do
         local x = origin.X + offset[1] * direction.X + offset[2] * lateral_x
         local y = origin.Y + offset[1] * direction.Y + offset[2] * lateral_y
