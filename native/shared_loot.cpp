@@ -278,12 +278,10 @@ namespace
 
     bool qualify_authored_opener(Address pawn, Address save, Address stock, Context& context)
     {
-        Unreal::UWorld* previous = nullptr;
-        for (const auto& profile : silverfish::authored_loot::profiles)
+        for (const auto* path : silverfish::authored_loot::worlds)
         {
-            auto* world = find<Unreal::UWorld>(profile.world);
-            if (!world || world == previous) continue;
-            previous = world;
+            auto* world = find<Unreal::UWorld>(path);
+            if (!world) continue;
             Context next;
             next.world = world;
             if (qualify_opener(pawn, save, stock, next).empty())

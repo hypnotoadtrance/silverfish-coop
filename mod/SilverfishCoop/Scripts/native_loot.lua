@@ -239,6 +239,26 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
+    if scope.profile.index > 3 then
+        local root = scope.crate:K2_GetActorLocation()
+        local dx, dy = point.X - root.X, point.Y - root.Y
+        local horizontal = math.sqrt(dx * dx + dy * dy)
+        if finite(horizontal) and horizontal > 1 then
+            -- Stock focus should approach the actual query box side of the cabinet first.
+            for _, distance in ipairs({180, 130, 220}) do
+                for _, height in ipairs({50, 100, 0}) do
+                    local at = {X = point.X + distance * dx / horizontal, Y = point.Y + distance * dy / horizontal, Z = point.Z + height}
+                    if pawn:K2_TeleportTo(at, rotation) then
+                        local valid_scope, current = pcall(loot.qualify, state, phase, pawn_name, requested_crate)
+                        if valid_scope then
+                            pawn:ForceNetUpdate()
+                            return current
+                        end
+                    end
+                end
+            end
+        end
+    end
     for _, distance in ipairs({ 180, 240, 130 }) do
         for _, offset in ipairs({ { distance, 0 }, { -distance, 0 }, { 0, distance }, { 0, -distance } }) do
             for _, height in ipairs({ 50, 100, 0 }) do

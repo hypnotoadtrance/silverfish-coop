@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
-from tools.silverfish.authored_loot import LEGACY_CRATE, full_name
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
+from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, PLACEMENTS, full_name
+from tools.silverfish.generate_authored_loot_registry import outputs, survey
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, RAIL_YARD
 
 
 OTHER_CRATE = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
@@ -15,6 +16,30 @@ BRIDGE_CRATE = full_name(DEAD_BRIDGE, "LootCrate_Small_BP_C_1")
 PAWN = "exact local pawn"
 ITEM = {"actor": "stock Bandage", "class_path": "/Game/Classes/Items/Item_Bandage.Item_Bandage_C", "guid": "A" * 32}
 OPERATION = "f" * 32
+
+
+class AuthoredCrateRegistryTests(unittest.TestCase):
+    def test_first_three_profiles_and_rollout_counts_match_generated_files(self):
+        self.assertEqual(tuple(CRATES)[:3], (LEGACY_CRATE, OTHER_CRATE, BRIDGE_CRATE))
+        self.assertEqual(len(PLACEMENTS), 22)
+        self.assertEqual({area: tuple(CRATES.values()).count(area) for area in (CITY, RAIL_YARD, CISTERN)},
+                         {CITY: 7, RAIL_YARD: 7, CISTERN: 5})
+        repository = Path(__file__).resolve().parents[1]
+        for relative, content in outputs().items():
+            self.assertEqual((repository / relative).read_text(encoding="utf-8"), content)
+
+    def test_survey_excludes_every_explicit_loot_override_and_unqualified_map(self):
+        report = [r"PACKAGE Maps_OverWorld\City_01_P.umap"]
+        common = "Loot_Spawner1=Loot_Spawner1; Loot_Spawner=Loot_Spawner; SpawnSalt=-17; RootComponent=DefaultSceneRoot"
+        excluded = ("Loot_Override=Row", "Replenish_Mode=1", "GuaranteeSpawn=False", "IgnoreKarma=False",
+                    "Ping_IfOpened=False", "Loot Table_Items=Stock", "SpawnerExpectedValue=1")
+        for index, override in enumerate(("", *excluded)):
+            report.append(f"LootCrate_Small_BP_C LootCrate_Small_BP_C_{index} {common}" + (f"; {override}" if override else ""))
+        report.extend((r"PACKAGE Maps_OverWorld\Unknown_P.umap", f"LootCrate_Small_BP_C LootCrate_Small_BP_C_0 {common}"))
+        maps, placed, defaults = survey("\n".join(report))
+        self.assertEqual(len(maps), 2)
+        self.assertEqual(len(placed), len(excluded) + 2)
+        self.assertEqual(defaults, {(CITY, "LootCrate_Small_BP_C_0"): -17})
 
 
 class NativeLootTests(unittest.IsolatedAsyncioTestCase):
@@ -137,7 +162,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         states = {crate: {"map": area, "crate": crate, "state": "ready"}
                   for crate, area in native_loot.CRATES.items()}
         game = self.game(CROSSROADS, native_loot_crates=states)
-        rolls = {crate: self.roll(area, crate, str(index) * 32)
+        rolls = {crate: self.roll(area, crate, f"{index:032x}")
                  for index, (crate, area) in enumerate(native_loot.CRATES.items(), start=1)}
 
         async def project(_verb, status, crate, *, timeout):

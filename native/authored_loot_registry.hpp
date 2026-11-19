@@ -15,6 +15,14 @@ namespace silverfish::authored_loot
         std::int32_t salt;
     };
 
+    inline constexpr std::array worlds{
+        STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+    };
+
     inline constexpr std::array profiles{
         Profile{STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
                 STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_3"), -1911374248},
@@ -22,5 +30,43 @@ namespace silverfish::authored_loot
                 STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_9"), -564104064},
         Profile{STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"),
                 STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.LootCrate_Small_BP_C_1"), -1960753196},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_5"), -1685293152},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_7"), -436292608},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_9"), -140629248},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_11"), -1132847040},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_13"), -1857173376},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_15"), -1228919296},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.LootCrate_Small_BP_C_17"), -1284951360},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_0"), -1578844576},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_1"), -1652760384},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_3"), -1449629184},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_4"), -619281664},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_11"), -451063552},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_14"), -1014618368},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_15"), -780724480},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.LootCrate_Small_BP_C_1"), -1486678656},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.LootCrate_Small_BP_C_3"), -400280704},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.LootCrate_Small_BP_C_4"), -1515671264},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.LootCrate_Small_BP_C_5"), -1430707776},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.LootCrate_Small_BP_C_7"), -1247535616},
     };
 }

@@ -5,6 +5,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local client_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
+local legacy_fixture_profiles = 3
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local bindings, fixture_sequences = {}, {}
 local active_world
@@ -154,6 +155,57 @@ local function project(current)
     return "stock crate exhausted projection verified"
 end
 
+local function fixture_focus(pawn, box)
+    local camera = pawn.Camera
+    if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then
+        error("native_loot_crate_stock_fixture_camera_unavailable", 0)
+    end
+    local rotation, eye = camera.RelativeRotation, camera:K2_GetComponentLocation()
+    local center, extent = box:K2_GetComponentLocation(), box:GetScaledBoxExtent()
+    if not rotation or not eye or not center or not extent or not close_angle(rotation.Pitch, rotation.Pitch)
+        or not close_angle(rotation.Yaw, rotation.Yaw) or not close_angle(rotation.Roll, rotation.Roll) then
+        error("native_loot_crate_stock_fixture_camera_unavailable", 0)
+    end
+    local original = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
+    local ray = {center}
+    for _, axis in ipairs({{box:GetUpVector(), extent.Z}, {box:GetRightVector(), extent.Y}}) do
+        local direction, size = axis[1], axis[2]
+        if direction and type(size) == "number" and size > 0 and size <= 100 then
+            for _, sign in ipairs({1, -1}) do
+                local offset = sign * size * 0.35
+                ray[#ray + 1] = {X = center.X + offset * direction.X, Y = center.Y + offset * direction.Y, Z = center.Z + offset * direction.Z}
+            end
+        end
+    end
+    local invoked, consumed, detail = pcall(function()
+        for _, point in ipairs(ray) do
+            local dx, dy, dz = point.X - eye.X, point.Y - eye.Y, point.Z - eye.Z
+            local horizontal = math.sqrt(dx * dx + dy * dy)
+            if horizontal > 1 and horizontal < 1000 and math.abs(dz) < 1000 then
+                local aim = {Pitch = math.deg(math.atan(dz, horizontal)), Yaw = math.deg(math.atan(dy, dx)), Roll = 0}
+                camera:K2_SetWorldRotation(aim, false, {}, true)
+                pawn:LookTrace()
+                if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, box) then
+                    return SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+                end
+            end
+        end
+        local focused = pawn.InteractionTarget_Component
+        error("native_loot_crate_stock_fixture_focus_unavailable:" .. (valid(focused) and focused:GetFullName() or "-"), 0)
+    end)
+    local restored, matches = pcall(function()
+        if not same(pawn.Camera, camera) or not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then return false end
+        camera:K2_SetRelativeRotation(original, false, {}, true)
+        pawn:LookTrace()
+        local readback = camera.RelativeRotation
+        return readback and close_angle(readback.Pitch, original.Pitch) and close_angle(readback.Yaw, original.Yaw)
+            and close_angle(readback.Roll, original.Roll)
+    end)
+    if not restored or not matches then error("mutation_unverified_native_loot_crate_stock_fixture_camera", 0) end
+    if not invoked then error(consumed, 0) end
+    return invoked, consumed, detail
+end
+
 local function fixture(current)
     local _, box = scene(current)
     local pawn, crate = current.pawn, current.crate
@@ -166,10 +218,15 @@ local function fixture(current)
     local index = current.profile.index
     local before_active, before = SilverfishReadNativeLootCrateInput(index)
     if before_active ~= true then error("native_loot_crate_stock_fixture_scope_unavailable", 0) end
-    local original = pawn.InteractionTarget_Component
-    pawn.InteractionTarget_Component = box
-    local invoked, ok, detail = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
-    pawn.InteractionTarget_Component = valid(original) and original or nil
+    local invoked, ok, detail
+    if index > legacy_fixture_profiles then
+        invoked, ok, detail = fixture_focus(pawn, box)
+    else
+        local original = pawn.InteractionTarget_Component
+        pawn.InteractionTarget_Component = box
+        invoked, ok, detail = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
+        pawn.InteractionTarget_Component = valid(original) and original or nil
+    end
     local active, sequence = SilverfishReadNativeLootCrateInput(index)
     if not invoked or not ok or detail ~= "stock_started_consumed" or not active or sequence <= before
         or crate.Looted ~= false then
