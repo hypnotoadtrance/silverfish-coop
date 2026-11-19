@@ -136,6 +136,18 @@ class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
                 self.bridge.command.assert_awaited_once_with("native-inventory-view-use-result", "3", self.area,
                                                              self.guid, "refused", timeout=2)
 
+    async def test_exact_mre_dispatches_only_with_the_invited_capability(self):
+        page = self.page | {"items": [self.page["items"][0] | {"class_path": native_guest_consumable.MRE_CLASS}]}
+        self.client.gameplay_action = AsyncMock(return_value={"native_inventory": page})
+        await self.client.service_inventory_use(True)
+        self.client.gameplay_action.assert_awaited_once_with("native-inventory-list", self.operation, "0")
+        self.client.last_inventory_use = 0
+        self.client.invite["native_guest_mre"] = True
+        self.client.gameplay_action = AsyncMock(side_effect=[{"native_inventory": page},
+            {"native_guest_mre": {"state": "used", "map": self.area, "guid": self.guid}}])
+        await self.client.service_inventory_use(True)
+        self.client.gameplay_action.assert_awaited_with(native_guest_consumable.MRE, self.operation, self.guid)
+
     async def test_confirmation_and_stale_client_identity_do_not_contact_host(self):
         for changed, active in (({"state": "confirming"}, True), ({"map": "old-zone"}, True),
                                 ({"pawn": "old-pawn"}, True), ({}, False)):

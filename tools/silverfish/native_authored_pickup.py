@@ -5,7 +5,7 @@ import time
 
 from . import native_host_save, party
 from .native_gold import valid_guid
-from .travel import CITY, CROSSROADS, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
+from .travel import BOROUGH, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
 
 SOURCE = "observatory-comp-board"
@@ -20,6 +20,7 @@ SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
 POCKET_WATCH = "crossroads-pocket-watch"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
+BOROUGH_MRE = "borough-mre"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -36,6 +37,8 @@ SOURCES = {
                    "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
     SAVLO_RING: (SAVLO_ESTATE, f"Art_EvilEyeRing_C {SAVLO_ESTATE}.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
                  "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
+    BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
+                  "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

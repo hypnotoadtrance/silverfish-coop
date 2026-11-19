@@ -19,8 +19,10 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_mosby_station_view, native_mosby_tape
+from .native_guest_consumable import parse_mre
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
+from .native_host_save import CQC_DROP_SOURCES
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
@@ -294,7 +296,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
            expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
-           guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
+           guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False, guest_mre: bool = False,
            guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False):
@@ -310,6 +312,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_REGEN", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_MRE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
     env.pop("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES", None)
@@ -341,6 +344,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Stock guest regeneration requires native campaign guest ownership")
     if guest_sickness and (not native_guest or not native_zones):
         raise ValueError("Stock guest sickness requires native campaign guest ownership")
+    if guest_mre and (not native_zones or port is not None and not native_guest):
+        raise ValueError("Stock guest MRE use requires native campaign guest ownership")
     if native_zones and backend != "cpp":
         raise ValueError("Natural exit handling requires a staged C++ game")
     if native_zone_walls and not native_zones:
@@ -377,6 +382,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_GUEST_REGEN"] = "1"
     if guest_sickness:
         env["SILVERFISH_COOP_NATIVE_GUEST_SICKNESS"] = "1"
+    if guest_mre:
+        env["SILVERFISH_COOP_NATIVE_GUEST_MRE"] = "1"
     if native_zones:
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
@@ -445,6 +452,14 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
 async def stop_game(process) -> None:
     process.close_job()
     await asyncio.to_thread(process.wait, timeout=10)
+
+
+def _enemy_row(data: dict, key: str, actor: str, row: dict) -> None:
+    if actor in CQC_DROP_SOURCES:
+        data.setdefault(key + "_by_actor", {})[actor] = row
+        if actor != CQC_DROP_SOURCES[0]:
+            return
+    data[key] = row
 
 
 def _finite(value: str) -> float | None:
@@ -1115,25 +1130,29 @@ class Bridge:
                     fresh.update(zip(("armor", "rest_level", "proof"), fields[14:]))
                     data["native_fresh_campaign"] = fresh
                 elif fields[0] == "native-enemy-loot" and len(fields) == 18 and fields[13] in ("0", "1"):
-                    data["native_enemy_loot"] = {"map": fields[1], "bandit": fields[2], "state": fields[3], "hits": int(fields[4]),
+                    _enemy_row(data, "native_enemy_loot", fields[2], {"map": fields[1], "bandit": fields[2], "state": fields[3], "hits": int(fields[4]),
                                                  "killer_role": fields[5], "killer_pawn": fields[6], "projectile": fields[7],
                                                  "damage": _finite(fields[8]), "hp_before": _finite(fields[9]), "hp_after": _finite(fields[10]),
                                                  "loot_calls": int(fields[11]), "bounty_calls": int(fields[12]), "bounty_active": fields[13] == "1",
                                                  "bounty_instances": int(fields[14]), "ammo_actor": fields[15], "ammo_class": fields[16],
-                                                 "ammo_quantity": int(fields[17])}
+                                                 "ammo_quantity": int(fields[17])})
                 elif fields[0] == "native-enemy-bounty" and len(fields) == 11:
-                    data["native_enemy_bounty"] = {
+                    _enemy_row(data, "native_enemy_bounty", fields[2], {
                         "map": fields[1], "bandit": fields[2], "source": fields[3], "override_count": int(fields[4]),
                         "original_active": fields[5] == "1", "original_instances": int(fields[6]),
                         "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
                         "cache_unchanged": fields[10] == "1",
-                    }
-                elif fields == ["native-enemy-loot-cqc-capability", "1"]:
+                    })
+                elif fields in (["native-enemy-loot-cqc-capability", "1"], ["native-enemy-loot-cqc-capability", "2"]):
                     data["native_enemy_loot_cqc_capability"] = True
+                    data["native_enemy_loot_cqc_version"] = int(fields[1])
                 elif fields[0] == "native-enemy-loot-cqc" and len(fields) == 6 and all(value in ("0", "1") for value in fields[4:]):
-                    data["native_enemy_loot_cqc"] = {"map": fields[1], "bandit": fields[2],
+                    _enemy_row(data, "native_enemy_loot_cqc", fields[2], {"map": fields[1], "bandit": fields[2],
                                                      "killer_character": None if fields[3] == "-" else fields[3],
-                                                     "reserved": fields[4] == "1", "captured": fields[5] == "1"}
+                                                     "reserved": fields[4] == "1", "captured": fields[5] == "1"})
+                elif fields[0] == "native-enemy-loot-cqc-target" and len(fields) == 6 and fields[2] in CQC_DROP_SOURCES:
+                    data.setdefault("native_enemy_loot_cqc_targets", {})[fields[2]] = dict(
+                        zip(("map", "actor", "target", "character", "ai_controller"), fields[1:]))
                 elif fields[0] == "native-enemy-loot-death-view" and len(fields) == 8:
                     area, actor, mode, epoch, guid, hidden, collision = fields[1:]
                     if (hidden in ("0", "1") and collision in ("0", "1")
@@ -1141,10 +1160,10 @@ class Bridge:
                                  and all(char in "0123456789abcdef" for char in epoch) and valid_guid(guid)
                                  and (hidden, collision) == ("1", "0")
                                  or mode in ("present", "stock") and (epoch, guid) == ("-", "-"))):
-                        data["native_enemy_loot_death_view"] = {
+                        _enemy_row(data, "native_enemy_loot_death_view", actor, {
                             "map": area, "actor": actor, "state": mode, "epoch": None if epoch == "-" else epoch,
                             "guid": None if guid == "-" else guid, "hidden": hidden == "1", "collision": collision == "1",
-                        }
+                        })
                 elif fields[0] == "native-enemy-loot-escrow" and len(fields) == 11:
                     data["native_enemy_loot_escrow"] = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
                                                             units=None if fields[7] == "-" else int(fields[7]),
@@ -1243,6 +1262,19 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
+                elif fields[0] == "native-guest-mre":
+                    proof = parse_mre(fields)
+                    if ("native_guest_mre" in data or data.get("state") != "hosting" or data.get("map") != proof["map"]):
+                        raise ValueError("Invalid stock MRE report scope")
+                    data["native_guest_mre"] = proof
+                elif fields[0] == "native-guest-mre-fixture" and len(fields) == 6:
+                    area, pawn, food, intox, host_intox = fields[1:]
+                    if (data.get("state") != "hosting" or data.get("map") != area or not pawn.startswith("Player_FP_C " + area + ".")
+                            or (float(food), int(intox)) != (17, 42) or not 0 <= int(host_intox) <= 100
+                            or "native_guest_mre_fixture" in data):
+                        raise ValueError("Invalid detached MRE fixture report")
+                    data["native_guest_mre_fixture"] = {"map": area, "pawn": pawn, "food": 17, "intoxication": 42,
+                                                         "host_intoxication": int(host_intox)}
                 elif fields[0] == "native-guest-regen" and len(fields) in (4, 16):
                     effect = {"state": fields[1], "map": fields[2], "pawn": fields[3]}
                     if len(fields) == 16:

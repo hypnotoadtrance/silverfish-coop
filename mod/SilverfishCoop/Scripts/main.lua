@@ -71,6 +71,7 @@ local native_guest_primary_input = require("native_guest_primary_input")
 local native_guest_clock = require("native_guest_clock")
 local native_host_camera = require("native_host_camera")
 local native_guest_consumable = require("native_guest_consumable")
+local native_guest_mre = require("native_guest_mre")
 local native_guest_regen = require("native_guest_regen")
 local native_guest_sickness = require("native_guest_sickness")
 local zone_maps = require("zone_maps")
@@ -409,6 +410,7 @@ local function run_command(fields, state, current_phase)
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
+        native_guest_mre.reset()
         native_guest_regen.clear(command == "native-guest-clear" and argument or nil)
         if command ~= "native-guest-clear" then native_wipe_view.clear() end
         if command == "native-guest-clear" then native_enemy_loot.clear_fixture() else native_enemy_loot.clear() end
@@ -813,6 +815,7 @@ local function run_command(fields, state, current_phase)
         or native_guest_clock.command(fields, state, current_phase)
         or native_host_camera.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
+        or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
         or native_loot_crate_input.command(fields, state, current_phase)
@@ -951,6 +954,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_clock.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_mre.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_sickness.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1098,6 +1102,7 @@ local function observe_session()
             observed_phase = phase(observed)
         end
         native_guest_sickness.sync(observed, observed_phase)
+        native_guest_mre.sync(observed, observed_phase)
         return observed, observed_phase
     end)
     if not ok then

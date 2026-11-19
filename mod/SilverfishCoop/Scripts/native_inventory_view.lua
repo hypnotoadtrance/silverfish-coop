@@ -11,6 +11,8 @@ local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTe
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local mre_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
+local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
@@ -158,8 +160,9 @@ local function page(fields)
             and (weapon_profiles.kinds[class] ~= nil or class == camera_path))
             or (source == "backpack" and body_armor.is_body_path(class))
         local name = item:gsub("_", " ")
-        local usable = source == "backpack" and class == bandage_path
-        if usable then name = "Bandage" end
+        local consumable = class == bandage_path and "Bandage" or mre_enabled and class == mre_path and "MRE"
+        local usable = source == "backpack" and consumable ~= false and consumable ~= nil
+        if usable then name = consumable end
         records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
             name = name, label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
@@ -176,15 +179,15 @@ local function show()
     end
     local selected = records[row.selection]
     if row.use_state == "confirming" then
-        lines[#lines + 1] = "Use one Bandage? Home confirms. End cancels."
+        lines[#lines + 1] = "Use one " .. selected.name .. "? Home confirms. End cancels."
     elseif row.use_state == "using" then
-        lines[#lines + 1] = "Bandage use pending"
+        lines[#lines + 1] = selected.name .. " use pending"
     elseif row.use_state == "used" then
-        lines[#lines + 1] = "Bandage used. Reopen inventory to refresh."
+        lines[#lines + 1] = selected.name .. " used. Reopen inventory to refresh."
     elseif row.use_state == "refused" then
-        lines[#lines + 1] = "Bandage use unavailable. Reopen inventory to refresh."
+        lines[#lines + 1] = selected.name .. " use unavailable. Reopen inventory to refresh."
     elseif row.use_state == "selecting" then
-        lines[#lines + 1] = "Page Up / Page Down selects. Home uses one Bandage. End closes."
+        lines[#lines + 1] = "Page Up / Page Down selects. Home uses the selected item. End closes."
     elseif row.equip_state == "confirming" then
         lines[#lines + 1] = "Equip " .. selected.name .. "? Home confirms. End cancels."
     elseif row.equip_state == "equipping" then
@@ -344,11 +347,11 @@ function inventory_view.command(fields, state, phase)
     elseif operation == "native-inventory-view-use-result" then
         if #fields ~= 6 or observation.use_state ~= "using" or fields[5] ~= observation.request_guid
             or (fields[6] ~= "used" and fields[6] ~= "refused") or not ready(current, false) then
-            error("The authenticated Bandage result does not match the pending use", 0)
+            error("The authenticated result does not match the pending item use", 0)
         end
         observation.use_state = fields[6]
         show()
-        return "verified inventory Bandage result displayed"
+        return "verified inventory item result displayed"
     end
     if observation.state ~= "pending" then
         error("The authenticated inventory view is already displayed", 0)

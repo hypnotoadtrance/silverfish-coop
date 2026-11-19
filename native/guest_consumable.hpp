@@ -7,5 +7,7 @@ namespace RC::LuaMadeSimple
 
 namespace silverfish::native_guest_consumable
 {
+    void install_hooks();
+    void uninstall_hooks();
     void register_lua(RC::LuaMadeSimple::Lua& lua);
 }

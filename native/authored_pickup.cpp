@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -44,7 +45,7 @@ namespace
         const U::TCHAR* item_class;
         double x, y, z;
         int item_type;
-        int stack_units{};
+        std::optional<int> stack_units{};
         bool physics{};
     };
 
@@ -104,6 +105,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1"),
             STR("/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
             125.08236158222627, 2704.0395701013076, 474.9005913197349, 0,
+        },
+        Profile{
+            "borough-mre",
+            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.Item_MRE_C_1"),
+            STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"),
+            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 0,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -264,11 +272,11 @@ namespace
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "authored_pickup_stock_actor_identity_unqualified";
         if (!boolean(actor, STR("Physics"), profile.physics)) return "authored_pickup_stock_physics_unqualified";
-        if (!boolean(actor, STR("Stacks"), profile.stack_units != 0)) return "authored_pickup_stock_stacking_unqualified";
+        if (!boolean(actor, STR("Stacks"), profile.stack_units.has_value())) return "authored_pickup_stock_stacking_unqualified";
         if (profile.stack_units)
         {
             auto* count = field<U::FIntProperty>(actor, STR("Ammo"));
-            if (!count || count->GetPropertyValueInContainer(actor) != profile.stack_units)
+            if (!count || count->GetPropertyValueInContainer(actor) != *profile.stack_units)
                 return "authored_pickup_stock_amount_unqualified";
         }
         auto* item = static_cast<U::AActor*>(actor);

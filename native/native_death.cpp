@@ -1238,6 +1238,7 @@ namespace
             silverfish::native_guest_clock::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
             silverfish::native_guest_sickness::uninstall_hooks();
+            silverfish::native_guest_consumable::uninstall_hooks();
             silverfish::native_loot_crate_input::uninstall_hooks();
             silverfish::native_enemy_loot::uninstall_hooks();
             silverfish::native_shop_view::uninstall_hooks();
@@ -1274,6 +1275,7 @@ namespace
             silverfish::native_guest_clock::install_hooks();
             silverfish::native_guest_primary_input::install_hooks();
             silverfish::native_guest_sickness::install_hooks();
+            silverfish::native_guest_consumable::install_hooks();
             silverfish::native_loot_crate_input::install_hooks();
             silverfish::native_enemy_loot::install_hooks();
             silverfish::native_shop_view::install_hooks();

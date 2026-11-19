@@ -39,8 +39,10 @@ namespace
     constexpr auto npc_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto bandit_path = STR("/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C");
     constexpr auto cqc_path = STR("/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C");
-    constexpr auto cqc_actor_path =
-        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0");
+    constexpr std::array cqc_actor_paths{
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_1"),
+    };
     constexpr auto army_shotgun_path = STR("/Game/Classes/Weapons/Wep_ShotGun_Army.Wep_ShotGun_Army_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -381,10 +383,27 @@ namespace
         bool dead_bridge{}, ordinary{};
     };
 
-    Scope scope;
+    Scope fixture_scope;
+    std::array<Scope, cqc_actor_paths.size()> cqc_scopes;
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
+
+    auto scopes() { return std::array{&fixture_scope, &cqc_scopes[0], &cqc_scopes[1]}; }
+
+    Scope* cqc_slot(Address actor)
+    {
+        if (!actor) return nullptr;
+        for (std::size_t index = 0; index < cqc_scopes.size(); ++index)
+        {
+            auto& candidate = cqc_scopes[index];
+            if (candidate.npc_identity == actor && candidate.generation == generation.load(std::memory_order_acquire))
+                return &candidate;
+        }
+        for (std::size_t index = 0; index < cqc_actor_paths.size(); ++index)
+            if (address(find<U::AActor>(cqc_actor_paths[index])) == actor) return &cqc_scopes[index];
+        return nullptr;
+    }
 
     bool member_current(const Scope& state, const Participant& member, bool local)
     {
@@ -557,7 +576,17 @@ namespace
         auto* pawn_type = find<U::UClass>(pawn_path);
         auto* bandit_type = find<U::UClass>(bandit_path);
         auto* cqc_type = find<U::UClass>(cqc_path);
-        auto* cqc = find<U::AActor>(cqc_actor_path);
+        U::AActor* cqc{};
+        auto* first = find<U::AActor>(cqc_actor_paths.front());
+        if (address(first) == actor) cqc = first;
+        if (next.ordinary && !cqc)
+        {
+            for (const auto* path : cqc_actor_paths)
+            {
+                auto* candidate = find<U::AActor>(path);
+                if (address(candidate) == actor) cqc = candidate;
+            }
+        }
         auto* store = find<U::UClass>(save_path);
         auto* controller = find<U::UClass>(controller_path);
         auto* instance = find<U::UClass>(instance_path);
@@ -591,7 +620,9 @@ namespace
             !set_participant(next.host, home, controller, store, local) ||
             (!next.ordinary && !set_participant(next.guests[0], peer, controller, store, connection)) || !current(next))
             return "stock_enemy_loot_authority_or_roster_unavailable";
-        if (next.dead_bridge && !cqc_ammunition(enemy, world)) return "stock_dead_bridge_cqc_loadout_unavailable";
+        auto* faction = field<U::FByteProperty>(enemy, STR("Faction"));
+        if (next.dead_bridge && (!faction || faction->GetPropertyValueInContainer(enemy) != 4 || !cqc_ammunition(enemy, world)))
+            return "stock_dead_bridge_cqc_loadout_unavailable";
         next.bounty.name = U::FName{STR("Bounty"), U::FNAME_Find};
         return bind_schema(next) ? std::string_view{} : "stock_enemy_loot_blueprint_schema_unavailable";
     }
@@ -625,26 +656,31 @@ namespace
 
     void reserve_pickup(Iteration& call, U::UObject* receiver, U::UFunction* function, const void* args)
     {
-        if (!available() || !scope.proof.reserved || !function || call.OriginalFunctionCallPrevented()) return;
+        if (!available() || !function || call.OriginalFunctionCallPrevented()) return;
         const auto name = function->GetFName();
         static const U::FName interact{STR("SendInteractionToActor")};
         static const U::FName store{STR("PutInInventory")};
         static const U::FName pickup{STR("PickUp_Object")};
         static const U::FName add{STR("AddItemToInventory")};
-        auto* shell = scope.proof.ammo_drop.Get();
-        if ((name == interact || name == store || name == pickup) && receiver == shell &&
-            function->GetOuterPrivate() == find<U::UClass>(item_path) && reserved(scope))
-            call.PreventOriginalFunctionCall();
-        else if (name == add && args && receiver == scope.instance.Get() &&
-            function == find<U::UFunction>(add_item_path) && reserved(scope))
+        for (const auto& scope : cqc_scopes)
         {
-            auto* item = parameter<U::FObjectProperty>(function, STR("Item"), 0, false);
-            if (item && item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(args)) == shell)
+            if (!scope.proof.reserved) continue;
+            auto* shell = scope.proof.ammo_drop.Get();
+            if ((name == interact || name == store || name == pickup) && receiver == shell &&
+                function->GetOuterPrivate() == find<U::UClass>(item_path) && reserved(scope))
                 call.PreventOriginalFunctionCall();
+            else if (name == add && args && receiver == scope.instance.Get() &&
+                function == find<U::UFunction>(add_item_path) && reserved(scope))
+            {
+                auto* item = parameter<U::FObjectProperty>(function, STR("Item"), 0, false);
+                if (item && item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(args)) == shell)
+                    call.PreventOriginalFunctionCall();
+            }
+            if (call.OriginalFunctionCallPrevented()) return;
         }
     }
 
-    void prepare_hit(U::UObject* npc, U::FFrame& frame)
+    void prepare_hit(Scope& scope, U::UObject* npc, U::FFrame& frame)
     {
         if (scope.hit.frame || scope.proof.killer.Get() || !frame.Locals() || !boolean(npc, STR("Alive"), true)) return;
         auto* caller = frame.PreviousFrame();
@@ -662,7 +698,7 @@ namespace
             RC::to_utf8_string(actor->GetFullName()), health, false};
     }
 
-    bool attributed_killer(U::UObject* npc)
+    bool attributed_killer(const Scope& scope, U::UObject* npc)
     {
         auto* last = object(npc, STR("LastDamagedMe"));
         const auto& proof = scope.proof;
@@ -673,7 +709,7 @@ namespace
         return scope.ordinary && !last;
     }
 
-    void prepare_bounty()
+    void prepare_bounty(Scope& scope)
     {
         auto& bounty = scope.bounty;
         auto& proof = scope.proof;
@@ -698,18 +734,15 @@ namespace
     }
 
 
-    void pre(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
+    void on_npc_pre(Scope& scope, U::UObject* object_receiver, U::FFrame& frame)
     {
-        reserve_pickup(iteration, object_receiver, frame.Node(), frame.Locals());
-        if (!available() || object_receiver != scope.npc.Get() || frame.Object() != object_receiver ||
-            iteration.OriginalFunctionCallPrevented()) return;
         auto* node = frame.Node();
         if ((node != scope.schema.deal && node != scope.schema.die && node != scope.schema.loot) ||
             Clock::now() >= scope.until || !current(scope)) return;
         if (node == scope.schema.deal)
         {
             if (scope.dead_bridge && !cqc_ammunition(object_receiver, scope.world.Get())) return;
-            prepare_hit(object_receiver, frame);
+            prepare_hit(scope, object_receiver, frame);
             return;
         }
         auto* caller = frame.PreviousFrame();
@@ -723,18 +756,31 @@ namespace
         if (node == scope.schema.loot && caller->Node() == scope.schema.script && !scope.proof.killer_name.empty() &&
             scope.proof.loot_calls == 0 && boolean(object_receiver, STR("Alive"), false))
         {
-            if (!attributed_killer(object_receiver))
+            if (!attributed_killer(scope, object_receiver))
             {
                 scope.proof.status = "stock_loot_killer_changed";
                 return;
             }
-            prepare_bounty();
+            prepare_bounty(scope);
             scope.loot_frame = &frame;
             ++scope.proof.loot_calls;
         }
     }
 
-    void finish_hit(Iteration& iteration, U::UObject* npc, U::FFrame& frame)
+    void pre(Iteration& iteration, U::UObject* receiver, U::FFrame& frame, void*)
+    {
+        if (!available()) return;
+        reserve_pickup(iteration, receiver, frame.Node(), frame.Locals());
+        if (!receiver || frame.Object() != receiver || iteration.OriginalFunctionCallPrevented()) return;
+        for (auto* scope : scopes())
+        {
+            if (scope->npc.Get() != receiver) continue;
+            on_npc_pre(*scope, receiver, frame);
+            return;
+        }
+    }
+
+    void finish_hit(Scope& scope, Iteration& iteration, U::UObject* npc, U::FFrame& frame)
     {
         auto hit = std::move(scope.hit);
         scope.hit = {};
@@ -771,7 +817,7 @@ namespace
         }
     }
 
-    void observe_bounty(Iteration& iteration, U::UObject* instance, U::FFrame& frame)
+    void observe_bounty(Scope& scope, Iteration& iteration, U::UObject* instance, U::FFrame& frame)
     {
         auto* caller = frame.PreviousFrame();
         const auto& schema = scope.schema;
@@ -807,7 +853,7 @@ namespace
         if (proof.bounty_source == "guest_detached")
         {
             if (!current(scope) || (!scope.ordinary && proof.killer.Get() != scope.guests[0].pawn.Get()) ||
-                !attributed_killer(scope.npc.Get()) ||
+                !attributed_killer(scope, scope.npc.Get()) ||
                 stock_count != bounty.cache_bounty || !cache_snapshot(instance, bounty, true))
             {
                 proof.bounty_source = "unqualified";
@@ -834,10 +880,10 @@ namespace
         proof.bounty_instances = schema.instances->GetPropertyValue(instances);
     }
 
-    void finish_loot(Iteration& iteration, U::UObject* npc, U::FFrame& frame)
+    void finish_loot(Scope& scope, Iteration& iteration, U::UObject* npc, U::FFrame& frame)
     {
         scope.loot_frame = nullptr;
-        if (iteration.OriginalFunctionCallPrevented() || !frame.Locals() || !current(scope) || !attributed_killer(npc)) return;
+        if (iteration.OriginalFunctionCallPrevented() || !frame.Locals() || !current(scope) || !attributed_killer(scope, npc)) return;
         scope.proof.cache_unchanged = cache_snapshot(scope.instance.Get(), scope.bounty, true);
         if (!scope.proof.cache_unchanged && scope.proof.bounty_overrides)
             scope.proof.status = "stock_bounty_cache_changed_during_loot";
@@ -886,12 +932,16 @@ namespace
     void post(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
     {
         if (!available()) return;
-        if (&frame == scope.hit.frame && object_receiver == scope.npc.Get()) finish_hit(iteration, object_receiver, frame);
-        if (!scope.loot_frame) return;
-        if (&frame == scope.loot_frame && object_receiver == scope.npc.Get())
-            finish_loot(iteration, object_receiver, frame);
-        else if (frame.Node() == scope.schema.passive)
-            observe_bounty(iteration, object_receiver, frame);
+        for (auto* scope : scopes())
+        {
+            if (&frame == scope->hit.frame && object_receiver == scope->npc.Get())
+                finish_hit(*scope, iteration, object_receiver, frame);
+            if (!scope->loot_frame) continue;
+            if (&frame == scope->loot_frame && object_receiver == scope->npc.Get())
+                finish_loot(*scope, iteration, object_receiver, frame);
+            else if (frame.Node() == scope->schema.passive)
+                observe_bounty(*scope, iteration, object_receiver, frame);
+        }
     }
 
     int answer(const Lua& lua, bool ok, std::string_view status)
@@ -937,13 +987,15 @@ namespace
 
     int set_scope(const Lua& lua)
     {
-        if (!available() || !fixtures_enabled() || scope.ordinary || lua.get_stack_size() != 3 ||
+        auto& scope = fixture_scope;
+        if (!available() || !fixtures_enabled() || lua.get_stack_size() != 3 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
             return answer(lua, false, "native_enemy_loot_exact_watch_required");
         const auto host = lua.get_integer();
         const auto guest = lua.get_integer();
         const auto actor = lua.get_integer();
-        if (host <= 0 || guest <= 0 || actor <= 0 || host == guest)
+        if (host <= 0 || guest <= 0 || actor <= 0 || host == guest ||
+            (ordinary_enabled() && cqc_slot(static_cast<Address>(actor))))
             return answer(lua, false, "native_enemy_loot_exact_watch_required");
         if (address(scope.host.pawn.Get()) == static_cast<Address>(host) &&
             address(scope.guests[0].pawn.Get()) == static_cast<Address>(guest) &&
@@ -987,6 +1039,9 @@ namespace
         const auto npc = lua.get_integer();
         if (host <= 0 || npc <= 0 || host == npc)
             return answer(lua, false, "native_enemy_loot_exact_watch_required");
+        auto* slot = cqc_slot(static_cast<Address>(npc));
+        if (!slot) return answer(lua, false, "native_enemy_loot_exact_watch_required");
+        auto& scope = *slot;
         const bool same_scope = scope.ordinary && address(scope.host.pawn.Get()) == static_cast<Address>(host) &&
             scope.npc_identity == static_cast<Address>(npc) && ticket_current(scope);
         if (!same_scope && reserved(scope)) return answer(lua, false, "native_enemy_loot_roll_pending");
@@ -1045,8 +1100,15 @@ namespace
 
     int read(const Lua& lua)
     {
-        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto arguments = lua.get_stack_size();
+        if (!available() || (arguments != 1 && arguments != 2) || !lua.is_integer(1) ||
+            (arguments == 2 && !lua.is_integer(2))) return 0;
         const auto requested = lua.get_integer();
+        const auto npc = arguments == 2 ? lua.get_integer() : 0;
+        const auto* slot = arguments == 1 ? &fixture_scope : cqc_slot(static_cast<Address>(npc));
+        if (!slot || (arguments == 2 && (!slot->ordinary || npc <= 0 || slot->npc_identity != static_cast<Address>(npc))))
+            return 0;
+        const auto& scope = *slot;
         if (requested <= 0 || address(scope.host.pawn.Get()) != static_cast<Address>(requested) ||
             (!scope.proof.reserved && Clock::now() >= scope.until) || !ticket_current(scope)) return 0;
         const auto& report = scope.proof;
@@ -1082,27 +1144,35 @@ namespace
 
     int finish_cqc(const Lua& lua)
     {
-        if (!available() || !scope.ordinary || !scope.proof.reserved || !scope.proof.captured || !ticket_current(scope) ||
-            lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
+        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
             return answer(lua, false, "native_enemy_loot_retirement_unavailable");
         const auto host = lua.get_integer();
         const auto ammo = lua.get_integer();
-        if (host <= 0 || ammo <= 0 || static_cast<Address>(host) != address(scope.host.pawn.Get()) ||
-            static_cast<Address>(ammo) != scope.ammo_identity || reserved(scope))
-            return answer(lua, false, "native_enemy_loot_retirement_unavailable");
-        scope.proof.reserved = false;
-        return answer(lua, true, "retired");
+        if (host > 0 && ammo > 0)
+        {
+            for (auto& scope : cqc_scopes)
+            {
+                if (!scope.proof.reserved || !scope.proof.captured || scope.ammo_identity != static_cast<Address>(ammo) ||
+                    address(scope.host.pawn.Get()) != static_cast<Address>(host) || !ticket_current(scope) || reserved(scope)) continue;
+                scope.proof.reserved = false;
+                return answer(lua, true, "retired");
+            }
+        }
+        return answer(lua, false, "native_enemy_loot_retirement_unavailable");
     }
 
     int cqc_pending(const Lua& lua)
     {
-        lua.set_bool(available() && scope.ordinary && scope.proof.reserved);
+        bool pending = false;
+        if (available())
+            for (const auto& scope : cqc_scopes) pending = pending || scope.proof.reserved;
+        lua.set_bool(pending);
         return 1;
     }
 
     int cqc_available(const Lua& lua)
     {
-        lua.set_bool(available() && ordinary_enabled());
+        lua.set_integer(available() && ordinary_enabled() ? 2 : 0);
         return 1;
     }
 
@@ -1129,7 +1199,10 @@ namespace silverfish::native_enemy_loot
     bool verified_ammo_roll(Address bandit, Address ammo, shared_loot::EscrowOwner& claimant, U::UObject*& actor,
                             bool consume)
     {
-        if (!available() || !bandit || !ammo || scope.npc_identity != bandit || !ticket_current(scope) ||
+        if (!available() || !bandit || !ammo) return false;
+        auto* slot = cqc_slot(bandit);
+        auto& scope = slot && slot->ordinary ? *slot : fixture_scope;
+        if (scope.npc_identity != bandit || !ticket_current(scope) ||
             (scope.ordinary ? !reserved(scope) : Clock::now() >= scope.until)) return false;
         auto& proof = scope.proof;
         auto* dropped = proof.ammo_drop.Get();
@@ -1208,6 +1281,10 @@ namespace silverfish::native_enemy_loot
     void clear_scope()
     {
         generation.fetch_add(1, std::memory_order_acq_rel);
-        if (U::IsInGameThreadRaw()) scope = {};
+        if (U::IsInGameThreadRaw())
+        {
+            fixture_scope = {};
+            cqc_scopes = {};
+        }
     }
 }

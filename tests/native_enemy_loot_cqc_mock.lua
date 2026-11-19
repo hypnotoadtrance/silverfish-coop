@@ -23,9 +23,11 @@ scout.Dead, scout.IsWeaponBlocked, scout_save.PlayerHealth = false, false, 250
 local scout_id = "aaaaaaaa-0000-0000-0000-000000000001"
 local shooter_id = "aaaaaaaa-0000-0000-0000-000000000002"
 package.loaded.guest_save = {
-    exact_item_context = function(_, _, name)
-        if name == "scout" then return scout, scout_save, scout_id end
-        if name == "shooter" then return shooter, shooter_save, shooter_id end
+    exact_item_context = function(state, _, name)
+        for _, detail in ipairs(state.guests) do
+            if detail.name == name and name == "scout" then return scout, scout_save, scout_id end
+            if detail.name == name and name == "shooter" then return shooter, shooter_save, shooter_id end
+        end
     end,
 }
 local fresh = true
@@ -36,6 +38,18 @@ local npc_class, npc = object(7, npc_class_path), object(8, "NPC_State_Infantry_
 npc.GetWorld, npc.GetClass, npc.IsActorBeingDestroyed = host.GetWorld, function() return npc_class end, function() return false end
 npc.HasAuthority = function() return true end
 npc.Alive, npc.Initialized = true, true
+local player_class_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local ai_class_path = "/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C"
+local player_class, ai_class = object(16, player_class_path), object(17, ai_class_path)
+local ai = object(18, "stock CQC AI")
+ai.GetWorld, ai.HasAuthority = npc.GetWorld, npc.HasAuthority
+ai.Pawn, ai.GetClass = npc, function() return ai_class end
+shooter.GetWorld, shooter.HasAuthority, shooter.GetClass = npc.GetWorld, npc.HasAuthority, function() return player_class end
+npc.Controller, npc.CombatTarget = ai, shooter
+local second_path = npc_path:gsub("_0$", "_1")
+local second = object(15, "NPC_State_Infantry_CQC_C " .. second_path)
+second.GetWorld, second.GetClass, second.IsActorBeingDestroyed = npc.GetWorld, npc.GetClass, npc.IsActorBeingDestroyed
+second.HasAuthority, second.Alive, second.Initialized = npc.HasAuthority, true, true
 local ammo_path = root .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_123"
 local shell_path = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 local shell_class, ammo = object(9, shell_path), object(10, "Ammo_ShotgunShells_BP_C " .. ammo_path)
@@ -55,23 +69,30 @@ api.DoesSaveGameExist = function(_, name) assert(name == slot); return false end
 api.CreateSaveGameObject = function(_, class) assert(class == save_class); return pool end
 api.SaveGameToSlot = function(_, target, name) assert(target == pool and name == slot); return true end
 api.LoadGameFromSlot = function(_, name) assert(name == slot); return reopened end
-local objects = {[npc_class_path] = npc_class, [npc_path] = npc, [ammo_path] = ammo,
-    [shell_path] = shell_class, [save_class_path] = save_class, ["/Script/Engine.Default__GameplayStatics"] = api}
+local objects = {[npc_class_path] = npc_class, [npc_path] = npc, [second_path] = second, [ammo_path] = ammo,
+    [shell_path] = shell_class, [save_class_path] = save_class, ["/Script/Engine.Default__GameplayStatics"] = api,
+    [player_class_path] = player_class, [ai_class_path] = ai_class}
 StaticFindObject = function(path) return objects[path] end
 
 local ready, reserved, captured = false, false, false
-local latest_roster
+local latest_roster = {}
 SilverfishSetNativeCqcEnemyLootScope = function(home, enemy, ...)
-    assert(home == host:GetAddress() and enemy == npc:GetAddress())
-    latest_roster = {...}
+    assert(home == host:GetAddress() and (enemy == npc:GetAddress() or enemy == second:GetAddress()))
+    latest_roster[enemy] = {...}
     return true
 end
-SilverfishReadNativeEnemyLoot = function()
+SilverfishReadNativeEnemyLoot = function(owner, enemy)
+    assert(owner == host:GetAddress())
+    if enemy == second:GetAddress() then
+        return "watching", 0, "-", "-", "-", 0, 0, 0, 0, 0, false, 0, "-", "-", 0,
+            "pending", 0, false, 0, 0, 0, 0, false, "-", false, false
+    end
+    assert(enemy == npc:GetAddress())
     return ready and "stock_loot_observed" or "watching", 3, "guest", "shooter", "stock projectile",
         20, 10, -10, 1, 2, true, 1, ammo:GetFullName(), shell_path, 8,
         "guest_detached", 2, false, 0, 1, 0, 0, true, shooter_id, reserved, captured
 end
-SilverfishNativeCqcEnemyLootAvailable = function() return true end
+SilverfishNativeCqcEnemyLootAvailable = function() return 2 end
 SilverfishNativeCqcEnemyLootPending = function() return reserved end
 SilverfishCaptureNativeEnemyLootEscrow = function(enemy, target, raw, extra)
     assert(enemy == npc:GetAddress() and target == pool:GetAddress() and raw == ammo:GetAddress() and extra == 0)
@@ -94,11 +115,16 @@ local state = {map = root, world = world, server = false, listening = true,
     guests = {{name = "scout", pawn = scout}, {name = "shooter", pawn = shooter}}}
 local row = function(...) return table.concat({...}, "\t") end
 enemy_loot.sync(state, "hosting")
-assert(table.concat(latest_roster, ",") == table.concat({3, 5, scout_id, 4, 6, shooter_id}, ","))
+assert(table.concat(latest_roster[npc:GetAddress()], ",") == table.concat({3, 5, scout_id, 4, 6, shooter_id}, ","))
+assert(table.concat(latest_roster[second:GetAddress()], ",") == table.concat({3, 5, scout_id, 4, 6, shooter_id}, ","))
+local current_target = row("native-enemy-loot-cqc-target", root, npc:GetFullName(), shooter:GetFullName(), shooter_id, ai:GetFullName())
+assert(table.concat(enemy_loot.rows(state, "hosting", row), "\n"):find(current_target, 1, true))
 assert(not enemy_loot.departure_pending(state, "hosting"))
 state.guests[2], ready, reserved = nil, true, true
 enemy_loot.sync(state, "hosting")
-assert(table.concat(latest_roster, ",") == table.concat({3, 5, scout_id}, ","))
+assert(table.concat(latest_roster[npc:GetAddress()], ",") == table.concat({3, 5, scout_id}, ","))
+assert(table.concat(latest_roster[second:GetAddress()], ",") == table.concat({3, 5, scout_id}, ","))
+assert(not table.concat(enemy_loot.rows(state, "hosting", row), "\n"):find(current_target, 1, true))
 enemy_loot.clear_fixture()
 assert(enemy_loot.departure_pending(state, "hosting"))
 fresh = false
@@ -110,6 +136,7 @@ assert(enemy_loot.command({"request", "native-enemy-loot-retire", ammo:GetFullNa
 assert(ammo.bHidden and not collision and destroyed and not enemy_loot.departure_pending(state, "hosting"))
 local rows = table.concat(enemy_loot.rows(state, "hosting", row), "\n")
 assert(rows:find(row("native-enemy-loot-cqc", root, npc:GetFullName(), shooter_id, 0, 1), 1, true))
+assert(rows:find(row("native-enemy-loot-cqc", root, second:GetFullName(), "-", 0, 0), 1, true))
 assert(rows:find(row("native-enemy-loot-escrow", root, "retired", "shooter", ammo:GetFullName(), slot, guid, 8, 1, 2, 3), 1, true))
 print("Ordinary Dead Bridge loot: detached roster, reserved escrow, exact retirement and source readback passed")
 
@@ -139,11 +166,13 @@ end
 SilverfishFireNativeGuestWeapon = function() error("Unqualified fixture reached stock fire") end
 refused(fixture, shot, "native_bandit_shot_equipped_guid_required")
 assert(inspect_count == 1)
-local sibling = {"request", "native-bandit-shot-fixture", npc:GetFullName():gsub("_0$", "_1"), scout:GetFullName(), guid}
+local other_stock = {"request", "native-bandit-shot-fixture", second:GetFullName(), scout:GetFullName(), guid}
+refused(fixture, other_stock, "native_bandit_shot_equipped_guid_required")
+local sibling = {"request", "native-bandit-shot-fixture", npc:GetFullName():gsub("_0$", "_2"), scout:GetFullName(), guid}
 refused(fixture, sibling, "native_bandit_shot_watch_required")
 local other_guest = {"request", "native-bandit-shot-fixture", npc:GetFullName(), shooter:GetFullName(), guid}
 refused(fixture, other_guest, "native_bandit_shot_exact_guest_and_weapon_required")
 ready = true
 refused(fixture, shot, "native_bandit_shot_watch_required")
-assert(inspect_count == 1)
+assert(inspect_count == 2)
 print("Dead Bridge stock shot fixture reads the automatic watcher and requires the exact live actor and guest")

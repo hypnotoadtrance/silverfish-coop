@@ -12,6 +12,7 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local savlo_estate = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
@@ -78,6 +79,14 @@ local profiles = {
         path = savlo_estate .. ".SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
         class = "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C",
         name = "Art_EvilEyeRing_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = borough,
+        source = "borough-mre",
+        path = borough .. ".Borough:PersistentLevel.Item_MRE_C_1",
+        class = "/Game/Classes/Items/Item_MRE.Item_MRE_C",
+        name = "Item_MRE_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

@@ -27,15 +27,26 @@ class DeadBridgeEnemyLootTests(unittest.TestCase):
         guid = "A" * 32
         frame = {"map": DEAD_BRIDGE}
         roll = dict(map=DEAD_BRIDGE, bandit=native_enemy_loot.CQC, class_path=native_enemy_loot.SHELLS, guid=guid,
+                    actor=native_enemy_loot.SHELL_ACTOR + "1001", epoch="a" * 32,
                     quantity=6, position=[35272, 1413, 191], killer="guest", claimed_by=None, escrow=frame)
         records = {guid: roll}
         checkpoint = {"world": {"party": {"native_enemy_loot_rolls": records}}, "characters": {"guest": {}}}
         self.assertEqual(native_host_save._escrow_frames(checkpoint), [frame])
-        for invalid in (dict(roll, bandit=roll["bandit"].removesuffix("_0") + "_1"), dict(roll, class_path="not-shells"),
+        for invalid in (dict(roll, bandit=roll["bandit"].removesuffix("_0") + "_2"), dict(roll, class_path="not-shells"),
                         dict(roll, quantity=10), dict(roll, escrow={"map": MAP})):
             with self.subTest(roll=invalid), self.assertRaises(CampaignFormatError):
                 records[guid] = invalid
                 native_host_save._escrow_frames(checkpoint)
+        companion_guid = "B" * 32
+        companion = dict(roll, bandit=native_enemy_loot.CQC_ACTORS[1], guid=companion_guid,
+                         actor=native_enemy_loot.SHELL_ACTOR + "1002", escrow={"map": DEAD_BRIDGE, "slot": "other"})
+        records[guid], records[companion_guid] = roll, companion
+        self.assertEqual(native_host_save._escrow_frames(checkpoint), [frame, companion["escrow"]])
+        for conflict in (dict(companion, bandit=roll["bandit"]), dict(companion, actor=roll["actor"])):
+            records[companion_guid] = conflict
+            with self.assertRaisesRegex(CampaignFormatError, "duplicate roll"):
+                native_host_save._escrow_frames(checkpoint)
+        del records[companion_guid]
         records[guid] = dict(roll, claimed_by="host")
         records[guid].pop("escrow")
         self.assertEqual(native_host_save._escrow_frames(checkpoint), [])
@@ -137,6 +148,54 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
         bridge.command.assert_not_awaited()
 
+    async def test_two_pending_cqc_rolls_keep_their_separate_shooter_and_reservation(self):
+        second_target = native_enemy_loot.CQC_ACTORS[1]
+        other_ammo, other_slot, other_guid = native_enemy_loot.SHELL_ACTOR + "2147480955", "SFCoop_" + "d" * 32, "D" * 32
+        sources = {self.target: self.source,
+                   second_target: dict(self.source, bandit=second_target, killer_pawn=self.first_pawn, ammo_actor=other_ammo,
+                                       ammo_quantity=5, bounty_active=False, bounty_instances=0)}
+        scopes = {self.target: self.scope,
+                  second_target: dict(self.scope, bandit=second_target, killer_character=self.first)}
+        bounties = {self.target: self.bounty, second_target: dict(self.bounty, bandit=second_target, permanent_count=0)}
+        drops = {self.target: self.captured,
+                 second_target: dict(self.captured, actor=other_ammo, pawn=self.first_pawn, slot=other_slot, guid=other_guid, units=5)}
+
+        def snapshot(receipt=None):
+            return dict(self.initial, native_enemy_loot_by_actor=sources, native_enemy_bounty_by_actor=bounties,
+                        native_enemy_loot_cqc_by_actor={actor: dict(scope) for actor, scope in scopes.items()},
+                        native_enemy_loot_escrow=receipt)
+
+        async def command(action, *arguments, **_):
+            if action == native_enemy_loot.BANK:
+                target, slot, ammo = arguments
+                proof = drops[target]
+                self.assertEqual((slot, ammo), (proof["slot"], proof["actor"]))
+                self.assertTrue(scopes[target]["reserved"])
+                scopes[target]["captured"] = True
+                return snapshot(proof)
+            self.assertEqual(action, native_enemy_loot.RETIRE)
+            ammo, slot, guid = arguments
+            target = self.host.party[native_enemy_loot.STATE_KEY][guid]["bandit"]
+            proof = drops[target]
+            self.assertEqual((slot, ammo), (proof["slot"], proof["actor"]))
+            if target == self.target:
+                self.assertTrue(scopes[second_target]["reserved"])
+            scopes[target]["reserved"] = False
+            return snapshot(dict(proof, state="retired"))
+
+        self.host.last_game = snapshot()
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+        with patch.object(native_host_save, "new_slot", side_effect=[self.slot, other_slot]), patch.object(
+                native_host_save, "record", side_effect=lambda _, slot, area, **__: {"slot": slot, "map": area}):
+            await native_enemy_loot.observe(self.host, bridge)
+            await native_enemy_loot.observe(self.host, bridge)
+        records = self.host.party[native_enemy_loot.STATE_KEY]
+        self.assertEqual({guid: (record["bandit"], record["killer"], record["quantity"]) for guid, record in records.items()},
+                         {self.guid: (self.target, self.second, 8), other_guid: (second_target, self.first, 5)})
+        self.assertFalse(native_enemy_loot.pending(self.host))
+        self.assertEqual(bridge.command.await_count, 4)
+        self.assertEqual(self.host.checkpoint_native.await_count, 2)
+
     async def test_claim_is_available_without_fixtures_to_another_member_once(self):
         roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
                     guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],
@@ -228,7 +287,7 @@ class DeadBridgeDeathViewTests(unittest.IsolatedAsyncioTestCase):
         self.client.transport.connected = False
         await native_enemy_loot.project_client(self.client)
         self.client.transport.connected = True
-        self.records[self.guid]["bandit"] = native_enemy_loot.CQC.removesuffix("_0") + "_1"
+        self.records[self.guid]["bandit"] = native_enemy_loot.CQC.removesuffix("_0") + "_2"
         await native_enemy_loot.project_client(self.client)
         self.client.bridge.command.assert_not_awaited()
 
@@ -239,6 +298,28 @@ class DeadBridgeDeathViewTests(unittest.IsolatedAsyncioTestCase):
         del self.records[alternate]
         self.records[self.guid]["actor"] = native_enemy_loot.CQC
         self.assertIsNone(native_enemy_loot.defeated_cqc(self.records, self.epoch))
+
+    async def test_replica_projections_use_two_independent_actor_and_guid_pairs(self):
+        first, second = native_enemy_loot.CQC_ACTORS
+        other_guid = "D" * 32
+        self.records[other_guid] = dict(self.records[self.guid], guid=other_guid, bandit=second,
+                                        actor=native_enemy_loot.SHELL_ACTOR + "2147480955")
+        table_key = native_enemy_loot.DEATH_VIEW + "_by_actor"
+        view = self.client.last_game[native_enemy_loot.DEATH_VIEW]
+        views = {first: view, second: dict(view, actor=second)}
+        self.client.last_game[table_key] = views.copy()
+
+        async def project(action, actor, epoch, guid, **_):
+            self.assertEqual(action, "native-enemy-loot-project-death")
+            self.assertEqual((epoch, guid), (self.epoch, self.guid if actor == first else other_guid))
+            views[actor] = dict(views[actor], state="projected", epoch=epoch, guid=guid, hidden=True, collision=False)
+            return dict(self.client.last_game, **{table_key: views.copy()})
+
+        self.client.bridge.command.side_effect = project
+        await native_enemy_loot.project_client(self.client)
+        await native_enemy_loot.project_client(self.client)
+        self.assertEqual(self.client.bridge.command.await_count, 2)
+        self.assertEqual(self.client.last_game[table_key][second]["guid"], other_guid)
 
     def test_bridge_requires_projected_collision_and_visibility_readback(self):
         with TemporaryDirectory() as directory:

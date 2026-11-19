@@ -15,6 +15,7 @@ from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CQC_DROP_SOURCE = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
+CQC_DROP_SOURCES = (CQC_DROP_SOURCE, CQC_DROP_SOURCE.removesuffix("_0") + "_1")
 
 
 def new_slot() -> str:
@@ -113,10 +114,12 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     if type(enemy_rolls) is not dict:
         raise CampaignFormatError("The campaign's stock enemy drops are invalid")
     members = {"host", *checkpoint["characters"]}
+    cqc_visits = set()
+    cqc_drops = set()
     for guid, roll in enemy_rolls.items():
         if (not valid_guid(guid) or type(roll) is not dict or roll.get("guid") != guid
                 or (roll.get("map") != "/Game/Classes/Maps/PlaytestMap_01"
-                    and (roll.get("map"), roll.get("bandit")) != (DEAD_BRIDGE, CQC_DROP_SOURCE))
+                    and (roll.get("map") != DEAD_BRIDGE or roll.get("bandit") not in CQC_DROP_SOURCES))
                 or roll.get("class_path") != "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
                 or type(roll.get("quantity")) is not int or not 3 <= roll["quantity"] <= 9
                 or not isinstance(roll.get("position"), list) or len(roll["position"]) != 3
@@ -126,6 +129,16 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 or roll.get("claimed_by") is None and (type(roll.get("escrow")) is not dict
                                                        or roll["escrow"].get("map") != roll["map"])):
             raise CampaignFormatError("A stock enemy drop has an invalid escrow or owner")
+        if roll.get("map") == DEAD_BRIDGE:
+            epoch, actor = roll.get("epoch"), roll.get("actor")
+            shell_prefix = f"Ammo_ShotgunShells_BP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
+            if (not isinstance(epoch, str) or not re.fullmatch(r"[0-9a-f]{32}", epoch)
+                    or not isinstance(actor, str) or not actor.startswith(shell_prefix)
+                    or not re.fullmatch(r"[0-9]+", actor.removeprefix(shell_prefix))
+                    or (epoch, roll["bandit"]) in cqc_visits or (epoch, actor) in cqc_drops):
+                raise CampaignFormatError("A placed CQC has an invalid or duplicate roll in this visit")
+            cqc_visits.add((epoch, roll["bandit"]))
+            cqc_drops.add((epoch, actor))
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")

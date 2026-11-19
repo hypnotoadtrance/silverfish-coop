@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 MAP = "/Game/Classes/Maps/PlaytestMap_01"
 DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 CQC = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
+CQC_SECOND = CQC.removesuffix("_0") + "_1"
 SHELLS = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 
 
@@ -32,7 +33,13 @@ def bandit(state: dict) -> dict:
     return state.get("game", {}).get("native_bandit", {})
 
 
-def cqc_counterpart(directory: Path) -> dict | None:
+def actor_proof(state: dict, key: str, actor: str) -> dict:
+    game = state.get("game", {})
+    rows = game.get(key + "_by_actor")
+    return rows.get(actor, {}) if rows is not None else game.get(key, {})
+
+
+def cqc_counterpart(directory: Path, actor: str = CQC) -> dict | None:
     paths = tuple((directory / "game-bridge").glob("*/status.tsv"))
     if len(paths) != 1:
         return None
@@ -42,12 +49,12 @@ def cqc_counterpart(directory: Path) -> dict | None:
         return None
     for line in lines:
         fields = line.split("\t")
-        if fields[:3] != ["native-enemy-loot-counterpart", DEAD_BRIDGE, CQC] or len(fields) != 9:
+        if fields[:3] != ["native-enemy-loot-counterpart", DEAD_BRIDGE, actor] or len(fields) != 9:
             continue
         if (fields[3] not in ("-", "0", "1", "2", "3") or fields[4] not in ("0", "1")
                 or fields[5] not in ("0", "1") or not all(value.isdecimal() for value in fields[6:])):
             raise AssertionError(fields)
-        return dict(actor=CQC, role=None if fields[3] == "-" else int(fields[3]), controller=fields[4] == "1",
+        return dict(actor=actor, role=None if fields[3] == "-" else int(fields[3]), controller=fields[4] == "1",
                     alive=fields[5] == "1", authorities=int(fields[6]), replicas=int(fields[7]), other=int(fields[8]))
     return None
 
@@ -68,7 +75,7 @@ async def wait(directory: Path, predicate, *, timeout=42) -> dict:
 async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: bool, require_movement: bool,
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
-                   automatic_cqc_loot: bool = False) -> dict:
+                   automatic_cqc_loot: bool = False, both_cqc: bool = False) -> dict:
     area = DEAD_BRIDGE if dead_bridge_cqc else MAP
     encounter = "dead-bridge-cqc" if dead_bridge_cqc else f"bandit-{subject}"
     profile = f"{encounter}-{uuid.uuid4().hex[:8]}"
@@ -192,6 +199,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert (armed["state"], armed["bandit"], armed["map"]) == ("watching", target, area), armed
             if dead_bridge_cqc:
                 evidence["authority_watch"] = armed
+            if both_cqc:
+                second_watched = await wait(run, lambda state: actor_proof(state, "native_enemy_loot", CQC_SECOND)
+                                            .get("state") == "watching")
+                evidence["second_authority_watch"] = actor_proof(second_watched, "native_enemy_loot", CQC_SECOND)
         if not dead_bridge_cqc:
             replica_spawn = bandit(await wait(guest_run, lambda state: bandit(state).get("status") == "stock_bandit_replica"
                                                   and bandit(state).get("replica_ai_denials", 0) > 0))
@@ -240,9 +251,9 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise AssertionError("The Bandit did not show enough stock movement to verify replica motion")
         if require_damage and not (damage and damage["other_player_untouched"]):
             raise AssertionError("The Bandit did not damage the exposed pawn independently of the other pawn")
-        if enemy_loot:
+        async def fight_and_share(target, proof_log, remaining):
             def read_observer(current):
-                return current.get("game", {}).get("native_enemy_loot", {})
+                return actor_proof(current, "native_enemy_loot", target)
 
             def killed(current):
                 return read_observer(current).get("state") in {"stock_kill_confirmed", "stock_loot_observed"}
@@ -251,11 +262,14 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 return current.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed") is True
 
             shots, revivals = [], []
-            evidence["stock_projectile_proofs"] = shots
-            evidence["ordinary_guest_revivals"] = revivals
+            proof_log["stock_projectile_proofs"] = shots
+            proof_log["ordinary_guest_revivals"] = revivals
             for _ in range(20):
                 current = status(run)
-                evidence["enemy_loot_last"] = read_observer(current)
+                proof_log["enemy_loot_last"] = read_observer(current)
+                stock_target = current.get("game", {}).get("native_enemy_loot_cqc_targets", {}).get(target)
+                if stock_target and (stock_target["target"], stock_target["character"]) == (exact_pawn, invitation["character_id"]):
+                    proof_log["stock_cqc_ai_targeted_guest"] = stock_target
                 if killed(current) or len(shots) >= 12:
                     break
                 if guest_downed(current):
@@ -314,16 +328,16 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 shots.append({"aim": aim, "shot": fired})
             resolved = await wait(run, lambda state: read_observer(state).get("state") == "stock_loot_observed",
                                   timeout=12)
-            observed = resolved["game"]["native_enemy_loot"]
+            observed = read_observer(resolved)
             assert (observed["map"], observed["bandit"], observed["killer_role"], observed["killer_pawn"]) == (
                 area, target, "guest", exact_pawn
             ), observed
             assert shots and observed["hits"] > 0 and observed["loot_calls"] == 1 and observed["bounty_calls"] > 0, observed
             assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"] != "-", observed
-            evidence["enemy_loot_from_exact_guest_projectile"] = observed
-            bounty = resolved["game"].get("native_enemy_bounty")
-            if bounty is not None:
-                evidence["stock_enemy_bounty_scope"] = bounty
+            proof_log["enemy_loot_from_exact_guest_projectile"] = observed
+            bounty = actor_proof(resolved, "native_enemy_bounty", target)
+            if bounty:
+                proof_log["stock_enemy_bounty_scope"] = bounty
             if enemy_bounty:
                 assert observed["bounty_active"] is True and observed["bounty_instances"] == 1, observed
                 assert bounty and (bounty["map"], bounty["bandit"], bounty["source"]) == (area, target, "guest_detached"), bounty
@@ -333,16 +347,20 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 ), bounty
             if shared_enemy_loot:
                 if automatic_cqc_loot:
+                    def own_rolls(current):
+                        return [roll for roll in current.get("gameplay", {}).get("native_enemy_loot_rolls", {}).values()
+                                if roll.get("bandit") == target and roll.get("epoch") == paired["zone_epoch"]]
+
                     def committed(current):
-                        scope = current.get("game", {}).get("native_enemy_loot_cqc", {})
+                        scope = actor_proof(current, "native_enemy_loot_cqc", target)
                         if (scope.get("reserved"), scope.get("captured"), scope.get("killer_character")) == (
                                 False, True, invitation["character_id"]):
-                            return len(current.get("gameplay", {}).get("native_enemy_loot_rolls", {})) == 1
+                            return len(own_rolls(current)) == 1
                         return False
 
                     settled = await wait(run, committed, timeout=15)
-                    roll, = settled["gameplay"]["native_enemy_loot_rolls"].values()
-                    evidence["automatic_stock_escrow"] = settled["game"]["native_enemy_loot_cqc"]
+                    roll, = own_rolls(settled)
+                    proof_log["automatic_stock_escrow"] = actor_proof(settled, "native_enemy_loot_cqc", target)
                 else:
                     roll = accepted("bank the stock enemy roll", await combat_action(
                         run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
@@ -351,7 +369,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     invitation["character_id"], observed["ammo_actor"], observed["ammo_quantity"], None
                 ), roll
                 if dead_bridge_cqc:
-                    assert (roll["map"], roll["bandit"], roll["class_path"]) == (area, CQC, SHELLS), roll
+                    assert (roll["map"], roll["bandit"], roll["class_path"]) == (area, target, SHELLS), roll
                     assert 3 <= roll["quantity"] <= 9, roll
                     from tools.silverfish.native_host_save import verify_record
                     campaign = run.parent
@@ -359,21 +377,21 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
                     verify_record(campaign / "game-user", durable["escrow"])
                     assert {key: value for key, value in durable.items() if key != "escrow"} == roll, durable
-                    evidence["verified_stock_shell_escrow"] = durable
+                    proof_log["verified_stock_shell_escrow"] = durable
 
                     def projected(state):
-                        view = state.get("game", {}).get("native_enemy_loot_death_view", {})
+                        view = actor_proof(state, "native_enemy_loot_death_view", target)
                         return state.get("gameplay_fresh") and state.get("zone_epoch") == roll["epoch"] and (
                             view.get("actor"), view.get("state"), view.get("epoch"), view.get("guid"),
                             view.get("hidden"), view.get("collision"),
-                        ) == (CQC, "projected", roll["epoch"], guid, True, False)
+                        ) == (target, "projected", roll["epoch"], guid, True, False)
 
                     defeat = await wait(guest_run, projected, timeout=12)
-                    counterpart = cqc_counterpart(guest_run)
+                    counterpart = cqc_counterpart(guest_run, target)
                     assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
                     assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
-                    evidence["client_cqc_after_combat"] = counterpart
-                    evidence["client_cqc_death_view"] = defeat["game"]["native_enemy_loot_death_view"]
+                    proof_log["client_cqc_after_combat"] = counterpart
+                    proof_log["client_cqc_death_view"] = actor_proof(defeat, "native_enemy_loot_death_view", target)
                 published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                     "native_enemy_loot_rolls", {}).get(guid) == roll)
                 assert published["gameplay_fresh"], published
@@ -397,7 +415,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 row, = [item for item in home["items"] if item["guid"] == guid]
                 assert (row["class_path"], row["quantity"]) == (roll["class_path"], roll["quantity"]), row
                 assert all(item["guid"] != guid for item in away["items"]), away
-                evidence["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
+                proof_log["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
                                                        "duplicate_guest_claim": refused["error"]}
                 if dead_bridge_cqc:
                     settled = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
@@ -418,7 +436,21 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert (rejoined["game"]["pawns"]["local"]["name"], same_visit["game"]["native_guest_save"]["pawn"]) == (
                         settled["game"]["pawns"]["local"]["name"], exact_pawn
                     )
-                    evidence["client_cqc_death_view_after_reconnect"] = rejoined["game"]["native_enemy_loot_death_view"]
+                    proof_log["client_cqc_death_view_after_reconnect"] = actor_proof(rejoined, "native_enemy_loot_death_view", target)
+            return remaining
+
+        if enemy_loot and both_cqc:
+            encounters = evidence["stock_cqc_encounters"] = {CQC: {}, CQC_SECOND: {}}
+            remaining = await fight_and_share(CQC, encounters[CQC], remaining)
+            sibling = actor_proof(status(guest_run), "native_enemy_loot_death_view", CQC_SECOND)
+            assert (sibling.get("state"), sibling.get("actor")) == ("present", CQC_SECOND), sibling
+            await fight_and_share(CQC_SECOND, encounters[CQC_SECOND], remaining)
+            first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (CQC, CQC_SECOND))
+            assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
+            final = status(run)["gameplay"]["native_enemy_loot_rolls"]
+            assert final == {first["guid"]: first, second["guid"]: second}, final
+        elif enemy_loot:
+            await fight_and_share(target, evidence, remaining)
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:
@@ -445,7 +477,7 @@ async def main(args) -> None:
                        require_movement=args.require_movement, require_damage=args.require_damage,
                        enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty,
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
-                       automatic_cqc_loot=args.automatic_cqc_loot)
+                       automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc)
 
 
 if __name__ == "__main__":
@@ -463,8 +495,11 @@ if __name__ == "__main__":
                         help="test the exact authored Dead Bridge CQC guest kill, typed shells and once-only shared claim")
     parser.add_argument("--automatic-cqc-loot", action="store_true",
                         help="arm and bank the exact stock CQC kill through the ordinary host path")
+    parser.add_argument("--both-cqc", action="store_true", help="defeat and claim from both placed CQC in one native visit")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
+    if args.both_cqc and not args.automatic_cqc_loot:
+        parser.error("--both-cqc requires --automatic-cqc-loot")
     if args.automatic_cqc_loot and (not args.dead_bridge_cqc or args.enemy_bounty):
         parser.error("--automatic-cqc-loot requires --dead-bridge-cqc and uses existing character traits")
     if args.dead_bridge_cqc:

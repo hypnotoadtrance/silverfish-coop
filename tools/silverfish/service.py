@@ -49,7 +49,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
-                        *native_guest_weapon.GUEST_ACTIONS, native_guest_consumable.ACTION, native_guest_armor.ACTION)
+                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_armor.ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
                 "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
@@ -159,7 +159,7 @@ class Host:
                  verify_native_roster: bool = False, persist_native_guest: bool = False, matrix_supported: bool = False,
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
-                 guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
+                 guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False, guest_mre: bool = False,
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
                  mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False, mama_dialogue_enabled: bool = False,
@@ -195,6 +195,7 @@ class Host:
         self.native_dead_bridge_enemy_loot = native_dead_bridge_enemy_loot
         self.guest_regen = guest_regen
         self.guest_sickness = guest_sickness
+        self.guest_mre = guest_mre
         self.broker_input = broker_input
         self.wipe_view_enabled = wipe_view_enabled
         self.wire_board_enabled = wire_board_enabled
@@ -781,7 +782,7 @@ class Host:
                 await bridge.command("travel", destination, *authorization)
             else:
                 command, arguments = ("travel-party", departure_proof) if departure_proof else ("travel", authorization)
-                for attempt in range(2):
+                for attempt in range(len(native_enemy_loot.CQC_ACTORS) + 1 if cqc_departure else 1):
                     hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
                     with hold:
                         try:
@@ -803,7 +804,7 @@ class Host:
                                 raise RuntimeError("The game did not verify the checked party departure")
                             break
                     self.last_game, self.last_seen = departure, time.monotonic()
-                    if not cqc_departure or attempt or not native_enemy_loot.pending(self):
+                    if not cqc_departure or attempt == len(native_enemy_loot.CQC_ACTORS) or not native_enemy_loot.pending(self):
                         raise RuntimeError("The stock CQC departure hold did not identify its reserved roll")
                     await native_enemy_loot.observe(self, bridge)
             observed = await bridge.wait_for(
@@ -1502,8 +1503,8 @@ class Host:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_armor.ACTION:
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
-            elif action == native_guest_consumable.ACTION:
-                result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"])
+            elif action in native_guest_consumable.RESULT:
+                result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
                                                    target, request["operation_id"])
@@ -1819,6 +1820,7 @@ class Host:
             "native_dialogue_mosby": bool(self.dialogue_sessions and native_dialogue.SCIENTIST_SHOP in self.dialogue_sessions.maps),
             "native_dialogue_shopkeep": bool(self.dialogue_sessions and native_dialogue.SHOPKEEP in self.dialogue_sessions.maps),
             "native_dialogue_mama": bool(self.dialogue_sessions and BOROUGH in self.dialogue_sessions.maps),
+            "native_guest_mre": self.guest_mre,
             "native_mosby_station": self.mosby_station_enabled,
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
@@ -2160,6 +2162,24 @@ class Host:
                     if (proof.get("map"), proof.get("mode")) != (CROSSROADS, mode):
                         raise RuntimeError("The stock CrossRoads director did not return a matching receipt")
                     result = {"native_campaign_npc_refresh": proof}
+                elif action == "native-guest-mre-fixture" and self.guest_mre and self.fixtures:
+                    alias = request.get("target") or "guest"
+                    owner = self.native_recipients().get(self.roles().get(alias))
+                    if not owner or not owner["connected"]:
+                        raise ValueError("Choose an exact connected guest for the staged MRE baseline")
+                    area, pawn = self.last_game.get("map"), owner["pawn"]
+                    try:
+                        self.last_game = await bridge.command(action, pawn, timeout=6)
+                    except RuntimeError as error:
+                        if not str(error).startswith("guest_mre_refused_"):
+                            self.native_checkpoint_unsafe = self.stopping = True
+                        raise
+                    self.last_seen = time.monotonic()
+                    proof = self.last_game.get("native_guest_mre_fixture", {})
+                    if (self.last_game.get("map"), proof.get("map"), proof.get("pawn")) != (area, area, pawn):
+                        self.native_checkpoint_unsafe = self.stopping = True
+                        raise RuntimeError("The staged MRE baseline did not verify its exact detached recipient")
+                    result = {"native_guest_mre_fixture": proof}
                 elif action == "native-guest-sickness-fixture" and self.guest_sickness and self.fixtures:
                     alias, amount = request.get("target") or "guest", request.get("amount")
                     owner = self.native_recipients().get(self.roles().get(alias))
@@ -2192,13 +2212,13 @@ class Host:
                         arguments = ()
                     self.last_game = await bridge.command(action, *arguments, timeout=5)
                     self.last_seen = time.monotonic()
-                    result = {"native_enemy_loot": self.last_game.get("native_enemy_loot", {})}
+                    result = {"native_enemy_loot": native_enemy_loot.source_for(self.last_game, target)}
                     if action == "native-bandit-aim-fixture":
                         result["native_bandit_aim"] = self.last_game.get("native_bandit_aim", {})
                 elif action == "native-bandit-shot-fixture" and self.native_guest and self.fixtures:
                     target = request.get("target")
                     bandit, separator, guid = target.rpartition("|") if isinstance(target, str) else ("", "", "")
-                    watched = self.last_game.get("native_enemy_loot", {})
+                    watched = native_enemy_loot.source_for(self.last_game, bandit)
                     character = self.roles().get("guest")
                     if (not separator or not character or watched.get("bandit") != bandit
                             or native_enemy_loot.watch_target(self.last_game, bandit) != bandit):
@@ -2964,7 +2984,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     native_zone_walls: bool = False, start_zone: str | None = None, max_guests: int = 1,
                     expanded_zones: bool = False, native_shop_view: bool = False,
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
-                    guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None,
+                    guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None, guest_mre: bool = False,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
@@ -2999,6 +3019,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
         raise ValueError("Restage the native host to enable stock guest sickness")
+    if guest_mre and not (native_guest and native_zones and staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre")):
+        raise ValueError("Stage the native campaign guest MRE bridge before enabling it")
     if native_events and native_backend != "cpp":
         raise ValueError("--native-events requires the staged C++ lab")
     if native_guest and not native_events:
@@ -3063,12 +3085,12 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_events=native_events, native_guest=native_guest, native_zones=native_zones,
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                             guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
+                             guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input, guest_mre=guest_mre,
                              native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
                              native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot)
             bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
-            if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_capability") is not True:
+            if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 2:
                 raise RuntimeError("The staged addon did not expose the exact stock Dead Bridge enemy loot bridge")
             extraction_rules = {}
             prepared_preset = None
@@ -3146,7 +3168,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               world_flush_supported=bool(authored and native_profile and staged_script(work, "native_world_flush.lua")),
                               expanded_zones=expanded_zones,
                               native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                              guest_regen=guest_regen, guest_sickness=guest_sickness,
+                              guest_regen=guest_regen, guest_sickness=guest_sickness, guest_mre=guest_mre,
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
@@ -3244,7 +3266,7 @@ def load_invite(file: Path, build: str) -> dict:
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby",
-            "native_mosby_station", "native_dialogue_shopkeep", "native_dialogue_mama")
+            "native_mosby_station", "native_dialogue_shopkeep", "native_dialogue_mama", "native_guest_mre")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
@@ -3255,6 +3277,8 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation enables the ShopKeep conversation without stock dialogue")
     if invite.get("native_dialogue_mama") and not invite.get("native_dialogue"):
         raise ValueError("Invitation enables Mama's conversation without stock dialogue")
+    if invite.get("native_guest_mre") and not invite.get("native_zones"):
+        raise ValueError("Invitation enables stock guest MRE use without native zones")
     return invite
 
 
@@ -3665,19 +3689,22 @@ class Client:
         try:
             inspected = await self.gameplay_action("native-inventory-list", operation, "0")
             page = inspected["native_inventory"]
-            if (page["owner"] != self.invite["character_id"] or page["offset"] != 0
-                    or not any(row["guid"] == guid and row["source"] == "backpack"
-                               and row["class_path"] == native_guest_consumable.BANDAGE_CLASS for row in page["items"])):
-                raise ValueError("The selected Bandage is no longer on the authenticated inventory page")
+            if page["owner"] != self.invite["character_id"] or page["offset"] != 0:
+                raise ValueError("The stock item is no longer on the authenticated inventory page")
+            items = [row for row in page["items"] if row["guid"] == guid and row["source"] == "backpack"]
+            item_class = items[0]["class_path"] if len(items) == 1 else None
+            action = native_guest_consumable.COMMANDS.get(item_class)
+            if not action or action == native_guest_consumable.MRE and not self.invite.get("native_guest_mre"):
+                raise ValueError("The selected stock item is not available to use")
             current = self.bridge.snapshot() or {}
             if ((self.host_session, self.zone_epoch) != epoch or current.get("state") != "connected"
                     or current.get("map") != area or current.get("native_guest_inventory_use_view") != view
                     or current.get("pawns", {}).get("local", {}).get("name") != pawn):
-                raise ValueError("The inventory Bandage confirmation expired")
-            consumed = await self.gameplay_action(native_guest_consumable.ACTION, operation, guid)
-            report = consumed["native_guest_bandage"]
+                raise ValueError("The inventory item confirmation expired")
+            consumed = await self.gameplay_action(action, operation, guid)
+            report = consumed[native_guest_consumable.RESULT[action]]
             if (report.get("state"), report.get("map"), report.get("guid")) != ("used", area, guid):
-                raise ValueError("The host did not verify use of the selected Bandage")
+                raise ValueError("The host did not verify use of the selected item")
             outcome = "used"
             self.control.event("native_guest_inventory_used", operation_id=operation, view_sequence=sequence, **consumed)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
@@ -4077,6 +4104,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for the stock ShopKeep counter dialogue")
     if invite.get("native_dialogue_mama") and not staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma"):
         raise ValueError("Restage the native client for Mama's stock Borough dialogue")
+    if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"):
+        raise ValueError("Restage the native client for stock guest MRE use")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):
@@ -4108,7 +4137,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                              native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
                              native_loot_input=native_loot_input, broker_input=broker_input,
                              native_wipe_view=wipe_view_enabled, guest_clock=guest_clock, guest_held_fire=guest_held_fire,
-                             native_mosby_station=mosby_station_enabled)
+                             native_mosby_station=mosby_station_enabled, guest_mre=invite.get("native_guest_mre", False))
             bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:
