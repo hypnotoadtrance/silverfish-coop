@@ -5,10 +5,9 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local client_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
-local crate_path = loot.crate:match("^%S+ (.+)$")
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
-local binding
-local fixture_sequence
+local bindings, fixture_sequences = {}, {}
+local active_world
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -23,40 +22,45 @@ local function exact_component(value, path, owner)
 end
 
 function input.clear()
-    binding, fixture_sequence = nil, nil
+    bindings, fixture_sequences, active_world = {}, {}, nil
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
 end
 
-function input.update(state, phase)
+function input.update(state, phase, profile)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
     local host = phase == "hosting" and state.server == false
-    if not enabled or state.map ~= loot.map or not state.listening or not valid(state.world)
+    if not enabled or not profile or state.map ~= profile.map or not state.listening or not valid(state.world)
         or not valid(pawn) or not same(pawn:GetWorld(), state.world)
         or (not host and (phase ~= "connected" or state.server ~= true)) then
-        if binding then input.clear() end
         return nil, "lua_scope"
+    end
+    if not same(active_world, state.world) then
+        input.clear()
+        active_world = state.world
     end
     if type(SilverfishSetNativeLootCrateInputScope) ~= "function"
         or type(SilverfishReadNativeLootCrateInput) ~= "function" then
         return nil, "lua_addon"
     end
 
-    local accepted, reason = SilverfishSetNativeLootCrateInputScope(pawn:GetAddress(), host)
+    local index = profile.index
+    local accepted, reason = SilverfishSetNativeLootCrateInputScope(pawn:GetAddress(), host, index)
     if not accepted then
-        if binding then input.clear() end
+        bindings[index], fixture_sequences[index] = nil, nil
         return nil, reason or "native_scope"
     end
-    local crate = StaticFindObject(crate_path)
-    if not valid(crate) or crate:GetFullName() ~= loot.crate or not same(crate:GetWorld(), state.world) then
-        if binding then input.clear() end
+    local crate = StaticFindObject(profile.path)
+    if not valid(crate) or crate:GetFullName() ~= profile.name or not same(crate:GetWorld(), state.world) then
+        bindings[index], fixture_sequences[index] = nil, nil
         return nil, "lua_crate"
     end
+    local binding = bindings[index]
     if not binding or not same(binding.crate, crate) or not same(binding.pawn, pawn) then
-        binding = { crate = crate, pawn = pawn, name = detail.name, host = host }
-        fixture_sequence = nil
+        binding = { crate = crate, pawn = pawn, name = detail.name, host = host, profile = profile }
+        bindings[index], fixture_sequences[index] = binding, nil
     end
     return binding
 end
@@ -90,7 +94,7 @@ local function observe_scene(current, box_state, box_address)
 end
 
 local function scene(current)
-    local active, _, box_state, box_address = SilverfishReadNativeLootCrateInput()
+    local active, _, box_state, box_address = SilverfishReadNativeLootCrateInput(current.profile.index)
     if not active then return end
     local report = observe_scene(current, box_state, box_address)
     if report.qualified then return report.door, report.box end
@@ -159,58 +163,65 @@ local function fixture(current)
         or not SilverfishSetNativeInteractScope(pawn:GetAddress(), current.host) then
         error("native_loot_crate_stock_fixture_unavailable", 0)
     end
-    local before_active, before = SilverfishReadNativeLootCrateInput()
+    local index = current.profile.index
+    local before_active, before = SilverfishReadNativeLootCrateInput(index)
     if before_active ~= true then error("native_loot_crate_stock_fixture_scope_unavailable", 0) end
     local original = pawn.InteractionTarget_Component
     pawn.InteractionTarget_Component = box
     local invoked, ok, detail = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
     pawn.InteractionTarget_Component = valid(original) and original or nil
-    local active, sequence = SilverfishReadNativeLootCrateInput()
+    local active, sequence = SilverfishReadNativeLootCrateInput(index)
     if not invoked or not ok or detail ~= "stock_started_consumed" or not active or sequence <= before
         or crate.Looted ~= false then
         error("native_loot_crate_stock_fixture_receipt_unverified", 0)
     end
-    fixture_sequence = sequence
+    fixture_sequences[index] = sequence
     return "stock crate interaction intercepted"
 end
 
 function input.command(fields, state, phase)
     local command = fields[2]
     if command ~= "native-loot-crate-fixture" and command ~= "native-loot-crate-project" then return end
-    local current = input.update(state, phase)
+    local target = command == "native-loot-crate-fixture" and fields[3] or fields[4]
+    local current = input.update(state, phase, loot.profile(state.map, target))
     if not current then error("native_loot_crate_input_scope_unavailable", 0) end
-    if command == "native-loot-crate-fixture" and #fields == 2 then return fixture(current) end
-    if command == "native-loot-crate-project" and #fields == 3 and fields[3] == "exhausted" then
+    if command == "native-loot-crate-fixture" and (#fields == 2 or #fields == 3) then return fixture(current) end
+    if command == "native-loot-crate-project" and (#fields == 3 or #fields == 4) and fields[3] == "exhausted" then
         return project(current)
     end
     error("native_loot_crate_input_arguments", 0)
 end
 
 function input.rows(state, phase, status_row)
-    if not enabled or state.map ~= loot.map or not state.listening or phase ~= "hosting" and phase ~= "connected" then
+    local profiles = loot.profiles(state.map)
+    if not enabled or #profiles == 0 or not state.listening or phase ~= "hosting" and phase ~= "connected" then
+        if active_world then input.clear() end
         return {}
     end
-    local current, scope = input.update(state, phase)
-    local active, sequence, scene_report
-    if current then
-        local box_state, box_address
-        active, sequence, box_state, box_address = SilverfishReadNativeLootCrateInput()
-        scope = active and "active" or "scope_inactive"
-        if active then scene_report = observe_scene(current, box_state, box_address) end
+    local rows, latest, reported = {}, 0, nil
+    for _, profile in ipairs(profiles) do
+        local current, scope = input.update(state, phase, profile)
+        local active, sequence, info = false, 0, {}
+        if current then
+            local box_state, box_address
+            active, sequence, box_state, box_address = SilverfishReadNativeLootCrateInput(profile.index)
+            scope = active and "active" or "scope_inactive"
+            if active then info = observe_scene(current, box_state, box_address) end
+        end
+        rows[#rows + 1] = status_row("native-loot-crate-diagnostic", profile.map, profile.name, phase,
+            scope or "-", info.door_state or "-", info.box_state or "-",
+            info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
+        if info.qualified then
+            rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name,
+                exhausted(current.crate, info.door, info.box) and "exhausted" or "ready")
+        end
+        if active and sequence > latest then
+            latest = sequence
+            reported = status_row("native-loot-crate-interaction", profile.map, profile.name,
+                current.name, sequence, sequence == fixture_sequences[profile.index] and "fixture" or "stock")
+        end
     end
-    local info = scene_report or {}
-    local diagnostic = status_row("native-loot-crate-diagnostic", loot.map, loot.crate, phase,
-        scope or "-", info.door_state or "-", info.box_state or "-",
-        info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
-    local rows = { diagnostic }
-    if scene_report and scene_report.qualified then
-        rows[#rows + 1] = status_row("native-loot-crate-input", loot.map, loot.crate,
-            exhausted(current.crate, info.door, info.box) and "exhausted" or "ready")
-    end
-    if active and sequence > 0 then
-        rows[#rows + 1] = status_row("native-loot-crate-interaction", loot.map, loot.crate,
-            current.name, sequence, sequence == fixture_sequence and "fixture" or "stock")
-    end
+    if reported then rows[#rows + 1] = reported end
     return rows
 end
 

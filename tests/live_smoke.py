@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.native_host_save import slot_path
 from tools.silverfish.native_loot import CRATE as NATIVE_LOOT_CRATE
+from tools.silverfish.authored_loot import PLACEMENTS as AUTHORED_CRATES, full_name as crate_name
 
 options = argparse.ArgumentParser(description=__doc__)
 options.add_argument("--work", type=Path, required=True, help="root of a prepared stage workspace")
@@ -74,6 +75,7 @@ options.add_argument("--native-weapon-reload", action="store_true", help="reload
 options.add_argument("--native-reload-input", action="store_true", help="dispatch the guest's genuine stock reload wrappers")
 options.add_argument("--native-loot", action="store_true", help="roll the qualified stock crate using an exact guest trait")
 options.add_argument("--native-loot-input", action="store_true", help="open the stock crate using its actual interaction binding")
+options.add_argument("--native-loot-matrix", action="store_true", help="verify two CrossRoads crates and one in Dead Bridge")
 options.add_argument("--native-loot-nonempty", action="store_true", help="use a deterministic stock crate test draw")
 options.add_argument("--native-loot-view", action="store_true", help="claim a stock crate item through the guest overlay")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
@@ -109,6 +111,8 @@ if args.native_bandage:
     args.native_pickup = True
     if not args.native_guest or args.native_wipe or args.native_guest_save:
         options.error("--native-bandage requires an independent native guest and its own inventory scenario")
+if args.native_loot_matrix:
+    args.native_loot_input = True
 if args.native_loot_input:
     args.native_loot = True
     if args.native_loot_nonempty:
@@ -395,6 +399,36 @@ async def meet_broker_reward_rows(owner):
                       "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"}
     return {item["guid"]: (item["class_path"], item["quantity"]) for item in inventory["items"]
             if item["class_path"] in reward_classes}
+
+
+async def open_additional_stock_crate(placement, character):
+    area, actor, _ = placement
+    crate = crate_name(area, actor)
+    stock = ("action", "--campaign", campaign)
+    client = ("action", "--profile", profile)
+    await command(*stock, "native-loot-approach", "--target", crate)
+    await wait(client_run, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(crate, {}).get("state") == "ready")
+    observed = (await command(*client, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
+    assert (observed["crate"], observed["map"], observed["entry"]) == (crate, area, "fixture"), observed
+    committed = await wait(run, lambda state: state.get("gameplay", {}).get("native_loot_rolls", {}).get(crate))
+    roll = committed["gameplay"]["native_loot_rolls"][crate]
+    assert roll["opener"] == character and roll["lucky_looter"] and roll["trait_calls"] >= 1, roll
+    for directory in (run, client_run):
+        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(crate, {})
+                   .get("state") == "exhausted")
+    if roll["items"]:
+        target = f"{roll['items'][0]['guid']}@{crate}"
+        claim = (*client, "native-loot-claim", "--target", target, "--operation-id", uuid.uuid4().hex)
+        received = (await command(*claim))["native_loot_claim"]
+        assert received["claimed_by"] == character and received["guid"] == roll["items"][0]["guid"], received
+        assert (await command(*claim))["native_loot_claim"] == received
+        refused = await command(*stock, "native-loot-claim", "--target", target, check=False)
+        assert refused["error"] == "native_loot_already_claimed", refused
+        roll["items"][0]["claimed_by"] = character
+    for owner in (stock, client):
+        assert (await command(*owner, "native-loot-open", "--target", crate))["native_loot_roll"] == roll
+    note("exact_authored_crate_has_one_shared_roll", roll)
+    return crate, roll
 
 
 def gold_ledger(status):
@@ -1764,6 +1798,11 @@ async def smoke():
                     loot_roll = (await command(*open_crate))["native_loot_roll"]
                     assert loot_roll["items"][0]["claimed_by"] == chosen, loot_roll
                     note("stock_crate_item_moves_from_escrow_to_exact_guest_once", claim)
+                if args.native_loot_matrix:
+                    matrix_rolls = {NATIVE_LOOT_CRATE: loot_roll}
+                    crate, roll = await open_additional_stock_crate(AUTHORED_CRATES[1], chosen)
+                    assert roll["id"] != loot_roll["id"], roll
+                    matrix_rolls[crate] = roll
             if args.native_fall:
                 await wait(run, lambda state: state["game"].get("native_fall", {}).get("state") == "ready")
                 authority = ("action", "--campaign", campaign)
@@ -2089,6 +2128,10 @@ async def smoke():
                     "guest_health": native_health, "map": destination, "pawn": traveled["native_guest_save"]["pawn"],
                 })
             if stock_overworld:
+                if args.native_loot_matrix:
+                    crate, roll = await open_additional_stock_crate(AUTHORED_CRATES[2], chosen)
+                    assert roll["id"] not in {previous["id"] for previous in matrix_rolls.values()}, roll
+                    matrix_rolls[crate] = roll
                 expected_map = host_status["game"]["map"]
                 await wait(run, lambda state: state["game"].get("native_zone", {}).get("state") == "ready")
                 await position("host", "near")
@@ -2189,6 +2232,15 @@ async def smoke():
             note("native_guest_health_restored_after_host_restart", {
                 "guest_health": rebound["pawns"]["guest"]["health"], "same_character_id": chosen,
             })
+            if args.native_loot_matrix:
+                stored = restored["campaign"]["world"]["party"]["native_loot_rolls"]
+                assert {crate: {name: value for name, value in roll.items() if name != "escrow"}
+                        for crate, roll in stored.items()} == matrix_rolls, stored
+                for crate, roll in matrix_rolls.items():
+                    if roll["map"] == expected_map:
+                        await wait(run, lambda state: state.get("game", {}).get("native_loot_crates", {}).get(crate, {})
+                                   .get("state") == "exhausted")
+                note("three_authored_crates_keep_their_original_rolls_after_restart", {"crates": list(matrix_rolls)})
             if args.native_meet_broker:
                 assert [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)] == meet_kits
                 assert broker_stock_balances(chosen) == meet_balances

@@ -1,4 +1,5 @@
 #include "loot_crate_input.hpp"
+#include "authored_loot_registry.hpp"
 #include "interaction_input.hpp"
 #include "shared_loot.hpp"
 
@@ -31,9 +32,6 @@ namespace
     using Iteration = Hook::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
 
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
-    constexpr auto crate_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_3");
-    constexpr auto crate_type_path = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C");
     constexpr auto open_path = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor");
     constexpr auto script_path = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:ExecuteUbergraph_LootCrate_Small_BP");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -43,7 +41,7 @@ namespace
     constexpr auto receipt_lifetime = std::chrono::seconds(4);
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
     constexpr int open_entry = 0x376;
-    constexpr int spawn_salt = -1911374248;
+    constexpr auto& profiles = silverfish::authored_loot::profiles;
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -153,24 +151,6 @@ namespace
         return {pawn, host};
     }
 
-    U::UWorld* stock_world(U::UObject* crate, std::string_view* failure = nullptr)
-    {
-        const auto refuse = [&](std::string_view reason) -> U::UWorld* {
-            if (failure) *failure = reason;
-            return nullptr;
-        };
-        if (!live(crate)) return refuse("crate_missing");
-        if (!exact(crate, crate_type_path) || crate->GetPathName() != crate_path) return refuse("crate_identity");
-        auto* actor = static_cast<U::AActor*>(crate);
-        auto* world = actor->GetWorld();
-        if (!live(world) || world->GetPathName() != world_path) return refuse("world_identity");
-        if (!actor_in_world(crate, world)) return refuse("crate_destroying");
-        auto* salt = field<U::FIntProperty>(crate, STR("SpawnSalt"));
-        if (!salt || salt->GetPropertyValueInContainer(crate) != spawn_salt) return refuse("crate_salt");
-        if (actor->GetLevel() != object(world, STR("PersistentLevel"))) return refuse("crate_level");
-        return world;
-    }
-
     U::UObject* stock_box(U::UObject* crate)
     {
         auto* box = object(crate, STR("Box"));
@@ -203,6 +183,29 @@ namespace
         return {"retired"};
     }
 
+    bool ready_profile(U::UObject* crate, U::UWorld* world)
+    {
+        if (!silverfish::shared_loot::default_crate_settings(crate)) return false;
+        auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
+        if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate) return false;
+        if (boolean(crate, STR("Looted"), true)) return true;
+        auto* value = field<U::FIntProperty>(crate, STR("SpawnedValue"));
+        auto* instance = object(world, STR("OwningGameInstance"));
+        if (!boolean(crate, STR("Looted"), false) || !value || value->GetPropertyValueInContainer(crate) != 0 ||
+            !instance || object(crate, STR("As Game Instance FP")) != instance || !presentation_box(crate).box)
+            return false;
+        auto* first = object(crate, STR("Loot_Spawner"));
+        auto* second = object(crate, STR("Loot_Spawner1"));
+        if (first == second) return false;
+        for (auto* child : {first, second})
+        {
+            if (!exact(child, STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C")) ||
+                child->GetOuterPrivate() != crate || object(child, STR("Container")) != crate ||
+                object(child, STR("As Game Instance FP")) != instance) return false;
+        }
+        return true;
+    }
+
 
     bool in_reach(U::UObject* pawn, U::UObject* box)
     {
@@ -231,7 +234,8 @@ namespace
         bool host{};
         Clock::time_point expires{}, receipt{};
         std::uint64_t observed{};
-    } scope;
+    };
+    std::array<Scope, profiles.size()> scopes;
     std::uint64_t sequence{};
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
@@ -245,7 +249,7 @@ namespace
             !method->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
     }
 
-    bool same_scope(U::UObject* crate, Local local)
+    bool same_scope(const Scope& scope, U::UObject* crate, Local local)
     {
         return crate && crate == scope.crate.Get() && scope.host == local.host && local.pawn && local.pawn == scope.pawn.Get();
     }
@@ -258,10 +262,19 @@ namespace
         const auto name = method->GetFName();
         if ((name != open_name && name != script_name) || (name == script_name && method != find<U::UFunction>(script_path)) ||
             (name == open_name && method != find<U::UFunction>(open_path))) return;
-        auto* world = stock_world(crate);
+        auto* world = silverfish::shared_loot::authored_crate_world(crate);
         if (!world) return;
         const auto local = local_owner(world);
         if (!local.pawn) return;
+        const auto active = std::ranges::find_if(scopes, [&](const Scope& candidate) {
+            return same_scope(candidate, crate, local);
+        });
+        const auto now = Clock::now();
+        const bool legacy = crate->GetPathName() == profiles.front().actor;
+        const bool scoped = active != scopes.end() && now < active->expires;
+        // The original exact crate keeps its existing live co-op guard. A new
+        // profile cannot suppress stock callbacks unless its actual scene armed.
+        if (!legacy && (!scoped || !ready_profile(crate, world))) return;
 
         if (name == script_name)
         {
@@ -283,13 +296,12 @@ namespace
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        const auto now = Clock::now();
-        if (!same_scope(crate, local) || now >= scope.expires || sequence == max_sequence ||
+        if (!scoped || sequence == max_sequence ||
             !boolean(crate, STR("Looted"), false) || !boolean(pawn, STR("Holding_Interact"), true) ||
             !hit || hit != stock_box(crate) || object(pawn, STR("InteractionTarget_Component")) != hit ||
             !in_reach(pawn, hit)) return;
-        scope.observed = ++sequence;
-        scope.receipt = now + receipt_lifetime;
+        active->observed = ++sequence;
+        active->receipt = now + receipt_lifetime;
     }
 
     int set_scope(const Lua& lua)
@@ -298,23 +310,39 @@ namespace
         if (ready())
         {
             status = "scope_arguments";
-            if (lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_bool(2))
+            const auto count = lua.get_stack_size();
+            if ((count == 2 || count == 3) && lua.is_integer(1) && lua.is_bool(2) &&
+                (count == 2 || lua.is_integer(3)))
             {
                 const auto pawn = lua.get_integer();
                 const bool host = lua.get_bool();
-                auto* crate = find<U::AActor>(crate_path);
-                auto* world = stock_world(crate, &status);
+                const auto profile_index = count == 3 ? lua.get_integer() : 1;
+                if (profile_index <= 0 || profile_index > static_cast<std::int64_t>(profiles.size()))
+                {
+                    lua.set_bool(false);
+                    lua.set_string(status);
+                    return 2;
+                }
+                const auto index = static_cast<std::size_t>(profile_index - 1);
+                auto& scope = scopes[index];
+                auto* crate = find<U::AActor>(profiles[index].actor);
+                auto* world = silverfish::shared_loot::authored_crate_world(crate, &status);
                 if (world)
                 {
                     status = "local_owner";
                     const auto local = local_owner(world);
                     if (local.pawn && pawn == reinterpret_cast<std::intptr_t>(local.pawn) && host == local.host)
                     {
-                        if (!same_scope(crate, local)) scope = {crate, local.pawn, host};
-                        scope.expires = Clock::now() + lease;
-                        status = "bound";
+                        status = "crate_profile_shape";
+                        if (index == 0 || ready_profile(crate, world))
+                        {
+                            if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, host};
+                            scope.expires = Clock::now() + lease;
+                            status = "bound";
+                        }
                     }
                 }
+                if (status != "bound") scope = {};
             }
         }
         lua.set_bool(status == "bound");
@@ -324,13 +352,17 @@ namespace
 
     int status(const Lua& lua)
     {
-        auto* crate = ready() ? scope.crate.Get() : nullptr;
-        auto* world = stock_world(crate);
+        const auto count = lua.get_stack_size();
+        const auto index = count == 0 ? 1 : count == 1 && lua.is_integer(1) ? lua.get_integer() : 0;
+        const auto* scope = ready() && index > 0 && index <= static_cast<std::int64_t>(scopes.size())
+            ? &scopes[static_cast<std::size_t>(index - 1)] : nullptr;
+        auto* crate = scope ? scope->crate.Get() : nullptr;
+        auto* world = silverfish::shared_loot::authored_crate_world(crate);
         const auto now = Clock::now();
-        const bool active = world && now < scope.expires && same_scope(crate, local_owner(world));
+        const bool active = world && now < scope->expires && same_scope(*scope, crate, local_owner(world));
         const auto box = active ? presentation_box(crate) : PresentationBox{};
         lua.set_bool(active);
-        lua.set_integer(active && now < scope.receipt ? static_cast<std::int64_t>(scope.observed) : 0);
+        lua.set_integer(active && now < scope->receipt ? static_cast<std::int64_t>(scope->observed) : 0);
         lua.set_string(box.state);
         lua.set_integer(reinterpret_cast<std::intptr_t>(box.box));
         return 4;
@@ -338,7 +370,7 @@ namespace
 
     int clear(const Lua&)
     {
-        if (U::IsInGameThreadRaw()) scope = {};
+        if (U::IsInGameThreadRaw()) scopes = {};
         return 0;
     }
 }
@@ -351,11 +383,11 @@ namespace silverfish::native_loot_crate_input
         callbacks[0] = Hook::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* crate, U::UFunction* method, void* parameters) {
                 intercept(call, crate, method, parameters);
-            }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified CrossRoads crate input")});
+            }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified authored crate input")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* crate, U::FFrame& frame, void*) {
                 intercept(call, crate, frame.Node(), frame.Locals());
-            }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified CrossRoads crate script")});
+            }, {false, false, STR("SilverfishCoopNative"), STR("Route qualified authored crate script")});
         if (std::ranges::find(callbacks, Hook::ERROR_ID) != callbacks.end())
         {
             uninstall_hooks();
@@ -385,6 +417,6 @@ namespace silverfish::native_loot_crate_input
 
     void clear_scope()
     {
-        if (U::IsInGameThreadRaw()) scope = {};
+        if (U::IsInGameThreadRaw()) scopes = {};
     }
 }

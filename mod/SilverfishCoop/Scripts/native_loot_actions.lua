@@ -56,7 +56,7 @@ function actions.command(fields, state, phase)
     local pawn, crate = fields[3], fields[4]
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local count = action == "open" and (fixture_nonempty and 6 or 5) or action == "claim" and 6 or 4
-    if not enabled or phase ~= "hosting" or #fields ~= count or crate ~= loot.crate or state.map ~= loot.map then
+    if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
         error("The exact stock crate operation is unavailable", 0)
     end
     if (action == "seed" or action == "approach" or fixture_nonempty)

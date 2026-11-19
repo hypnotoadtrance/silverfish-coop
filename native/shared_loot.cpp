@@ -1,4 +1,5 @@
 #include "shared_loot.hpp"
+#include "authored_loot_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,9 +31,6 @@ namespace
     using Address = std::uintptr_t;
 
     constexpr auto owner = STR("SilverfishCoopNative");
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
-    constexpr auto crate_path =
-        STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_3");
     constexpr auto crate_class = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C");
     constexpr auto parent_class =
         STR("/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C");
@@ -58,7 +56,6 @@ namespace
     constexpr auto character_type_path =
         STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct");
     constexpr auto permanent_effects_name = STR("PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00");
-    constexpr auto authored_salt = -1911374248;
     constexpr int max_clients = 4;
     constexpr int max_effects = 256;
 
@@ -279,22 +276,43 @@ namespace
         return {};
     }
 
+    bool qualify_authored_opener(Address pawn, Address save, Address stock, Context& context)
+    {
+        Unreal::UWorld* previous = nullptr;
+        for (const auto& profile : silverfish::authored_loot::profiles)
+        {
+            auto* world = find<Unreal::UWorld>(profile.world);
+            if (!world || world == previous) continue;
+            previous = world;
+            Context next;
+            next.world = world;
+            if (qualify_opener(pawn, save, stock, next).empty())
+            {
+                context = next;
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
     {
-        context.world = find<Unreal::UWorld>(world_path);
-        context.crate = find<Unreal::UObject>(crate_path);
-        auto* crate_type = find<Unreal::UClass>(crate_class);
-        if (!live(context.world) || !live(context.crate) || address(context.crate) != crate || !crate_type ||
-            context.crate->GetClassPrivate() != crate_type ||
+        for (const auto& profile : silverfish::authored_loot::profiles)
+        {
+            auto* candidate = find<Unreal::UObject>(profile.actor);
+            if (candidate && address(candidate) == crate)
+            {
+                context.crate = candidate;
+                break;
+            }
+        }
+        context.world = silverfish::shared_loot::authored_crate_world(context.crate);
+        if (!context.world ||
             !authority(context.crate, context.world)) return "exact_stock_crate_unavailable";
-        auto* level = object_field(context.world, STR("PersistentLevel"));
-        auto* salt = field<Unreal::FIntProperty>(context.crate, STR("SpawnSalt"));
         auto* value = field<Unreal::FIntProperty>(context.crate, STR("SpawnedValue"));
-        if (!level || static_cast<Unreal::AActor*>(context.crate)->GetLevel() != level ||
-            !salt || salt->GetPropertyValueInContainer(context.crate) != authored_salt ||
-            !value || value->GetPropertyValueInContainer(context.crate) != 0 ||
-            !read_bool(context.crate, STR("Looted"), false) || !read_bool(context.crate, STR("IgnoreKarma"), false) ||
-            !read_bool(context.crate, STR("GuaranteeSpawn"), false)) return "stock_crate_not_ready";
+        if (!value || value->GetPropertyValueInContainer(context.crate) != 0 ||
+            !read_bool(context.crate, STR("Looted"), false) ||
+            !silverfish::shared_loot::default_crate_settings(context.crate)) return "stock_crate_not_ready";
 
         if (const auto error = qualify_opener(pawn, save, stock, context); !error.empty()) return error;
         context.box = object_field(context.crate, STR("Box"));
@@ -858,9 +876,8 @@ namespace
             return seed_result(lua, false, "native_loot_exact_detached_guest_required");
 
         Context context;
-        context.world = find<Unreal::UWorld>(world_path);
-        const auto owner_error = qualify_opener(addresses[0], addresses[1], addresses[2], context);
-        if (!owner_error.empty()) return seed_result(lua, false, owner_error);
+        if (!qualify_authored_opener(addresses[0], addresses[1], addresses[2], context))
+            return seed_result(lua, false, "native_loot_exact_detached_guest_required");
 
         auto* character_type = find<Unreal::UScriptStruct>(character_type_path);
         auto* character = field<Unreal::FStructProperty>(context.save, STR("Character"));
@@ -926,9 +943,57 @@ namespace
 
 namespace silverfish::shared_loot
 {
+    Unreal::UWorld* authored_crate_world(Unreal::UObject* crate, std::string_view* failure)
+    {
+        const auto refuse = [&](std::string_view reason) -> Unreal::UWorld* {
+            if (failure) *failure = reason;
+            return nullptr;
+        };
+        if (!live(crate)) return refuse("crate_missing");
+        if (crate->GetClassPrivate() != find<Unreal::UClass>(crate_class)) return refuse("crate_identity");
+        const auto path = crate->GetPathName();
+        const auto profile = std::ranges::find_if(authored_loot::profiles, [&](const auto& entry) {
+            return path == entry.actor;
+        });
+        if (profile == authored_loot::profiles.end()) return refuse("crate_identity");
+        auto* actor = static_cast<Unreal::AActor*>(crate);
+        auto* world = actor->GetWorld();
+        if (!live(world) || world->GetPathName() != profile->world ||
+            world != find<Unreal::UWorld>(profile->world)) return refuse("world_identity");
+        if (!read_bool(crate, STR("bActorIsBeingDestroyed"), false)) return refuse("crate_destroying");
+        auto* level = object_field(world, STR("PersistentLevel"));
+        if (!level || actor->GetLevel() != level) return refuse("crate_level");
+        auto* salt = field<Unreal::FIntProperty>(crate, STR("SpawnSalt"));
+        if (!salt || salt->GetPropertyValueInContainer(crate) != profile->salt) return refuse("crate_salt");
+        return world;
+    }
+
+    bool default_crate_settings(Unreal::UObject* crate)
+    {
+        if (!read_bool(crate, STR("GuaranteeSpawn"), false) || !read_bool(crate, STR("IgnoreKarma"), false))
+            return false;
+        // Keep the previously live-qualified stock route on its existing guards.
+        if (crate->GetPathName() == authored_loot::profiles.front().actor) return true;
+        auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
+        if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate() ||
+            !read_bool(crate, STR("Ping_IfOpened"), false)) return false;
+        for (const auto* name : {STR("Replenish_Mode"), STR("Loot_Override")})
+        {
+            auto* property = crate->GetPropertyByNameInChain(name);
+            if (!property || property->GetArrayDim() != 1 ||
+                !property->Identical(property->ContainerPtrToValuePtr<void>(crate),
+                                     property->ContainerPtrToValuePtr<void>(defaults))) return false;
+        }
+        return true;
+    }
+
     bool qualify_escrow_owner(Address pawn, Address save, Address stock, EscrowOwner& owner)
     {
-        return qualify_escrow_owner_in_world(find<Unreal::UWorld>(world_path), pawn, save, stock, owner);
+        if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening) return false;
+        Context context;
+        if (!qualify_authored_opener(pawn, save, stock, context)) return false;
+        owner = {context.world, context.pawn, context.save, context.stock};
+        return true;
     }
 
     bool qualify_escrow_owner_in_world(Unreal::UWorld* world, Address pawn, Address save, Address stock, EscrowOwner& owner)
@@ -945,10 +1010,10 @@ namespace silverfish::shared_loot
                               EscrowOwner& owner, std::array<Unreal::UObject*, 2>& actors, bool consume)
     {
         auto* expected = latest_roll.crate.Get();
+        auto* world = authored_crate_world(expected);
         if (!crate || !expected || crate != address(expected) || Clock::now() >= latest_roll.expires ||
-            expected != find<Unreal::UObject>(crate_path) ||
-            !qualify_escrow_owner(address(latest_roll.pawn.Get()), address(latest_roll.save.Get()),
-                                  address(latest_roll.stock.Get()), owner) ||
+            !world || !qualify_escrow_owner_in_world(world, address(latest_roll.pawn.Get()), address(latest_roll.save.Get()),
+                                                     address(latest_roll.stock.Get()), owner) ||
             !authority(expected, owner.world) || !read_bool(expected, STR("Looted"), true) ||
             object_field(expected, STR("Player")) != owner.pawn) return false;
 

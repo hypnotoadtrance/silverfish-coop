@@ -507,8 +507,8 @@ class Host:
                 and world_view.get("actor") == WORLD_VIEW_ACTORS.get(area)):
             view["host_world"]["native_world_view"] = world_view
         view["native_quests"] = self.party.get("native_quests", {})
-        if rolls := self.party.get(native_loot.STATE_KEY):
-            view[native_loot.STATE_KEY] = {key: native_loot.public_roll(roll) for key, roll in rolls.items()}
+        if rolls := native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area):
+            view[native_loot.STATE_KEY] = rolls
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
         if pending := pending_cube(self.party):
@@ -1485,7 +1485,7 @@ class Host:
             await native_inventory_death.project_bags(self, bridge, "host", native_inventory_death.visible_bags(self.party, "host"))
             await native_authored_pickup.project(self, bridge, self.party.get(native_authored_pickup.STATE_KEY, {}))
             if self.native_loot_input:
-                snapshot = await native_loot.project_opened(bridge, self.last_game, self.party.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE))
+                snapshot = await native_loot.project_opened(bridge, self.last_game, self.party.get(native_loot.STATE_KEY, {}))
                 if snapshot is not self.last_game:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_rewards.settle(self, bridge)
@@ -2151,17 +2151,25 @@ class Host:
                 elif action in ("native-loot-inspect", "native-loot-open", "native-loot-approach",
                                 "native-loot-seed", "native-loot-claim"):
                     operation = action.removeprefix("native-loot-")
-                    character = (self.roles().get(request.get("target") or "guest")
-                                 if operation in ("seed", "approach") else "host")
-                    target = request.get("target") if operation == "claim" else native_loot.CRATE
+                    character, target = "host", request.get("target")
+                    if operation in ("seed", "approach"):
+                        role, target = native_loot.fixture_selection(target, self.last_game.get("map"))
+                        character = self.roles().get(role)
+                    elif operation != "claim" and target is None:
+                        target = native_loot.default_crate(self.last_game.get("map"))
                     result = await native_loot.perform(self, bridge, character, operation, target,
                                                        request.get("operation_id") or path.stem)
                 elif action == "native-loot-open-fixture" and self.fixtures:
-                    character = self.roles().get(request.get("target") or "guest")
-                    result = await native_loot.perform(self, bridge, character, "open", native_loot.CRATE,
+                    role, crate = native_loot.fixture_selection(request.get("target"), self.last_game.get("map"))
+                    character = self.roles().get(role)
+                    result = await native_loot.perform(self, bridge, character, "open", crate,
                                                        request.get("operation_id") or path.stem, fixture_nonempty=True)
                 elif action == "native-loot-crate-fixture" and self.native_loot_input and self.fixtures:
-                    self.last_game = await bridge.command(action, timeout=5)
+                    area = self.last_game.get("map")
+                    crate = request.get("target") or native_loot.default_crate(area)
+                    if native_loot.CRATES.get(crate) != area or not crate:
+                        raise ValueError("Select an exact authored crate on the current map")
+                    self.last_game = await bridge.command(action, crate, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
                 elif action in ("native-quest-catalog", "native-quest-list"):
@@ -2730,14 +2738,15 @@ class Host:
                 if snapshot is not self.last_game:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
             if (self.native_loot_input and not self.stopping and not self.native_checkpoint_unsafe
-                    and (sequence := native_loot.interaction_sequence(self.last_game, self.last_crate_intent))):
+                    and (intent := native_loot.interaction(self.last_game, self.last_crate_intent))):
+                sequence, crate = intent
                 self.last_crate_intent = sequence
-                operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}").hex
+                operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}:{crate}").hex
                 try:
-                    await native_loot.perform(self, bridge, "host", "open", native_loot.CRATE, operation)
-                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation)
+                    await native_loot.perform(self, bridge, "host", "open", crate, operation)
+                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate)
                 except (OSError, ValueError, RuntimeError) as error:
-                    self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, reason=str(error))
+                    self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             for operation_id, target in bridge.interactions():
                 if self.stopping or self.native_checkpoint_unsafe:
                     break
@@ -2766,8 +2775,8 @@ class Host:
                 await self.apply_pending_spawns(bridge)
                 await self.project_gameplay(bridge)
                 if loot_view and not self.stopping:
-                    roll = self.party.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE)
-                    snapshot = await loot_view.sync(self.last_game, roll, claim_crate)
+                    rolls = self.party.get(native_loot.STATE_KEY, {})
+                    snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             now = time.monotonic()
@@ -3323,18 +3332,20 @@ class Client:
     async def service_crate_interaction(self, active: bool) -> None:
         if not self.invite.get("native_loot_input"):
             return
-        sequence = native_loot.interaction_sequence(self.last_game, self.last_crate_intent)
-        if sequence is None:
+        intent = native_loot.interaction(self.last_game, self.last_crate_intent)
+        if intent is None:
             return
+        sequence, crate = intent
         self.last_crate_intent = sequence
         if not active or self.stopping or not self.host_session or not self.zone_epoch:
             return
-        operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}").hex
+        operation = uuid.uuid5(self.bridge.input_namespace,
+                               f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
         try:
-            result = await self.gameplay_action("native-loot-open", operation, native_loot.CRATE)
-            self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, **result)
+            result = await self.gameplay_action("native-loot-open", operation, crate)
+            self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, **result)
         except (ValueError, OSError, RuntimeError) as error:
-            self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, reason=str(error))
+            self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, crate=crate, reason=str(error))
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):
@@ -3524,7 +3535,7 @@ class Client:
                     await native_flood_jammer.project_client(self)
                     if self.invite.get("native_loot_input"):
                         self.last_game = await native_loot.project_opened(
-                            self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE))
+                            self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
                 await self.project_world_view()
                 if self.guest_clock:
                     await self.guest_clock.sync(self)
@@ -3645,7 +3656,11 @@ class Client:
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_authored_pickup_interaction": self.last_game.get("native_authored_pickup_interaction", {})}
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
-                    self.last_game = await self.bridge.command(action, timeout=5)
+                    area = self.last_game.get("map")
+                    crate = request.get("target") or native_loot.default_crate(area)
+                    if native_loot.CRATES.get(crate) != area or not crate:
+                        raise ValueError("Select an exact authored crate on the current map")
+                    self.last_game = await self.bridge.command(action, crate, timeout=5)
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
                 elif action == "native-loot-view-fixture" and self.loot_view:
                     self.last_game = await self.loot_view.fixture(action, request.get("target"))
@@ -3716,9 +3731,9 @@ class Client:
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
             if self.loot_view:
-                roll = (self.gameplay.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE)
-                        if active and time.monotonic() - self.gameplay_seen < 2 else None)
-                self.last_game = await self.loot_view.sync(self.last_game, roll, claim_crate)
+                rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
+                         if active and time.monotonic() - self.gameplay_seen < 2 else {})
+                self.last_game = await self.loot_view.sync(self.last_game, rolls, claim_crate)
             await self.service_broker_input(active)
             if self.wire_board:
                 current = (active and not self.stopping and self.host_session and self.zone_epoch

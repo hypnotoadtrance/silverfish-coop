@@ -28,9 +28,9 @@ local function bounded_id(text, lower)
         and text:match(lower and "^[0-9a-f]+$" or "^[0-9A-F]+$")
 end
 
-local function scope(state, phase)
-    if not event_path or state.map ~= loot.map then return end
-    local binding = crate_input.update(state, phase)
+local function scope(state, phase, crate)
+    if not event_path or not crate then return end
+    local binding = crate_input.update(state, phase, loot.profile(state.map, crate))
     local controller = state.controller
     if not binding or not valid(controller) then return end
     local pawn = binding.pawn
@@ -40,11 +40,13 @@ local function scope(state, phase)
         or binding.crate.Looted ~= true then return end
     local here, target = pawn:K2_GetActorLocation(), binding.crate:K2_GetActorLocation()
     local range, stack = pawn.InteractionRange, controller.MenuStack
-    if not here or not target or type(range) ~= "number" or range <= 0 or range > 1000
+    if not here or not target or type(range) ~= "number" or range ~= range or range <= 0 or range > 1000
         or controller.Loading ~= false or not stack or stack:GetArrayNum() ~= 0
-        or is_downed(pawn) ~= false
-        or (here.X - target.X)^2 + (here.Y - target.Y)^2 + (here.Z - target.Z)^2 >= range^2 then return end
-    return { pawn = pawn, controller = controller, name = binding.name }
+        or is_downed(pawn) ~= false then return end
+    local distance = math.sqrt((here.X - target.X)^2 + (here.Y - target.Y)^2 + (here.Z - target.Z)^2)
+    if distance ~= distance or distance >= range then return end
+    return { pawn = pawn, controller = controller, name = binding.name, crate = crate, actor = binding.crate,
+        distance = distance }
 end
 
 local function remove_widget()
@@ -96,7 +98,7 @@ local function submit(item)
     local file = io.open(event_path, "ab")
     if not file then return false end
     sequence = sequence + 1
-    local ok = file:write(table.concat({ "crate-view", sequence, current.id, current.name, item.guid }, "\t"), "\n")
+    local ok = file:write(table.concat({ "crate-view", sequence, current.id, current.name, current.crate, item.guid }, "\t"), "\n")
     local closed = file:close()
     return ok and closed
 end
@@ -106,7 +108,7 @@ local function choose(action)
         if selection.mode == "confirming" then
             selection.mode = "ready"
         elseif selection.mode == "ready" then
-            dismissed = current.id
+            dismissed = { id = current.id, crate = current.crate }
             remove_widget()
             return
         end
@@ -128,7 +130,7 @@ end
 
 local function items(fields)
     local parsed, seen = {}, {}
-    for index = 5, #fields do
+    for index = 6, #fields do
         local guid, path = fields[index]:match("^([0-9A-F]+)|(/Game/[%w_./%-]+)$")
         local name = path and #path <= 512 and path:match("%.([%w_%-]+)_C$")
         if not bounded_id(guid, false) or seen[guid] or not name then
@@ -144,35 +146,38 @@ function view.command(fields, state, phase)
     local command = fields[2]
     if command ~= "native-loot-view-render" and command ~= "native-loot-view-fixture"
         and command ~= "native-loot-view-result" then return end
-    local active = scope(state, phase)
+    local active = scope(state, phase, fields[5])
     if not active or active.name ~= fields[4] or not bounded_id(fields[3], true) then
         error("stock_crate_view_scope_unavailable", 0)
     end
-    if command == "native-loot-view-render" and #fields >= 4 and #fields <= 6 then
-        local id, signature = fields[3], table.concat(fields, "\t", 5)
-        if id ~= dismissed and #fields > 4 then
-            if not current or current.id ~= id or current.name ~= active.name or current.signature ~= signature then
+    if command == "native-loot-view-render" and #fields >= 5 and #fields <= 7 then
+        local id, signature = fields[3], table.concat(fields, "\t", 6)
+        local closed = dismissed and dismissed.id == id and dismissed.crate == active.crate
+        if not closed and #fields > 5 then
+            if not current or current.id ~= id or current.crate ~= active.crate or not same(current.actor, active.actor)
+                or current.name ~= active.name or current.signature ~= signature then
                 remove_widget()
                 selection = { index = 1, mode = "ready" }
             end
             active.id, active.signature, active.expires = id, signature, os.time() + 2
             active.items, current = items(fields), active
             paint()
-        elseif #fields == 4 then
+        elseif #fields == 5 and current and current.crate == active.crate then
             view.clear()
-        elseif current and current.id == id then
+        elseif current and current.id == id and current.crate == active.crate then
             current.expires = os.time() + 2
         end
         return "stock crate panel refreshed"
     end
-    if not current or current.id ~= fields[3] or current.name ~= active.name or #fields ~= 5 then
+    if not current or current.id ~= fields[3] or current.name ~= active.name or current.crate ~= active.crate
+        or not same(current.actor, active.actor) or #fields ~= 6 then
         error("stock_crate_view_selection_unavailable", 0)
     end
-    if command == "native-loot-view-fixture" and headless and valid(widget) and keys[fields[5]] then
-        choose(fields[5])
+    if command == "native-loot-view-fixture" and headless and valid(widget) and keys[fields[6]] then
+        choose(fields[6])
         return "staged stock crate panel key dispatched"
     end
-    if command == "native-loot-view-result" and fields[5] == "refresh" and selection.mode == "claiming" then
+    if command == "native-loot-view-result" and fields[6] == "refresh" and selection.mode == "claiming" then
         selection.mode = "ready"
         paint()
         return "stock crate panel claim completed"
@@ -182,8 +187,9 @@ end
 
 function view.sync(state, phase)
     if not current then return end
-    local active = scope(state, phase)
-    if not active or not same(active.pawn, current.pawn) or os.time() > current.expires then
+    local active = scope(state, phase, current.crate)
+    if not active or not same(active.pawn, current.pawn) or not same(active.actor, current.actor)
+        or os.time() > current.expires then
         view.clear()
         return
     end
@@ -203,12 +209,22 @@ function view.sync(state, phase)
 end
 
 function view.rows(state, phase, status_row)
-    local active = scope(state, phase)
-    if not active then return {} end
-    local mode = dismissed and current and dismissed == current.id and "closed"
-        or current and selection.mode or "nearby"
-    return { status_row("native-loot-view", active.name, current and current.id or "-", mode,
-        mode == "claiming" and sequence or "-", current and current.items[selection.index].guid or "-") }
+    if not event_path then return {} end
+    local rows = {}
+    for _, profile in ipairs(loot.profiles(state.map)) do
+        local active = scope(state, phase, profile.name)
+        if active then
+            rows[#rows + 1] = status_row("native-loot-view-nearby", state.map, active.crate, active.name, active.distance)
+            if current and current.crate == active.crate and same(current.actor, active.actor)
+                and same(current.pawn, active.pawn) then
+                local mode = dismissed and dismissed.id == current.id and dismissed.crate == current.crate
+                    and "closed" or selection.mode
+                rows[#rows + 1] = status_row("native-loot-view", active.name, current.id, mode,
+                    mode == "claiming" and sequence or "-", current.items[selection.index].guid, active.crate)
+            end
+        end
+    end
+    return rows
 end
 
 function view.start(bridge, downed)

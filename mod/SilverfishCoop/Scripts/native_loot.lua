@@ -1,11 +1,8 @@
 local loot = {}
 local guest_save = require("guest_save")
+local registry = require("authored_loot_registry")
 
-local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
-local level = map .. ".CrossRoads_P"
 local crate_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
-local crate_name = "LootCrate_Small_BP_C " .. level .. ":PersistentLevel.LootCrate_Small_BP_C_3"
-local spawn_salt = -1911374248
 local spawner_class = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local box_class = "/Script/Engine.BoxComponent"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -21,7 +18,22 @@ local item_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local max_inventory, max_effects = 4096, 256
 
-loot.map, loot.crate = map, crate_name
+local maps, names = {}, {}
+for _, profile in ipairs(registry) do
+    maps[profile.map] = maps[profile.map] or {}
+    table.insert(maps[profile.map], profile)
+    names[profile.name] = profile
+    profile.world = profile.path:match("^(.-):PersistentLevel%.")
+end
+
+function loot.profiles(map)
+    return maps[map] or {}
+end
+
+function loot.profile(map, name)
+    local profile = name == nil and loot.profiles(map)[1] or names[name]
+    return profile and profile.map == map and profile or nil
+end
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -128,12 +140,12 @@ function loot.lucky_looter(save)
     return false, "none"
 end
 
-local function host_context(state, phase)
+local function host_context(state, phase, profile)
     local world = state.world
     local host = state.local_pawn and state.local_pawn.pawn
     local controller = state.local_pawn and state.local_pawn.controller_object
-    if phase ~= "hosting" or state.map ~= map or not state.listening or state.server
-        or not valid(world) or world:GetFullName() ~= "World " .. level
+    if phase ~= "hosting" or not profile or state.map ~= profile.map or not state.listening or state.server
+        or not valid(world) or world:GetFullName() ~= "World " .. profile.world
         or not exact(host, StaticFindObject(pawn_class)) or not authority(host, world)
         or not exact(controller, StaticFindObject(controller_class)) or not authority(controller, world)
         or not controller:IsLocalController() or not same(controller.Pawn, host)
@@ -165,17 +177,14 @@ local function participant(state, name, host, world)
     return match
 end
 
-local function find_crate(world)
+local function find_crate(world, profile)
     local class = StaticFindObject(crate_class)
-    local match
-    for _, crate in ipairs(FindAllOf("LootCrate_Small_BP_C") or {}) do
-        if exact(crate, class) and crate:GetFullName() == crate_name and authority(crate, world) then
-            if match then error("native_loot_crate_ambiguous", 0) end
-            match = crate
-        end
+    local crate = StaticFindObject(profile.path)
+    if not exact(crate, class) or crate:GetFullName() ~= profile.name or not authority(crate, world)
+        or crate.SpawnSalt ~= profile.salt then
+        error("native_loot_authored_crate_unavailable", 0)
     end
-    if not match or match.SpawnSalt ~= spawn_salt then error("native_loot_authored_crate_unavailable", 0) end
-    return match
+    return crate
 end
 
 local function child_spawners(crate, instance)
@@ -205,12 +214,13 @@ local function distance_to_box(pawn, box, allow_distant)
 end
 
 function loot.qualify(state, phase, pawn_name, requested_crate, allow_distant)
-    if type(pawn_name) ~= "string" or requested_crate ~= nil and requested_crate ~= crate_name then
+    local profile = loot.profile(state.map, requested_crate)
+    if type(pawn_name) ~= "string" or not profile then
         error("native_loot_expected_exact_pawn_and_crate", 0)
     end
-    local host, world, instance, stock = host_context(state, phase)
+    local host, world, instance, stock = host_context(state, phase, profile)
     local pawn = participant(state, pawn_name, host, world)
-    local crate = find_crate(world)
+    local crate = find_crate(world, profile)
     local box = crate.Box
     if crate.Looted ~= false or crate.SpawnedValue ~= 0 or crate.GuaranteeSpawn ~= false or crate.IgnoreKarma ~= false
         or not same(crate["As Game Instance FP"], instance) or not exact(box, StaticFindObject(box_class))
@@ -220,7 +230,7 @@ function loot.qualify(state, phase, pawn_name, requested_crate, allow_distant)
     local position, distance = distance_to_box(pawn, box, allow_distant)
     local spawners = child_spawners(crate, instance)
     local trait, source = loot.lucky_looter(pawn.Save)
-    return { world = world, instance = instance, stock = stock, pawn = pawn, save = pawn.Save, crate = crate,
+    return { world = world, instance = instance, stock = stock, pawn = pawn, save = pawn.Save, crate = crate, profile = profile,
         box = box, spawners = spawners, lucky_looter = trait, lucky_source = source,
         position = position, distance = distance }
 end
@@ -243,10 +253,12 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
 end
 
 function loot.claim_context(state, phase, pawn_name, requested_crate)
-    if requested_crate ~= crate_name then error("native_loot_expected_exact_crate", 0) end
-    local host, world, instance, stock = host_context(state, phase)
+    local profile = requested_crate and loot.profile(state.map, requested_crate)
+    if not profile then error("native_loot_expected_exact_crate", 0) end
+    local host, world, _, stock = host_context(state, phase, profile)
     local pawn = participant(state, pawn_name, host, world)
-    local crate = find_crate(world)
+    local crate = find_crate(world, profile)
+    if crate.Looted ~= true then error("native_loot_crate_not_open", 0) end
     local target, from = crate:K2_GetActorLocation(), pawn:K2_GetActorLocation()
     local dx, dy, dz = target.X - from.X, target.Y - from.Y, target.Z - from.Z
     local range = pawn.InteractionRange
@@ -260,9 +272,10 @@ end
 -- The native hook supplies only the item addresses captured from this exact
 -- crate's two SpawnLoot out parameters. Nearby world items have no provenance.
 function loot.results(state, phase, scope, item_addresses)
-    local host, world, instance, stock = host_context(state, phase)
-    if type(scope) ~= "table" or not same(scope.world, world) or not same(scope.instance, instance)
-        or not same(scope.stock, stock) or not same(find_crate(world), scope.crate)
+    local profile = type(scope) == "table" and scope.profile
+    local host, world, instance, stock = host_context(state, phase, profile)
+    if not same(scope.world, world) or not same(scope.instance, instance)
+        or not same(scope.stock, stock) or not same(find_crate(world, profile), scope.crate)
         or not authority(scope.pawn, world) or not same(scope.pawn.Save, scope.save)
         or not (same(scope.pawn, host) or guest_save.matches(scope.pawn))
         or scope.crate.Looted ~= true or type(item_addresses) ~= "table" or #item_addresses > 2 then

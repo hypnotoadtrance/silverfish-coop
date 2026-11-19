@@ -1,15 +1,15 @@
-"""Commit one host-authoritative roll from the qualified stock CrossRoads crate."""
+"""Commit and share host-authoritative rolls for qualified stock crates."""
 
 import asyncio
 import time
 import uuid
 
 from . import native_host_save, party
+from .authored_loot import CRATES, LEGACY_CRATE
 from .native_gold import valid_guid
-from .travel import CROSSROADS
 
 
-CRATE = f"LootCrate_Small_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_3"
+CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
 
 
@@ -24,28 +24,56 @@ def _scope(host, character: str) -> str:
     return record.get("pawn", "") if record.get("connected") else ""
 
 
-def interaction_sequence(game: dict, last_sequence: int) -> int | None:
+def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
     proof = game.get("native_loot_crate_interaction", {})
     pawn = game.get("pawns", {}).get("local", {}).get("name")
-    sequence = proof.get("sequence")
-    if (game.get("map") == CROSSROADS and pawn and type(sequence) is int and last_sequence < sequence < 2**53
-            and (proof.get("map"), proof.get("crate"), proof.get("pawn")) == (CROSSROADS, CRATE, pawn)
+    area, crate, sequence = game.get("map"), proof.get("crate"), proof.get("sequence")
+    if (isinstance(crate, str) and crate in CRATES and CRATES[crate] == area and pawn
+            and type(sequence) is int and last_sequence < sequence < 2**53
+            and (proof.get("map"), proof.get("pawn")) == (area, pawn)
             and proof.get("entry") in ("stock", "fixture")):
-        return sequence
+        return sequence, crate
 
 
-async def project_opened(bridge, game: dict, roll: dict | None) -> dict:
-    """Project a saved open crate without replaying its stock loot function."""
-    if not roll or game.get("map") != CROSSROADS or roll.get("crate") != CRATE or roll.get("map") != CROSSROADS:
-        return game
-    scope = game.get("native_loot_crate_input", {})
-    if (scope.get("map"), scope.get("crate"), scope.get("state")) != (CROSSROADS, CRATE, "ready"):
-        return game
-    snapshot = await bridge.command("native-loot-crate-project", "exhausted", timeout=4)
-    proof = snapshot.get("native_loot_crate_input", {})
-    if (proof.get("map"), proof.get("crate"), proof.get("state")) != (CROSSROADS, CRATE, "exhausted"):
-        raise RuntimeError("The stock crate did not reflect its committed roll")
-    return snapshot
+def _rolls_in_area(rolls: dict, area: str) -> dict:
+    return {crate: roll for crate, map_name in CRATES.items() if map_name == area
+            and (roll := rolls.get(crate)) and (roll.get("crate"), roll.get("map")) == (crate, area)}
+
+
+def published(rolls: dict, area: str) -> dict:
+    return {crate: public_roll(roll) for crate, roll in _rolls_in_area(rolls, area).items()}
+
+
+def default_crate(area: str) -> str | None:
+    return next((crate for crate, zone in CRATES.items() if zone == area), None)
+
+
+def fixture_selection(target: str | None, area: str) -> tuple[str, str | None]:
+    if target is None:
+        return "guest", default_crate(area)
+    if not isinstance(target, str):
+        return "", None
+    role, separator, crate = target.partition("@")
+    if separator:
+        return role, crate
+    if target in CRATES:
+        return "guest", target
+    return target, default_crate(area)
+
+async def project_opened(bridge, game: dict, rolls: dict) -> dict:
+    """Project saved open crates in this map without replaying stock rolls."""
+    area = game.get("map")
+    for crate in _rolls_in_area(rolls or {}, area):
+        scope = game.get("native_loot_crates", {}).get(crate, {})
+        if (scope.get("map"), scope.get("crate"), scope.get("state")) != (area, crate, "ready"):
+            continue
+        snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, timeout=4)
+        proof = snapshot.get("native_loot_crates", {}).get(crate, {})
+        if snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) != (
+                area, crate, "exhausted"):
+            raise RuntimeError("The exact stock crate did not reflect its committed roll")
+        game = snapshot
+    return game
 
 
 class LootView:
@@ -80,18 +108,38 @@ class LootView:
             raise ValueError("Select an input for the active staged crate view")
         return await self.bridge.command(action, *self.scope, target, timeout=4)
 
-    async def sync(self, game: dict, roll: dict | None, claim) -> dict:
+    async def sync(self, game: dict, rolls: dict | None, claim) -> dict:
         event = self.read_claim() or self.pending_event
         view = game.get("native_loot_view", {})
         pawn = game.get("pawns", {}).get("local", {}).get("name")
-        if (not roll or game.get("map") != CROSSROADS or roll.get("map") != CROSSROADS or roll.get("crate") != CRATE
-                or not pawn or view.get("pawn") != pawn or not party.REQUEST_ID.fullmatch(str(roll.get("id", "")))):
+        area = game.get("map")
+        eligible = _rolls_in_area(rolls or {}, area)
+        candidates = {}
+        nearby = game.get("native_loot_view_candidates", {})
+        for crate, roll in eligible.items():
+            candidate = nearby.get(crate, {})
+            distance = candidate.get("distance")
+            if (pawn and (candidate.get("map"), candidate.get("crate"), candidate.get("pawn")) == (area, crate, pawn)
+                    and type(distance) in (float, int) and 0 <= distance <= 1000
+                    and party.REQUEST_ID.fullmatch(str(roll.get("id", "")))):
+                candidates[crate] = distance
+        if not candidates:
             self.scope = self.previous_items = None
             self.next_lease = 0.0
             self.claimed.clear()
             self.pending_event = []
             return game
-        scope = roll["id"], pawn
+        shown_crate = view.get("crate")
+        if (isinstance(shown_crate, str) and shown_crate in candidates and view.get("pawn") == pawn
+                and view.get("id") == eligible[shown_crate]["id"]
+                and (view.get("state") in ("confirming", "claiming")
+                     or tuple(event[2:5]) == (view["id"], pawn, shown_crate))):
+            crate = shown_crate
+        else:
+            nonempty = [key for key in candidates if any(not row.get("claimed_by") for row in eligible[key]["items"])]
+            crate = min(nonempty or candidates, key=lambda key: (candidates[key], key))
+        roll = eligible[crate]
+        scope = roll["id"], pawn, crate
         if scope != self.scope:
             self.scope = scope
             self.previous_items = None
@@ -99,19 +147,20 @@ class LootView:
             self.claimed.clear()
         rows = {row["guid"]: row for row in roll["items"] if not row.get("claimed_by")}
         self.pending_event = []
-        valid_event = (len(event) == 5 and event[0] == "crate-view" and tuple(event[2:4]) == scope
+        valid_event = (len(event) == 6 and event[0] == "crate-view" and tuple(event[2:5]) == scope
                        and event[1].isascii() and event[1].isdigit() and len(event[1]) <= 16
-                       and self.last_sequence < (sequence := int(event[1]))
-                       and (guid := event[4]) in rows and guid not in self.claimed)
-        if valid_event and (view.get("id"), view.get("state"), view.get("sequence"), view.get("guid")) != (
-                scope[0], "claiming", sequence, guid):
+                       and self.last_sequence < (sequence := int(event[1])) < 2**53
+                       and (guid := event[5]) in rows and guid not in self.claimed)
+        if valid_event and tuple(view.get(key) for key in ("id", "pawn", "crate", "state", "sequence", "guid")) != (
+                *scope, "claiming", sequence, guid):
             self.pending_event = event
         elif valid_event:
             self.last_sequence = sequence
             operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{scope}:{sequence}").hex
             try:
-                result = await claim(operation, guid)
-                if result["native_loot_claim"]["guid"] != guid:
+                result = await claim(operation, f"{guid}@{crate}")
+                if (result["native_loot_claim"]["guid"] != guid
+                        or result.get("native_loot_crate", LEGACY_CRATE) != crate):
                     raise RuntimeError("The crate response did not match the selected item")
                 self.claimed.add(guid)
                 self.control.event("native_stock_crate_item_taken", operation_id=operation, **result)
@@ -136,54 +185,76 @@ class LootView:
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
                   fixture_nonempty: bool = False) -> dict:
+    area = host.last_game.get("map")
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
-            or host.last_game.get("state") != "hosting" or host.last_game.get("map") != CROSSROADS
+            or host.last_game.get("state") != "hosting" or area not in CRATES.values()
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_loot_scope_unavailable")
     if (action in ("approach", "seed") or fixture_nonempty) and not host.fixtures:
         raise party.RuleError("native_loot_fixture_unavailable")
-    target_valid = valid_guid(target) if action == "claim" else target == CRATE
-    if not target_valid or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
+    if (action not in ("claim", "inspect", "approach", "seed", "open") or not isinstance(target, str)
+            or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id)):
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
     pawn = _scope(host, character)
     if not pawn or character not in host.party["players"]:
         raise party.RuleError("native_loot_opener_unavailable")
-    saved = host.party.get(STATE_KEY, {}).get(CRATE)
+    rolls = _rolls_in_area(host.party.get(STATE_KEY, {}), area)
+    crate = target
+    if action == "claim":
+        guid, separator, crate = target.partition("@")
+        if not valid_guid(guid):
+            raise party.RuleError("native_loot_requires_exact_crate_and_operation")
+        receipt = next((entry for entry in host.party["receipts"].get(character, []) if entry["id"] == operation_id), None)
+        if receipt and not separator:
+            request = receipt["request"]
+            if len(request) != 3 or request[:2] != ["native-loot-claim", guid]:
+                raise party.RuleError("operation_id_conflict")
+            crate = request[2] or LEGACY_CRATE
+        elif not separator:
+            matches = [key for key, roll in rolls.items() if any(row.get("guid") == guid for row in roll["items"])]
+            if len(matches) > 1:
+                raise party.RuleError("native_loot_item_ambiguous")
+            if not matches:
+                raise party.RuleError("native_loot_item_unavailable")
+            crate, = matches
+    if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
+        raise party.RuleError("native_loot_requires_exact_crate_and_operation")
+    saved = rolls.get(crate)
     if saved and action in ("open", "inspect"):
         return {"native_loot_roll": public_roll(saved)}
     if host.party["players"][character]["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
         raise party.RuleError("native_loot_opener_unavailable")
 
     arguments = ()
-    fingerprint = ["native-loot-claim", target, None]
     if action == "claim":
-        for entry in host.party["receipts"].get(character, []):
-            if entry["id"] == operation_id:
-                if entry["request"] != fingerprint:
-                    raise party.RuleError("operation_id_conflict")
-                return entry["result"]
-        item = next((row for row in saved.get("items", ()) if row.get("guid") == target), None) if saved else None
+        fingerprint = ["native-loot-claim", guid, crate]
+        if receipt:
+            legacy = crate == LEGACY_CRATE and receipt["request"] == ["native-loot-claim", guid, None]
+            if receipt["request"] != fingerprint and not legacy:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+        item = next((row for row in saved.get("items", ()) if row.get("guid") == guid), None) if saved else None
         if not item or not saved.get("escrow"):
             raise party.RuleError("native_loot_item_unavailable")
         if item.get("claimed_by"):
             raise party.RuleError("native_loot_already_claimed")
         escrow = saved["escrow"]
-        if escrow.get("map") != CROSSROADS:
+        if escrow.get("map") != area:
             raise RuntimeError("The crate escrow belongs to a different map")
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, escrow)
-        arguments = (target, escrow["slot"])
+        arguments = (guid, escrow["slot"])
     elif action == "open":
         arguments = (native_host_save.new_slot(), *(("fixture-nonempty",) if fixture_nonempty else ()))
     mutates = action in ("open", "seed", "claim")
     if mutates:
         host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(f"native-loot-{action}", pawn, CRATE, *arguments, timeout=6)
+        snapshot = await bridge.command(f"native-loot-{action}", pawn, crate, *arguments, timeout=6)
         proof = snapshot.get("native_loot", {})
-        if (snapshot.get("state") != "hosting" or snapshot.get("map") != CROSSROADS
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or (proof.get("action"), proof.get("map"), proof.get("pawn"), proof.get("crate"))
-                != (action, CROSSROADS, pawn, CRATE)):
+                != (action, area, pawn, crate)):
             raise RuntimeError("The native loot proof did not match the exact participant and stock crate")
         if not proof["ok"]:
             if mutates and proof["invoked"]:
@@ -201,13 +272,13 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                     or len({item["guid"] for item in items}) != len(items)
                     or proof["escrow_slot"] != arguments[0]):
                 raise RuntimeError("The exact stock crate roll did not verify")
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], CROSSROADS,
+            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], area,
                                             flush=True)
-            roll = {"id": operation_id, "map": CROSSROADS, "crate": CRATE, "opener": character,
+            roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
                     "lucky_looter": proof["lucky_looter"], "trait_source": proof["trait_source"],
                     "trait_calls": proof["trait_calls"], "items": items, "escrow": frame}
             candidate = party.load_party(host.party)
-            candidate.setdefault(STATE_KEY, {})[CRATE] = roll
+            candidate.setdefault(STATE_KEY, {})[crate] = roll
             revision = await host.checkpoint_native(bridge, candidate)
             host.party = candidate
             host.native_checkpoint_unsafe = False
@@ -218,9 +289,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                     or proof["escrow_slot"] != arguments[1]):
                 raise RuntimeError("The exact stock crate item transfer did not verify")
             candidate = party.load_party(host.party)
-            claimed = next(row for row in candidate[STATE_KEY][CRATE]["items"] if row["guid"] == target)
+            claimed = next(row for row in candidate[STATE_KEY][crate]["items"] if row["guid"] == guid)
             claimed["claimed_by"] = character
-            result = {"native_loot_claim": claimed}
+            result = {"native_loot_claim": claimed, "native_loot_crate": crate}
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]

@@ -21,6 +21,7 @@ from .native_authored_pickup import SOURCE as AUTHORED_PICKUP_SOURCE
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
+from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -1071,19 +1072,34 @@ class Bridge:
                                                 "owner": fields[5], "deadline": int(fields[6]), "offset": int(fields[7]),
                                                 "total": int(fields[8]), "guid": fields[9], "selected": int(fields[10]),
                                                 "limit": int(fields[11]), "sequence": int(fields[12])}
-                elif fields[0] == "native-loot-crate-input" and len(fields) == 4:
-                    data["native_loot_crate_input"] = {"map": fields[1], "crate": fields[2], "state": fields[3]}
-                elif fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10:
-                    data["native_loot_crate_diagnostic"] = {"map": fields[1], "crate": fields[2], "phase": fields[3],
-                                                             "scope": fields[4], "door": fields[5], "box": fields[6],
-                                                             "looted": None if fields[7] == "-" else fields[7] == "1",
-                                                             "collision": _finite(fields[8]), "roll": _finite(fields[9])}
+                elif (fields[0] == "native-loot-crate-input" and len(fields) == 4
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
+                    row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
+                    data.setdefault("native_loot_crates", {})[fields[2]] = row
+                    if fields[2] == LEGACY_CRATE:
+                        data["native_loot_crate_input"] = row
+                elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1]):
+                    row = {"map": fields[1], "crate": fields[2], "phase": fields[3],
+                           "scope": fields[4], "door": fields[5], "box": fields[6],
+                           "looted": None if fields[7] == "-" else fields[7] == "1",
+                           "collision": _finite(fields[8]), "roll": _finite(fields[9])}
+                    data.setdefault("native_loot_crate_diagnostics", {})[fields[2]] = row
+                    if fields[2] == LEGACY_CRATE:
+                        data["native_loot_crate_diagnostic"] = row
                 elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
                     data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
                                                             "sequence": int(fields[4]), "entry": fields[5]}
-                elif fields[0] == "native-loot-view" and len(fields) == 6:
+                elif (fields[0] == "native-loot-view-nearby" and len(fields) == 5
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1] and 0 < len(fields[3]) <= 512
+                      and (distance := _finite(fields[4])) is not None and 0 <= distance < 1000):
+                    data.setdefault("native_loot_view_candidates", {})[fields[2]] = {
+                        "map": fields[1], "crate": fields[2], "pawn": fields[3], "distance": distance,
+                    }
+                elif fields[0] == "native-loot-view" and len(fields) == 7 and fields[6] in AUTHORED_CRATES:
                     data["native_loot_view"] = {"pawn": fields[1], "id": fields[2], "state": fields[3],
-                                                "sequence": None if fields[4] == "-" else int(fields[4]), "guid": fields[5]}
+                                                "sequence": None if fields[4] == "-" else int(fields[4]), "guid": fields[5],
+                                                "crate": fields[6]}
                 elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
                     data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
                                                            "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}
