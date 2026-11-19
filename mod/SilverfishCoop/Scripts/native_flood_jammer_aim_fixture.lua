@@ -97,7 +97,7 @@ local function align(context, center)
     end
 end
 
-function fixture.aim(state, phase, name, guid, exact_jammer_name)
+function fixture.aim(state, phase, name, guid, profile)
     last = nil
     if not enabled or phase ~= "hosting" or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^A-F0-9]") then
         refuse("headless_fixture_and_guid_required")
@@ -105,8 +105,8 @@ function fixture.aim(state, phase, name, guid, exact_jammer_name)
     local host = state.local_pawn and state.local_pawn.pawn
     if not valid(host) or type(SilverfishReadFloodJammer) ~= "function"
         or SilverfishReadFloodJammer(host:GetAddress()) ~= "watching" then refuse("exact_native_watch_required") end
-    local jammer = StaticFindObject(exact_jammer_name:match("^%S+ (.+)$"))
-    if not valid(jammer) or jammer:GetFullName() ~= exact_jammer_name or not same(jammer:GetWorld(), state.world)
+    local jammer = StaticFindObject(profile.jammer_path)
+    if not valid(jammer) or jammer:GetFullName() ~= profile.jammer_name or not same(jammer:GetWorld(), state.world)
         or not jammer:HasAuthority() or jammer:IsActorBeingDestroyed() or not finite(jammer.Health) or jammer.Health <= 0
         or not component(jammer.Capsule, jammer, "CapsuleComponent") then refuse("living_authored_jammer_required") end
 
@@ -159,9 +159,9 @@ function fixture.aim(state, phase, name, guid, exact_jammer_name)
         refuse(checked and "no_stock_sight_line" or "geometry_call_failed")
     end
     if not pcall(function() context.pawn:ForceNetUpdate() end) then error("mutation_unverified_stock_flood_jammer_aim_net_update", 0) end
-    last = {world = state.world, map = state.map, pawn = name, jammer = exact_jammer_name, guid = guid,
+    last = {world = state.world, map = state.map, pawn = name, jammer = profile.jammer_name, tag = profile.tag, guid = guid,
         distance = distance, component = hit}
-    return "verified stock line of fire to the Flood Plains jammer"
+    return "verified stock line of fire to the authored jammer"
 end
 
 function fixture.row(state, phase, status_row)
@@ -171,7 +171,7 @@ function fixture.row(state, phase, status_row)
         last = nil
         return
     end
-    return status_row("native-flood-jammer-aim", proof.map, proof.pawn, proof.jammer, proof.guid, proof.distance, proof.component)
+    return status_row(proof.tag .. "-aim", proof.map, proof.pawn, proof.jammer, proof.guid, proof.distance, proof.component)
 end
 
 return fixture

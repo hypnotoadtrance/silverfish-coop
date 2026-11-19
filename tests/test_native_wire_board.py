@@ -101,3 +101,20 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         for step, expected in ((None, "offer"), (1, "missing"), (2, "missing"), (3, "ready"), (-10, "completed")):
             action.return_value = {"native_turret_photo": {**proof, "step_after": step}}
             self.assertEqual(await view._inspect(wire.BOROUGH, wire.BOARD, quest, "event", action), expected)
+
+
+    async def test_lake_jammer_menu_uses_the_exact_stock_board_and_objective_step(self):
+        view = wire.WireBoardView(None, None)
+        spec = wire.LAKE_JAMMER
+        self.assertIn(spec.quest, wire.QUESTS[spec.board_map])
+        self.assertEqual(spec.board, wire.BOARDS[spec.board_map])
+        self.assertNotIn(spec.quest, wire.QUESTS[wire.BOROUGH])
+        action = AsyncMock(side_effect=wire.party.RuleError("stock_lake_jammer_quest_not_offered"))
+        self.assertEqual(await view._inspect(spec.board_map, spec.board, spec.quest, "event", action), "not_offered")
+        action.side_effect = None
+        proof = {"map": spec.board_map, "board": spec.board, "quest": spec.quest}
+        for step, expected in ((None, "offer"), (1, "missing"), (2, "ready"), (-7, "completed"), (-10, "completed")):
+            action.return_value = {spec.key: {**proof, "step_after": step}}
+            self.assertEqual(await view._inspect(spec.board_map, spec.board, spec.quest, "event", action), expected)
+        with self.assertRaisesRegex(RuntimeError, "did not identify the selected stock contract"):
+            await view._inspect(wire.BOROUGH, wire.BOARD, spec.quest, "event", action)

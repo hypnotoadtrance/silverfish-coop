@@ -59,10 +59,11 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
     if collection and verb in ("native-quest-start", "native-quest-turnin"):
         operation = native_computer_board.start if verb == "native-quest-start" else native_computer_board.turn_in
         return await operation(host, bridge, actor, spec=collection)
-    if target == native_flood_jammer.QUEST_ID:
+    jammer = native_flood_jammer.CONTRACTS.get(target) if isinstance(target, str) else None
+    if jammer:
         if verb not in ("native-quest-start", "native-quest-turnin"):
-            raise party.RuleError("native_flood_jammer_requires_the_authored_objective")
-        operation = native_flood_jammer.START if verb == "native-quest-start" else native_flood_jammer.TURN_IN
+            raise party.RuleError(f"{jammer.key}_requires_the_authored_objective")
+        operation = jammer.command("start" if verb == "native-quest-start" else "turn-in")
         return await native_flood_jammer.act(host, bridge, actor, operation)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)

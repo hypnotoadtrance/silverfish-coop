@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_mosby_station_view, native_mosby_tape
+from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from .native_guest_consumable import parse_mre
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -36,6 +36,11 @@ REPO = Path(__file__).resolve().parents[2]
 AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
+JAMMER_ROWS = {
+    spec.command(verb): (spec, verb)
+    for spec in native_flood_jammer.CONTRACTS.values()
+    for verb in ("", "reputation", "objective", "aim", "projection")
+}
 WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
 MANIFEST = Path("Manifest_NonUFSFiles_Win64.txt")
 STOCK_PACKAGES = ("SilverFish-Windows.pak", "SilverFish-Windows.utoc",
@@ -1094,28 +1099,29 @@ class Bridge:
                     data["native_meet_broker"] = dict(proof, weapon_guid=fields[12])
                 elif fields[0] == "native-meet-broker-reputation" and len(fields) == 3 and "native_meet_broker" in data:
                     data["native_meet_broker"].update(reputation_before=int(fields[1]), reputation_after=int(fields[2]))
-                elif fields[0] == "native-flood-jammer" and len(fields) == 12:
-                    names = ("operation", "map", "pawn", "board", "quest")
-                    numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
-                    proof = dict(zip(names, fields[1:6]))
-                    proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:]))
-                    data["native_flood_jammer"] = {**proof, "reputation": {}}
-                elif (fields[0] == "native-flood-jammer-reputation" and len(fields) == 4
-                      and fields[1] in ("2", "5") and "native_flood_jammer" in data):
-                    data["native_flood_jammer"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
-                elif fields[0] == "native-flood-jammer-objective" and len(fields) == 12 and fields[9] in ("host", "guest", "-"):
-                    names = ("step_before", "step_after", "xp_before", "xp_after")
-                    numeric = dict((name, None if value == "-" else int(value)) for name, value in zip(names, fields[5:9]))
-                    data["native_flood_jammer_objective"] = {
-                        "map": fields[1], "jammer": fields[2], "trigger": fields[3], "state": fields[4],
-                        **numeric, "shooter_role": fields[9], "shooter": fields[10], "projectile": fields[11],
-                    }
-                elif fields[0] == "native-flood-jammer-aim" and len(fields) == 7 and valid_guid(fields[4]):
-                    data["native_flood_jammer_aim"] = dict(zip(("map", "pawn", "jammer", "guid"), fields[1:5]),
-                                                         distance=_finite(fields[5]), component=fields[6])
-                elif (fields[0] == "native-flood-jammer-projection" and len(fields) == 5
-                      and fields[3] in ("present", "hidden", "absent")):
-                    data["native_flood_jammer_projection"] = dict(zip(("map", "actor", "state", "audio"), fields[1:]))
+                elif fields[0] in JAMMER_ROWS:
+                    spec, kind = JAMMER_ROWS[fields[0]]
+                    key = spec.key
+                    if kind == "" and len(fields) == 12:
+                        names = ("operation", "map", "pawn", "board", "quest")
+                        numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
+                        proof = dict(zip(names, fields[1:6]))
+                        proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:]))
+                        data[key] = {**proof, "reputation": {}}
+                    elif kind == "reputation" and len(fields) == 4 and fields[1] in spec.factions and key in data:
+                        data[key]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                    elif kind == "objective" and len(fields) == 12 and fields[9] in ("host", "guest", "-"):
+                        names = ("step_before", "step_after", "xp_before", "xp_after")
+                        numeric = dict((name, None if value == "-" else int(value)) for name, value in zip(names, fields[5:9]))
+                        data[f"{key}_objective"] = {
+                            "map": fields[1], "jammer": fields[2], "trigger": fields[3], "state": fields[4],
+                            **numeric, "shooter_role": fields[9], "shooter": fields[10], "projectile": fields[11],
+                        }
+                    elif kind == "aim" and len(fields) == 7 and valid_guid(fields[4]):
+                        data[f"{key}_aim"] = dict(zip(("map", "pawn", "jammer", "guid"), fields[1:5]),
+                                                  distance=_finite(fields[5]), component=fields[6])
+                    elif kind == "projection" and len(fields) == 5 and fields[3] in ("present", "hidden", "absent"):
+                        data[f"{key}_projection"] = dict(zip(("map", "actor", "state", "audio"), fields[1:]))
                 elif fields[0] == "native-guest-clock" and len(fields) == 9 and fields[6] in ("armed", "projected"):
                     data["native_guest_clock"] = {
                         "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),

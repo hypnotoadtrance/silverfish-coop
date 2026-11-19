@@ -174,6 +174,7 @@ def parser() -> argparse.ArgumentParser:
         "native-savlo-ring-preflight", "native-savlo-ring-approach", "native-savlo-ring-xp-fixture",
         "native-meet-broker-preflight", "native-meet-broker-approach",
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
+        "native-lake-jammer-preflight", "native-lake-jammer-approach", "native-lake-jammer-aim",
         "native-inventory-list",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",

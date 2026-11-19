@@ -44,7 +44,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
-                        *native_computer_board.PREFLIGHTS, native_flood_jammer.PREFLIGHT, native_meet_broker.PREFLIGHT,
+                        *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1546,8 +1546,8 @@ class Host:
                 result = await native_computer_board.preflight(self, bridge, character, spec=native_computer_board.PREFLIGHTS[action])
             elif action == native_meet_broker.PREFLIGHT and target is None:
                 result = await native_meet_broker.preflight(self, bridge, character)
-            elif action == native_flood_jammer.PREFLIGHT and target is None:
-                result = await native_flood_jammer.preflight(self, bridge, character)
+            elif action in native_flood_jammer.PREFLIGHTS and target is None:
+                result = await native_flood_jammer.preflight(self, bridge, character, native_flood_jammer.COMMANDS[action])
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -2387,14 +2387,14 @@ class Host:
                 elif action == native_computer_board.APPROACH and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_computer_board.approach(self, bridge, actor)
-                elif action == native_flood_jammer.PREFLIGHT and request.get("target") is None:
-                    result = await native_flood_jammer.preflight(self, bridge, "host")
-                elif action == native_flood_jammer.APPROACH and self.fixtures:
+                elif action in native_flood_jammer.PREFLIGHTS and request.get("target") is None:
+                    result = await native_flood_jammer.preflight(self, bridge, "host", native_flood_jammer.COMMANDS[action])
+                elif action in native_flood_jammer.APPROACHES and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
-                    result = await native_flood_jammer.approach(self, bridge, actor)
-                elif action == native_flood_jammer.AIM:
+                    result = await native_flood_jammer.approach(self, bridge, actor, native_flood_jammer.COMMANDS[action])
+                elif action in native_flood_jammer.AIMS:
                     actor = self.roles().get(request.get("target") or "guest")
-                    result = await native_flood_jammer.aim_fixture(self, bridge, actor, request.get("item_guid"))
+                    result = await native_flood_jammer.aim_fixture(self, bridge, actor, request.get("item_guid"), native_flood_jammer.COMMANDS[action])
                 elif action == native_wire_quest.APPROACH:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_wire_quest.approach(self, bridge, actor)

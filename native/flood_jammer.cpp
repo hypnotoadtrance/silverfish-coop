@@ -32,10 +32,7 @@ namespace
     using Address = std::uintptr_t;
     using Clock = std::chrono::steady_clock;
 
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P");
-    constexpr auto jammer_path = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.SignalJammer_BP_C_1");
     constexpr auto jammer_type = STR("/Game/Classes/ScriptingActors/Quest_Objectives/SignalJammer_BP.SignalJammer_BP_C");
-    constexpr auto trigger_path = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.Quest_Trigger_BP_C_1");
     constexpr auto trigger_type = STR("/Game/Classes/ScriptingActors/Quest_Trigger_BP.Quest_Trigger_BP_C");
     constexpr auto base_type = STR("/Game/Classes/ScriptingActors/Simple_DestroyTarget_BP.Simple_DestroyTarget_BP_C");
     constexpr auto projectile_type = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
@@ -137,6 +134,25 @@ namespace
         return use(value, found, map->Num());
     }
 
+    struct JammerProfile
+    {
+        const U::TCHAR *world, *jammer, *trigger, *quest;
+        int salt, faction, advantage;
+    };
+
+    constexpr std::array jammer_profiles{
+        JammerProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.SignalJammer_BP_C_1"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.Quest_Trigger_BP_C_1"),
+            STR("Jmr_FloodPlains"), 112725360, 2, 75},
+        JammerProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.SignalJammer_BP_C_1"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.Quest_Trigger_BP_C_1"),
+            STR("Jmr_Lake"), 343288032, 8, 50},
+    };
+
     struct Snapshot { int step{absent}, cash{}, xp{}; };
     struct Proof
     {
@@ -148,6 +164,7 @@ namespace
     struct Guest { Address pawn{}, save{}; };
     struct Scope
     {
+        const JammerProfile* profile{};
         U::FWeakObjectPtr world{}, level{}, instance{}, driver{}, host{}, controller{}, player{}, save{};
         U::FWeakObjectPtr jammer{}, trigger{};
         U::UFunction *signal{}, *graph{}, *core{}, *deal{};
@@ -187,7 +204,7 @@ namespace
         auto* player = candidate.player.Get();
         auto* host = candidate.host.Get();
         auto* save = candidate.save.Get();
-        return live(world) && live(driver) && live(instance) && live(player) && live(save) &&
+        return candidate.profile && live(world) && live(driver) && live(instance) && live(player) && live(save) &&
             authority(host, world) && authority(controller, world) &&
             object(world, STR("PersistentLevel")) == candidate.level.Get() &&
             object(world, STR("NetDriver")) == driver && object(world, STR("OwningGameInstance")) == instance &&
@@ -238,7 +255,8 @@ namespace
                     return count == size && data && value->GetPropertyValue(data) == delta;
                 });
         };
-        return effect(STR("Rep_OnComplete"), 2, 10, 1) && effect(STR("Adv_OnComplete"), 2, 75, 2) &&
+        return candidate.profile && effect(STR("Rep_OnComplete"), candidate.profile->faction, 10, 1) &&
+            effect(STR("Adv_OnComplete"), candidate.profile->faction, candidate.profile->advantage, 2) &&
             effect(STR("Adv_OnComplete"), 5, -10, 2) &&
             map_member<U::FNameProperty, U::FIntProperty>(trigger, STR("Set_SaveFlags"), candidate.quest,
                 [](auto*, const void*, int count) { return count == 0; });
@@ -246,7 +264,20 @@ namespace
 
     bool bind(Address host_address, Address save_address, Scope& next)
     {
-        auto* world = find<U::UWorld>(world_path);
+        U::UWorld* world = nullptr;
+        for (const auto& profile : jammer_profiles)
+        {
+            auto* possible = find<U::UWorld>(profile.world);
+            if (!live(possible)) continue;
+            auto* possible_instance = object(possible, STR("OwningGameInstance"));
+            auto* possible_host = object(possible_instance, STR("As Player FP"));
+            if (address(possible_host) != host_address || !exact(possible_host, pawn_type) ||
+                !authority(possible_host, possible)) continue;
+            if (world) return false;
+            world = possible;
+            next.profile = &profile;
+        }
+        if (!world) return false;
         auto* level = object(world, STR("PersistentLevel"));
         auto* instance = object(world, STR("OwningGameInstance"));
         auto* driver = object(world, STR("NetDriver"));
@@ -281,13 +312,14 @@ namespace
     {
         auto* world = next.world.Get();
         auto* level = next.level.Get();
-        auto* jammer = find<U::UObject>(jammer_path);
-        auto* trigger = find<U::UObject>(trigger_path);
+        if (!next.profile) return "stock_jammer_profile_unavailable";
+        auto* jammer = find<U::UObject>(next.profile->jammer);
+        auto* trigger = find<U::UObject>(next.profile->trigger);
         if (!exact(jammer, jammer_type) || !exact(trigger, trigger_type) || !authority(jammer, world) ||
             !authority(trigger, world) || static_cast<U::AActor*>(jammer)->GetLevel() != level ||
             static_cast<U::AActor*>(trigger)->GetLevel() != level ||
             sole_object(jammer, STR("Activate_OnDeath")) != trigger ||
-            !equals<U::FIntProperty>(jammer, STR("Salt"), 112725360)) return "stock_exact_jammer_or_trigger_unavailable";
+            !equals<U::FIntProperty>(jammer, STR("Salt"), next.profile->salt)) return "stock_exact_jammer_or_trigger_unavailable";
         // The powered stock signal fills the trigger's GameInstance cache before accessing the quest.
         if (!trigger_cache_matches(trigger, next.instance.Get(), true)) return "stock_jammer_trigger_cache_unqualified";
 
@@ -307,7 +339,7 @@ namespace
             jammer->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) != next.deal ||
             jammer->GetFunctionByNameInChain(U::FName{STR("Core_Destroyed")}) != next.core) return "stock_jammer_damage_schema_unqualified";
 
-        next.quest = U::FName{STR("Jmr_FloodPlains"), U::FNAME_Find};
+        next.quest = U::FName{next.profile->quest, U::FNAME_Find};
         next.cash = U::FName{STR("Player_Cash"), U::FNAME_Find};
         next.xp = U::FName{STR("Player_Xp"), U::FNAME_Find};
         next.quest_struct = find<U::UScriptStruct>(quest_type);
@@ -470,9 +502,9 @@ namespace silverfish::native_flood_jammer
         if (!enabled() || installed.load(std::memory_order_acquire)) return;
         constexpr auto owner = STR("SilverfishCoopNative");
         callbacks[0] = H::RegisterProcessLocalScriptFunctionPreCallback(
-            before, {false, false, owner, STR("Observe authored Flood Plains jammer signal")});
+            before, {false, false, owner, STR("Observe exact authored jammer signal")});
         callbacks[1] = H::RegisterProcessLocalScriptFunctionPostCallback(
-            after, {false, false, owner, STR("Read authored Flood Plains jammer quest transition")});
+            after, {false, false, owner, STR("Read exact authored jammer quest transition")});
         if (callbacks[0] == H::ERROR_ID || callbacks[1] == H::ERROR_ID) uninstall_hooks();
         else installed.store(true, std::memory_order_release);
     }

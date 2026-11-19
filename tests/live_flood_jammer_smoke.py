@@ -1,4 +1,4 @@
-"""Verify the stock Flood Plains jammer contract through a headless guest's real weapon input."""
+"""Verify an authored stock signal jammer through a headless guest's real weapon input."""
 
 import argparse
 import asyncio
@@ -15,21 +15,26 @@ from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS
 
 
 REPO = Path(__file__).resolve().parents[1]
-QUEST = "Jmr_FloodPlains"
-BOARD = f"BountyBoard_BP_C {BOROUGH}.Borough:PersistentLevel.BountyBoard_BP_C_3"
-LEVEL = f"{RUINS}.RuinFeilds_P:PersistentLevel."
-JAMMER = f"SignalJammer_BP_C {LEVEL}SignalJammer_BP_C_1"
-TRIGGER = f"Quest_Trigger_BP_C {LEVEL}Quest_Trigger_BP_C_1"
-TO_FLOOD = ((CITY, "City_Borough"), (RAIL, "Rail_City"), (RUINS, "Ry_Rf"))
-TO_BOARD = ((RAIL, "Ry_Rf"), (CITY, "Rail_City"), (BOROUGH, "City_Borough"))
+sys.path.insert(0, str(REPO))
+
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD
 
 
-def quest_record(campaign):
-    return campaign.get("world", {}).get("party", {}).get("native_quests", {}).get(QUEST, {})
+def quest_record(campaign, quest):
+    return campaign.get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
 
 
-async def exercise(work, vanilla_saved, *, client_projection=False):
-    name = "flood-jammer-" + uuid.uuid4().hex[:8]
+async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
+    lake = spec == BLACK_LAKE
+    quest, board_map, area = spec.quest, spec.board_map, spec.objective_map
+    level = area + "." + area.rsplit("/", 1)[1] + ":PersistentLevel."
+    objective_key = f"{spec.key}_objective"
+    advantage_flags = ("Adv_Freelancer", "Adv_Coup") if lake else ()
+    faction = "8" if lake else "2"
+    outbound = ((area, "BlackMarket"),) if lake else ((CITY, "City_Borough"), (RAIL, "Rail_City"), (RUINS, "Ry_Rf"))
+    returning = ((board_map, "BlackMarket"),) if lake else ((RAIL, "Ry_Rf"), (CITY, "Rail_City"), (BOROUGH, "City_Borough"))
+    name = spec.command().removeprefix("native-") + "-" + uuid.uuid4().hex[:8]
     host, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
     run, client_run = campaign / "run", work / "clients" / name / "run"
@@ -41,7 +46,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     client_flags = ("--headless", "--native-zones", "--native-guest-primary-input")
-    evidence = {"routes": [], "shots": [], "client_projection_requested": client_projection}
+    evidence = {"quest": quest, "routes": [], "shots": [], "stock_board_input": lake, "client_projection_requested": client_projection}
     processes = []
     character = None
 
@@ -89,24 +94,51 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
                    timeout=75)
         return authority
 
-    async def cross(current, area, tag):
-        route = {"from": current["game"]["map"], "to": area, "entrance": tag}
+    async def cross(current, destination, tag):
+        source = current["game"]["map"]
+        matches = [route for route in AUTHORED_ROUTES if (route.source, route.destination, route.entrance) == (source, destination, tag)]
+        assert len(matches) == 1, (source, destination, tag, matches)
+        stock_route = matches[0]
+        route = {"from": source, "to": destination, "entrance": tag, "actor": stock_route.actor, "kind": stock_route.kind}
         evidence["pending_route"] = route
-        for role in ("host", "guest"):
-            await action(host, "native-exit-position", "--target", role, "--exit-position", "near", "--entrance", tag)
-        await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", "--entrance", tag)
-        arrived = await enrolled(area, (current["generation"], current["zone_epoch"]))
+        if stock_route.kind == "door":
+            for role in ("host", "guest"):
+                await action(host, "native-door-position", "--target", role, "--exit-position", "near", "--entrance", tag)
+            await action(host, "native-door-probe", "--target", "host", "--entrance", tag)
+        elif stock_route.kind == "overlap":
+            endpoint = ("--entrance", tag, "--exit-actor", stock_route.actor)
+            for role in ("host", "guest"):
+                await action(host, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
+            await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
+        else:
+            raise ValueError(f"Unexpected stock jammer route {stock_route.kind}")
+        arrived = await enrolled(destination, (current["generation"], current["zone_epoch"]))
         evidence["routes"].append({**route, "zone_epoch": arrived["zone_epoch"]})
         del evidence["pending_route"]
         return arrived
 
     async def board():
-        approached = (await action(host, "native-flood-jammer-approach", "--target", "guest"))["native_flood_jammer_approach"]
-        readback = (await action(client, "native-flood-jammer-preflight"))["native_flood_jammer"]
+        approached = (await action(host, spec.command("approach"), "--target", "guest"))[f"{spec.key}_approach"]
+        readback = (await action(client, spec.command("preflight")))[spec.key]
         assert (readback["map"], readback["board"], readback["quest"], readback["pawn"]) == (
-            BOROUGH, BOARD, QUEST, approached["pawn"],
+            board_map, spec.board, quest, approached["pawn"],
         ), readback
         return readback
+
+    async def board_state(*states, selected=True):
+        state = await wait(client_run, lambda frame: (view := frame.get("game", {}).get("native_wire_board", {}))
+                           and (view.get("map"), view.get("board")) == (board_map, spec.board)
+                           and (not selected or view.get("quest") == quest) and view.get("state") in states)
+        return state["game"]["native_wire_board"]
+
+    async def board_press(expected):
+        pressed = (await action(client, "native-wire-board-fixture", "--target", quest))["native_wire_board"]
+        assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (board_map, spec.board, quest, expected), pressed
+        evidence.setdefault("board_presses", []).append(pressed)
+
+    async def committed(step):
+        result = await wait(run, lambda frame: quest_record(frame.get("campaign", {}), quest).get("step") == step)
+        return quest_record(result["campaign"], quest)
 
     def read_saved():
         return json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -120,25 +152,25 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         root = campaign / "game-user" / "Saved" / "SaveGames"
         result = {}
         for owner, frame in (("host", stock), ("guest", guest)):
-            flags = stock_flags(root, frame, BOROUGH)
-            result[owner] = {key: flags.get(key, 0) for key in ("Player_Cash", "Player_Xp")}
+            flags = stock_flags(root, frame, board_map)
+            result[owner] = {key: flags.get(key, 0) for key in ("Player_Cash", "Player_Xp", *advantage_flags)}
         return result
 
     async def projected(*states):
-        key = "native_flood_jammer_projection"
+        key = f"{spec.key}_projection"
         client_state = await wait(client_run, lambda frame: (view := frame.get("game", {}).get(key, {}))
-                                  and (view.get("map"), view.get("actor")) == (RUINS, JAMMER)
+                                  and (view.get("map"), view.get("actor")) == (area, spec.jammer)
                                   and view.get("state") in states, timeout=20)
         return client_state["game"][key]
 
     async def fire(guid, magazine):
-        aim = (await action(host, "native-flood-jammer-aim", "--target", "guest", "--item-guid", guid))["native_flood_jammer_aim"]
-        assert (aim["map"], aim["jammer"], aim["guid"]) == (RUINS, JAMMER, guid), aim
-        assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(LEVEL + "SignalJammer_BP_C_1."), aim
+        aim = (await action(host, spec.command("aim"), "--target", "guest", "--item-guid", guid))[f"{spec.key}_aim"]
+        assert (aim["map"], aim["jammer"], aim["guid"]) == (area, spec.jammer, guid), aim
+        assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(level + "SignalJammer_BP_C_1."), aim
         press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         attempt = {"aim": aim, "press": press}
         evidence["shots"].append(attempt)
-        assert (press["map"], press["guid"], press["stock_wrappers"]) == (RUINS, guid, 2), press
+        assert (press["map"], press["guid"], press["stock_wrappers"]) == (area, guid, 2), press
         for _ in range(36):
             events = (await command("events", *client, "--tail", "35"))["events"]
             event = next((row for row in events if row.get("sequence") == press["sequence"]
@@ -148,32 +180,53 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
                 assert event["event"] == "native_guest_primary_input", event
                 shot = event["native_guest_weapon"]
                 assert (shot["map"], shot["pawn"], shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
-                    RUINS, aim["pawn"], guid, magazine, magazine - 1, 1,
+                    area, aim["pawn"], guid, magazine, magazine - 1, 1,
                 ), shot
                 return shot
             await asyncio.sleep(.2)
         raise RuntimeError(f"No authoritative stock primary-input receipt for sequence {press['sequence']}")
 
     try:
-        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", BOROUGH, *host_flags)
-        await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == BOROUGH, timeout=75)
+        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", board_map, *host_flags)
+        await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == board_map, timeout=75)
         invitation = await command("invite", *host, "--name", "Jammer guest", "--character", "Signal Hunter")
         character = invitation["character_id"]
         visitor = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
-        current = await enrolled(BOROUGH)
+        current = await enrolled(board_map)
         port = current["endpoint"]["port"]
 
         offer = await board()
         evidence["stock_offer"] = offer
         assert offer["step_before"] is None and offer["step_after"] is None, offer
-        accepted = await action(client, "native-quest-start", "--target", QUEST)
+        if lake:
+            assert offer["xp_before"] == 0, offer
+            offset = 0
+            while offset is not None:
+                catalog = (await action(client, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
+                assert (catalog["board"], catalog["offset"]) == (spec.board, offset), catalog
+                listed = next((row for row in catalog["quests"] if row["id"] == quest), None)
+                if listed:
+                    assert listed["co_op"] in ("experimental", "verified"), listed
+                    evidence["stock_catalog"] = listed
+                    break
+                next_offset = catalog["next_offset"]
+                assert next_offset is None or offset < next_offset <= 128, catalog
+                offset = next_offset
+            assert "stock_catalog" in evidence, catalog
+            evidence["native_balances_at_offer"] = await balances()
+            await board_state("armed", "focused", selected=False)
+            await board_press("loading")
+            await board_state("offer")
+            await board_press("starting")
+            accepted = await committed(1)
+        else:
+            accepted = await action(client, "native-quest-start", "--target", quest)
+            assert accepted["effect"] == "native_quest_changed", accepted
         evidence["stock_acceptance"] = accepted
-        assert (accepted["effect"], accepted["quest_id"], accepted["step"], accepted["actor"]) == (
-            "native_quest_changed", QUEST, 1, character,
-        ), accepted
-        assert quest_record(read_saved())["step"] == 1
-        premature = await action(client, "native-quest-turnin", "--target", QUEST, expected=False)
-        assert premature["error"] == "native_flood_jammer_objective_incomplete", premature
+        assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
+        assert quest_record(read_saved(), quest)["step"] == 1
+        premature = await action(client, "native-quest-turnin", "--target", quest, expected=False)
+        assert premature["error"] == f"{spec.key}_objective_incomplete", premature
         evidence["early_turn_in"] = premature["error"]
 
         guid = uuid.uuid4().hex.upper()
@@ -181,12 +234,12 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
             "native_guest_weapon"]
         evidence["stock_pistol_seed"] = seeded
         assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
-        for area, tag in TO_FLOOD:
-            current = await cross(current, area, tag)
+        for destination, tag in outbound:
+            current = await cross(current, destination, tag)
 
-        watcher = await wait(run, lambda state: state.get("game", {}).get("native_flood_jammer_objective", {}).get("state") == "watching")
-        watched = watcher["game"]["native_flood_jammer_objective"]
-        assert (watched["map"], watched["jammer"], watched["trigger"]) == (RUINS, JAMMER, TRIGGER), watched
+        watcher = await wait(run, lambda state: state.get("game", {}).get(objective_key, {}).get("state") == "watching")
+        watched = watcher["game"][objective_key]
+        assert (watched["map"], watched["jammer"], watched["trigger"]) == (area, spec.jammer, spec.trigger), watched
         evidence["stock_watch"] = watched
         if client_projection:
             visible = await projected("present")
@@ -195,53 +248,70 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         equipped = (await action(client, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
         evidence["stock_pistol_equip"] = equipped
         assert (equipped["map"], equipped["status"], equipped["guid"], equipped["actor_ammo"], equipped["stored_ammo"]) == (
-            RUINS, "equipped", guid, 7, 7,
+            area, "equipped", guid, 7, 7,
         ), equipped
         await wait(client_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
-                   and (scope["map"], scope["guid"], scope["kind"]) == (RUINS, guid, "light-pistol"))
+                   and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, "light-pistol"))
 
         magazine = 7
         for attempt in range(3):
             shot = await fire(guid, magazine)
             magazine = shot["after"]
             try:
-                observed = await wait(run, lambda state: quest_record(state.get("campaign", {})).get("step") == 2, timeout=10)
+                observed = await wait(run, lambda state: quest_record(state.get("campaign", {}), quest).get("step") == 2, timeout=10)
                 break
             except RuntimeError:
-                last_observer = status(run).get("game", {}).get("native_flood_jammer_objective", {})
+                last_observer = status(run).get("game", {}).get(objective_key, {})
                 evidence["shots"][-1]["last_objective"] = last_observer
                 if attempt == 2 or last_observer.get("state") != "watching":
                     raise
-        completed = quest_record(observed["campaign"])
-        assert quest_record(read_saved()) == completed, completed
+        completed = quest_record(observed["campaign"], quest)
+        assert quest_record(read_saved(), quest) == completed, completed
         proof = completed["objective"]
         evidence["durable_objective"] = completed
         assert completed["actor"] == character and (
             proof["map"], proof["jammer"], proof["trigger"], proof["state"], proof["step_before"], proof["step_after"],
             proof["shooter_role"], proof["shooter"],
-        ) == (RUINS, JAMMER, TRIGGER, "stock_objective_verified", 1, 2, "guest", shot["pawn"]), completed
-        assert proof["xp_before"] == proof["xp_after"] and proof["projectile"].split(" ", 1)[-1].startswith(LEVEL), proof
+        ) == (area, spec.jammer, spec.trigger, "stock_objective_verified", 1, 2, "guest", shot["pawn"]), completed
+        assert proof["xp_before"] == proof["xp_after"] and proof["projectile"].split(" ", 1)[-1].startswith(level), proof
         if client_projection:
             concealed = await projected("hidden", "absent")
             evidence["client_projection_after"] = concealed
             assert (concealed["state"], concealed["audio"]) in {("hidden", "muted"), ("absent", "none")}, concealed
 
-        for area, tag in TO_BOARD:
-            current = await cross(current, area, tag)
+        for destination, tag in returning:
+            current = await cross(current, destination, tag)
         ready = await board()
         before = await balances()
         evidence["stock_redemption_ready"], evidence["native_balances_before"] = ready, before
         assert ready["step_after"] == 2 and ready["xp_after"] == offer["xp_after"], ready
-        assert ready["reputation"]["2"]["after"] == offer["reputation"]["2"]["after"] + 10, (offer, ready)
+        assert ready["reputation"][faction]["after"] == offer["reputation"][faction]["after"] + 10, (offer, ready)
         assert ready["reputation"]["5"]["after"] == offer["reputation"]["5"]["after"], (offer, ready)
-        settled = await action(client, "native-quest-turnin", "--target", QUEST)
-        evidence["stock_turn_in"] = settled
-        assert (settled["effect"], settled["step"], settled["cash"], settled["xp"], settled["wallet"], set(settled["recipients"])) == (
-            "native_quest_changed", -10, 350, 1, before["host"]["Player_Cash"] + 350, {"host", character},
+        if lake:
+            baseline = evidence["native_balances_at_offer"]
+            assert before["host"]["Adv_Freelancer"] == baseline["host"]["Adv_Freelancer"] + 50, (baseline, before)
+            assert before["host"]["Adv_Coup"] == baseline["host"]["Adv_Coup"] - 10, (baseline, before)
+            assert before["guest"] == baseline["guest"], (baseline, before)
+            await board_state("armed", "focused", selected=False)
+            await board_press("loading")
+            await board_state("ready")
+            await board_press("redeeming")
+            settled = await committed(-10)
+            await board_state("completed")
+            reputation_after = (await board())["reputation"]
+            reputation = {key: {"before": row["after"], "after": reputation_after[key]["after"]}
+                          for key, row in ready["reputation"].items()}
+        else:
+            settled = await action(client, "native-quest-turnin", "--target", quest)
+            assert settled["effect"] == "native_quest_changed", settled
+            reputation = settled[spec.key]["reputation"]
+        evidence["stock_turn_in"], evidence["stock_reputation"] = settled, reputation
+        assert (settled["step"], settled["cash"], settled["xp"], settled["wallet"], set(settled["recipients"])) == (
+            -10, spec.cash, 1, before["host"]["Player_Cash"] + spec.cash, {"host", character},
         ), settled
         assert settled["objective"] == proof, settled
-        reputation = settled["native_flood_jammer"]["reputation"]
-        assert (reputation["2"]["after"] - reputation["2"]["before"], reputation["5"]["after"] - reputation["5"]["before"]) == (50, -40), reputation
+        assert (reputation[faction]["after"] - reputation[faction]["before"],
+                reputation["5"]["after"] - reputation["5"]["before"]) == (50, -40), reputation
 
         def reward_materialized(state):
             players = state.get("campaign", {}).get("world", {}).get("party", {}).get("players", {})
@@ -250,11 +320,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
 
         await wait(run, reward_materialized)
         paid = await balances()
-        expected = {owner: {"Player_Cash": values["Player_Cash"] + (350 if owner == "host" else 0),
+        expected = {owner: {**values, "Player_Cash": values["Player_Cash"] + (spec.cash if owner == "host" else 0),
                             "Player_Xp": values["Player_Xp"] + 1} for owner, values in before.items()}
         assert paid == expected, (before, paid)
         evidence["native_balances_paid"] = paid
-        repeated = await action(client, "native-quest-turnin", "--target", QUEST)
+        repeated = await action(client, "native-quest-turnin", "--target", quest)
         assert (repeated["effect"], repeated["wallet"], repeated["objective"]) == (
             "native_quest_already_settled", settled["wallet"], proof,
         ), repeated
@@ -267,7 +337,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         renewed = await action(host, "refresh-invite", "--target", invitation["guest_id"])
         assert (renewed["guest_id"], renewed["character_id"]) == (invitation["guest_id"], character), renewed
         await launch(client, "guest-restart", "join", *client, "--invite", renewed["invite_file"], *client_flags)
-        restarted = await enrolled(BOROUGH, (current["generation"], current["zone_epoch"]))
+        restarted = await enrolled(board_map, (current["generation"], current["zone_epoch"]))
         assert restarted["endpoint"]["port"] == port, restarted["endpoint"]
         restored = await board()
         assert (restored["step_after"], restored["cash_after"], restored["xp_after"]) == (
@@ -276,7 +346,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         assert {key: row["after"] for key, row in restored["reputation"].items()} == settled["reputation"], restored
         restored_pistol = (await action(client, "native-guest-weapon-inspect", "--target", guid))["native_guest_weapon"]
         assert (restored_pistol["guid"], restored_pistol["stored_ammo"]) == (guid, magazine), restored_pistol
-        replay = await action(client, "native-quest-turnin", "--target", QUEST)
+        replay = await action(client, "native-quest-turnin", "--target", quest)
         assert (replay["effect"], replay["wallet"], replay["objective"]) == (
             "native_quest_already_settled", settled["wallet"], proof,
         ), replay
@@ -299,7 +369,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
             evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == original
             if not evidence["original_saves_verified"]:
                 evidence.update(verified=False, failure="The original Saved directory changed")
-        (run / "live-flood-jammer-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        (run / f"live-{spec.command().removeprefix('native-')}-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         if original is not None:
             assert evidence["original_saves_verified"], "The original Saved directory changed during the smoke"
@@ -310,5 +380,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", required=True, type=Path, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, help="original Saved directory to hash before and after")
     parser.add_argument("--client-projection", action="store_true", help="require the exact client-local jammer to disappear after the stock kill")
+    parser.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
     arguments = parser.parse_args()
-    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection))
+    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection,
+                         spec=BLACK_LAKE if arguments.black_lake else FLOOD))
