@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_authored_pickup as pickup, native_computer_board as collection
 from tools.silverfish import native_quest, native_rewards, native_wire_board, party
-from tools.silverfish.travel import BLACK_MARKET, NORTHEAST_RAIL, OBSERVATORY, SHOPKEEP
+from tools.silverfish.travel import BLACK_MARKET, FOREST, NORTHEAST_RAIL, OBSERVATORY, SHOPKEEP
 
 
 OWNER = "guest"
@@ -31,11 +31,12 @@ class StockCollectionPairTests(unittest.IsolatedAsyncioTestCase):
         for spec, board, source_map, source_actor in (
             (collection.MOLASSES, SHOPKEEP, NORTHEAST_RAIL, "Item_Molasis_C_1"),
             (collection.SAVLO_KEYCARD, OBSERVATORY, pickup.TRENCH, "KeyCard_Savlo_BP_C_1"),
+            (collection.STOLEN_BAG, BLACK_MARKET, FOREST, "Brokers_ArtifactsBag_C_1"),
         ):
             with self.subTest(quest=spec.quest_id):
                 self.assertEqual(native_wire_board.fixture_selection(board, spec.quest_id), (spec.quest_id,))
                 with self.assertRaises(party.RuleError):
-                    native_wire_board.fixture_selection(BLACK_MARKET, spec.quest_id)
+                    native_wire_board.fixture_selection(OBSERVATORY if board == BLACK_MARKET else BLACK_MARKET, spec.quest_id)
                 source = spec.pickup_source
                 area, placed, item = pickup.SOURCES[source]
                 self.assertEqual(area, source_map)

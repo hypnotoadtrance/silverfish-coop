@@ -52,6 +52,7 @@ namespace
     constexpr auto savlo_keycard_item_path = STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C");
     constexpr auto pump_tape_item_path = STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
+    constexpr auto stolen_bag_item_path = STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
     constexpr auto stone_maze_id = STR("Clt_Tape_StoneMaze_01");
@@ -680,6 +681,8 @@ namespace
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
+    constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
+        stolen_bag_item_path, 1200};
     constexpr ObjectiveQuest pocket_watch_objective{"pocket_watch", PartyWorld::scav_bar, STR("Clt_Watch"),
         pocket_watch_item_path, 1000, nullptr, 1, true};
     constexpr ObjectiveQuest savlo_ring_objective{"savlo_ring", PartyWorld::scav_bar, STR("Clct_EvilEye"),
@@ -1386,6 +1389,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
+    lua.register_function("SilverfishStageStolenBagObjective", stage_objective<stolen_bag_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);

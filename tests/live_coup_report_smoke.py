@@ -39,6 +39,7 @@ class CollectionSmoke:
     advantage: tuple[tuple[str, int], ...] = ()
     cabinet: stock_cabinet.Cabinet | None = None
     savlo_locker: bool = False
+    pickup_location: tuple[float, float, float] | None = None
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -313,13 +314,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 assert opened["doors"] == replica["doors"] == "open", (opened, replica)
                 evidence["stock_pickup_cabinet"] = {"guest_stock_veto": veto, "authority": opened, "replica": replica}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
-            if profile or plan.savlo_locker:
+            if profile or plan.savlo_locker or plan.pickup_location:
                 def near(state, role, point, radius):
                     game = state.get("game", {})
                     position = game.get("pawns", {}).get(role, {}).get("location")
                     return game.get("map") == pickup_map and position and math.dist(position, point) <= radius
 
-                placement = profile.pickup_location if profile else (30714.073647, -137718.505194, 2043.691163)
+                placement = (profile.pickup_location if profile else
+                             plan.pickup_location or (30714.073647, -137718.505194, 2043.691163))
                 approached = await wait(run, lambda state: near(state, "guest", placement, 240))
                 authority = approached["game"]["pawns"]["guest"]["location"]
                 await wait(client_run, lambda state: near(state, "local", authority, 25))

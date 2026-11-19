@@ -185,6 +185,7 @@ def parser() -> argparse.ArgumentParser:
         "native-coup-report-preflight", "native-coup-report-approach",
         "native-depot-documents-preflight", "native-depot-documents-approach",
         "native-brandy-preflight", "native-brandy-approach",
+        "native-stolen-bag-preflight", "native-stolen-bag-approach", "native-stolen-bag-xp-fixture",
         "native-pocket-watch-preflight", "native-pocket-watch-approach",
         "native-savlo-ring-preflight", "native-savlo-ring-approach", "native-savlo-ring-xp-fixture",
         "native-molasses-preflight", "native-molasses-approach",

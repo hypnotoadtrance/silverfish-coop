@@ -61,6 +61,9 @@ DEPOT_DOCUMENTS = CollectionContract("DepotDocs", "native-depot-documents", "Dep
 BRANDY = CollectionContract("Clt_Brandy", "native-brandy", "Fine Vintage", BLACK_MARKET,
                             "black_market_redemption_required", 900, frozenset({"8"}), "consumed_brandy",
                             native_authored_pickup.CITY_BRANDY, frozenset({BLACK_MARKET}))
+STOLEN_BAG = CollectionContract("Clt_StolenBag", "native-stolen-bag", "Stolen Goods", BLACK_MARKET,
+                                "black_market_redemption_required", 1200, frozenset({"5", "8"}), "consumed_bag",
+                                native_authored_pickup.STOLEN_BAG, frozenset({BLACK_MARKET}), fixture_xp=5)
 POCKET_WATCH = CollectionContract("Clt_Watch", "native-pocket-watch", "Pocket Watch", SCAV_BAR,
                                   "scav_bar_redemption_required", 1000, frozenset(), "consumed_watch",
                                   native_authored_pickup.POCKET_WATCH, frozenset({SCAV_BAR}))
@@ -77,7 +80,7 @@ SAVLO_KEYCARD = CollectionContract("Clct_SavloKey", "native-savlo-keycard", "Hal
                                    "observatory_redemption_required", 50000, frozenset({"8"}), "consumed_keycard",
                                    native_authored_pickup.SAVLO_KEYCARD, frozenset({OBSERVATORY}), fixture_xp=14)
 CONTRACTS = {spec.quest_id: spec for spec in (
-    COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
+    COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, STOLEN_BAG, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}

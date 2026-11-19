@@ -1,4 +1,4 @@
-"""Commit a qualified placed pickup to one stock inventory."""
+"""Commit a qualified placed pickup to its stock inventory or the party wallet."""
 
 import asyncio
 import time
@@ -6,7 +6,7 @@ import time
 from . import native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_gold import valid_guid
-from .travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
+from .travel import BOROUGH, CITY, CROSSROADS, FOREST, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
 
 SOURCE = "observatory-comp-board"
@@ -15,6 +15,8 @@ ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
 CITY_BRANDY = "city-paladin-brandy"
 CITY_PEACHES = "city-canned-peaches"
+CASH_CLASS = "/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"
+CASH_ACTORS = {f"city-couple-bills-{number}": f"Item_Money_CoupleBills_C_{number}" for number in (7, 8)}
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
@@ -30,6 +32,7 @@ SAVLO_KEYCARD = "trench-savlo-keycard"
 TRENCH = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
+STOLEN_BAG = "forest-brokers-artifacts-bag"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -60,8 +63,12 @@ SOURCES = {
                     "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
+    STOLEN_BAG: (FOREST, f"Brokers_ArtifactsBag_C {FOREST}.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
+                 "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
 }
 SOURCES.update({source: (row.area, row.actor, row.ammo.item_path) for source, row in STOCK_SUPPLIES.items()})
+SOURCES.update({source: (CITY, f"Item_Money_CoupleBills_C {CITY}.City_01_P:PersistentLevel.{actor}", CASH_CLASS)
+                for source, actor in CASH_ACTORS.items()})
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
     MAP_SOURCES.setdefault(area, []).append(source)
@@ -71,6 +78,8 @@ SOURCES_KEY = "native_authored_pickup_sources"
 INTERACTIONS_KEY = "native_authored_pickup_interactions"
 MERGE_TAG = "native-authored-supply-merge"
 MERGE_KEY = "native_authored_supply_merge"
+CASH_TAG = "native-authored-cash-credit"
+CASH_KEY = "native_authored_cash_credit"
 APPROACH = "native-authored-pickup-approach"
 FIXTURE = "native-authored-pickup-fixture"
 STOCK_FIXTURE = "native-authored-pickup-stock-fixture"
@@ -80,7 +89,7 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES]
+        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES and source not in CASH_ACTORS]
         if len(defaults) == 1:
             return defaults[0]
     if isinstance(requested, str) and requested in sources:
@@ -116,7 +125,7 @@ async def project(service, bridge, pickups: dict) -> None:
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:
-    if isinstance(target, str) and target in STOCK_SUPPLIES:
+    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in CASH_ACTORS):
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
             raise party.RuleError("native_authored_pickup_stale_zone")
         return f"{target}@{epoch}"
@@ -156,14 +165,42 @@ def parse_merge(fields: list[str], snapshot: dict) -> dict:
     return report
 
 
+def _matches_cash(claim: dict, credit: dict) -> bool:
+    name = credit.get("source")
+    actor = CASH_ACTORS.get(name) if isinstance(name, str) else None
+    amount, before, after = (credit.get(key) for key in ("amount", "before", "after"))
+    slot = credit.get("slot")
+    return (actor is not None and credit.get("map") == CITY and claim.get("ok") is True and claim.get("applied") is True
+            and claim.get("status") == "cash_credited" and claim.get("guid") == "-"
+            and all(credit.get(key) == claim.get(key) for key in ("source", "map", "pawn", "slot"))
+            and isinstance(credit.get("pawn"), str) and bool(credit["pawn"])
+            and isinstance(slot, str) and native_host_save.SLOT.fullmatch(slot) is not None
+            and credit.get("stock_flag") == f"{actor}-City_01_P-"
+            and all(type(value) is int for value in (amount, before, after))
+            and 6 <= amount <= 10 and 0 <= before < after < 2**31 and after - before == amount)
+
+
+def parse_cash(fields: list[str], snapshot: dict) -> dict:
+    if len(fields) != 9 or (snapshot.get("state"), snapshot.get("map")) != ("hosting", CITY):
+        raise ValueError("Invalid exact authored cash credit")
+    source, area, pawn, slot, amount, before, after, flag = fields[1:]
+    credit = {"source": source, "map": area, "pawn": pawn, "slot": slot, "amount": int(amount),
+              "before": int(before), "after": int(after), "stock_flag": flag}
+    if not _matches_cash(snapshot.get("native_authored_pickup_claim", {}), credit):
+        raise ValueError("The authored cash credit does not match its exact source, wallet delta and stock save flag")
+    return credit
+
+
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
     if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
     target, has_epoch, epoch = target.partition("@")
     is_supply = target in STOCK_SUPPLIES
-    if target not in SOURCES or (has_epoch and not is_supply):
+    is_cash = target in CASH_ACTORS
+    bound_epoch = is_supply or is_cash
+    if target not in SOURCES or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
-    if is_supply:
+    if bound_epoch:
         if character == "host" and not has_epoch:
             epoch = host.zone_epoch
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch) or epoch != host.zone_epoch:
@@ -195,7 +232,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     if not pawn:
         raise party.RuleError("native_authored_pickup_owner_unavailable")
     await host.checkpoint_native(bridge)
-    if is_supply:
+    if bound_epoch:
         if epoch != host.zone_epoch or host.transitioning or host.stopping or host.native_checkpoint_unsafe or (
                 host.last_game.get("state"), host.last_game.get("map")) != ("hosting", area):
             raise party.RuleError("native_authored_pickup_stale_zone")
@@ -203,6 +240,9 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 or _current_pawn(host, character) != pawn or host.party["wipe"] is not None
                 or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
             raise party.RuleError("native_authored_pickup_owner_or_source_changed")
+    amount = _displayed(host.last_game, target).get("wallet_value") if is_cash else None
+    if is_cash and (type(amount) is not int or not 6 <= amount <= 10):
+        raise party.RuleError("authored_cash_stock_value_unavailable")
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:
@@ -214,7 +254,13 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         if not report["ok"] and not report["applied"]:
             host.native_checkpoint_unsafe = False
             raise party.RuleError(report["status"])
-        if (not report["ok"] or not report["applied"] or report["status"] not in ("claimed", "merged")
+        credit = snapshot.get(CASH_KEY)
+        if is_cash:
+            if (not isinstance(credit, dict) or not _matches_cash(report, credit)
+                    or credit["amount"] != amount
+                    or snapshot.get("native_wallet") != credit["after"]):
+                raise RuntimeError("The exact authored cash flag and wallet credit did not verify")
+        elif (credit is not None or not report["ok"] or not report["applied"] or report["status"] not in ("claimed", "merged")
                 or not valid_guid(report["guid"])):
             raise RuntimeError(f"The authored pickup did not verify ({report['status']})")
         merge = snapshot.get(MERGE_KEY)
@@ -223,15 +269,21 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 raise RuntimeError("The authored supply merge did not verify its stock stack and quantity")
         elif merge is not None:
             raise RuntimeError("The authored pickup append reported an unexpected stack merge")
-        await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+        if not is_cash:
+            await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "guid": report["guid"],
-               "owner": character}
+        row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "owner": character}
+        if is_cash:
+            row["wallet_credit"] = {key: credit[key] for key in ("amount", "before", "after", "stock_flag")}
+        else:
+            row["guid"] = report["guid"]
         if merge is not None:
             row.update(guid=merge["stack_guid"], source_guid=report["guid"],
                        stack_before=merge["before"], stack_after=merge["after"])
         result = {"native_authored_pickup_claim": row}
         candidate = party.load_party(host.party)
+        if is_cash:
+            candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
         candidate.setdefault(STATE_KEY, {})[target] = row
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})

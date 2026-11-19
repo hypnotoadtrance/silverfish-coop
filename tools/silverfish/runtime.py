@@ -1519,13 +1519,18 @@ class Bridge:
                     data[native_savlo_locker.KEY] = native_savlo_locker.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-savlo-locker-diagnostic" and len(fields) == 3 and fields[1] == native_savlo_locker.TRENCH:
                     data["native_savlo_locker_diagnostic"] = fields[2]
-                elif fields[0] == "native-authored-pickup" and len(fields) == 6:
-                    source, area, actor, item_class, state = fields[1:]
+                elif fields[0] == "native-authored-pickup" and len(fields) in (6, 7):
+                    source, area, actor, item_class, state = fields[1:6]
                     placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})
                     if (source in placed or native_authored_pickup.SOURCES.get(source) != (area, actor, item_class)
                             or state not in ("available", "claimed")):
                         raise ValueError("Invalid authored pickup status")
                     placed[source] = {"source": source, "map": area, "actor": actor, "class_path": item_class, "state": state}
+                    if len(fields) == 7:
+                        amount = int(fields[6])
+                        if source not in native_authored_pickup.CASH_ACTORS or data.get("state") != "hosting" or not 6 <= amount <= 10:
+                            raise ValueError("Invalid authority authored stock cash value")
+                        placed[source]["wallet_value"] = amount
                 elif fields[0] == "native-authored-pickup-interaction" and len(fields) == 6:
                     source, area, pawn, serial, entry = fields[1:]
                     intents = data.setdefault(native_authored_pickup.INTERACTIONS_KEY, {})
@@ -1541,6 +1546,10 @@ class Bridge:
                     if native_authored_pickup.MERGE_KEY in data:
                         raise ValueError("Repeated authored supply merge report")
                     data[native_authored_pickup.MERGE_KEY] = native_authored_pickup.parse_merge(fields, data)
+                elif fields[0] == native_authored_pickup.CASH_TAG:
+                    if native_authored_pickup.CASH_KEY in data:
+                        raise ValueError("Repeated exact authored cash credit")
+                    data[native_authored_pickup.CASH_KEY] = native_authored_pickup.parse_cash(fields, data)
                 elif fields[0] == "native-rest-guard" and len(fields) == 4:
                     data["native_rest_guard"] = {"armed": fields[1] == "1", "status": fields[2],
                                                "guest_denials": int(fields[3])}

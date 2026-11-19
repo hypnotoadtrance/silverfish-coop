@@ -6,6 +6,8 @@ local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
     ["city-canned-peaches"] = city,
+    ["city-couple-bills-7"] = city,
+    ["city-couple-bills-8"] = city,
     ["scientist-blank-data-tape"] = scientist,
     ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
@@ -15,6 +17,7 @@ local sources = {
     ["trench-savlo-keycard"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
     ["trench-savlo-locker"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
     ["fort-leto-locker-key-543"] = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P",
+    ["forest-brokers-artifacts-bag"] = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -23,13 +26,17 @@ local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
 local savlo_locker = "trench-savlo-locker"
 local fort_leto_key = "fort-leto-locker-key-543"
+local stolen_bag = "forest-brokers-artifacts-bag"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
+    ["city-couple-bills-7"] = {95, 125, 155, 190},
+    ["city-couple-bills-8"] = {95, 125, 155, 190},
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
+    [stolen_bag] = {85, 115, 145, 175, 210},
 }
 local supplies, shelf_source = {}, nil
 for _, profile in ipairs(supply_profiles) do
@@ -148,7 +155,9 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
 end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
-    if supplies[profile.source] ~= profile or phase ~= "hosting" or not state.listening or state.server ~= false
+    local cash = profile.stock_cash == true and (profile.source == "city-couple-bills-7" or profile.source == "city-couple-bills-8")
+    local bag = profile.source == stolen_bag and profile.map == sources[stolen_bag] and profile.authority_sight == true
+    if (not cash and not bag and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
         or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
         or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
         or actor:GetFullName() ~= profile.name .. " " .. profile.path or pawn.Dead ~= false then return false end

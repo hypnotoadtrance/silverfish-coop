@@ -134,6 +134,15 @@ local profiles = {
         approach = { { 140, 0 }, { 115, 115 }, { 115, -115 }, { -115, 0 } },
     },
     {
+        map = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
+        source = "forest-brokers-artifacts-bag",
+        path = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
+        class = "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C",
+        name = "Brokers_ArtifactsBag_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+        authority_sight = true,
+    },
+    {
         map = city,
         source = "city-canned-peaches",
         path = city .. ".City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
@@ -143,6 +152,16 @@ local profiles = {
     },
 }
 local map_profiles = {}
+for _, number in ipairs({7, 8}) do
+    profiles[#profiles + 1] = {
+        map = city,
+        source = "city-couple-bills-" .. number,
+        path = city .. ".City_01_P:PersistentLevel.Item_Money_CoupleBills_C_" .. number,
+        class = "/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C",
+        name = "Item_Money_CoupleBills_C",
+        stock_cash = true,
+    }
+end
 for _, profile in ipairs(require("authored_supply_catalog")) do
     profiles[#profiles + 1] = profile
 end
@@ -207,7 +226,7 @@ local function select_profile(requested)
     if requested == nil then
         local sole
         for _, profile in ipairs(binding.placements) do
-            if not profile.fixture_only and not profile.stock_supply then
+            if not profile.fixture_only and not profile.stock_supply and not profile.stock_cash then
                 if sole then sole = nil; break end
                 sole = profile.source
             end
@@ -237,12 +256,30 @@ end
 
 local function claim(fields, state, phase, profile)
     local name, slot = fields[3], fields[4]
-    if phase ~= "hosting" or not exact_slot(slot) or type(SilverfishCaptureNativeAuthoredPickup) ~= "function"
-        or type(SilverfishVerifyNativeAuthoredPickup) ~= "function" or type(SilverfishRecoverNativeInventoryBag) ~= "function" then
+    if phase ~= "hosting" or not exact_slot(slot) then
         error("authored_pickup_claim_arguments", 0)
     end
     report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false}
     local pawn, save, statics = owner(state, phase, name)
+    if profile.stock_cash then
+        local cash = SilverfishClaimNativeAuthoredCash
+        local actor = StaticFindObject(profile.path)
+        if type(cash) ~= "function" or not valid(pawn) or not valid(actor)
+            or not stock_input_fixture.authority_sight(state, phase, profile, pawn, actor) then
+            report.status = "authored_cash_exact_authority_sight_required"
+            return "authored cash pickup refused"
+        end
+        local ok, reason, amount, before, after, flag = cash(pawn:GetAddress(), save:GetAddress(), profile.source)
+        report.applied = ok == true or type(reason) == "string" and reason:match("^mutation_unverified_") ~= nil
+        report.ok = ok == true and reason == "cash_credited" and math.type(amount) == "integer" and amount >= 6 and amount <= 10
+            and math.type(before) == "integer" and math.type(after) == "integer" and before >= 0 and after <= 0x7fffffff
+            and after == before + amount and flag == profile.path:match("([^%.:]+)$") .. "-City_01_P-"
+        report.status = report.ok and "cash_credited" or (ok and "mutation_unverified_authored_cash_abi" or tostring(reason))
+        if report.ok then report.cash = {amount = amount, before = before, after = after, flag = flag} end
+        return "authored cash pickup reported"
+    end
+    if type(SilverfishCaptureNativeAuthoredPickup) ~= "function" or type(SilverfishVerifyNativeAuthoredPickup) ~= "function"
+        or type(SilverfishRecoverNativeInventoryBag) ~= "function" then error("authored_pickup_claim_arguments", 0) end
     local save_class = StaticFindObject(save_path)
     if not valid(pawn) or not valid(save_class) or statics:DoesSaveGameExist(slot, 0) then
         report.status = "authored_pickup_claimant_or_slot_unavailable"
@@ -253,6 +290,8 @@ local function claim(fields, state, phase, profile)
             report.status = "authored_supply_merge_bridge_unavailable"
             return "authored loose pickup reported"
         end
+    end
+    if profile.stock_supply or profile.authority_sight then
         local checked, visible = pcall(stock_input_fixture.authority_sight, state, phase, profile, pawn, StaticFindObject(profile.path))
         if not checked or visible ~= true then
             report.status = "authored_pickup_exact_authority_sight_required"
@@ -371,10 +410,14 @@ function pickup.rows(state, phase, status_row)
     local rows = {}
     for _, profile in ipairs(binding.placements) do
         if binding.active[profile.source] then
-            local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup(profile.source)
+            local active, claimed, sequence, fixture, amount = SilverfishReadNativeAuthoredPickup(profile.source)
             if active then
-                rows[#rows + 1] = status_row("native-authored-pickup", profile.source, state.map,
-                    profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available")
+                local fields = {"native-authored-pickup", profile.source, state.map,
+                    profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available"}
+                if profile.stock_cash and binding.host and math.type(amount) == "integer" and amount >= 6 and amount <= 10 then
+                    fields[7] = amount
+                end
+                rows[#rows + 1] = status_row(table.unpack(fields))
                 if sequence > 0 then
                     rows[#rows + 1] = status_row("native-authored-pickup-interaction", profile.source, state.map,
                         state.local_pawn.name, sequence, fixture and "fixture" or "stock")
@@ -388,6 +431,11 @@ function pickup.rows(state, phase, status_row)
         if report.stack then
             rows[#rows + 1] = status_row("native-authored-supply-merge", report.source, state.map, report.pawn,
                 report.slot, report.guid, report.stack, report.before, report.after)
+        end
+        if report.cash then
+            local cash = report.cash
+            rows[#rows + 1] = status_row("native-authored-cash-credit", report.source, state.map, report.pawn, report.slot,
+                cash.amount, cash.before, cash.after, cash.flag)
         end
     end
     return rows

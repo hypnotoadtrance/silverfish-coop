@@ -2,6 +2,8 @@
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
+#include "stock_cash.hpp"
+#include "stock_wallet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -22,6 +24,7 @@
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
@@ -53,6 +56,7 @@ namespace
         const silverfish::guest_weapon_profiles::StockAmmo* stock_ammo{};
         double stack_weight{};
         int stack_value{};
+        bool stock_cash{};
     };
 
     constexpr std::array profiles{
@@ -155,16 +159,44 @@ namespace
             -2411.2730396058255, -28557.413414035567, 542.1560096044024, 0,
         },
         Profile{
+            "forest-brokers-artifacts-bag",
+            STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1"),
+            STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
+            -8042.335612722819, 25100.7873570329, 898.6314940223217, 1,
+        },
+        Profile{
             "city-canned-peaches",
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedPeaches_C_1"),
             STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
             -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
         },
+        Profile{
+            .source = "city-couple-bills-7",
+            .world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            .actor = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_Money_CoupleBills_C_7"),
+            .item_class = STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"),
+            .x = -685.8361208569721, .y = 4674.064705473622, .z = 12.734350318836803,
+            .item_type = 1, .physics = true, .stock_cash = true,
+        },
+        Profile{
+            .source = "city-couple-bills-8",
+            .world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            .actor = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_Money_CoupleBills_C_8"),
+            .item_class = STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"),
+            .x = -727.2304047599307, .y = 4674.064705, .z = 12.734349193875403,
+            .item_type = 1, .physics = true, .stock_cash = true,
+        },
 #include "authored_supply_profiles.inc"
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
+    constexpr auto money_base = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C");
+    constexpr auto money_interact = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C:SendInteractionToActor");
+    constexpr auto resolve_save_mode = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:ResolveSaveMode");
+    constexpr auto code_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C");
+    constexpr auto stock_actor_id = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.FL_CodeLib01_C:Calc_UniqueID");
     constexpr auto secure_locker_class = STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C");
     constexpr auto secure_locker_input =
         STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C:SendInteractionToActor");
@@ -379,12 +411,28 @@ namespace
         return read(table, row) == expected_table && name->GetPropertyValueInContainer(row) == expected;
     }
 
+    int loose_cash_value(U::UObject* actor)
+    {
+        auto* range_min = field<U::FIntProperty>(actor, STR("Value_Min"));
+        auto* range_max = field<U::FIntProperty>(actor, STR("Value_Max"));
+        auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        if (!value || !range_min || !range_max || !mode || mode->GetPropertyValueInContainer(actor) != 2 ||
+            !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bReplicates"), false) ||
+            range_min->GetPropertyValueInContainer(actor) != 6 || range_max->GetPropertyValueInContainer(actor) != 10)
+            return 0;
+        const auto amount = value->GetPropertyValueInContainer(actor);
+        auto* type = actor->GetClassPrivate();
+        return silverfish::stock_cash::is_family(type) && silverfish::stock_cash::qualified_value(type, amount) ? amount : 0;
+    }
+
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "authored_pickup_stock_actor_identity_unqualified";
         if (!boolean(actor, STR("Physics"), profile.physics)) return "authored_pickup_stock_physics_unqualified";
-        if (!boolean(actor, STR("Stacks"), profile.stack_units.has_value())) return "authored_pickup_stock_stacking_unqualified";
+        if (!boolean(actor, STR("Stacks"), profile.stock_cash || profile.stack_units.has_value()))
+            return "authored_pickup_stock_stacking_unqualified";
         if (profile.stack_units)
         {
             auto* count = field<U::FIntProperty>(actor, STR("Ammo"));
@@ -399,6 +447,7 @@ namespace
             return "authored_pickup_stock_category_unqualified";
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
+        if (profile.stock_cash && !loose_cash_value(actor)) return "authored_pickup_stock_cash_profile_unqualified";
         // Physics-enabled items can settle below their authored placement under vanilla simulation.
         // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
         if (profile.physics && !require_placement) return nullptr;
@@ -430,7 +479,7 @@ namespace
         if (!actor) return nullptr;
         const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
         if (match == scopes.end() || !local_scope(*match)) return nullptr;
-        if (match->profile->stock_ammo &&
+        if ((match->profile->stock_ammo || match->profile->stock_cash) &&
             (!exact_source(actor, match->world.Get(), *match->profile, !match->claimed) ||
              source_box(actor) != match->box.Get())) return nullptr;
         return &*match;
@@ -447,12 +496,12 @@ namespace
         return std::isfinite(squared) && squared <= maximum_range_squared;
     }
 
-    U::UFunction* interaction()
+    U::UFunction* interaction(bool cash = false)
     {
-        auto* function = find<U::UFunction>(interact_path);
+        auto* function = find<U::UFunction>(cash ? money_interact : interact_path);
         auto* passed_player = parameter<U::FObjectProperty>(function, STR("Player"), 0);
         auto* hit = parameter<U::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
-        if (!function || function->GetOuterPrivate() != find<U::UClass>(base_class) || function->GetNumParms() != 2 ||
+        if (!function || function->GetOuterPrivate() != find<U::UClass>(cash ? money_base : base_class) || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
             !passed_player || passed_player->GetPropertyClass().Get() != find<U::UClass>(pawn_path) ||
@@ -580,9 +629,11 @@ namespace
             return;
         }
         auto* scope = actor_scope(context);
-        if (!scope || function->GetOuterPrivate() != find<U::UClass>(base_class)) return;
+        if (!scope) return;
+        const bool cash_callback = scope->profile->stock_cash && name == interact_name && function == interaction(true);
+        if (!cash_callback && function->GetOuterPrivate() != find<U::UClass>(base_class)) return;
         call.PreventOriginalFunctionCall();
-        if (!call.OriginalFunctionCallPrevented() || name != interact_name || function != interaction()) return;
+        if (!call.OriginalFunctionCallPrevented() || name != interact_name || function != interaction(scope->profile->stock_cash)) return;
 
         auto* pawn = read(field<U::FObjectProperty>(function, STR("Player")), args);
         auto* hit = read(field<U::FObjectProperty>(function, STR("HitComponent")), args);
@@ -1280,7 +1331,7 @@ namespace
         }
         auto* box = source_box(actor);
         if (!box) return result(lua, false, "authored_pickup_stock_root_box_unqualified");
-        if (!interaction()) return result(lua, false, "authored_pickup_stock_interaction_unqualified");
+        if (!interaction(profile.stock_cash)) return result(lua, false, "authored_pickup_stock_interaction_unqualified");
         if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
             return result(lua, false, "authored_pickup_stock_visibility_unqualified");
         Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
@@ -1327,7 +1378,81 @@ namespace
         lua.set_bool(active && scope->claimed);
         lua.set_integer(emitted ? static_cast<std::int64_t>(scope->observed.sequence) : 0);
         lua.set_bool(emitted && scope->observed.fixture);
-        return 4;
+        lua.set_integer(active && scope->host && scope->profile->stock_cash ? loose_cash_value(scope->actor.Get()) : 0);
+        return 5;
+    }
+
+    std::string cash_flag(U::UObject* actor)
+    {
+        auto* library = find<U::UObject>(code_library);
+        auto* function = find<U::UFunction>(stock_actor_id);
+        auto* item = parameter<U::FObjectProperty>(function, STR("Actor"), 0);
+        auto* world_context = parameter<U::FObjectProperty>(function, STR("__WorldContext"), sizeof(void*));
+        auto* identity = parameter<U::FStrProperty>(function, STR("ID"), 2 * sizeof(void*), true);
+        alignas(std::max_align_t) std::array<std::byte, 32> buffer{};
+        if (!library || !library->HasAnyFlags(U::RF_ClassDefaultObject) || !function ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || function->GetNumParms() != 3 ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || function->GetReturnProperty() ||
+            function->GetParmsSize() != buffer.size() || !item || !world_context || !identity ||
+            item->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.Actor"))) return {};
+        identity->InitializeValue_InContainer(buffer.data());
+        const auto destroy = [&identity](std::byte* memory) { identity->DestroyValue_InContainer(memory); };
+        const std::unique_ptr<std::byte, decltype(destroy)> initialized(buffer.data(), destroy);
+        item->SetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(buffer.data()), actor);
+        world_context->SetObjectPropertyValue(world_context->ContainerPtrToValuePtr<void>(buffer.data()), actor);
+        library->ProcessEvent(function, buffer.data());
+        const auto& key = identity->GetPropertyValue(identity->ContainerPtrToValuePtr<void>(buffer.data()));
+        const auto expected = actor->GetName() + STR("-City_01_P-");
+        if (key.Len() != static_cast<int>(expected.size()) || expected != *key) return {};
+        return RC::to_utf8_string(expected);
+    }
+
+    int claim_cash(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2))
+            return result(lua, false, "authored_cash_claim_arguments");
+        const auto pawn_address = lua.get_integer();
+        const auto target_address = lua.get_integer();
+        auto* scope = select_source(lua);
+        auto* pawn = pawn_address > 0 ? live_address(static_cast<Address>(pawn_address), find<U::UClass>(pawn_path)) : nullptr;
+        auto* target = object(pawn, STR("Save"));
+        if (!scope || !scope->profile || !scope->profile->stock_cash || target_address <= 0 ||
+            address(target) != static_cast<Address>(target_address) || !authorized(*scope, pawn, target))
+            return result(lua, false, "authored_cash_exact_claimant_unavailable");
+        auto* actor = scope->actor.Get();
+        auto* instance = object(scope->world.Get(), STR("OwningGameInstance"));
+        auto* canonical = object(instance, STR("SaveSlot_Ref"));
+        auto* mark = find<U::UFunction>(resolve_save_mode);
+        silverfish::stock_wallet::Wallet wallet;
+        const auto amount = loose_cash_value(actor);
+        const auto flag = cash_flag(actor);
+        if (!amount || flag.empty() || !wallet.bind(instance) || object(pawn, STR("As Game Instance FP")) != instance ||
+            !mark || mark->GetOuterPrivate() != find<U::UClass>(base_class) || mark->GetNumParms() != 0 ||
+            mark->GetParmsSize() != 0 || mark->GetReturnProperty() || mark->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
+            return result(lua, false, "authored_cash_stock_schema_unqualified");
+        const auto key = RC::to_wstring(flag);
+        const auto before = wallet.amount(instance);
+        if (wallet.flag_value(instance, key.c_str()).second)
+            return result(lua, false, "authored_cash_stock_flag_already_recorded");
+        if (before < 0 || before > (std::numeric_limits<int>::max)() - amount)
+            return result(lua, false, "authored_cash_stock_wallet_out_of_range");
+
+        // Preserve the cooked permanent actor flag and stock wallet function in the same guarded turn.
+        actor->ProcessEvent(mark, nullptr);
+        if (wallet.flag_value(instance, key.c_str()) != std::pair{1, true} || wallet.amount(instance) != before ||
+            object(instance, STR("SaveSlot_Ref")) != canonical || !authorized(*scope, pawn, target))
+            return result(lua, false, "mutation_unverified_authored_cash_flag_readback");
+        wallet.change(instance, amount, false);
+        const auto after = wallet.amount(instance);
+        if (after != before + amount || wallet.flag_value(instance, key.c_str()) != std::pair{1, true} ||
+            object(instance, STR("SaveSlot_Ref")) != canonical || !authorized(*scope, pawn, target) || !set_visibility(*scope, true))
+            return result(lua, false, "mutation_unverified_authored_cash_settlement");
+        result(lua, true, "cash_credited");
+        lua.set_integer(amount);
+        lua.set_integer(before);
+        lua.set_integer(after);
+        lua.set_string(flag);
+        return 6;
     }
 
     int capture(const Lua& lua)
@@ -1345,7 +1470,7 @@ namespace
         RowSchema rows;
         auto* pawn = live_address(supplied[0], find<U::UClass>(pawn_path));
         auto* target = object(pawn, STR("Save"));
-        if (!scope || address(target) != supplied[1] || !authorized(*scope, pawn, target))
+        if (!scope || scope->profile->stock_cash || address(target) != supplied[1] || !authorized(*scope, pawn, target))
             return result(lua, false, "authored_pickup_exact_claimant_unavailable");
         if (!rows.bind()) return result(lua, false, "authored_pickup_inventory_schema_unavailable");
         if (scope->profile->stack_units && !scope->profile->stock_ammo)
@@ -1383,7 +1508,7 @@ namespace
         const auto reloaded = static_cast<Address>(lua.get_integer());
         const auto* scope = select_source(lua);
         RowSchema rows;
-        if (!scope || initial == reloaded || !available(*scope) || !scope->host || !rows.bind())
+        if (!scope || scope->profile->stock_cash || initial == reloaded || !available(*scope) || !scope->host || !rows.bind())
             return result(lua, false, "authored_pickup_verify_schema_unavailable");
         auto* item_class = find<U::UClass>(scope->profile->item_class);
         auto* first = isolated(initial, rows);
@@ -1402,7 +1527,7 @@ namespace
         if (!scope || fixture_scope || !headless() || (scope->host && !env("SILVERFISH_COOP_NATIVE_FIXTURES")) ||
             !admit_input(*scope, scope->pawn.Get(), scope->box.Get()))
             return result(lua, false, "authored_pickup_fixture_unavailable");
-        auto* fn = interaction();
+        auto* fn = interaction(scope && scope->profile && scope->profile->stock_cash);
         if (!fn) return result(lua, false, "authored_pickup_fixture_schema_unavailable");
         auto* actor = scope->actor.Get();
         const auto before = sequence;
@@ -1457,6 +1582,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
+        lua.register_function("SilverfishClaimNativeAuthoredCash", claim_cash);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);
         lua.register_function("SilverfishMergeNativeAuthoredSupply", merge_supply);
         lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape<stone_maze_tape>);

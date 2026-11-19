@@ -13,6 +13,7 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local molasses, keycard = "Clt_Molasis", "Clct_SavloKey"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
+local stolen_bag = "Clt_StolenBag"
 local pocket_watch = "Clt_Watch"
 local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
@@ -32,12 +33,12 @@ local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report, flood_control}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
-    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny}, true),
+    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny, stolen_bag}, true),
 }
 local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
-    [lenny] = "Lenny's House", [flood_control] = "Flood Control"}
+    [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -55,6 +56,11 @@ local prompt = {
     elsewhere = "Deliver one Computer Board to the Scientist bounty board.",
 }
 local contract_prompt = {
+    [stolen_bag] = {
+        offer = "Recover the Broker's bag from the Forest.\nInteract again to accept the contract.",
+        missing = "Bring the Broker's unopened bag in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the bag for 1,200 shared cash.\nInteract again to turn it in.",
+    },
     [flood_control] = {
         offer = "Close the Subway flow-control valve.\nInteract again to accept the contract.",
         missing = "Close the flow-control valve in the Subway.\nInteract to check the contract again.",

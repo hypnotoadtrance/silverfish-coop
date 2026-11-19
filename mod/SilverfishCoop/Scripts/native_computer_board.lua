@@ -51,6 +51,16 @@ local recipes = {
         redeem_map = black_market, wrong_board = "black_market_redemption_required",
         stage_objective = "SilverfishStageBrandyObjective",
     },
+    ["native-stolen-bag"] = {
+        id = "Clt_StolenBag", title = "Stolen Goods", fault = "stolen_bag",
+        objective_path = "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C",
+        cash = 1200, difficulty = 5, fail_on_death = false, redeem = 1, fixture_xp = 5,
+        offered_boards = {1, 3}, scoped_boards = {1}, factions = {8, 5}, reputation = {[8] = 100, [5] = -150},
+        reputation_flags = {[8] = "Rep_Freelancer", [5] = "Rep_Coup"}, advantage = {[8] = 60},
+        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true,
+        redeem_map = black_market, wrong_board = "black_market_redemption_required",
+        stage_objective = "SilverfishStageStolenBagObjective",
+    },
     ["native-pocket-watch"] = {
         id = "Clt_Watch", title = "Pocket Watch", fault = "pocket_watch",
         objective_path = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C",

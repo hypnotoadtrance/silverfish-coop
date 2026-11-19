@@ -27,7 +27,8 @@ QUESTS = {
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
                          native_computer_board.SAVLO_RING.quest_id}),
-    BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id, LAKE_JAMMER.quest, LENNY.quest}),
+    BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
+                            native_computer_board.STOLEN_BAG.quest_id, LAKE_JAMMER.quest, LENNY.quest}),
 }
 PREFLIGHTS = {
     native_subway_valve.QUEST: (native_subway_valve.PREFLIGHT, native_subway_valve.BOARD_KEY),

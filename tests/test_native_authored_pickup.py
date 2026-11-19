@@ -11,6 +11,7 @@ from tools.silverfish.travel import BLACK_MARKET, CITY, OBSERVATORY
 
 
 WIRE, BRANDY = pickup.CITY_WIRE, pickup.CITY_BRANDY
+CASH = "city-couple-bills-7"
 GUIDS = {WIRE: "AA" * 16, BRANDY: "BB" * 16}
 GUEST, PAWN = "courier", "Player_FP_C authenticated pawn"
 
@@ -72,8 +73,79 @@ class AuthoredPickupSelectorTests(unittest.TestCase):
         self.assertNotEqual(commands[0][0], commands[1][0])
         self.assertEqual(bridge.interactions(), [])
 
+    def test_cash_status_binds_stock_roll_and_permanent_flag_to_exact_actor(self):
+        path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        status = path / "status.tsv"
+        bridge = runtime.Bridge(path, Mock())
+        slot = "SFCoop_" + "a" * 32
+        placed = "\t".join(("native-authored-pickup", *row(CASH).values(), "7"))
+        report = "\t".join(("native-authored-pickup-claim", CASH, CITY, PAWN, "1", "1", "cash_credited", "-", slot))
+        credit = "\t".join((pickup.CASH_TAG, CASH, CITY, PAWN, slot, "7", "50", "57", "Item_Money_CoupleBills_C_7-City_01_P-"))
+        host_header = f"schema\t1\nsession\thost\thosting\t{CITY}\t1\t0\n"
+        status.write_text(host_header + "\n".join((placed, report, credit)), encoding="utf-8")
+        snapshot = bridge.snapshot()
+        self.assertEqual(snapshot[pickup.SOURCES_KEY][CASH]["wallet_value"], 7)
+        self.assertEqual(snapshot[pickup.CASH_KEY]["amount"], 7)
+        status.write_text(host_header + "\n".join((placed, report, credit.replace("C_7-", "C_8-"))), encoding="utf-8")
+        self.assertIsNone(bridge.snapshot())
+
 
 class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
+    def cash_host(self):
+        profile = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        state = party.new_party()
+        for actor in ("host", GUEST):
+            party.add_player(state, actor)
+        game = frame()
+        game[pickup.SOURCES_KEY][CASH] = dict(row(CASH), wallet_value=7)
+        game["native_wallet"] = 50
+        return SimpleNamespace(native_zones=True, native_profile=profile, stopping=False, transitioning=False,
+                               native_checkpoint_unsafe=False, last_game=game, last_seen=time.monotonic(),
+                               zone_epoch="e" * 32, party=state, control=Mock(),
+                               native_recipients=lambda: {GUEST: {"pawn": PAWN, "connected": True}},
+                               checkpoint_native=AsyncMock(return_value=4))
+
+    def cash_bridge(self, host, **changes):
+        async def command(action, pawn, slot, source, *, timeout):
+            self.assertEqual((action, pawn, source, timeout), (pickup.ACTION, PAWN, CASH, 7))
+            report = {"source": source, "map": CITY, "pawn": pawn, "slot": slot,
+                      "ok": True, "applied": True, "status": "cash_credited", "guid": "-"}
+            credit = {"source": source, "map": CITY, "pawn": pawn, "slot": slot, "amount": 7,
+                      "before": 50, "after": 57, "stock_flag": "Item_Money_CoupleBills_C_7-City_01_P-"}
+            return {**host.last_game, "native_authored_pickup_claim": report, pickup.CASH_KEY: dict(credit, **changes),
+                    "native_wallet": 57}
+        return SimpleNamespace(command=AsyncMock(side_effect=command))
+
+    async def test_cash_claim_updates_only_wallet_and_one_authored_source_without_escrow(self):
+        host = self.cash_host()
+        bridge = self.cash_bridge(host)
+        request = pickup.request_target(CASH, host.zone_epoch)
+        result = await pickup.claim(host, bridge, GUEST, request, "a" * 32)
+        claim = result["native_authored_pickup_claim"]
+        self.assertEqual((claim["owner"], claim["wallet_credit"]["amount"]), (GUEST, 7))
+        self.assertNotIn("guid", claim)
+        self.assertEqual(host.party["economy"]["wallet"], 57)
+        self.assertEqual(host.party[pickup.STATE_KEY], {CASH: claim})
+        self.assertEqual(list(host.native_profile.iterdir()), [])
+        self.assertEqual(await pickup.claim(host, bridge, GUEST, request, "a" * 32), result)
+        with self.assertRaisesRegex(party.RuleError, "already_claimed"):
+            await pickup.claim(host, bridge, "host", CASH, "b" * 32)
+        self.assertEqual(host.checkpoint_native.call_count, 2)
+        self.assertEqual(host.checkpoint_native.call_args.kwargs["require_guest_frames"], {GUEST})
+        self.assertEqual(bridge.command.await_count, 1)
+
+    async def test_cash_unverified_live_amount_or_save_flag_never_checkpoints(self):
+        for changes in ({"stock_flag": "Item_Money_CoupleBills_C_8-City_01_P-"}, {"before": 49, "amount": 8}):
+            with self.subTest(changes=changes):
+                host = self.cash_host()
+                bridge = self.cash_bridge(host, **changes)
+                request = pickup.request_target(CASH, host.zone_epoch)
+                with self.assertRaisesRegex(RuntimeError, "flag and wallet credit did not verify"):
+                    await pickup.claim(host, bridge, GUEST, request, "a" * 32)
+                self.assertEqual(host.checkpoint_native.call_count, 1)
+                self.assertTrue(host.stopping and host.native_checkpoint_unsafe)
+                self.assertNotIn(pickup.STATE_KEY, host.party)
+
     async def test_project_hides_only_the_selected_durable_source(self):
         service = SimpleNamespace(last_game=frame(state="connected"))
         bridge = SimpleNamespace(command=AsyncMock(return_value=frame("claimed", state="connected")))
