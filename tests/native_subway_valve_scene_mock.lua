@@ -55,7 +55,8 @@ sound.AudioComponent = original
 original.VolumeMultiplier = 1
 function original:GetOwner() return sound end
 function original:SetVolumeMultiplier(value) self.VolumeMultiplier = value end
-function original:Stop() self.stopped = true end
+function original:Stop() sound.AudioComponent = nil end
+function sound:K2_DestroyActor() error("The live stock audio owner must remain bound for silent readback") end
 function original:IsPlaying() return true end -- A lingering headless mixer handle is not a source of audible sound.
 local foreign = object("same-class replacement", audio_class)
 function foreign:GetOwner() return sound end
@@ -81,8 +82,11 @@ assert(flood.command(input, state, "connected"))
 local result = scene()
 assert(result[3] == "closed" and result[5] == epoch and result[6] == "absent" and result[7] == "retired" and result[8] == "retired")
 assert(result[10] == "component_muted")
-assert(original.stopped and original.VolumeMultiplier == 0 and original:IsPlaying() and sound.destroy_calls == 1 and sludge.destroy_calls == 1)
+assert(sound.AudioComponent == original and original.VolumeMultiplier == 0 and original:IsPlaying() and sludge.destroy_calls == 1)
 sound.AudioComponent = nil
-assert(scene()[3] == "closed" and scene()[8] == "retired" and scene()[10] == "component_absent_after_mute")
+assert(scene()[3] == "settling" and scene()[8] == "present" and scene()[10] == "component_invalid")
+sound.AudioComponent = original
+function original:GetOwner() return nil end
+assert(scene()[3] == "settling" and scene()[10] == "component_owner_missing")
 sound.AudioComponent = foreign
 assert(scene()[3] == "settling" and scene()[8] == "present" and scene()[10] == "component_replaced")

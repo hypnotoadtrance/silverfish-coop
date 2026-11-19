@@ -30,6 +30,7 @@ INPUT = "subway-valve"
 FACTIONS = {"2", "4", "5"}
 AUDIO_CHECKS = {"actor_absent", "receipt_unavailable", "actor_replaced", "actor_visible", "actor_collision_enabled",
                 "actor_tick_enabled", "mute_unverified", "component_absent_after_mute", "component_replaced",
+                "component_invalid", "component_class_changed", "component_owner_missing", "component_owner_changed",
                 "volume_nonzero", "component_muted"}
 
 

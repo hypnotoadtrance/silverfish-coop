@@ -200,9 +200,12 @@ end
 
 local function owned_audio(actor)
     local component = actor.AudioComponent
-    if not valid(component) then return nil, "absent" end
-    if exact(component, "/Script/Engine.AudioComponent") and same(component:GetOwner(), actor) then return component, "owned" end
-    return nil, "foreign"
+    if not valid(component) then return nil, "component_invalid" end
+    if not exact(component, "/Script/Engine.AudioComponent") then return nil, "component_class_changed" end
+    local owner = component:GetOwner()
+    if not valid(owner) then return nil, "component_owner_missing" end
+    if not same(owner, actor) then return nil, "component_owner_changed" end
+    return component
 end
 
 local function dormant(actor)
@@ -219,7 +222,7 @@ local function retired(world, actor, kind)
     if kind == "sludge" then return true end
     if retirement.audio_muted ~= true then return false, "mute_unverified" end
     local audio, status = owned_audio(actor)
-    if status == "absent" then return true, "component_absent_after_mute" end
+    if not audio then return false, status end
     if not same(retirement.component, audio) then return false, "component_replaced" end
     if audio.VolumeMultiplier ~= 0 then return false, "volume_nonzero" end
     return true, "component_muted"
@@ -276,15 +279,14 @@ local function retire_scene_actors(scene)
     if scene.audio then
         local component = owned_audio(scene.audio)
         if not valid(component) then error("mutation_unverified_stock_subway_valve_audio_owner", 0) end
-        -- Mixer playback state can outlive Destroy in a headless world. Verify the authored source is silent.
+        -- Preserve the stock audio component's ownership for silent readback. Stop/Destroy
+        -- can detach it while the same AmbientSound actor remains visible to reflection.
         if component.VolumeMultiplier ~= 0 then component:SetVolumeMultiplier(0) end
         if component.VolumeMultiplier ~= 0 then error("mutation_unverified_stock_subway_valve_audio_mute", 0) end
         receipt.component, receipt.audio_muted = component, true
-        component:Stop()
     end
     retirement = receipt
     if scene.sludge then scene.sludge:K2_DestroyActor() end
-    if scene.audio then scene.audio:K2_DestroyActor() end
 end
 
 local function actor_for(context, state, phase, name)
