@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY
 from tools.silverfish import native_lenny
+from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
 
 
 def quest_record(campaign, quest):
@@ -29,6 +30,9 @@ def quest_record(campaign, quest):
 async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
     lake, lenny = spec == BLACK_LAKE, spec == LENNY
     stock_board_input = lake or lenny
+    weapon = "sg-71-a" if lenny else "light-pistol"
+    weapon_label = "shotgun" if lenny else "pistol"
+    ammo = TWELVE_GAUGE_BUCK if lenny else NINE_MM_BALL
     quest, board_map, area = spec.quest, spec.board_map, spec.objective_map
     level = area + "." + area.rsplit("/", 1)[1] + ":PersistentLevel."
     objective_key = f"{spec.key}_objective"
@@ -188,7 +192,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                 assert event["event"] == "native_guest_primary_input", event
                 shot = event["native_guest_weapon"]
                 assert (shot["map"], shot["pawn"], shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
-                    area, aim["pawn"], guid, magazine, magazine - 1, 1,
+                    area, aim["pawn"], guid, magazine, magazine - 1, ammo.projectile_count,
                 ), shot
                 return shot
             await asyncio.sleep(.2)
@@ -249,9 +253,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         evidence["early_turn_in"] = premature["error"]
 
         guid = uuid.uuid4().hex.upper()
-        seeded = (await action(host, "native-guest-weapon-seed-light-pistol", "--target", "guest", "--item-guid", guid))[
-            "native_guest_weapon"]
-        evidence["stock_pistol_seed"] = seeded
+        seed_command = ("native-guest-weapon-seed", "--kind", weapon) if lenny else ("native-guest-weapon-seed-light-pistol",)
+        seeded = (await action(host, *seed_command, "--target", "guest", "--item-guid", guid))["native_guest_weapon"]
+        evidence[f"stock_{weapon_label}_seed"] = seeded
         assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
         for destination, tag in outbound:
             current = await cross(current, destination, tag)
@@ -273,33 +277,48 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             evidence["client_projection_before"] = visible
             assert visible["audio"] == "-", visible
         equipped = (await action(client, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
-        evidence["stock_pistol_equip"] = equipped
+        evidence[f"stock_{weapon_label}_equip"] = equipped
         assert (equipped["map"], equipped["status"], equipped["guid"], equipped["actor_ammo"], equipped["stored_ammo"]) == (
             area, "equipped", guid, 7, 7,
         ), equipped
         await wait(client_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
-                   and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, "light-pistol"))
+                   and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, weapon))
 
+        if lenny:
+            reserve = uuid.uuid4().hex.upper()
+            seeded = (await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", reserve))["native_guest_weapon"]
+            assert seeded["guid"] == reserve, seeded
+            inventory = (await action(client, "native-inventory-list"))["native_inventory"]
+            shells = next(row for row in inventory["items"] if row["guid"] == reserve)
+            assert (shells["class_path"], shells["quantity"], shells["source"]) == (ammo.item_path, ammo.fixture_units, "backpack"), shells
+            evidence["stock_buckshot_reserve"] = shells
         magazine = 7
-        max_shots = 14 if lenny else 3
+        max_shots = 12 if lenny else 3
         for attempt in range(max_shots):
             if magazine == 0 and lenny:
-                reserve = uuid.uuid4().hex.upper()
-                seeded = (await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", reserve))["native_guest_weapon"]
-                assert seeded["guid"] == reserve, seeded
                 reload = (await action(client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
                 magazine = reload["after"]
-                assert reload["guid"] == guid and magazine > 0, reload
+                assert (reload["guid"], reload["before"], magazine, reload["reserve_before"], reload["reserve_after"]) == (
+                    guid, 0, ammo.fixture_units, ammo.fixture_units, 0,
+                ), reload
                 evidence["stock_reload"] = reload
             shot = await fire(guid, magazine)
             magazine = shot["after"]
+            def objective_committed(state):
+                return quest_record(state.get("campaign", {}), quest).get("step") == 2
+
             try:
-                observed = await wait(run, lambda state: quest_record(state.get("campaign", {}), quest).get("step") == 2, timeout=2 if lenny else 10)
+                observed = await wait(run, objective_committed, timeout=.8 if lenny else 10)
                 break
             except RuntimeError:
                 last_observer = status(run).get("game", {}).get(objective_key, {})
                 evidence["shots"][-1]["last_objective"] = last_observer
-                if attempt == max_shots - 1 or last_observer.get("state") not in ("watching", "stock_objective_verified"):
+                remaining_hp = last_observer.get("health")
+                if lenny and (last_observer.get("state") == "stock_objective_verified"
+                              or isinstance(remaining_hp, (int, float)) and remaining_hp <= 0):
+                    observed = await wait(run, objective_committed, timeout=9)
+                    break
+                if attempt == max_shots - 1 or last_observer.get("state") != "watching":
                     raise
         completed = quest_record(observed["campaign"], quest)
         assert quest_record(read_saved(), quest) == completed, completed
@@ -314,6 +333,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         else:
             assert (proof["jammer"], proof["trigger"]) == (spec.jammer, spec.trigger), proof
         assert proof["xp_before"] == proof["xp_after"] and proof["projectile"].split(" ", 1)[-1].startswith(level), proof
+        if lenny:
+            assert proof["projectile"].startswith(f"{ammo.projectile}_C "), proof
         if client_projection and not lenny:
             concealed = await projected("hidden", "absent")
             evidence["client_projection_after"] = concealed
@@ -389,15 +410,15 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             -10, paid["host"]["Player_Cash"], paid["host"]["Player_Xp"],
         ), restored
         assert {key: row["after"] for key, row in restored["reputation"].items()} == settled["reputation"], restored
-        restored_pistol = (await action(client, "native-guest-weapon-inspect", "--target", guid))["native_guest_weapon"]
-        assert (restored_pistol["guid"], restored_pistol["stored_ammo"]) == (guid, magazine), restored_pistol
+        restored_weapon = (await action(client, "native-guest-weapon-inspect", "--target", guid))["native_guest_weapon"]
+        assert (restored_weapon["guid"], restored_weapon["stored_ammo"]) == (guid, magazine), restored_weapon
         replay = await action(client, "native-quest-turnin", "--target", quest)
         assert (replay["effect"], replay["wallet"], replay["objective"]) == (
             "native_quest_already_settled", settled["wallet"], proof,
         ), replay
         assert await balances() == paid
         evidence.update(same_port_restart={"port": port, "generation": restarted["generation"], "character": character,
-                                          "quest": restored, "pistol": restored_pistol, "replay": replay["effect"]}, verified=True)
+                                          "quest": restored, weapon_label: restored_weapon, "replay": replay["effect"]}, verified=True)
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
         raise

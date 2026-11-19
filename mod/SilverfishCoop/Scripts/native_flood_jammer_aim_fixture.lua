@@ -1,8 +1,8 @@
 local guest_save = require("guest_save")
+local firearms = require("guest_weapon_registry")
 
 local fixture = {}
 local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
-local pistol_class = "BlueprintGeneratedClass /Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local color = {R = 0, G = 0, B = 0, A = 0}
 local last
@@ -27,13 +27,14 @@ local function component(value, owner, kind)
 end
 local function refuse(reason) error("stock_flood_jammer_aim_" .. reason, 0) end
 
-local function equipped(state, phase, name, guid)
+local function equipped(state, phase, name, guid, tag)
     local pawn, save = guest_save.exact_item_context(state, phase, name)
     if not valid(pawn) or not valid(save) or pawn.Dead ~= false or pawn.IsWeaponBlocked ~= false
         or not finite(save.PlayerHealth) or save.PlayerHealth <= 0 then refuse("standing_guest_required") end
     local weapon, camera, capsule, controller = pawn.EquipedItem, pawn.Camera, pawn.CapsuleComponent, pawn.Controller
+    local path = firearms.paths[tag == "native-lenny" and "sg-71-a" or "light-pistol"]
     if not valid(weapon) or not valid(controller) or not weapon:HasAuthority() or weapon:IsActorBeingDestroyed()
-        or not same(weapon:GetWorld(), state.world) or weapon:GetClass():GetFullName() ~= pistol_class
+        or not same(weapon:GetWorld(), state.world) or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path
         or not same(weapon:GetOwner(), pawn) or not same(weapon:GetInstigator(), pawn)
         or not same(weapon.User, pawn) or not same(weapon.Player_Ref, pawn) or weapon.HeldByPlayer ~= true
         or not component(camera, pawn, "CameraComponent") or not component(capsule, pawn, "CapsuleComponent")
@@ -41,7 +42,7 @@ local function equipped(state, phase, name, guid)
     if type(SilverfishInspectNativeGuestWeapon) ~= "function" then refuse("weapon_inspector_unavailable") end
     local ok, equipped_status, rounds, saved = SilverfishInspectNativeGuestWeapon(pawn:GetAddress(), save:GetAddress(), guid)
     if ok ~= true or equipped_status ~= "equipped" or not finite(rounds) or rounds ~= saved or rounds <= 0 then
-        refuse("loaded_owned_pistol_required")
+        refuse("loaded_owned_weapon_required")
     end
     return {pawn = pawn, save = save, weapon = weapon, camera = camera, capsule = capsule,
         controller = controller, muzzle = weapon.Arrow_Muzzle}
@@ -106,7 +107,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     local mesh_class = tag == "native-lenny" and "SkeletalMeshComponent" or "StaticMeshComponent"
     if not component(target_mesh, actor, mesh_class) then target_mesh = nil end
 
-    local context = equipped(state, phase, name, guid)
+    local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
     context.ignored = {context.pawn, context.weapon, actor}
     local center = target_capsule:K2_GetComponentLocation()
