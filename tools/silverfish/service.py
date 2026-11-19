@@ -26,7 +26,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment, _census
-from . import native_mosby_tape, native_smg_hold
+from . import native_mosby_station_view, native_mosby_tape, native_smg_hold
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -160,7 +160,8 @@ class Host:
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
                  guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
-                 dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False):
+                 dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
+                 mosby_station_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -195,6 +196,7 @@ class Host:
         self.wipe_view_enabled = wipe_view_enabled
         self.wire_board_enabled = wire_board_enabled
         self.dialogue_sessions = native_dialogue.DialogueSessions(mosby=mosby_dialogue_enabled) if dialogue_enabled else None
+        self.mosby_station_enabled = mosby_station_enabled
         self.camera_ready_at = {}
         self.host_camera_input = native_turret_photo.HostCameraInput() if host_camera_input else None
         self.wipe_view = None
@@ -1749,6 +1751,7 @@ class Host:
             "native_wire_board": self.wire_board_enabled,
             "native_dialogue": self.dialogue_sessions is not None,
             "native_dialogue_mosby": bool(self.dialogue_sessions and native_dialogue.SCIENTIST_SHOP in self.dialogue_sessions.maps),
+            "native_mosby_station": self.mosby_station_enabled,
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -2772,6 +2775,8 @@ class Host:
         async def wire_action(action, _operation, target):
             if action == native_wire_quest.PREFLIGHT:
                 return await native_wire_quest.preflight(self, bridge, "host")
+            if action == native_mosby_tape.READINGS_PREFLIGHT:
+                return await native_mosby_tape.preflight(self, bridge, "host", action, target)
             if action in native_computer_board.PREFLIGHTS:
                 return await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.PREFLIGHTS[action])
             if action == native_turret_photo.PREFLIGHT:
@@ -2889,6 +2894,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     dialogue_enabled = native_guest and native_zones and staged_script(work, "native_dialogue.lua")
     mosby_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_mosby.lua")
+    mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
     if guest_held_fire and not (native_guest_controls and
@@ -3047,6 +3053,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
+                              mosby_station_enabled=mosby_station_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
@@ -3135,7 +3142,7 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
-            "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby")
+            "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby", "native_mosby_station")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
@@ -3224,6 +3231,7 @@ class Client:
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dialogue_view = (native_dialogue.DialogueView(bridge, control, mosby=invite.get("native_dialogue_mosby", False))
                               if invite.get("native_dialogue") else None)
+        self.mosby_station = native_mosby_station_view.StationView(bridge, control) if invite.get("native_mosby_station") else None
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
         self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
         self.primary_scope = None
@@ -3502,9 +3510,10 @@ class Client:
             return
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
+        armor = item_class == native_guest_armor.CLASS_PATH
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid) or item_class not in native_guest_weapon.CLASS_PATHS):
+                or not native_gold.valid_guid(guid) or not (armor or item_class in native_guest_weapon.CLASS_PATHS)):
             return
         identifier = f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory-equip:{sequence}"
         operation = uuid.uuid5(self.bridge.input_namespace, identifier).hex
@@ -3513,9 +3522,11 @@ class Client:
             inspected = await self.gameplay_action("native-inventory-list", operation, "0")
             page = inspected["native_inventory"]
             if (page["owner"] != self.invite["character_id"] or page["offset"] != 0
-                    or not any(row["guid"] == guid and row["class_path"] == item_class for row in page["items"])):
-                raise ValueError("The selected stock weapon is no longer on the authenticated inventory page")
-            equipped = await self.gameplay_action("native-guest-weapon-equip", operation, guid)
+                    or not any(row["guid"] == guid and row["class_path"] == item_class
+                               and (not armor or row["source"] == "backpack") for row in page["items"])):
+                raise ValueError("The selected stock item is no longer on the authenticated inventory page")
+            action = native_guest_armor.ACTION if armor else "native-guest-weapon-equip"
+            equipped = await self.gameplay_action(action, operation, guid)
             outcome = "equipped"
             self.control.event("native_guest_inventory_equipped", operation_id=operation, view_sequence=sequence, **equipped)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
@@ -3570,6 +3581,7 @@ class Client:
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
             (self.wire_board is not None, native_wire_board.MAPS, native_wire_board.HEARTBEAT),
             (self.dialogue_view is not None, self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
+            (self.mosby_station is not None, (native_mosby_tape.STONE_MAZE,), native_mosby_station_view.HEARTBEAT),
         )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
@@ -3795,6 +3807,15 @@ class Client:
                     if proof.get("state") != "pending" or not proof.get("sequence"):
                         raise RuntimeError("The stock dialogue input did not return a pending response")
                     result = {"native_dialogue_view": proof}
+                elif action == native_mosby_station_view.FIXTURE and self.mosby_station:
+                    if (self.last_game.get("state"), self.last_game.get("map"), request.get("target")) != (
+                            "connected", native_mosby_tape.STONE_MAZE, None):
+                        raise ValueError("Connect the enrolled guest to the exact Stone Maze station")
+                    self.last_game = await self.bridge.command(action, timeout=6)
+                    proof = self.last_game.get(native_mosby_station_view.KEY, {})
+                    if proof.get("state") not in ("checking", "trading") or not proof.get("sequence"):
+                        raise RuntimeError("The stock Stone Maze station press did not verify")
+                    result = {native_mosby_station_view.KEY: proof}
                 elif action == "native-wipe-view-key-fixture" and self.wipe_view:
                     self.last_game = await self.wipe_view.fixture(action, request.get("target"))
                     result = {"native_wipe_view": self.last_game.get("native_wipe_view", {})}
@@ -3837,6 +3858,10 @@ class Client:
             if state is not None:
                 self.last_game = state
             await self.service_requests()
+            if self.guest_held_input:
+                held_active = (self.transport.connected and self.last_game.get("state") == "connected"
+                               and not self.needs_travel and not self.server_transitioning)
+                await self.guest_held_input.service(held_active)
             if self.transport.connected and not self.stopping:
                 await self.refresh_gameplay()
             repair_needed = (not self.transport.connected or self.needs_travel
@@ -3853,8 +3878,6 @@ class Client:
                       and not self.needs_travel and not self.server_transitioning)
             await self.service_reload_input(active)
             await self.service_primary_input(active)
-            if self.guest_held_input:
-                await self.guest_held_input.service(active)
             await self.service_crate_interaction(active)
             if self.loot_view:
                 rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
@@ -3870,6 +3893,10 @@ class Client:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
                 self.last_game = await self.dialogue_view.sync(self.last_game, epoch, current, self.gameplay_action)
+            if self.mosby_station:
+                current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
+                epoch = f"{self.host_session}:{self.zone_epoch}"
+                self.last_game = await self.mosby_station.sync(self.last_game, epoch, current, self.gameplay_action)
             if self.wipe_view:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
@@ -3916,6 +3943,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
     expanded_zones = invite.get("expanded_zones", False)
     native_loot_input = invite.get("native_loot_input", False)
     broker_input = invite.get("native_broker_input", False)
+    mosby_station_enabled = invite.get("native_mosby_station", False)
     wipe_view_enabled = invite.get("native_wipe_view", False)
     if wipe_view_enabled and not staged_script(work, "native_wipe_view.lua"):
         raise ValueError("Restage the native client for stock wipe item selection")
@@ -3923,6 +3951,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for stock Broker station interaction")
     if invite.get("native_wire_board") and not staged_script(work, "native_wire_board.lua"):
         raise ValueError("Restage the native client for stock Copper Stop interaction")
+    if mosby_station_enabled and not staged_script(work, "native_mosby_station_view.lua"):
+        raise ValueError("Restage the native client for stock Stone Maze station interaction")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):
@@ -3953,7 +3983,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                              guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
                              native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
                              native_loot_input=native_loot_input, broker_input=broker_input,
-                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock, guest_held_fire=guest_held_fire)
+                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock, guest_held_fire=guest_held_fire,
+                             native_mosby_station=mosby_station_enabled)
             bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:

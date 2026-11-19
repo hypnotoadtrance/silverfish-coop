@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import native_computer_board, native_turret_photo, native_wire_quest, party
+from . import native_computer_board, native_mosby_tape, native_turret_photo, native_wire_quest, party
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
@@ -19,13 +19,14 @@ COUP_REPORT = native_computer_board.COUP_REPORT
 DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 QUESTS = {
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
-    SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID}),
+    SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id}),
 }
 PREFLIGHTS = {
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
+    native_mosby_tape.MOSBY_QUEST: (native_mosby_tape.READINGS_PREFLIGHT, "native_mosby_readings"),
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered",
@@ -110,6 +111,8 @@ class WireBoardView:
               or previous.state != ("offer" if kind == "start" else "ready") or time.monotonic() >= previous.expires):
             raise party.RuleError("native_wire_board_stale_confirmation")
         if kind == "start":
+            if quest == native_mosby_tape.MOSBY_QUEST:
+                raise party.RuleError("native_mosby_readings_uses_authored_dialogue_and_station")
             await action("native-quest-start", operation, quest)
         elif kind == "turnin":
             if quest == native_computer_board.QUEST_ID and area != SCIENTIST_SHOP:
@@ -127,7 +130,8 @@ class WireBoardView:
             if quest != QUEST and str(error) in HIDDEN_OFFERS:
                 return "not_offered"
             raise
-        expected_quest = proof.get("id") if quest == QUEST else proof.get("quest")
+        field = "id" if quest == QUEST else "quest_id" if quest == native_mosby_tape.MOSBY_QUEST else "quest"
+        expected_quest = proof.get(field)
         expected_board = proof.get("target") if quest == native_turret_photo.QUEST_ID else proof.get("board")
         # The authenticated service verifies the authority pawn. Its Unreal name can differ from the receiving client's name.
         if (proof.get("map"), expected_board, expected_quest) != (area, board, quest):
@@ -138,6 +142,12 @@ class WireBoardView:
         last = 3 if quest == native_turret_photo.QUEST_ID else 2
         if "step_after" not in proof or step not in (None, -10, *range(1, last + 1)):
             raise RuntimeError("The host board report did not verify the selected stock quest step")
+        if quest == native_mosby_tape.MOSBY_QUEST:
+            if step is None:
+                return "not_offered"
+            if step == -10:
+                return "completed"
+            return "ready" if valid_guid(proof.get("objective_guid")) and proof.get("objective_owner") in ("host", "guest") else "missing"
         if step is None:
             return "offer"
         if step == -10:

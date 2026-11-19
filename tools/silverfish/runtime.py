@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_dialogue, native_downed_markers, native_mosby_tape
+from . import native_authored_pickup, native_dialogue, native_downed_markers, native_mosby_station_view, native_mosby_tape
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from . import native_smg_hold
@@ -296,7 +296,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
            guest_clock: bool = False,
-           broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False):
+           broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -414,6 +414,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_BROKER_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
+    if native_mosby_station and headless and port is None:
+        env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_wipe_view:
         env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
@@ -477,6 +479,7 @@ class Bridge:
         self.broker_input_offset = 0
         self.wire_board_offset = 0
         self.dialogue_offset = 0
+        self.mosby_station_offset = 0
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -682,6 +685,18 @@ class Bridge:
                     and ((token, choice) == ("-", "-") or choice in native_dialogue.ORDINALS and native_dialogue.valid_token(token))):
                 events.append((sequence, pawn, token, choice))
         return events
+
+    def native_mosby_station_requests(self) -> list[tuple[int, int, str, str, str | None]]:
+        try:
+            with (self.directory / "native-mosby-station-events").open("rb") as stream:
+                stream.seek(self.mosby_station_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.mosby_station_offset += end or (len(batch) if len(batch) == 4096 else 0)
+        return [event for raw in batch[:end].splitlines()
+                if (event := native_mosby_station_view.parse_intent(raw.decode("utf-8", errors="replace").split("\t")))]
 
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
         try:
@@ -1005,6 +1020,8 @@ class Bridge:
                     dialogue_progress = fields
                 elif fields[0] == "native-mosby-tape":
                     data["native_mosby_tape"] = native_mosby_tape.parse_exchange(fields)
+                elif fields[0] == "native-mosby-station-view":
+                    data[native_mosby_station_view.KEY] = native_mosby_station_view.parse(fields)
                 elif fields[0] == "native-mosby-readings":
                     if mosby_frame is not None:
                         raise ValueError("Duplicate Stone Maze quest frame")
@@ -1590,6 +1607,10 @@ class Bridge:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):
                     del data["player_local_input"]
+                station = data.get(native_mosby_station_view.KEY)
+                if station and (data.get("state"), data.get("map"), data["pawns"].get("local", {}).get("name")) != (
+                        "connected", station["map"], station["pawn"]):
+                    del data[native_mosby_station_view.KEY]
                 primary = data.get("native_guest_primary_scope", {})
                 for name in ("native_guest_held_fire", "native_guest_held_fire_fixture"):
                     held_input = data.get(name)

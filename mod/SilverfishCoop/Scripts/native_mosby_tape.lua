@@ -52,7 +52,7 @@ local function identity(row)
 end
 
 local function owned(save, class, expected)
-    local result = {}
+    local result, first_backpack = {}, nil
     for index, array in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
         local size = count(array)
         if not int32(size) or size < 0 or size > 4096 then refuse("inventory_unqualified") end
@@ -60,12 +60,13 @@ local function owned(save, class, expected)
             local row = array[cursor]
             if same(row[class_field], class) then
                 local id = identity(row)
-                if not id or result[id] then refuse("inventory_identity_unqualified") end
+                if not id or result[id] ~= nil then refuse("inventory_identity_unqualified") end
                 result[id] = index == 1
+                if index == 1 and not first_backpack then first_backpack = id end
             elseif expected and identity(row) == expected then refuse("inventory_guid_class_changed") end
         end
     end
-    return result
+    return result, first_backpack
 end
 
 local function singleton(rows)
@@ -176,8 +177,8 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
     if not reaches(pawn, station, box) then refuse("station_out_of_reach") end
     local blank, product = StaticFindObject(blank_path), StaticFindObject(product_path)
     qualify_offer(station, blank, product)
-    local rows = owned(save, blank, blank_guid ~= "-" and blank_guid or nil)
-    local held = blank_guid == "-" and singleton(rows) or rows[blank_guid] and blank_guid or nil
+    local rows, first_backpack = owned(save, blank, blank_guid ~= "-" and blank_guid or nil)
+    local held = blank_guid == "-" and first_backpack or rows[blank_guid] and blank_guid or nil
     if blank_guid ~= "-" and not guid(blank_guid) then refuse("blank_guid_unqualified") end
     local status, filled = "offer", "-"
     local checked, after = true, before

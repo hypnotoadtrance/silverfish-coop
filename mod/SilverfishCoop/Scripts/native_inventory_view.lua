@@ -12,6 +12,7 @@ local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local bomber_jacket_path = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
 local input_keys, held = {}, {}
@@ -153,8 +154,9 @@ local function page(fields)
         if slots[position] then error("The authenticated inventory view repeats a stock inventory position", 0) end
         slots[position] = true
         seen[guid] = true
-        local equippable = (source == "backpack" or source == "equipment")
-            and (weapon_profiles.kinds[class] ~= nil or class == camera_path)
+        local equippable = ((source == "backpack" or source == "equipment")
+            and (weapon_profiles.kinds[class] ~= nil or class == camera_path))
+            or (source == "backpack" and class == bomber_jacket_path)
         local name = item:gsub("_", " ")
         local usable = source == "backpack" and class == bandage_path
         if usable then name = "Bandage" end
@@ -188,7 +190,7 @@ local function show()
     elseif row.equip_state == "equipping" then
         lines[#lines + 1] = "Equip pending"
     elseif row.equip_state == "equipped" then
-        lines[#lines + 1] = "Weapon equipped. Reopen inventory to refresh."
+        lines[#lines + 1] = "Item equipped. Reopen inventory to refresh."
     elseif row.equip_state == "refused" or row.equip_state == "error" then
         lines[#lines + 1] = "Equip unavailable. Reopen inventory to refresh."
     elseif selected and selected.equippable then

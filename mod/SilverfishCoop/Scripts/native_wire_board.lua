@@ -10,6 +10,7 @@ local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
+local readings = "Clt_Tape_StoneMaze_01"
 local function board_profile(area, level, suffix, id, quests, display_global)
     local world = area .. "." .. level
     local path = world .. ":PersistentLevel.BountyBoard_BP_C_" .. suffix
@@ -18,12 +19,12 @@ local function board_profile(area, level, suffix, id, quests, display_global)
 end
 local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
-    [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer}),
+    [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy}, true),
 }
 local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
-    [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage"}
+    [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -70,6 +71,11 @@ local contract_prompt = {
         offer = "Find the sealed Paladin Brandy in the City.\nInteract again to accept the contract.",
         missing = "Bring the sealed bottle in your backpack.\nInteract to check the contract again.",
         ready = "Turn in the bottle for 900 shared cash.\nInteract again to turn it in.",
+    },
+    [readings] = {
+        not_offered = "Speak to Dr. Mosby to start this contract.",
+        missing = "Bring the Ground Saturation Data tape from Stone Maze.\nInteract to check the contract again.",
+        ready = "Turn in your Ground Saturation Data tape for 7,500 shared cash.\nInteract again to turn it in.",
     },
 }
 local rendered_states = {
@@ -150,12 +156,12 @@ local function distance_squared(first, second)
     return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
 end
 
-local function can_use(current, now)
+local function can_use(current, now, pending_readings)
     local pawn, controller = current.pawn, current.controller
     local stack, range = controller.MenuStack, pawn.InteractionRange
     if controller.Loading ~= false or not stack or stack:GetArrayNum() ~= 0
         or pawn.Dead ~= false or type(is_downed) ~= "function" or is_downed(pawn) ~= false
-        or type(range) ~= "number" or not (range > 0 and range <= 1000) or not fresh(now) then return false end
+        or type(range) ~= "number" or not (range > 0 and range <= 1000) or not (pending_readings or fresh(now)) then return false end
     local location = pawn:K2_GetActorLocation()
     return distance_squared(location, current.board:K2_GetActorLocation()) <= range^2
         and distance_squared(location, current.box:K2_GetComponentLocation()) <= range^2
@@ -278,7 +284,8 @@ function board_view.sync(state, phase)
         return
     end
     local facing = focused(current)
-    if session and (session.expires <= now or not allow or (not facing and not session.fixture)) then session = nil end
+    local readings_pending = session and session.quest == readings and session.pending and can_use(current, now, true)
+    if session and (session.expires <= now or not allow and not readings_pending or (not facing and not session.fixture)) then session = nil end
     if pending_move ~= 0 then
         if allow and facing and (not session or not session.pending) then
             local selected = ((selection - 1 + pending_move) % #current.profile.quests) + 1
@@ -301,7 +308,8 @@ function board_view.command(fields, state, phase)
     local action = fields[2]
     if action ~= "native-wire-board-render" and action ~= "native-wire-board-fixture" then return end
     local current, now = current_context(state, phase), os.time()
-    if not same_context(current, binding) or not can_use(current, now) then error("wire_board_scope_unavailable", 0) end
+    local readings_pending = action == "native-wire-board-render" and session and session.quest == readings and session.pending
+    if not same_context(current, binding) or not can_use(current, now, readings_pending) then error("wire_board_scope_unavailable", 0) end
     if action == "native-wire-board-fixture" then
         local quests, selected = current.profile.quests, nil
         if #fields == 2 then

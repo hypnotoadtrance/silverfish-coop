@@ -149,6 +149,7 @@ def parser() -> argparse.ArgumentParser:
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
         "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture",
         "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",
+        "native-mosby-station-fixture",
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",

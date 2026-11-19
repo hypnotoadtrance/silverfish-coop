@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish.control import submit
 from tools.silverfish.native_host_save import guest_record
-from tools.silverfish.native_smg_hold import ALL, FINISHED, KEY, LOCAL, LOCAL_FIXTURE
+from tools.silverfish.native_smg_hold import ALL, FINISHED, KEY, LOCAL, LOCAL_FIXTURE, parse
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -140,6 +140,24 @@ async def verify(work: Path, originals_path: Path):
     def hold(state, index):
         return state.get("game", {}).get(ALL, {}).get(members[index]["host_pawn"], {})
 
+    async def stock_cycle(condition, *, timeout=4):
+        deadline = time.monotonic() + timeout
+        status_path, = (run / "game-bridge").glob("*/status.tsv")
+        last = []
+        while time.monotonic() < deadline:
+            try:
+                rows = status_path.read_text(encoding="utf-8").splitlines()
+                parsed = [parse(row.split("\t")) for row in rows if row.startswith("native-guest-smg-hold\t")]
+                by_pawn = {row["pawn"]: row for row in parsed}
+                last = [by_pawn.get(member["host_pawn"], {}) for member in members]
+            except (OSError, ValueError):
+                await asyncio.sleep(0.03)
+                continue
+            if condition(last):
+                return last
+            await asyncio.sleep(0.03)
+        raise RuntimeError(f"The native SMG cycles did not reach the requested state: {last}")
+
     async def committed(index, serial):
         member = members[index]
         row = await wait_event(run, COMMIT, lambda event: event.get("serial") == serial and event.get("guid") == member["guid"])
@@ -194,16 +212,13 @@ async def verify(work: Path, originals_path: Path):
 
         pressed = await asyncio.gather(edge(0, "press"), edge(1, "press"))
         evidence["press_fixtures"] = pressed
-        simultaneous = await wait(run, lambda state: all(hold(state, index).get("status") == "active"
-                                  and hold(state, index).get("rounds", 0) >= 1 for index in range(2)), timeout=4)
-        ongoing = [hold(simultaneous, index) for index in range(2)]
+        ongoing = await stock_cycle(lambda rows: all(row.get("status") == "active" and row.get("rounds", 0) >= 1 for row in rows))
         assert len({row["serial"] for row in ongoing}) == 2 and all(row["before"] == 25 for row in ongoing), ongoing
         evidence["overlapping_stock_holds"] = ongoing
         left_release = await edge(0, "release")
         assert left_release["stroke"] == pressed[0]["stroke"], left_release
-        after_release = await wait(run, lambda state: hold(state, 0).get("status") == "released"
-                                   and hold(state, 1).get("rounds", 0) > ongoing[1]["rounds"], timeout=5)
-        right_after_left = hold(after_release, 1)
+        _, right_after_left = await stock_cycle(lambda rows: rows[0].get("status") == "released"
+                                                and rows[1].get("rounds", 0) > ongoing[1]["rounds"])
         assert right_after_left["status"] == "active", right_after_left
         right_release = await edge(1, "release")
         assert right_release["stroke"] == pressed[1]["stroke"], right_release

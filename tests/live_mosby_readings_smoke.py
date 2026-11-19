@@ -17,6 +17,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_authored_pickup as pickup, native_dialogue as dialogue, native_mosby_tape as tape
+from tools.silverfish import native_mosby_station_view as station_view
+from tools.silverfish import native_wire_board
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
 
 
@@ -24,7 +26,7 @@ TO_MAZE = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (DEAD_BRIDGE, "
 TO_SCIENTIST = ((DEAD_BRIDGE, "DB_SM"), (CROSSROADS, "DB_CR"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
 
 
-async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False):
+async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False):
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -165,8 +167,27 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         approach = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
         before = (await action(client, tape.PREFLIGHT, "--target", blank))["native_mosby_tape"]
         assert (before["station"], before["pawn"], before["blank_guid"]) == (tape.STATION, approach["pawn"], blank), before
-        operation = uuid.uuid4().hex
-        converted = await action(client, tape.CONVERT, "--target", blank, "--operation-id", operation)
+        if stock_station:
+            def stationary(status):
+                return status.get("game", {}).get(station_view.KEY, {})
+
+            await wait(client_run, lambda status: stationary(status).get("state") in ("armed", "focused"), timeout=15)
+            checked = (await action(client, station_view.FIXTURE))[station_view.KEY]
+            assert checked["state"] == "checking" and checked["sequence"] == checked["open"] and checked["blank_guid"] is None
+            shown = stationary(await wait(client_run, lambda status: stationary(status).get("state") == "offer", timeout=15))
+            assert (shown["sequence"], shown["blank_guid"], shown["station"]) == (checked["sequence"], blank, tape.STATION)
+            assert blank in await inventory(client, character)
+            pending = (await action(client, station_view.FIXTURE))[station_view.KEY]
+            assert (pending["state"], pending["open"], pending["blank_guid"]) == ("trading", checked["open"], blank)
+            exchanged = stationary(await wait(client_run, lambda status: stationary(status).get("state") == "exchanged", timeout=26))
+            assert (exchanged["sequence"], exchanged["blank_guid"]) == (pending["sequence"], blank)
+            receipt = saved()["world"]["party"][tape.EXCHANGES][blank]
+            assert receipt["filled_guid"] == exchanged["filled_guid"]
+            converted, operation = {"effect": "stone_maze_tape_exchanged", **receipt}, receipt["operation_id"]
+            evidence["stock_station"] = {"offer": shown, "trade": exchanged}
+        else:
+            operation = uuid.uuid4().hex
+            converted = await action(client, tape.CONVERT, "--target", blank, "--operation-id", operation)
         assert converted["effect"] == "stone_maze_tape_exchanged", converted
         product = converted["filled_guid"]
         assert product != blank and converted["owner"] == character
@@ -184,7 +205,29 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert board["objective_guid"] == product and board["objective_owner"] == "guest", board
         await action(authority, "checkpoint")
         first_flags = flags(saved())
-        completed = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
+        if stock_board:
+            def panel(status):
+                return status.get("game", {}).get("native_wire_board", {})
+
+            def matches(readback):
+                return (readback.get("map"), readback.get("board"), readback.get("quest")) == (
+                    SCIENTIST_SHOP, tape.BOARD, tape.MOSBY_QUEST)
+
+            await wait(client_run, lambda status: panel(status).get("state") in ("armed", "focused"), timeout=15)
+            started = (await action(client, native_wire_board.FIXTURE, "--target", tape.MOSBY_QUEST))["native_wire_board"]
+            assert matches(started) and started["state"] == "loading" and started["open"] == started["sequence"]
+            reviewed = panel(await wait(client_run, lambda state: matches(panel(state)) and (panel(state).get("state"), panel(state).get("sequence"))
+                                        == ("ready", started["sequence"]), timeout=16))
+            assert product in await inventory(client, character) and flags(saved()) == first_flags
+            confirming = (await action(client, native_wire_board.FIXTURE, "--target", tape.MOSBY_QUEST))["native_wire_board"]
+            assert matches(confirming) and confirming["state"] == "redeeming" and confirming["open"] == reviewed["open"]
+            assert confirming["sequence"] > started["sequence"]
+            granted = panel(await wait(client_run, lambda state: matches(panel(state)) and (panel(state).get("state"), panel(state).get("sequence"))
+                                       == ("completed", confirming["sequence"]), timeout=32))
+            completed = {"effect": "native_quest_changed", **saved()["world"]["party"]["native_quests"][tape.MOSBY_QUEST]}
+            evidence["stock_board"] = {"review": reviewed, "turn_in": granted}
+        else:
+            completed = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
         assert (completed["effect"], completed["consumed_tape"], completed["step"], completed["cash"], completed["xp"]) == (
             "native_quest_changed", product, -10, 7500, 3), completed
         assert set(completed["armor"]) == {"host", character} and len(set(completed["armor"].values())) == 2
@@ -248,5 +291,8 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, help="original Saved directory to hash before and after")
     parser.add_argument("--stock-pickup", action="store_true", help="exercise the stock Interact fixture if installed for Scientist tape")
+    parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
+    parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
+                         stock_station=args.stock_station, stock_board=args.stock_board))

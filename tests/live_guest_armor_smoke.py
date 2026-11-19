@@ -17,7 +17,7 @@ from tools.silverfish.native_guest_armor import ACTION, CLASS_PATH, FIXTURE, eff
 from tools.silverfish.travel import OBSERVATORY
 
 
-async def verify(work, vanilla_saved):
+async def verify(work, vanilla_saved, *, stock_input=False):
     name = "stock-guest-armor-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     client = ("--profile", name)
@@ -97,7 +97,21 @@ async def verify(work, vanilla_saved):
         assert {key: row for key, row in backpack.items() if key != guid} == initial, backpack
         wrong = await act(client, ACTION, "--target", "A" * 32, success=False)
         assert wrong["error"] == "native_guest_armor_exact_owned_row_required", wrong
-        operation = uuid.uuid4().hex
+        if stock_input:
+            await act(client, "native-inventory-view-fixture")
+            await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {}).get(
+                "guid") == guid)
+            for expected in ("confirming", "equipped"):
+                await act(client, "native-inventory-view-key-fixture", "--target", "confirm")
+                await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_equip_view", {}).get(
+                    "state") == expected)
+            journal = (await ask("events", *client, "--tail", "20"))["events"]
+            identified, = [event for event in journal if event["event"] == "native_guest_inventory_equipped"
+                           and event.get("native_guest_armor", {}).get("guid") == guid]
+            operation = identified["operation_id"]
+            evidence["stock_inventory_input"] = identified
+        else:
+            operation = uuid.uuid4().hex
         equip = (ACTION, "--target", guid, "--operation-id", operation)
         receipt = (await act(client, *equip))["native_guest_armor"]
         assert (receipt["status"], receipt["guid"], receipt["class_path"]) == ("equipped", guid, CLASS_PATH), receipt
@@ -157,5 +171,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--stock-input", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), stock_input=args.stock_input))
