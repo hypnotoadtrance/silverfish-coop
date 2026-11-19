@@ -250,19 +250,24 @@ local function unchanged(context)
 end
 
 local function valid_transition(spec, before, after, step, cash, xp, expected_rep)
-    if after.step ~= step or after.cash ~= before.cash + cash or after.xp ~= before.xp + xp then return false end
+    if after.step ~= step or after.cash ~= before.cash + cash or after.xp ~= before.xp + xp then
+        return false, ("balances:step=%s/%s,cash=%s/%s,xp=%s/%s"):format(
+            after.step, step, after.cash, before.cash + cash, after.xp, before.xp + xp)
+    end
     for _, faction in ipairs(spec.factions) do
         local observed = after.rep[faction]
         if (expected_rep and (observed.amount ~= expected_rep[faction] or not observed.found))
             or (not expected_rep and (observed.amount ~= before.rep[faction].amount or observed.found ~= before.rep[faction].found)) then
-            return false
+            local amount = expected_rep and expected_rep[faction] or before.rep[faction].amount
+            return false, ("reputation[%d]=%d/%d,found=%s"):format(faction, observed.amount, amount, tostring(observed.found))
         end
     end
     for faction, previous in pairs(before.advantage) do
         local observed = after.advantage[faction]
         local delta = expected_rep and spec.advantage[faction] or 0
         if observed.amount ~= previous.amount + delta or observed.found ~= (previous.found or delta ~= 0) then
-            return false
+            return false, ("advantage[%d]=%d/%d,found=%s"):format(
+                faction, observed.amount, previous.amount + delta, tostring(observed.found))
         end
     end
     return true
@@ -322,16 +327,23 @@ local function redeem(spec, context, before, objective, identity, owner)
         end
     end
     local output = {}
-    local checked, after = pcall(function()
+    local checked, after, reason = pcall(function()
         library:TurnIn_Quest(context.key, context.instance, true, context.host, output, output)
+        if not unchanged(context) then return nil, "save_ownership_changed" end
+        if output.Success ~= true or valid(output.ConfirmationPopup) then return nil, "stock_confirmation_incomplete" end
         local observed = progress(spec, context)
-        if not unchanged(context) or output.Success ~= true or valid(output.ConfirmationPopup)
-            or not valid_transition(spec, before, observed, -10, spec.cash, 1, expected_rep)
-            or wire.objective_guid(context.save, objective, spec.one_stack_unit)
-            or owner == "guest" and wire.objective_guid(context.receiving_save, objective, spec.one_stack_unit) then return end
+        local reconciled, detail = valid_transition(spec, before, observed, -10, spec.cash, 1, expected_rep)
+        if not reconciled then return nil, detail end
+        if wire.objective_guid(context.save, objective, spec.one_stack_unit)
+            or owner == "guest" and wire.objective_guid(context.receiving_save, objective, spec.one_stack_unit) then
+            return nil, "objective_still_present"
+        end
         return observed
     end)
-    if not checked or not after then error("mutation_unverified_stock_" .. spec.fault .. "_turn_in", 0) end
+    if not checked or not after then
+        local detail = checked and (reason or "unavailable") or tostring(after):sub(1, 250)
+        error("mutation_unverified_stock_" .. spec.fault .. "_turn_in:" .. detail, 0)
+    end
     return after
 end
 
