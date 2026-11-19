@@ -609,29 +609,51 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     end
     local anchor, origin = marker.Arrow:K2_GetComponentLocation(), door:K2_GetActorLocation()
     local extents = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    if not vector(anchor) or not vector(origin) or not vector(direction)
+        or not finite(extents) or extents < 20 or extents > 150 then
+        error("The named door or pawn has invalid staging geometry", 0)
+    end
     local color = { R = 0, G = 0, B = 0, A = 1 }
     local ignore = { door }
     for _, details in ipairs(state.pawns) do
         if valid(details.pawn) then ignore[#ignore + 1] = details.pawn end
     end
     local lateral_x, lateral_y = -direction.Y, direction.X
-    for _, length in ipairs(distance > 1000 and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
+    local far = distance > 1000
+    local candidates = {}
+    for _, length in ipairs(far and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
         for _, offset in ipairs({ 0, 90, -90 }) do
-            local x = origin.X + length * direction.X + offset * lateral_x
-            local y = origin.Y + length * direction.Y + offset * lateral_y
-            local hit = {}
-            local top, bottom = math.max(anchor.Z, origin.Z) + 185, math.min(anchor.Z, origin.Z) - 325
-            local found = library:LineTraceSingle(pawn, { X = x, Y = y, Z = top }, { X = x, Y = y, Z = bottom },
-                0, false, ignore, 0, hit, true, color, color, 0)
-            local impact = hit.OutHit or hit
-            if found == true and impact.ImpactPoint and impact.ImpactNormal and impact.ImpactNormal.Z >= .7
-                and impact.ImpactPoint.Z < top - 1 and impact.ImpactPoint.Z >= bottom then
-                local z = impact.ImpactPoint.Z + extents + 2
-                if (distance > 1000 or (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2 <= 320^2)
-                    and pawn:K2_TeleportTo({ X = x, Y = y, Z = z }, rotation) then
-                    pawn:ForceNetUpdate()
-                    return true
-                end
+            candidates[#candidates + 1] = {length, offset}
+        end
+    end
+    if far and headless then
+        -- Small shops can have walkable space across the door's axis but none along it.
+        for _, radius in ipairs({distance, 1950, 2700}) do
+            local diagonal = radius / math.sqrt(2)
+            for _, pair in ipairs({{0, radius}, {0, -radius}, {diagonal, diagonal},
+                {diagonal, -diagonal}, {-diagonal, diagonal}, {-diagonal, -diagonal}}) do
+                candidates[#candidates + 1] = pair
+            end
+        end
+    end
+    local top, bottom = math.max(anchor.Z, origin.Z) + 185, math.min(anchor.Z, origin.Z) - (far and 550 or 325)
+    for _, offset in ipairs(candidates) do
+        local x = origin.X + offset[1] * direction.X + offset[2] * lateral_x
+        local y = origin.Y + offset[1] * direction.Y + offset[2] * lateral_y
+        local hit = {}
+        local found = library:LineTraceSingle(pawn, { X = x, Y = y, Z = top }, { X = x, Y = y, Z = bottom },
+            0, false, ignore, 0, hit, true, color, color, 0)
+        local impact = hit.OutHit or hit
+        local surface = impact.Component and impact.Component:Get()
+        if found == true and vector(impact.ImpactPoint) and vector(impact.ImpactNormal) and impact.ImpactNormal.Z >= .7
+            and impact.ImpactPoint.Z < top - 1 and impact.ImpactPoint.Z >= bottom and valid(surface)
+            and surface:GetCollisionObjectType() == 0 then
+            local z = impact.ImpactPoint.Z + extents + 2
+            local squared = (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2
+            if (far and squared > 1900^2 or not far and squared <= 320^2)
+                and pawn:K2_TeleportTo({ X = x, Y = y, Z = z }, rotation) then
+                pawn:ForceNetUpdate()
+                return true
             end
         end
     end
@@ -761,7 +783,7 @@ function zone.command(fields, state, phase)
         error("Choose an exact stock overlap actor with its entrance tag", 0)
     end
     local alternate = tonumber(fields[7])
-    if fields[7] and (not alternate_lanes[alternate] or not actor or position ~= "near"
+    if fields[7] and (not fixture_mode or not headless or not alternate_lanes[alternate] or not actor or position ~= "near"
         or state.map == "/Game/Classes/Maps/Dreams/GoldNexus_P") then
         error("An alternate lane requires an exact stock mainland overlap approached from nearby", 0)
     end
