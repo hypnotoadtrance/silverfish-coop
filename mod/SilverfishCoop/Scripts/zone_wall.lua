@@ -428,12 +428,10 @@ function wall.command(fields, state, phase)
         error("Position the pawn near the exit before the swept wall probe", 0)
     end
     if nexus_probe then
-        if plan.actor == "Level_Exit_BP_C_179" and plan.entrance == "Nexus_M35" then
-            local inward = record.original:GetRightVector()
-            local depth = (start.X - center.X) * inward.X + (start.Y - center.Y) * inward.Y
-            if not finite(depth) or depth < -150 or depth >= -20 then
-                error("Position the pawn in the outward Gold Nexus Rail crypt pocket before the swept wall probe", 0)
-            end
+        local inward = record.original:GetRightVector()
+        local depth = (start.X - center.X) * inward.X + (start.Y - center.Y) * inward.Y
+        if not finite(depth) or depth < -150 or depth >= -20 then
+            error("Position the pawn in the selected Gold Nexus crypt's outward pocket before the swept wall probe", 0)
         end
         center = nexus_probe_target(pawn, pawn_capsule, record.original, start, center)
         start = pawn:K2_GetActorLocation()

@@ -25,6 +25,37 @@ from tools.silverfish.travel import CROSSROADS, GOLD_NEXUS
 PADS = {route.actor: route for route in AUTHORED_ROUTES if route.source == GOLD_NEXUS}
 DEFAULT_PAD = "Level_Exit_BP_C_179"
 DUPLICATE_TAG = "Nexus_CrossRoads"
+DIAGONAL = 1000 / math.sqrt(2)
+PAD_CENTERS = {
+    "Level_Exit_BP_C_178": (0, -1000),
+    "Level_Exit_BP_C_179": (DIAGONAL, -DIAGONAL),
+    "Level_Exit_BP_C_180": (1000, 0),
+    "Level_Exit_BP_C_181": (DIAGONAL, DIAGONAL),
+    "Level_Exit_BP_C_182": (-DIAGONAL, DIAGONAL),
+    "Level_Exit_BP_C_183": (-1000, 0),
+    "Level_Exit_BP_C_184": (-DIAGONAL, -DIAGONAL),
+}
+
+
+def crypt_approach(state, pad_actor):
+    game = state.get("game", {})
+    if game.get("map") != GOLD_NEXUS:
+        return None
+    center_x, center_y = PAD_CENTERS[pad_actor]
+    inward_x, inward_y = -center_x / 1000, -center_y / 1000
+    pawns = game.get("pawns", {})
+    coordinates = {}
+    for side, alias in ((-1, "local"), (1, "guest")):
+        point = pawns.get(alias, {}).get("location", ())
+        if len(point) != 3 or not all(type(value) in (float, int) and math.isfinite(value) for value in point):
+            return None
+        dx, dy = point[0] - center_x, point[1] - center_y
+        depth = dx * inward_x + dy * inward_y
+        lane = dx * inward_y - dy * inward_x
+        if not -150 <= depth < -20 or not 0 < side * lane < 75:
+            return None
+        coordinates[alias] = {"location": point, "depth_cm": depth, "lane_cm": lane}
+    return coordinates
 
 
 async def exercise(work, vanilla_saved, pad):
@@ -156,23 +187,8 @@ async def exercise(work, vanilla_saved, pad):
         for role in ("host", "guest"):
             placed = await command("action", *authority, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
             assert (placed["exit_actor"], placed["entrance"], placed["target"]) == (pad.actor, pad.entrance, role), placed
-        if pad.actor == DEFAULT_PAD:
-            def pocket(state):
-                pawns = state.get("game", {}).get("pawns", {})
-                coordinates = {}
-                for side, alias in ((-1, "local"), (1, "guest")):
-                    point = pawns.get(alias, {}).get("location")
-                    if not point or not all(type(value) in (float, int) and math.isfinite(value) for value in point):
-                        return None
-                    dx, dy = point[0] - 707.1067725825, point[1] + 707.1067897906
-                    depth, lane = (dy - dx) / math.sqrt(2), (dx + dy) / math.sqrt(2)
-                    if not -150 <= depth < -20 or not 0 < side * lane < 75:
-                        return None
-                    coordinates[alias] = {"location": point, "depth_cm": depth, "lane_cm": lane}
-                return coordinates
-
-            approach = await wait(run, pocket, timeout=8)
-            evidence["stock_rail_crypt_approach"] = pocket(approach)
+        approach = await wait(run, lambda state: crypt_approach(state, pad.actor), timeout=8)
+        evidence["stock_crypt_approach"] = crypt_approach(approach, pad.actor)
         await wait(run, lambda state: (wall := state.get("game", {}).get("native_zone_wall", {})).get("host_open") is True
                    and pad.actor + " (" not in wall.get("failure", ""), timeout=12)
         evidence["guest_wall"] = await sweep("guest", "wall")

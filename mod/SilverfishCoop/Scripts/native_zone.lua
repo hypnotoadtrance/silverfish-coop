@@ -7,6 +7,15 @@ local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local fixture_mode = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local expanded_fixtures = expanded and fixture_mode and require("authored_wall_routes") or {}
+local nexus_portals = {
+    Level_Exit_BP_C_178 = "Lantern_Portal_BP_C_1",
+    Level_Exit_BP_C_179 = "Lantern_Portal_BP_C_2",
+    Level_Exit_BP_C_180 = "Lantern_Portal_BP_C_9",
+    Level_Exit_BP_C_181 = "Lantern_Portal_BP_C_7",
+    Level_Exit_BP_C_182 = "Lantern_Portal_BP_C_3",
+    Level_Exit_BP_C_183 = "Lantern_Portal_BP_C_10",
+    Level_Exit_BP_C_184 = "Lantern_Portal_BP_C_8",
+}
 local event_path
 local expanded_event_path
 local heartbeat_path
@@ -367,36 +376,39 @@ local function nexus_fixture_floor(world, world_name)
     return component
 end
 
-local function nexus_rail_pocket(world, world_name, center, normal, sign)
-    local path = world_name .. ":PersistentLevel.Lantern_Portal_BP_C_2"
-    local portal = placed_actor("Lantern_Portal_BP_C", "Lantern_Portal_BP_C_2", world)
-    if not valid(portal) then error("Gold Nexus Rail crypt actor missing in the current world", 0) end
+local function nexus_crypt_pocket(world, world_name, exit_name, center, normal, sign)
+    local portal_name = nexus_portals[exit_name]
+    if not portal_name then error("The selected Gold Nexus pad has no qualified stock crypt", 0) end
+    local label = "Gold Nexus " .. portal_name .. " crypt"
+    local path = world_name .. ":PersistentLevel." .. portal_name
+    local portal = placed_actor("Lantern_Portal_BP_C", portal_name, world)
+    if not valid(portal) then error(label .. " actor missing in the current world", 0) end
     if portal:GetFullName() ~= "Lantern_Portal_BP_C " .. path then
-        error("Gold Nexus Rail crypt actor path changed: " .. portal:GetFullName(), 0)
+        error(label .. " actor path changed: " .. portal:GetFullName(), 0)
     end
     local class = portal:GetClass()
     if not valid(class) or class:GetFullName() ~= "BlueprintGeneratedClass /Game/Classes/Actors/Lantern_Portal_BP.Lantern_Portal_BP_C" then
-        error("Gold Nexus Rail crypt actor class changed: " .. (valid(class) and class:GetFullName() or "missing"), 0)
+        error(label .. " actor class changed: " .. (valid(class) and class:GetFullName() or "missing"), 0)
     end
     if not portal:HasAuthority() or portal:IsActorBeingDestroyed() then
-        error("Gold Nexus Rail crypt lacks current stock actor authority", 0)
+        error(label .. " lacks current stock actor authority", 0)
     end
 
     local root = portal.RootComponent
     if not valid(root) or root:GetFullName() ~= "SceneComponent " .. path .. ".DefaultSceneRoot"
         or not same(root:GetOwner(), portal) then
-        error("Gold Nexus Rail crypt stock root changed: " .. (valid(root) and root:GetFullName() or "missing"), 0)
+        error(label .. " stock root changed: " .. (valid(root) and root:GetFullName() or "missing"), 0)
     end
     local component_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
-    if not valid(component_class) then error("Gold Nexus Rail crypt static mesh component class missing", 0) end
+    if not valid(component_class) then error(label .. " static mesh component class missing", 0) end
     local components = portal:K2_GetComponentsByClass(component_class)
     local representation = type(components)
     if representation == "userdata" and type(components.type) == "function" then representation = components:type() end
     -- UE4SS UFunction array returns are one-based Lua tables; direct TArray userdata also implements length.
     local count = (representation == "table" or representation == "TArray") and #components or nil
     if not finite(count) or count < 1 or count > 24 then
-        error(string.format("Gold Nexus Rail crypt component census unavailable (type %s, count %s)",
-            representation, tostring(count)), 0)
+        error(string.format("%s component census unavailable (type %s, count %s)",
+            label, representation, tostring(count)), 0)
     end
     local crypt
     local names = {}
@@ -409,33 +421,33 @@ local function nexus_rail_pocket(world, world_name, center, normal, sign)
             local name = component:GetFullName()
             names[#names + 1] = name:match("[^.]+$") or name
             if name == "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then
-                if crypt then error("Gold Nexus Rail crypt entrance mesh is ambiguous", 0) end
+                if crypt then error(label .. " entrance mesh is ambiguous", 0) end
                 crypt = component
             end
         end
     end
     if not valid(crypt) then
-        error("Gold Nexus Rail crypt entrance mesh missing from stock census: " .. table.concat(names, ", "), 0)
+        error(label .. " entrance mesh missing from stock census: " .. table.concat(names, ", "), 0)
     end
-    if not same(crypt:GetClass(), component_class) then error("Gold Nexus Rail crypt entrance mesh class changed", 0) end
-    if not same(crypt:GetOwner(), portal) then error("Gold Nexus Rail crypt entrance mesh owner changed", 0) end
-    if not same(crypt:GetAttachParent(), root) then error("Gold Nexus Rail crypt entrance mesh root changed", 0) end
+    if not same(crypt:GetClass(), component_class) then error(label .. " entrance mesh class changed", 0) end
+    if not same(crypt:GetOwner(), portal) then error(label .. " entrance mesh owner changed", 0) end
+    if not same(crypt:GetAttachParent(), root) then error(label .. " entrance mesh root changed", 0) end
     local collision = crypt:GetCollisionEnabled()
     if (collision ~= 1 and collision ~= 3) or crypt:GetCollisionResponseToChannel(2) ~= 2 then
-        error("Gold Nexus Rail crypt stock entrance mesh does not block player capsules", 0)
+        error(label .. " stock entrance mesh does not block player capsules", 0)
     end
     local mesh = crypt.StaticMesh
     if not valid(mesh) or mesh:GetFullName() ~= "StaticMesh /Game/Assets/StaticMeshes/Mesh_BuildingSets/Tunnels_Dungeons/SM_Env_Entrance_Crypt_01.SM_Env_Entrance_Crypt_01" then
-        error("Gold Nexus Rail crypt entrance asset changed: " .. (valid(mesh) and mesh:GetFullName() or "missing"), 0)
+        error(label .. " entrance asset changed: " .. (valid(mesh) and mesh:GetFullName() or "missing"), 0)
     end
     local origin, right = crypt:K2_GetComponentLocation(), crypt:GetRightVector()
     if not vector(origin) or not vector(right) then
-        error("Gold Nexus Rail crypt stock component geometry is unavailable", 0)
+        error(label .. " stock component geometry is unavailable", 0)
     end
     local offset = math.sqrt((origin.X - center.X)^2 + (origin.Y - center.Y)^2)
     local facing = (right.X * normal.X + right.Y * normal.Y) * sign
     if offset > 3 or facing < .99 then
-        error(string.format("Gold Nexus Rail crypt geometry changed (offset %.2f, facing %.3f)", offset, facing), 0)
+        error(string.format("%s geometry changed (offset %.2f, facing %.3f)", label, offset, facing), 0)
     end
 end
 
@@ -500,7 +512,7 @@ local function place_expanded_overlap(state, details, route, position)
         if valid(detail.pawn) then ignored[#ignored + 1] = detail.pawn end
     end
     local candidates = {}
-    local rail_pocket = floor and route.actor == "Level_Exit_BP_C_179" and route.entrance == "Nexus_M35" and position == "near"
+    local nexus_pocket = floor and position == "near"
     local function add_point(distance, offset)
         local side = math.max(-lane_limit, math.min(lane_limit, lane + offset))
         candidates[#candidates + 1] = {center.X + distance * sign * normal.X + side * tangent.X,
@@ -515,9 +527,9 @@ local function place_expanded_overlap(state, details, route, position)
         end
         -- The cooked mound extends beyond the court wall. Use the outward side of the selected pad.
         for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(-depth, offset) end
-    elseif rail_pocket then
+    elseif nexus_pocket then
         -- The narrow inward opening and the rear stone both block a capsule. The pocket lies inside the crypt.
-        nexus_rail_pocket(state.world, world_name, center, normal, sign)
+        nexus_crypt_pocket(state.world, world_name, route.actor, center, normal, sign)
         local lane_edge = math.min(lane_limit, 55, 120 - radius)
         local side = (index % 2 == 0 and -1 or 1) * lane_edge
         for _, clearance in ipairs({30, 45, 20}) do
@@ -528,13 +540,7 @@ local function place_expanded_overlap(state, details, route, position)
             end
         end
     elseif floor then
-        local distance = inside and 0 or depth + index * 105
-        local side = (index % 2 == 0 and -1 or 1) * lane_limit
-        local offsets = inside and {assigned, 0, 125, -125} or {side, side * .65, 0, -side}
-        for _, offset in ipairs(offsets) do add_point(distance, offset) end
-        if not inside then
-            for _, offset in ipairs(offsets) do add_point(distance + 75, offset) end
-        end
+        for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(0, offset) end
     else
         for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do add_point(depth, offset) end
     end
@@ -564,7 +570,7 @@ local function place_expanded_overlap(state, details, route, position)
                 if pawn:K2_TeleportTo(point, facing) then
                     moved = true
                     local actual = pawn:K2_GetActorLocation()
-                    local tolerance = rail_pocket and 10 or 70
+                    local tolerance = nexus_pocket and 10 or 70
                     if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= tolerance^2
                         and box:IsOverlappingActor(pawn) == inside then
                         pawn:ForceNetUpdate()
