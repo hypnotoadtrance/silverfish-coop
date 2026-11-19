@@ -218,7 +218,7 @@ class GuestInput:
         guid = weapon.get("guid")
         area = game.get("map")
         if (active and not client.stopping and client.host_session and client.zone_epoch
-                and time.monotonic() - client.gameplay_seen < 2 and game.get("state") == "connected"
+                and game.get("state") == "connected"
                 and member.get("character_id") == client.invite["character_id"] and member.get("downed") is False
                 and party_game.get("wipe") is None and pawn and valid_guid(guid)
                 and (weapon.get("map"), weapon.get("kind")) == (area, "smg-standard")):
@@ -236,28 +236,35 @@ class GuestInput:
         events = [row for row in client.bridge.guest_held_fire_requests() if row[0] > self.last_sequence]
         if events:
             self.last_sequence = events[-1][0]
-        terminals = {row[1:4] + row[5:] for row in events if row[4] == "release"}
+        terminals = {row[1:4] + row[5:]: row[4] for row in events if row[4] != "press"}
         frame = client.last_game.get(LOCAL, {})
         held = tuple(frame.get(key) for key in ("map", "pawn", "guid", "stroke"))
+        started = False
         for sequence, area, pawn, guid, edge, number in events:
             if edge == "press" and not self.stroke and eligible == (area, pawn, guid):
                 token = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{client.zone_epoch}:{number}").hex
                 stroke = LocalStroke(client.host_session, client.zone_epoch, area, pawn, guid, number, token)
-                if (area, pawn, guid, number) in terminals:
+                terminal = terminals.get((area, pawn, guid, number))
+                if terminal == "release":
                     await self._send(stroke, "tap", sequence)
-                elif frame.get("state") == "held" and stroke.matches(*held):
+                elif terminal is None:
                     result = await self._send(stroke, "press", sequence)
                     self.stroke = stroke if result.get("status") in LIVE else None
+                    started = self.stroke is not None
                     self.renew_at = time.monotonic() + .55
+            elif edge == "press":
+                client.control.event("native_guest_held_fire_scope_refused", stroke=number, map=area, pawn=pawn,
+                                     guid=guid, eligibility=eligible is not None, previous_stroke=self.stroke is not None)
             elif edge != "press" and self.stroke and self.stroke.matches(area, pawn, guid, number):
                 terminal, self.stroke = self.stroke, None
                 await self._send(terminal, edge, sequence)
-        if not self.stroke:
+        if not self.stroke or started:
             return
         if frame.get("state") != "held" or not self.stroke.matches(*held):
             abandoned, self.stroke = self.stroke, None
             await self._send(abandoned, "cancel", self.last_sequence)
-        elif frame.get("proof") in {"mapped-key", "headless-fixture"} and time.monotonic() >= self.renew_at:
+        elif (frame.get("proof") in {"mapped-key", "headless-fixture"} and time.monotonic() >= self.renew_at
+              and time.monotonic() - client.gameplay_seen < 3):
             frame = await self._send(self.stroke, "renew", self.last_sequence)
             self.renew_at = time.monotonic() + .55
             if frame.get("status") in FINISHED:

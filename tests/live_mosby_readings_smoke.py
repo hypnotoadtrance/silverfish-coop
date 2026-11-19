@@ -172,7 +172,26 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
                 return status.get("game", {}).get(station_view.KEY, {})
 
             await wait(client_run, lambda status: stationary(status).get("state") in ("armed", "focused"), timeout=15)
-            checked = (await action(client, station_view.FIXTURE))[station_view.KEY]
+            attempts = []
+            for variant in (None, 1, 3, 4, 5, 6, 7, 8):
+                if variant is not None:
+                    try:
+                        await action(authority, tape.APPROACH, "--target", "guest", "--amount", str(variant))
+                    except RuntimeError as error:
+                        if "approach_no_safe_floor" not in str(error):
+                            raise
+                        attempts.append({"variant": variant, "refusal": str(error)})
+                        continue
+                try:
+                    checked = (await action(client, station_view.FIXTURE))[station_view.KEY]
+                    break
+                except RuntimeError as error:
+                    if "fixture_stock_focus_unavailable" not in str(error):
+                        raise
+                    attempts.append({"variant": variant, "refusal": str(error)})
+            else:
+                evidence["stock_station_approach_attempts"] = attempts
+                raise RuntimeError("No verified floor position could focus the stock Stone Maze interaction Box")
             assert checked["state"] == "checking" and checked["sequence"] == checked["open"] and checked["blank_guid"] is None
             shown = stationary(await wait(client_run, lambda status: stationary(status).get("state") == "offer", timeout=15))
             assert (shown["sequence"], shown["blank_guid"], shown["station"]) == (checked["sequence"], blank, tape.STATION)

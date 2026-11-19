@@ -26,6 +26,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment, _census
+from .restart_wipe_guard import RestartWipeGuard
 from . import native_mosby_station_view, native_mosby_tape, native_smg_hold
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
@@ -214,7 +215,12 @@ class Host:
         self.native_pickup = NativePickup()
         self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
-        self.party = party.load_party(store.status()["world"].get("party"))
+        initial_status = store.status()
+        self.party = party.load_party(initial_status["world"].get("party"))
+        self.restart_wipe_guard = RestartWipeGuard(initial_status) if (
+            native_guest and native_zones and native_profile and persist_native_guest and self.enrollment
+            and exact_guest_binding
+        ) else None
         pending_trips = pending_cube(self.party), native_dream.visit(self.party), native_matrix.pending(self.party)
         if sum(bool(item) for item in pending_trips) > 1:
             raise ValueError("The campaign has overlapping committed item transports")
@@ -246,6 +252,8 @@ class Host:
             except CampaignError:
                 return {"accepted": False, "reason": "guest_unavailable"}
             return {"accepted": True, "game_access": False, "session_id": self.control.generation}
+        if reason := self.restart_admission_refusal(request, capacity=1):
+            return {"accepted": False, "reason": reason}
         if self.guest and self.guest["guest_id"] != request["guest_id"]:
             if self.guest["disconnected"] is None or self.last_game.get("remote_clients", 0):
                 return {"accepted": False, "reason": "party_full"}
@@ -311,10 +319,7 @@ class Host:
         current_map = self.last_game["map"]
         checkpoint_party = self.party if proposed_party is None else proposed_party
         status = self.store.status()
-        world = status["world"]
-        world.update({
-            "map": current_map, "host": _pawn(self.last_game, "local"), "party": checkpoint_party,
-        })
+        world = {**status["world"], "map": current_map, "host": _pawn(self.last_game, "local"), "party": checkpoint_party}
         verify_travel_checkpoint(world)
         if native_record is not None:
             if native_record["map"] != world["map"]:
@@ -348,6 +353,10 @@ class Host:
                         or expected["slot"] == previous.get(character, {}).get("slot")
                         or (expected not in planned and expected != unleased)):
                     raise RuntimeError("The checkpoint would omit a newly modified detached guest save")
+        if guard := getattr(self, "restart_wipe_guard", None):
+            guard.checkpoint(status, world, set(self.roles().values()), self.native_recipients(),
+                             paired=native_record is not None, captures=captures, changes=changes,
+                             unleased=unleased_states or {})
         return self.store.checkpoint(world, changes, unleased_states=unleased_states)
 
     def checkpoint_guest_changes(self, status: dict, guest_records: dict[str, dict]) -> dict[str, dict]:
@@ -491,6 +500,23 @@ class Host:
     def role_pawn(self, role: str) -> tuple[str, object | None]:
         return ("local" if role == "host" else "guest"), None
 
+    def restart_admission_refusal(self, request, *, capacity):
+        guard = getattr(self, "restart_wipe_guard", None)
+        if guard and guard.waiting:
+            area = self.last_game.get("map") if self.last_game.get("state") == "hosting" else None
+            return guard.admission_refusal(
+                {"map": area, "party": self.party}, self.native_recipients(),
+                self.store.status()["leases"], capacity, request["guest_id"], request["character_id"],
+            )
+        return None
+
+    def wipe_roster(self, roles):
+        guard = getattr(self, "restart_wipe_guard", None)
+        if guard and guard.waiting:
+            area = self.last_game.get("map") if self.last_game.get("state") == "hosting" else None
+            return guard.wipe_roster({"map": area, "party": self.party}, roles, self.native_recipients())
+        return tuple(roles.values())
+
     def native_recipients(self) -> dict[str, dict]:
         if not self.native_guest or not self.guest or not self.guest_pawn:
             return {}
@@ -554,10 +580,11 @@ class Host:
                 raise party.RuleError("action_unavailable")
             if target is not None and isinstance(target, str):
                 target = roles.get(target, target)
+        eligible = self.wipe_roster(roles) if action in ("native-down", "test-damage") else tuple(roles.values())
         candidate, result = party.transition(
             self.party, actor, operation_id, action, target, pawns,
             loot_available=self.fixtures and self.marker_ready, test_fixtures=self.fixtures,
-            test_damage=amount, eligible=tuple(roles.values()), retained=retained, now=time.time(),
+            test_damage=amount, eligible=eligible, retained=retained, now=time.time(),
         )
         if candidate is not self.party:
             revision = self.checkpoint(candidate)
@@ -1602,7 +1629,7 @@ class Host:
         draft = self.party["wipe"]
         if not draft:
             roles = self.roles()
-            draft = party.begin_when_all_down(self.party, tuple(roles.values()),
+            draft = party.begin_when_all_down(self.party, Host.wipe_roster(self, roles),
                                               self.authoritative_pawns(roles), now)
             if not draft:
                 return
@@ -2285,7 +2312,7 @@ class Host:
                     result = await self.dialogue_sessions.approach(self, bridge, actor)
                 elif action == native_mosby_tape.APPROACH and self.fixtures:
                     target = request.get("target") or "guest"
-                    result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target))
+                    result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"))
                 elif action == native_mosby_tape.READINGS_PREFLIGHT:
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:

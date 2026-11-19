@@ -63,6 +63,8 @@ class MultiHost(Host):
             return {"accepted": False, "reason": "travel_in_progress"}
         if request["protocol_version"] != PROTOCOL or request["game_build"] != self.game_build:
             return {"accepted": False, "reason": "incompatible_game_or_protocol"}
+        if reason := self.restart_admission_refusal(request, capacity=self.members.max_guests):
+            return {"accepted": False, "reason": reason}
         if self.party["wipe"] and request["character_id"] not in self.party["wipe"]["roster"]:
             return {"accepted": False, "reason": "wipe_in_progress"}
         try:

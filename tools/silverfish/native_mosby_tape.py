@@ -141,14 +141,16 @@ async def preflight(host, bridge, actor, action, target):
     return {"native_mosby_readings": await _command(host, bridge, action, pawn)}
 
 
-async def approach(host, bridge, actor):
+async def approach(host, bridge, actor, variant=None):
     if not host.fixtures:
         raise party.RuleError("native_mosby_tape_approach_unavailable")
     area = host.last_game.get("map")
     if area not in (STONE_MAZE, SCIENTIST_SHOP):
         raise party.RuleError("native_mosby_tape_exact_zone_unavailable")
+    if variant is not None and (area != STONE_MAZE or type(variant) is not int or not 1 <= variant <= 8):
+        raise party.RuleError("native_mosby_tape_approach_invalid_variant")
     pawn = _scope(host, actor, area, guest_only=area == STONE_MAZE)
-    snapshot = await bridge.command(APPROACH, pawn, timeout=6)
+    snapshot = await bridge.command(APPROACH, pawn, *((str(variant),) if variant is not None else ()), timeout=6)
     if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
         raise RuntimeError("Stone Maze approach left the qualified stock zone")
     host.last_game, host.last_seen = snapshot, time.monotonic()

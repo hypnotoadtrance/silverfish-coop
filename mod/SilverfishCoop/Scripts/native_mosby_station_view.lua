@@ -168,10 +168,16 @@ local function fixture(current, now)
     local rotation = {Pitch = origin.Pitch, Yaw = origin.Yaw, Roll = origin.Roll}
     local eye, center = camera:K2_GetComponentLocation(), box:K2_GetComponentLocation()
     local size, cursor = box:GetScaledBoxExtent(), controller.bShowMouseCursor
-    if not size or not (size.Z > 0 and size.Z <= 200) then reject("fixture_box_unqualified") end
+    if not size or not (size.Y > 0 and size.Y <= 200 and size.Z > 0 and size.Z <= 200) then reject("fixture_box_unqualified") end
     local checked, issue = pcall(function()
-        for _, lift in ipairs({0, 0.35, -0.35, 0.65}) do
-            local dx, dy, dz = center.X - eye.X, center.Y - eye.Y, center.Z - eye.Z + lift * size.Z
+        local up, right = box:GetUpVector(), box:GetRightVector()
+        local last_hit = "-"
+        for _, offset in ipairs({{0, 0}, {0, 0.35}, {0, -0.35}, {0, 0.65}, {-0.65, 0}, {0.65, 0},
+                {-0.65, 0.65}, {0.65, 0.65}}) do
+            local side, lift = offset[1] * size.Y, offset[2] * size.Z
+            local dx = center.X - eye.X + side * right.X + lift * up.X
+            local dy = center.Y - eye.Y + side * right.Y + lift * up.Y
+            local dz = center.Z - eye.Z + side * right.Z + lift * up.Z
             local direction = math.sqrt(dx^2 + dy^2)
             if direction > 1 then
                 camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(dz, direction)), Yaw = math.deg(math.atan(dy, dx)), Roll = 0}, false, {}, true)
@@ -182,9 +188,11 @@ local function fixture(current, now)
                         or controller.bShowMouseCursor ~= cursor or not drain(current, now, true) then reject("fixture_stock_press_unverified") end
                     return
                 end
+                local hit = pawn.InteractionTarget_Component
+                if valid(hit) then last_hit = hit:GetFullName() end
             end
         end
-        reject("fixture_stock_focus_unavailable")
+        reject("fixture_stock_focus_unavailable|" .. last_hit)
     end)
     camera:K2_SetRelativeRotation(rotation, false, {}, true)
     pawn:LookTrace()

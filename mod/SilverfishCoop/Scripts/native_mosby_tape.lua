@@ -142,9 +142,9 @@ local function qualify_offer(station, blank, product)
         or not require_one(row.Items_Recive_22_BF8DA3D74F10EFDF07693DB9957DFFCD, product) then refuse("station_offer_item_changed") end
 end
 
-local function approach(state, phase, name)
+local function approach(state, phase, name, variant)
     if not fixtures then refuse("approach_unavailable") end
-    if state.map == scientist then return wire.stock_board_approach(state, phase, name, board) end
+    if state.map == scientist and not variant then return wire.stock_board_approach(state, phase, name, board) end
     local _, host = scope(state, phase, maze)
     local pawn = receiver(state, phase, name, host, false)
     local station, box = target_station(state)
@@ -153,7 +153,13 @@ local function approach(state, phase, name)
     local height = valid(capsule) and capsule:GetScaledCapsuleHalfHeight()
     if not valid(library) or type(height) ~= "number" or not (height > 20 and height < 150) then refuse("approach_capsule_unavailable") end
     local color = {R = 0, G = 0, B = 0, A = 0}
-    for _, delta in ipairs({{0, -140}, {0, 140}, {-140, 0}, {140, 0}, {-100, -100}, {100, -100}}) do
+    local offsets = {{0, -140}, {0, 140}, {-140, 0}, {140, 0}, {-100, -100}, {100, -100}, {-100, 100}, {100, 100}}
+    if variant then
+        local exact = offsets[math.tointeger(variant)]
+        if not exact then refuse("approach_invalid_variant") end
+        offsets = {exact}
+    end
+    for _, delta in ipairs(offsets) do
         local x, y = origin.X + delta[1], origin.Y + delta[2]
         local hit = {}
         local found = library:LineTraceSingle(pawn, {X = x, Y = y, Z = origin.Z + 90}, {X = x, Y = y, Z = origin.Z - 300},
@@ -344,7 +350,9 @@ end
 
 function tape.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-mosby-tape-approach" and #fields == 3 then last = nil; return approach(state, phase, fields[3]) end
+    if action == "native-mosby-tape-approach" and (#fields == 3 or #fields == 4) then
+        last = nil; return approach(state, phase, fields[3], fields[4])
+    end
     if action == "native-mosby-tape-preflight" and #fields == 4 or action == "native-mosby-tape-convert" and #fields == 5 then
         last = nil; return exchange(state, phase, fields[3], action, fields[4], fields[5])
     end

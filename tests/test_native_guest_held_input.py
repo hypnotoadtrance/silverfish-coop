@@ -1,8 +1,11 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
+import uuid
 
+from tools.silverfish.native_smg_hold import ACTION, KEY, GuestInput
 from tools.silverfish.runtime import Bridge, MAP
 
 
@@ -63,3 +66,38 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         self.assertNotIn("native_guest_held_fire", snapshot)
         self.assertEqual(snapshot["native_guest_held_fire_fixture"]["stroke"], 38)
         self.assertEqual(snapshot["native_guest_held_fire_fixture"]["edge"], "release")
+
+
+class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def guest(self, *batches):
+        client = SimpleNamespace(
+            bridge=Mock(input_namespace=uuid.uuid4(), guest_held_fire_requests=Mock(side_effect=batches)),
+            control=Mock(), gameplay_action=AsyncMock(return_value={KEY: {"status": "active"}}),
+            stopping=False, host_session="c" * 32, zone_epoch="d" * 32, viewer_role="guest",
+            invite={"character_id": "character"}, gameplay_seen=0,
+            gameplay={
+                "players": {"guest": {"character_id": "character", "downed": False}},
+                "native_equipped_weapon": {"kind": "smg-standard", "map": MAP, "guid": GUID},
+                "wipe": None,
+            },
+            last_game={"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}},
+        )
+        return client, GuestInput(client)
+
+    async def test_qualified_press_before_heartbeat_and_ordered_release_use_same_token(self):
+        client, controller = self.guest([(1, MAP, PAWN, GUID, "press", 1)], [(2, MAP, PAWN, GUID, "release", 1)])
+        await controller.service(True)
+        await controller.service(True)
+        calls = [request.args for request in client.gameplay_action.await_args_list]
+        self.assertEqual([action for action, _, _ in calls], [ACTION, ACTION])
+        first, second = (target.split("@") for _, _, target in calls)
+        self.assertEqual(first[:3], second[:3])
+        self.assertEqual([first[3], second[3]], ["press", "release"])
+        self.assertIsNone(controller.stroke)
+
+    async def test_press_and_release_in_one_frame_is_one_stock_tap(self):
+        client, controller = self.guest([(1, MAP, PAWN, GUID, "press", 1), (2, MAP, PAWN, GUID, "release", 1)])
+        await controller.service(True)
+        client.gameplay_action.assert_awaited_once()
+        action, _, target = client.gameplay_action.await_args.args
+        self.assertEqual((action, target), ("native-guest-weapon-fire", GUID))
