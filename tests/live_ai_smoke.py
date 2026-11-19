@@ -1,4 +1,4 @@
-"""Exercise the Playtest Bandit or exact Dead Bridge CQC on a headless loopback party."""
+"""Exercise the Playtest Bandit or exact placed NFTA CQC in a headless loopback party."""
 
 import argparse
 import asyncio
@@ -19,6 +19,9 @@ MAP = "/Game/Classes/Maps/PlaytestMap_01"
 DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 CQC = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 CQC_SECOND = CQC.removesuffix("_0") + "_1"
+REFINERY = "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"
+REFINERY_CQC = f"NPC_State_Infantry_CQC_C {REFINERY}.Refinery_01_P:PersistentLevel.NPC_State_Infantry_CQC_C_1"
+REFINERY_CQC_SECOND = REFINERY_CQC.removesuffix("_1") + "_3"
 SHELLS = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 
 
@@ -39,7 +42,7 @@ def actor_proof(state: dict, key: str, actor: str) -> dict:
     return rows.get(actor, {}) if rows is not None else game.get(key, {})
 
 
-def cqc_counterpart(directory: Path, actor: str = CQC) -> dict | None:
+def cqc_counterpart(directory: Path, actor: str = CQC, area: str = DEAD_BRIDGE) -> dict | None:
     paths = tuple((directory / "game-bridge").glob("*/status.tsv"))
     if len(paths) != 1:
         return None
@@ -49,7 +52,7 @@ def cqc_counterpart(directory: Path, actor: str = CQC) -> dict | None:
         return None
     for line in lines:
         fields = line.split("\t")
-        if fields[:3] != ["native-enemy-loot-counterpart", DEAD_BRIDGE, actor] or len(fields) != 9:
+        if fields[:3] != ["native-enemy-loot-counterpart", area, actor] or len(fields) != 9:
             continue
         if (fields[3] not in ("-", "0", "1", "2", "3") or fields[4] not in ("0", "1")
                 or fields[5] not in ("0", "1") or not all(value.isdecimal() for value in fields[6:])):
@@ -76,9 +79,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
-                   restart_unclaimed_shells: bool = False) -> dict:
-    area = DEAD_BRIDGE if dead_bridge_cqc else MAP
-    encounter = "dead-bridge-cqc" if dead_bridge_cqc else f"bandit-{subject}"
+                   restart_unclaimed_shells: bool = False, refinery_cqc: bool = False) -> dict:
+    placed_cqc = dead_bridge_cqc or refinery_cqc
+    area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
+    first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
+    encounter = "refinery-cqc" if refinery_cqc else "dead-bridge-cqc" if dead_bridge_cqc else f"bandit-{subject}"
     profile = f"{encounter}-{uuid.uuid4().hex[:8]}"
     run = work / "campaigns" / profile / "run"
     guest_run = work / "clients" / profile / "run"
@@ -132,7 +137,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
     client = ("--profile", profile)
     evidence = {"subject": subject, "hostile": hostile, "bounty_fixture": enemy_bounty, "map": area}
     try:
-        route_options = ("--native-expanded-zones",) if dead_bridge_cqc else ()
+        route_options = ("--native-expanded-zones",) if placed_cqc else ()
         if automatic_cqc_loot:
             route_options += ("--native-dead-bridge-enemy-loot",)
             evidence["automatic_cqc_loot"] = True
@@ -140,23 +145,23 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         await start("host.txt", host, "host", *host, "--port", "0", *host_flags, "--start-zone", area)
         await wait(run, lambda state: state.get("state") == "hosting"
                    and state.get("game", {}).get("map") == area
-                   and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
+                   and (placed_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
         invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
         client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
         await start("client.txt", client, "join", *client, *client_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected"
                    and state.get("game", {}).get("map") == area
-                   and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
+                   and (placed_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
         paired = await wait(run, lambda state: state.get("game", {}).get("native_roster", {}).get("count") == 1
                             and (state.get("game", {}).get("native_guest_save", {}).get("state") == "bound"
-                                 if dead_bridge_cqc else bandit(state).get("watched_pawn")))
-        if dead_bridge_cqc:
+                                 if placed_cqc else bandit(state).get("watched_pawn")))
+        if placed_cqc:
             exact_pawn = paired["game"]["native_guest_save"]["pawn"]
-            visible = await wait(guest_run, lambda state: cqc_counterpart(guest_run) is not None
+            visible = await wait(guest_run, lambda state: cqc_counterpart(guest_run, first_target, area) is not None
                                  and state.get("game", {}).get("native_enemy_loot_death_view", {}).get("state") == "present")
-            evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run)
+            evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run, first_target, area)
             before = visible["game"]["native_enemy_loot_death_view"]
-            assert (before["actor"], before["hidden"], before["collision"]) == (CQC, False, True), before
+            assert (before["actor"], before["hidden"], before["collision"]) == (first_target, False, True), before
             if not automatic_cqc_loot:
                 wrong = await combat_action(run, "native-enemy-loot-watch", CQC.removesuffix("_0") + "_1")
                 assert wrong.get("ok") is False and wrong.get("error") == "Choose the exact staged stock enemy", wrong
@@ -185,8 +190,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             reserve = accepted("stage the weapon's stock reserve", await combat_action(run, "native-guest-weapon-seed-ammo"))
             evidence["stock_loadout"] = {"kind": loadout, "weapon": proof, "reserve": reserve["native_guest_weapon"]}
 
-        if dead_bridge_cqc:
-            target = CQC
+        if placed_cqc:
+            target = first_target
         else:
             await command("action", *host, "native-bandit-position", "--target", subject)
             await command("action", *host, "native-bandit-spawn")
@@ -202,13 +207,13 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 armed = accepted("watch exact stock enemy", await combat_action(
                     run, "native-enemy-loot-watch", target))["native_enemy_loot"]
             assert (armed["state"], armed["bandit"], armed["map"]) == ("watching", target, area), armed
-            if dead_bridge_cqc:
+            if placed_cqc:
                 evidence["authority_watch"] = armed
             if both_cqc:
-                second_watched = await wait(run, lambda state: actor_proof(state, "native_enemy_loot", CQC_SECOND)
+                second_watched = await wait(run, lambda state: actor_proof(state, "native_enemy_loot", second_target)
                                             .get("state") == "watching")
-                evidence["second_authority_watch"] = actor_proof(second_watched, "native_enemy_loot", CQC_SECOND)
-        if not dead_bridge_cqc:
+                evidence["second_authority_watch"] = actor_proof(second_watched, "native_enemy_loot", second_target)
+        if not placed_cqc:
             replica_spawn = bandit(await wait(guest_run, lambda state: bandit(state).get("status") == "stock_bandit_replica"
                                                   and bandit(state).get("replica_ai_denials", 0) > 0))
             assert server_spawn["role"] == 3 and server_spawn["authority_count"] == 1 and server_spawn["simulated_count"] == 0, server_spawn
@@ -366,7 +371,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 await asyncio.wait_for(process.wait(), 20)
             await start("host-restart.txt", host, "host", *host, "--port", str(port), *host_flags)
             restored = await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != old["generation"]
-                                  and state.get("game", {}).get("map") == DEAD_BRIDGE and state.get("zone_epoch") != old["zone_epoch"])
+                                  and state.get("game", {}).get("map") == area and state.get("zone_epoch") != old["zone_epoch"])
             assert restored["endpoint"]["port"] == port, restored
             renewed = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
             assert (renewed["guest_id"], renewed["character_id"]) == (invitation["guest_id"], invitation["character_id"])
@@ -409,7 +414,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert (roll["killer"], roll["actor"], roll["quantity"], roll["claimed_by"]) == (
                     invitation["character_id"], observed["ammo_actor"], observed["ammo_quantity"], None
                 ), roll
-                if dead_bridge_cqc:
+                if placed_cqc:
                     assert (roll["map"], roll["bandit"], roll["class_path"]) == (area, target, SHELLS), roll
                     assert 3 <= roll["quantity"] <= 9, roll
                     from tools.silverfish.native_host_save import cqc_retired, verify_record
@@ -430,7 +435,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         ) == (target, "projected", roll["epoch"], guid, True, False)
 
                     defeat = await wait(guest_run, projected, timeout=12)
-                    counterpart = cqc_counterpart(guest_run, target)
+                    counterpart = cqc_counterpart(guest_run, target, area)
                     assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
                     assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
                     proof_log["client_cqc_after_combat"] = counterpart
@@ -452,7 +457,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 if stock_shell_input:
                     def marked(state):
                         marker = state.get("game", {}).get("native_enemy_shell_view", {})
-                        return (marker.get("map"), marker.get("epoch")) == (DEAD_BRIDGE, interaction_epoch) and guid in marker.get("markers", ())
+                        return (marker.get("map"), marker.get("epoch")) == (area, interaction_epoch) and guid in marker.get("markers", ())
 
                     for local_run in (run, guest_run):
                         await wait(local_run, marked, timeout=10)
@@ -460,7 +465,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     press = accepted("exercise the claimant's stock Interact", await combat_action(
                         winner_run, "native-enemy-shell-input-fixture", selection,
                     ))["native_enemy_shell_fixture"]
-                    assert press == {"map": DEAD_BRIDGE, "epoch": interaction_epoch, "guid": guid}, press
+                    assert press == {"map": area, "epoch": interaction_epoch, "guid": guid}, press
                     settled = await wait(run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
                     claimed = settled["gameplay"]["native_enemy_loot_rolls"][guid]
@@ -488,7 +493,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert all(item["guid"] != guid for item in away["items"]), away
                 proof_log["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
                                                        "duplicate_guest_claim" if winner == "host" else "duplicate_host_claim": refused["error"]}
-                if dead_bridge_cqc:
+                if placed_cqc:
                     settled = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid) == claimed)
                     assert settled["gameplay_fresh"], settled
@@ -497,7 +502,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert {key: value for key, value in durable.items() if key != "retirement"} == claimed, durable
                     if defer_until_restart:
                         assert cqc_retired(durable), durable
-                    assert saved["world"]["map"] == DEAD_BRIDGE, saved["world"]
+                    assert saved["world"]["map"] == area, saved["world"]
                     if defer_until_restart:
                         return
                     await command("action", *client, "drop-link")
@@ -513,16 +518,16 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     )
                     proof_log["client_cqc_death_view_after_reconnect"] = actor_proof(rejoined, "native_enemy_loot_death_view", target)
         if enemy_loot and both_cqc:
-            encounters = evidence["stock_cqc_encounters"] = {CQC: {}, CQC_SECOND: {}}
+            encounters = evidence["stock_cqc_encounters"] = {first_target: {}, second_target: {}}
             # Complete both stock fights before keeping the party exposed during
             # inventory, shared claims or Direct IP reconnect verification.
-            remaining, first_observed = await fight(CQC, encounters[CQC], remaining)
-            sibling = actor_proof(status(guest_run), "native_enemy_loot_death_view", CQC_SECOND)
-            assert (sibling.get("state"), sibling.get("actor")) == ("present", CQC_SECOND), sibling
-            _, second_observed = await fight(CQC_SECOND, encounters[CQC_SECOND], remaining)
-            await share(CQC, encounters[CQC], first_observed)
-            await share(CQC_SECOND, encounters[CQC_SECOND], second_observed, defer_until_restart=restart_unclaimed_shells)
-            first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (CQC, CQC_SECOND))
+            remaining, first_observed = await fight(first_target, encounters[first_target], remaining)
+            sibling = actor_proof(status(guest_run), "native_enemy_loot_death_view", second_target)
+            assert (sibling.get("state"), sibling.get("actor")) == ("present", second_target), sibling
+            _, second_observed = await fight(second_target, encounters[second_target], remaining)
+            await share(first_target, encounters[first_target], first_observed)
+            await share(second_target, encounters[second_target], second_observed, defer_until_restart=restart_unclaimed_shells)
+            first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (first_target, second_target))
             assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
             final = status(run)["gameplay"]["native_enemy_loot_rolls"]
             assert final == {first["guid"]: first, second["guid"]: second}, final
@@ -556,7 +561,8 @@ async def main(args) -> None:
                        enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty,
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
                        automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc,
-                       stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells)
+                       stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells,
+                       refinery_cqc=args.refinery_cqc)
 
 
 if __name__ == "__main__":
@@ -572,6 +578,7 @@ if __name__ == "__main__":
     parser.add_argument("--shared-enemy-loot", action="store_true", help="check the shared typed roll and alternate member's single claim")
     parser.add_argument("--dead-bridge-cqc", action="store_true",
                         help="test the exact authored Dead Bridge CQC guest kill, typed shells and once-only shared claim")
+    parser.add_argument("--refinery-cqc", action="store_true", help="test both exact naturally placed Refinery CQC")
     parser.add_argument("--automatic-cqc-loot", action="store_true",
                         help="arm and bank the exact stock CQC kill through the ordinary host path")
     parser.add_argument("--both-cqc", action="store_true", help="defeat and claim from both placed CQC in one native visit")
@@ -579,15 +586,18 @@ if __name__ == "__main__":
     parser.add_argument("--restart-unclaimed-shells", action="store_true", help="restart before claiming the second stock shell stack")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
+    if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
+        parser.error("--refinery-cqc requires --both-cqc and its own encounter")
+    placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
     if args.both_cqc and not args.automatic_cqc_loot:
         parser.error("--both-cqc requires --automatic-cqc-loot")
     if args.stock_shell_input and not args.automatic_cqc_loot:
         parser.error("--stock-shell-input requires --automatic-cqc-loot")
     if args.restart_unclaimed_shells and (not args.both_cqc or args.stock_shell_input != "host"):
         parser.error("--restart-unclaimed-shells requires --both-cqc and --stock-shell-input host")
-    if args.automatic_cqc_loot and (not args.dead_bridge_cqc or args.enemy_bounty):
-        parser.error("--automatic-cqc-loot requires --dead-bridge-cqc and uses existing character traits")
-    if args.dead_bridge_cqc:
+    if args.automatic_cqc_loot and (not placed_cqc or args.enemy_bounty):
+        parser.error("--automatic-cqc-loot requires a placed Dead Bridge or Refinery encounter and uses existing character traits")
+    if placed_cqc:
         if args.subject != "guest" or args.hostile or args.require_combat or args.require_movement or args.require_damage:
             parser.error("--dead-bridge-cqc requires --subject guest and uses its own stock scene")
         args.shared_enemy_loot = True

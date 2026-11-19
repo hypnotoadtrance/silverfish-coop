@@ -28,10 +28,16 @@ os.getenv = function() return "1" end
 StaticFindObject = function(path) return classes[path] end
 FText = function(value) return { ToString = function() return value end } end
 SilverfishTakeNativeInteractPress = function() end
+package.loaded.native_enemy_loot_registry = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_loot_registry.lua"))()
 for _, path in ipairs({pawn_path, controller_path, camera_path, actor_path, mesh_path, material_path, widget_path, text_path, raw_class}) do
     classes[path] = object(path)
 end
 world = object("World " .. area .. ".DeadBridge_P")
+SilverfishIsNativeCqcShellRetired = function(address, path)
+    assert(address == world:GetAddress())
+    local raw = classes[path]
+    return not raw or (raw:GetWorld() == world and raw:GetClass() == classes[raw_class] and raw.destroyed == true)
+end
 
 local pawn, controller, camera = object("Player_FP_C host", pawn_path), object("Controller", controller_path), object("Camera", camera_path)
 pawn.Controller, pawn.Camera, pawn.Dead, pawn.CanInteract, pawn.InteractionRange = controller, camera, false, false, 250

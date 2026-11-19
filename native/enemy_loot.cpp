@@ -1,4 +1,5 @@
 #include "enemy_loot.hpp"
+#include "enemy_loot_registry.hpp"
 #include "shared_loot.hpp"
 
 #include <array>
@@ -28,6 +29,7 @@ namespace
 {
     namespace U = RC::Unreal;
     namespace Hook = U::Hook;
+    namespace profiles = silverfish::enemy_loot_profiles;
     using Lua = RC::LuaMadeSimple::Lua;
     using Iteration = Hook::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
@@ -35,14 +37,9 @@ namespace
 
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto world_path = STR("/Game/Classes/Maps/PlaytestMap_01.PlaytestMap_01");
-    constexpr auto cqc_world_path = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
     constexpr auto npc_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto bandit_path = STR("/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C");
     constexpr auto cqc_path = STR("/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C");
-    constexpr std::array cqc_actor_paths{
-        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"),
-        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_1"),
-    };
     constexpr auto army_shotgun_path = STR("/Game/Classes/Weapons/Wep_ShotGun_Army.Wep_ShotGun_Army_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -380,16 +377,22 @@ namespace
         U::FFrame* loot_frame{};
         Clock::time_point until{};
         std::uint64_t generation{};
-        bool dead_bridge{}, ordinary{};
+        bool placed_cqc{}, ordinary{};
     };
 
     Scope fixture_scope;
-    std::array<Scope, cqc_actor_paths.size()> cqc_scopes;
+    std::array<Scope, profiles::actors.size()> cqc_scopes;
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
 
-    auto scopes() { return std::array{&fixture_scope, &cqc_scopes[0], &cqc_scopes[1]}; }
+    auto scopes()
+    {
+        std::array<Scope*, profiles::actors.size() + 1> result{};
+        result[0] = &fixture_scope;
+        for (std::size_t index = 0; index < cqc_scopes.size(); ++index) result[index + 1] = &cqc_scopes[index];
+        return result;
+    }
 
     Scope* cqc_slot(Address actor)
     {
@@ -400,8 +403,8 @@ namespace
             if (candidate.npc_identity == actor && candidate.generation == generation.load(std::memory_order_acquire))
                 return &candidate;
         }
-        for (std::size_t index = 0; index < cqc_actor_paths.size(); ++index)
-            if (address(find<U::AActor>(cqc_actor_paths[index])) == actor) return &cqc_scopes[index];
+        for (std::size_t index = 0; index < profiles::actors.size(); ++index)
+            if (address(find<U::AActor>(profiles::actors[index].path)) == actor) return &cqc_scopes[index];
         return nullptr;
     }
 
@@ -576,15 +579,18 @@ namespace
         auto* pawn_type = find<U::UClass>(pawn_path);
         auto* bandit_type = find<U::UClass>(bandit_path);
         auto* cqc_type = find<U::UClass>(cqc_path);
-        U::AActor* cqc{};
-        auto* first = find<U::AActor>(cqc_actor_paths.front());
-        if (address(first) == actor) cqc = first;
-        if (next.ordinary && !cqc)
+        U::AActor* cqc = nullptr;
+        const U::TCHAR* encounter_world = world_path;
+        const auto count = next.ordinary ? profiles::actors.size() : std::size_t{1};
+        for (std::size_t index = 0; index < count; ++index)
         {
-            for (const auto* path : cqc_actor_paths)
+            const auto& profile = profiles::actors[index];
+            auto* candidate = find<U::AActor>(profile.path);
+            if (candidate && address(candidate) == actor)
             {
-                auto* candidate = find<U::AActor>(path);
-                if (address(candidate) == actor) cqc = candidate;
+                cqc = candidate;
+                encounter_world = profile.world;
+                break;
             }
         }
         auto* store = find<U::UClass>(save_path);
@@ -604,8 +610,8 @@ namespace
                 (candidate == cqc && candidate->GetClassPrivate() == cqc_type))) enemy = candidate;
             return home && (next.ordinary || peer) && enemy ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
-        next.dead_bridge = enemy && enemy == cqc;
-        auto* world = find<U::UWorld>(next.dead_bridge ? cqc_world_path : world_path);
+        next.placed_cqc = enemy && enemy == cqc;
+        auto* world = find<U::UWorld>(encounter_world);
         auto* owner = object(world, STR("OwningGameInstance"));
         if (!live(world) || !live(owner) || owner->GetClassPrivate() != instance)
             return "stock_enemy_loot_classes_unavailable";
@@ -615,14 +621,14 @@ namespace
         next.npc = enemy;
         next.npc_identity = address(enemy);
         next.generation = generation.load(std::memory_order_acquire);
-        if ((next.ordinary && !next.dead_bridge) || !authority(enemy, world) ||
+        if ((next.ordinary && !next.placed_cqc) || !authority(enemy, world) ||
             !boolean(enemy, STR("Alive"), true) || !boolean(enemy, STR("Initialized"), true) ||
             !set_participant(next.host, home, controller, store, local) ||
             (!next.ordinary && !set_participant(next.guests[0], peer, controller, store, connection)) || !current(next))
             return "stock_enemy_loot_authority_or_roster_unavailable";
         auto* faction = field<U::FByteProperty>(enemy, STR("Faction"));
-        if (next.dead_bridge && (!faction || faction->GetPropertyValueInContainer(enemy) != 4 || !cqc_ammunition(enemy, world)))
-            return "stock_dead_bridge_cqc_loadout_unavailable";
+        if (next.placed_cqc && (!faction || faction->GetPropertyValueInContainer(enemy) != 4 || !cqc_ammunition(enemy, world)))
+            return "stock_placed_cqc_loadout_unavailable";
         next.bounty.name = U::FName{STR("Bounty"), U::FNAME_Find};
         return bind_schema(next) ? std::string_view{} : "stock_enemy_loot_blueprint_schema_unavailable";
     }
@@ -741,7 +747,7 @@ namespace
             Clock::now() >= scope.until || !current(scope)) return;
         if (node == scope.schema.deal)
         {
-            if (scope.dead_bridge && !cqc_ammunition(object_receiver, scope.world.Get())) return;
+            if (scope.placed_cqc && !cqc_ammunition(object_receiver, scope.world.Get())) return;
             prepare_hit(scope, object_receiver, frame);
             return;
         }
@@ -1142,6 +1148,12 @@ namespace
         return 26;
     }
 
+    bool in_retirement(const U::FWeakObjectPtr& shell)
+    {
+        auto* actor = shell.Get();
+        return !actor || boolean(actor, STR("bActorIsBeingDestroyed"), true);
+    }
+
     int finish_cqc(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
@@ -1153,12 +1165,46 @@ namespace
             for (auto& scope : cqc_scopes)
             {
                 if (!scope.proof.reserved || !scope.proof.captured || scope.ammo_identity != static_cast<Address>(ammo) ||
-                    address(scope.host.pawn.Get()) != static_cast<Address>(host) || !ticket_current(scope) || reserved(scope)) continue;
+                    address(scope.host.pawn.Get()) != static_cast<Address>(host) || !ticket_current(scope)) continue;
+                if (!in_retirement(scope.proof.ammo_drop))
+                    return answer(lua, false, "native_enemy_loot_raw_retirement_pending");
                 scope.proof.reserved = false;
                 return answer(lua, true, "retired");
             }
         }
         return answer(lua, false, "native_enemy_loot_retirement_unavailable");
+    }
+
+    int raw_shell_retired(const Lua& lua)
+    {
+        const auto respond = [&](bool clear) { lua.set_bool(clear); return 1; };
+        if (!available() || !ordinary_enabled() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
+            return respond(false);
+        const auto requested = lua.get_integer();
+        const std::string path{lua.get_string()};
+        if (requested <= 0 || path.empty() || path.size() > 256) return respond(false);
+        U::UWorld* world = nullptr;
+        for (const auto* known : profiles::worlds)
+        {
+            auto* candidate = find<U::UWorld>(known);
+            if (address(candidate) == static_cast<Address>(requested)) { world = candidate; break; }
+        }
+        auto* driver = object(world, STR("NetDriver"));
+        auto* level = object(world, STR("PersistentLevel"));
+        if (!live(world) || !live(driver) || !live(level) || object(driver, STR("World")) != world ||
+            !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")))
+            return respond(false);
+        const auto prefix = RC::to_utf8_string(world->GetPathName()) + ":PersistentLevel.Ammo_ShotgunShells_BP_C_";
+        if (!path.starts_with(prefix)) return respond(false);
+        const auto suffix = std::string_view{path}.substr(prefix.size());
+        if (suffix.empty() || suffix.find_first_not_of("0123456789") != std::string_view::npos) return respond(false);
+        auto* actor = find<U::AActor>(RC::to_wstring(path).c_str());
+        if (!actor) return respond(true);
+        if (actor->GetClassPrivate() != find<U::UClass>(shell_path) || RC::to_utf8_string(actor->GetPathName()) != path)
+            return respond(false);
+        if (auto* own_world = actor->GetWorld(); own_world && own_world != world) return respond(false);
+        if (auto* own_level = actor->GetLevel(); own_level && own_level != level) return respond(false);
+        return respond(in_retirement(U::FWeakObjectPtr{actor}));
     }
 
     int cqc_pending(const Lua& lua)
@@ -1172,7 +1218,7 @@ namespace
 
     int cqc_available(const Lua& lua)
     {
-        lua.set_integer(available() && ordinary_enabled() ? 2 : 0);
+        lua.set_integer(available() && ordinary_enabled() ? 3 : 0);
         return 1;
     }
 
@@ -1188,7 +1234,9 @@ namespace silverfish::native_enemy_loot
     bool qualify_escrow_claimant(Address pawn, Address save, Address stock, shared_loot::EscrowOwner& claimant)
     {
         if (!available()) return false;
-        for (const auto* path : {world_path, cqc_world_path})
+        auto* fixture = find<U::UWorld>(world_path);
+        if (live(fixture) && shared_loot::qualify_escrow_owner_in_world(fixture, pawn, save, stock, claimant)) return true;
+        for (const auto* path : profiles::worlds)
         {
             auto* world = find<U::UWorld>(path);
             if (live(world) && shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, claimant)) return true;
@@ -1273,6 +1321,7 @@ namespace silverfish::native_enemy_loot
         {
             lua.register_function("SilverfishSetNativeCqcEnemyLootScope", set_cqc_scope);
             lua.register_function("SilverfishFinishNativeCqcEnemyLoot", finish_cqc);
+            lua.register_function("SilverfishIsNativeCqcShellRetired", raw_shell_retired);
             lua.register_function("SilverfishNativeCqcEnemyLootPending", cqc_pending);
             lua.register_function("SilverfishNativeCqcEnemyLootAvailable", cqc_available);
         }

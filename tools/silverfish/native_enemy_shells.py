@@ -5,8 +5,7 @@ import time
 
 from .native_downed_markers import location
 from .native_gold import valid_guid
-from .native_host_save import CQC_SHELL_ACTOR
-from .travel import DEAD_BRIDGE
+from .enemy_loot_profiles import BY_MAP
 
 
 KEY = "native_enemy_shell_view"
@@ -35,7 +34,7 @@ def target_parts(value):
 
 def parse_view(area, epoch, markers, focused):
     guids = [] if markers == "-" else markers.split(",")
-    if (area == DEAD_BRIDGE and valid_epoch(epoch) and 0 < len(guids) <= LIMIT
+    if (area in BY_MAP and valid_epoch(epoch) and 0 < len(guids) <= LIMIT
             and len(set(guids)) == len(guids) and all(valid_guid(guid) for guid in guids)
             and (focused == "-" or focused in guids)):
         return {"map": area, "epoch": epoch, "markers": guids, "focused": None if focused == "-" else focused}
@@ -44,14 +43,14 @@ def parse_view(area, epoch, markers, focused):
 
 def parse_authority(area, epoch, pawn, eligible):
     guids = [] if eligible == "-" else eligible.split(",")
-    if (area == DEAD_BRIDGE and valid_epoch(epoch) and 0 < len(pawn) <= 512 and pawn.startswith("Player_FP_C ")
+    if (area in BY_MAP and valid_epoch(epoch) and 0 < len(pawn) <= 512 and pawn.startswith("Player_FP_C ")
             and len(guids) <= LIMIT and len(set(guids)) == len(guids) and all(valid_guid(guid) for guid in guids)):
         return {"map": area, "epoch": epoch, "pawn": pawn, "eligible": guids}
     return None
 
 
-def _fields(frame, epoch, *, hosting):
-    if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (DEAD_BRIDGE, epoch):
+def _fields(frame, profile, epoch, *, hosting):
+    if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (profile.map, epoch):
         return ()
     rows = frame.get("shells")
     if not isinstance(rows, dict) or not 0 < len(rows) <= LIMIT:
@@ -61,8 +60,7 @@ def _fields(frame, epoch, *, hosting):
         if (not valid_guid(guid) or not isinstance(row, (list, tuple)) or len(row) != (5 if hosting else 4)
                 or type(row[0]) is not int or not 3 <= row[0] <= 9 or not location(row[1:4])):
             return ()
-        if hosting and (not isinstance(row[4], str) or not row[4].startswith(CQC_SHELL_ACTOR)
-                        or not re.fullmatch(r"[0-9]+", row[4][len(CQC_SHELL_ACTOR):])):
+        if hosting and not profile.owns_shell(row[4]):
             return ()
         encoded.append("|".join(map(str, (guid, *row))))
     return tuple(sorted(encoded))
@@ -71,11 +69,12 @@ def _fields(frame, epoch, *, hosting):
 async def fixture(bridge, game, epoch, target):
     selected = target_parts(target)
     view = game.get(KEY, {})
-    if (not selected or selected[0] != epoch or (view.get("map"), view.get("epoch")) != (DEAD_BRIDGE, epoch)
+    area = game.get("map")
+    if (area not in BY_MAP or not selected or selected[0] != epoch or (view.get("map"), view.get("epoch")) != (area, epoch)
             or selected[1] not in view.get("markers", ())):
-        raise ValueError("Choose an exact active shell cue in the current Dead Bridge visit")
+        raise ValueError("Choose an exact active shell cue in the current encounter map")
     snapshot = await bridge.command(FIXTURE, target, timeout=5)
-    return snapshot, {"map": DEAD_BRIDGE, "epoch": epoch, "guid": selected[1]}
+    return snapshot, {"map": area, "epoch": epoch, "guid": selected[1]}
 
 
 class ShellView:
@@ -86,15 +85,16 @@ class ShellView:
     async def sync(self, bridge, game, phase, epoch, frame):
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         version = game.get("native_enemy_shell_view_version")
-        current = ((game.get("state"), game.get("map")) == (phase, DEAD_BRIDGE)
+        profile = BY_MAP.get(game.get("map"))
+        current = (game.get("state") == phase and profile
                    and version in ((2,) if phase == "hosting" else (1, 2)) and pawn and valid_epoch(epoch))
-        fields = _fields(frame, epoch, hosting=phase == "hosting") if current else ()
+        fields = _fields(frame, profile, epoch, hosting=phase == "hosting") if current else ()
         if not fields:
             old, self.binding = self.binding, None
             if old and current:
                 return await bridge.command(CLEAR, timeout=2)
             return game
-        binding = (epoch, pawn, fields)
+        binding = (profile.id, epoch, pawn, fields)
         now = time.monotonic()
         if binding == self.binding and now < self.next_update:
             return game

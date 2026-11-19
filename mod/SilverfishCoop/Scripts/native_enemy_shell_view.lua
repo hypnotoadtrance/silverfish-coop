@@ -1,9 +1,8 @@
 local view = {}
+local profiles = require("native_enemy_loot_registry")
 
-local area = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
-local world_name = "World " .. area .. ".DeadBridge_P"
-local raw_class = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
-local raw_prefix = area .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
+local by_world = {}
+for _, profile in pairs(profiles) do by_world["World " .. profile.world] = profile end
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_INPUT") == "1"
 local host_enabled = os.getenv("SILVERFISH_COOP_NATIVE_CQC_LOOT") == "1"
@@ -51,23 +50,22 @@ local function distance_squared(first, second)
     return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
 end
 
-local function raw_path(name)
-    if type(name) ~= "string" then return end
-    local body = name:match("^Ammo_ShotgunShells_BP_C (%S+)$")
-    if body and body:sub(1, #raw_prefix) == raw_prefix and body:sub(#raw_prefix + 1):match("^[0-9]+$") then return body end
+local function raw_path(profile, name)
+    if not profile or type(name) ~= "string" then return end
+    local prefix = profile.raw_prefix
+    if name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^[0-9]+$") then return name:match("^%S+ (.+)$") end
 end
 
 function view.raw_retired(world, name)
-    local path = raw_path(name)
-    if not path or not valid(world) or world:GetFullName() ~= world_name then return false end
-    local shell = StaticFindObject(path)
-    return not valid(shell) or (same(shell:GetWorld(), world) and shell:GetFullName() == name
-        and exact(shell, raw_class) and shell:IsActorBeingDestroyed() == true)
+    local path = valid(world) and raw_path(by_world[world:GetFullName()], name)
+    return path and type(SilverfishIsNativeCqcShellRetired) == "function"
+        and SilverfishIsNativeCqcShellRetired(world:GetAddress(), path) == true
 end
 
 local function viewer(state, phase)
-    if not enabled or state.map ~= area or not valid(state.world)
-        or state.world:GetFullName() ~= world_name or state.listening ~= true
+    local profile = profiles[state.map]
+    if not enabled or not profile or not valid(state.world)
+        or state.world:GetFullName() ~= "World " .. profile.world or state.listening ~= true
         or type(SilverfishTakeNativeInteractPress) ~= "function" then return end
     local hosting = phase == "hosting" and host_enabled and state.server == false
     if not hosting and (phase ~= "connected" or state.server ~= true) then return end
@@ -224,9 +222,9 @@ local function paint(pawn, controller, guid)
     return widget.TextBlock_Notes:GetText():ToString() == text
 end
 
-local function row_at(encoded, hosting)
+local function row_at(encoded, host_profile)
     local guid, units, x, y, z, raw
-    if hosting then
+    if host_profile then
         guid, units, x, y, z, raw = encoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
     else
         guid, units, x, y, z = encoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
@@ -234,7 +232,7 @@ local function row_at(encoded, hosting)
     local quantity = math.tointeger(tonumber(units))
     local point = { X = tonumber(x), Y = tonumber(y), Z = tonumber(z) }
     if not identifier(guid, "[^0-9A-F]") or not quantity or quantity < 3 or quantity > 9
-        or not vector(point) or (hosting and not raw_path(raw)) then
+        or not vector(point) or (host_profile and not raw_path(host_profile, raw)) then
         error("native_enemy_shell_frame_invalid", 0)
     end
     return guid, { quantity = quantity, point = point, cue = aim_point(point), raw = raw }
@@ -254,7 +252,7 @@ function view.command(fields, state, phase)
     end
     local rows, order = {}, {}
     for index = 5, #fields do
-        local guid, row = row_at(fields[index], phase == "hosting")
+        local guid, row = row_at(fields[index], phase == "hosting" and profiles[state.map])
         if rows[guid] then error("native_enemy_shell_frame_invalid", 0) end
         rows[guid], order[#order + 1] = row, guid
     end
@@ -269,7 +267,7 @@ function view.command(fields, state, phase)
             remove_marker(old)
         end
     end
-    frame = { epoch = epoch, pawn = pawn, world = state.world, rows = rows, order = order, visible = {}, eligible = {},
+    frame = { epoch = epoch, pawn = pawn, world = state.world, map = state.map, rows = rows, order = order, visible = {}, eligible = {},
         expires = now(pawn) + frame_lifetime }
     return "local shell frame accepted"
 end
@@ -352,11 +350,11 @@ function view.rows(state, phase, status_row)
     local rows = { status_row("native-enemy-shell-view-capability", 2) }
     if frame and same(frame.world, state.world) then
         if phase == "hosting" then
-            rows[#rows + 1] = status_row("native-enemy-shell-authority", area, frame.epoch, frame.pawn:GetFullName(),
+            rows[#rows + 1] = status_row("native-enemy-shell-authority", frame.map, frame.epoch, frame.pawn:GetFullName(),
                 #frame.eligible > 0 and table.concat(frame.eligible, ",") or "-")
         end
         if #frame.visible > 0 then
-            rows[#rows + 1] = status_row("native-enemy-shell-view", area, frame.epoch,
+            rows[#rows + 1] = status_row("native-enemy-shell-view", frame.map, frame.epoch,
                 table.concat(frame.visible, ","), frame.focus or "-")
         end
     end

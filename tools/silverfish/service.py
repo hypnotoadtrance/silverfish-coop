@@ -782,13 +782,14 @@ class Host:
                 write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             if authored_plan:
                 authorization = ("authored", str(authored_plan.travel_time_step or 0))
-            cqc_departure = current == DEAD_BRIDGE and getattr(self, "native_dead_bridge_enemy_loot", False)
-            if departure_proof is None and not cqc_departure:
+            cqc_profile = native_enemy_loot.BY_MAP.get(current) if getattr(self, "native_dead_bridge_enemy_loot", False) else None
+            pending_capacity = len(cqc_profile.actors) if cqc_profile else 0
+            if departure_proof is None and not pending_capacity:
                 self.begin_zone_guests(transport)
                 await bridge.command("travel", destination, *authorization)
             else:
                 command, arguments = ("travel-party", departure_proof) if departure_proof else ("travel", authorization)
-                for attempt in range(len(native_enemy_loot.CQC_ACTORS) + 1 if cqc_departure else 1):
+                for attempt in range(pending_capacity + 1):
                     hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
                     with hold:
                         try:
@@ -810,7 +811,7 @@ class Host:
                                 raise RuntimeError("The game did not verify the checked party departure")
                             break
                     self.last_game, self.last_seen = departure, time.monotonic()
-                    if not cqc_departure or attempt == len(native_enemy_loot.CQC_ACTORS) or not native_enemy_loot.pending(self):
+                    if attempt == pending_capacity or not native_enemy_loot.pending(self):
                         raise RuntimeError("The stock CQC departure hold did not identify its reserved roll")
                     await native_enemy_loot.observe(self, bridge)
             observed = await bridge.wait_for(
@@ -2219,15 +2220,16 @@ class Host:
                 elif action in ("native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture") and self.native_guest and self.fixtures:
                     target = request.get("target")
                     character = self.roles().get("guest")
+                    encounter = native_enemy_loot.BY_MAP.get(self.last_game.get("map"))
                     if (action == "native-bandit-aim-fixture" and self.native_dead_bridge_enemy_loot
-                            and self.last_game.get("map") == DEAD_BRIDGE and target in native_enemy_loot.CQC_ACTORS
+                            and encounter and target in encounter.actors
                             and self.party["players"].get(character, {}).get("downed") is True):
                         owner = self.native_recipients().get(character, {})
                         if not owner.get("connected") or not owner.get("pawn") or self.transitioning or self.party["wipe"]:
                             raise ValueError("Choose the exact enrolled downed guest in the current Dead Bridge visit")
                         self.last_game = await bridge.command("native-cqc-revive-approach", target, owner["pawn"], timeout=5)
                         self.last_seen = time.monotonic()
-                        result = {"native_cqc_revive_approach": {"map": DEAD_BRIDGE, "pawn": owner["pawn"]}}
+                        result = {"native_cqc_revive_approach": {"map": encounter.map, "pawn": owner["pawn"]}}
                         self.control.respond(path, True, **result)
                         continue
                     if action in ("native-enemy-loot-watch", "native-bandit-aim-fixture"):
@@ -3049,8 +3051,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
     if native_dead_bridge_enemy_loot and not (native_loot_input and native_backend == "cpp" and
             staged_script(work, "native_enemy_loot.lua", "native-enemy-loot-cqc-capability") and
+            staged_script(work, "native_enemy_loot_registry.lua", "refinery-cqc-v1") and
             staged_script(work, "guest_save.lua", "native-guest-bind-exact")):
-        raise ValueError("Stock Dead Bridge enemy loot requires the current native co-op stage")
+        raise ValueError("Stock placed CQC enemy loot requires the current native co-op stage")
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
     wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
@@ -3141,8 +3144,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot)
             bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
-            if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 2:
-                raise RuntimeError("The staged addon did not expose the exact stock Dead Bridge enemy loot bridge")
+            if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 3:
+                raise RuntimeError("The staged addon did not expose the exact placed CQC enemy loot bridge")
             extraction_rules = {}
             prepared_preset = None
             if start_preset:
@@ -4119,7 +4122,7 @@ class Client:
             if self.shop_view:
                 await self.shop_view.sync(self, active)
             frame = (self.gameplay.get(native_enemy_shells.FRAME_KEY) if active and self.transport.game_access
-                     and self.expected_zone == DEAD_BRIDGE and time.monotonic() - self.gameplay_seen < 2 else None)
+                     and self.expected_zone in native_enemy_loot.BY_MAP and time.monotonic() - self.gameplay_seen < 2 else None)
             with contextlib.suppress(OSError, RuntimeError):
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame,

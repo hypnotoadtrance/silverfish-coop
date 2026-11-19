@@ -67,8 +67,9 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
     host.add_argument("--native-guest-mre", action="store_true", help="enable guest MRE and Canned Peaches use with personal intoxication")
     host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
-    host.add_argument("--native-dead-bridge-enemy-loot", action="store_true",
-                      help="automatically share the exact Dead Bridge CQC stock shotgun-shell roll")
+    host.add_argument("--native-authored-enemy-loot", "--native-dead-bridge-enemy-loot",
+                      dest="native_dead_bridge_enemy_loot", action="store_true",
+                      help="share stock shotgun-shell rolls from exact Dead Bridge and Refinery CQC")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")

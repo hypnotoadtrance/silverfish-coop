@@ -32,6 +32,7 @@ package.loaded.guest_save = {
 }
 local fresh = true
 package.loaded.native_transport = {scoped_host = function() return {pawn = host}, fresh end}
+package.loaded.native_enemy_loot_registry = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_loot_registry.lua"))()
 package.loaded.native_enemy_shell_view = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_shell_view.lua"))()
 local npc_class_path = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C"
 local npc_path = root .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
@@ -55,6 +56,7 @@ local ammo_path = root .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C
 local shell_path = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 local shell_class, ammo = object(9, shell_path), object(10, "Ammo_ShotgunShells_BP_C " .. ammo_path)
 local destroyed, collision = false, true
+local retire_pending = true
 ammo.Ammo, ammo.bHidden = 8, false
 ammo.GetWorld, ammo.GetClass = host.GetWorld, function() return shell_class end
 ammo.HasAuthority, ammo.IsActorBeingDestroyed = function() return not destroyed end, function() return destroyed end
@@ -74,6 +76,9 @@ local objects = {[npc_class_path] = npc_class, [npc_path] = npc, [second_path] =
     [shell_path] = shell_class, [save_class_path] = save_class, ["/Script/Engine.Default__GameplayStatics"] = api,
     [player_class_path] = player_class, [ai_class_path] = ai_class}
 StaticFindObject = function(path) return objects[path] end
+SilverfishIsNativeCqcShellRetired = function(address, path)
+    return address == world:GetAddress() and path == ammo_path and destroyed and not retire_pending
+end
 
 local ready, reserved, captured = false, false, false
 local latest_roster = {}
@@ -107,6 +112,10 @@ SilverfishVerifyNativeLootEscrow = function(initial, persisted)
 end
 SilverfishFinishNativeCqcEnemyLoot = function(home, raw)
     assert(home == host:GetAddress() and raw == ammo:GetAddress() and reserved and captured and destroyed)
+    if retire_pending then
+        retire_pending = false
+        return false, "native_enemy_loot_raw_retirement_pending"
+    end
     reserved = false
     return true, "retired"
 end
@@ -133,6 +142,9 @@ assert(enemy_loot.command({"request", "native-enemy-loot-bank", npc:GetFullName(
 assert(not ammo.bHidden and collision and not destroyed and enemy_loot.departure_pending(state, "hosting"))
 assert(not pcall(enemy_loot.command, {"request", "native-enemy-loot-retire", ammo:GetFullName(), slot, ("C"):rep(32)}, state, "hosting"))
 assert(not destroyed)
+local ready_to_commit, wait_reason = pcall(enemy_loot.command,
+    {"request", "native-enemy-loot-retire", ammo:GetFullName(), slot, guid}, state, "hosting")
+assert(not ready_to_commit and wait_reason == "native_enemy_loot_raw_retirement_pending" and destroyed and reserved)
 assert(enemy_loot.command({"request", "native-enemy-loot-retire", ammo:GetFullName(), slot, guid}, state, "hosting"))
 assert(ammo.bHidden and not collision and destroyed and not enemy_loot.departure_pending(state, "hosting"))
 local rows = table.concat(enemy_loot.rows(state, "hosting", row), "\n")
@@ -212,3 +224,38 @@ recover[4] = shooter:GetFullName()
 refused(fixture, recover, "native_cqc_revive_exact_downed_guest_required")
 assert(scout_save.PlayerHealth == 1 and scout.IsWeaponBlocked)
 print("Exact downed guest's stock revive approach is independent of either CQC watcher")
+
+local refinery = "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"
+local profile = package.loaded.native_enemy_loot_registry[refinery]
+local refinery_world = object(30, "World " .. profile.world)
+local refinery_actors, sent = {}, {}
+for index, name in ipairs(profile.names) do
+    local actor = object(30 + index, name)
+    actor.GetWorld, actor.GetClass = function() return refinery_world end, npc.GetClass
+    actor.IsActorBeingDestroyed, actor.HasAuthority = npc.IsActorBeingDestroyed, npc.HasAuthority
+    actor.Alive, actor.Initialized = true, true
+    objects[profile.paths[name]], refinery_actors[actor:GetAddress()] = actor, name
+end
+state.world, state.map = refinery_world, refinery
+host.GetWorld = function() return refinery_world end
+scout.GetWorld = host.GetWorld
+SilverfishSetNativeCqcEnemyLootScope = function(local_address, actor, ...)
+    assert(local_address == host:GetAddress() and refinery_actors[actor])
+    sent[actor] = {...}
+    return true
+end
+SilverfishReadNativeEnemyLoot = function(owner, actor)
+    assert(owner == host:GetAddress() and refinery_actors[actor])
+    return "watching", 0, "-", "-", "-", 0, 0, 0, 0, 0, false, 0, "-", "-", 0,
+        "pending", 0, false, 0, 0, 0, 0, false, "-", false, false
+end
+automatic.sync(state, "hosting")
+assert(not next(sent))
+SilverfishNativeCqcEnemyLootAvailable = function() return 3 end
+automatic.sync(state, "hosting")
+assert(sent[31][1] == scout:GetAddress() and sent[32][1] == scout:GetAddress())
+local qualified = table.concat(automatic.rows(state, "hosting", row), "\n")
+assert(qualified:find(row("native-enemy-loot", refinery, profile.names[1], "watching"), 1, true))
+assert(qualified:find(row("native-enemy-loot", refinery, profile.names[2], "watching"), 1, true))
+assert(not qualified:find(npc:GetFullName(), 1, true))
+print("Refinery uses native profile capability 3 and watches only its two authenticated placed encounters")

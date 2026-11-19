@@ -9,12 +9,38 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, party
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
+from tools.silverfish.enemy_loot_profiles import BY_MAP as ENCOUNTERS
+from tools.silverfish.generate_enemy_loot_registry import outputs as enemy_registry_outputs
 from tools.silverfish.runtime import Bridge, MAP
 from tools.silverfish.service import Host
-from tools.silverfish.travel import DEAD_BRIDGE
+from tools.silverfish.travel import DEAD_BRIDGE, REFINERY
 
 
 class DeadBridgeEnemyLootTests(unittest.TestCase):
+    def test_refinery_profiles_bind_exact_stock_source_and_map_independently(self):
+        refinery, bridge = ENCOUNTERS[REFINERY], ENCOUNTERS[DEAD_BRIDGE]
+        self.assertEqual([actor.rsplit("_", 1)[1] for actor in refinery.actors], ["1", "3"])
+        guid, slot = "A" * 32, "SFCoop_" + "1" * 32
+        drop = dict(map=refinery.map, bandit=refinery.actors[0], profile=refinery.id, class_path=native_enemy_loot.SHELLS,
+                    guid=guid, actor=refinery.shell_prefix + "10101", epoch="a" * 32, quantity=6, position=[1, 2, 3],
+                    killer="host", claimed_by=None, escrow={"map": refinery.map, "slot": slot})
+        records = {guid: dict(drop, retirement=native_host_save.cqc_retirement_record(drop, slot))}
+        checkpoint = {"world": {"party": {native_enemy_loot.STATE_KEY: records}}, "characters": {}}
+        self.assertEqual(records[guid]["retirement"]["schema"], 2)
+        self.assertEqual(native_host_save._escrow_frames(checkpoint), [drop["escrow"]])
+        self.assertEqual(native_enemy_loot.defeated_cqc(records, drop["epoch"], refinery.actors[0]), guid)
+        self.assertIsNone(native_enemy_loot.defeated_cqc(records, drop["epoch"], bridge.actors[0]))
+        for invalid in (
+            {key: value for key, value in drop.items() if key != "profile"}, {**drop, "profile": bridge.id},
+            {**drop, "actor": bridge.shell_prefix + "10101"}, {**drop, "bandit": refinery.actors[0].removesuffix("_1") + "_2"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(CampaignFormatError):
+                records[guid] = invalid
+                native_host_save._escrow_frames(checkpoint)
+        root = Path(__file__).resolve().parents[1]
+        for relative, expected in enemy_registry_outputs().items():
+            self.assertEqual((root / relative).read_text(encoding="utf-8"), expected)
+
     def test_watch_requires_exact_map_and_placed_actor(self):
         watch = native_enemy_loot.watch_target
         cqc = native_enemy_loot.CQC
@@ -171,6 +197,23 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(native_host_save.cqc_retired(self.host.party[native_enemy_loot.STATE_KEY][self.guid]))
         self.assertEqual(replay["native_enemy_loot_roll"]["killer"], self.second)
         self.assertFalse(self.host.stopping or self.host.native_checkpoint_unsafe)
+
+    async def test_retirement_only_retries_the_same_raw_ticket_after_delayed_native_destroy(self):
+        roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
+                    guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],
+                    killer=self.second, claimed_by=None, escrow=self.frame)
+        self.party[native_enemy_loot.STATE_KEY] = {self.guid: roll}
+        snapshot = dict(self.initial, native_enemy_loot_escrow=dict(self.captured, state="retired"),
+                        native_enemy_loot_retire_proof=self.retire_proof(self.captured),
+                        native_enemy_loot_cqc=dict(self.scope, captured=True, reserved=False))
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            RuntimeError("native_enemy_loot_raw_retirement_pending"), snapshot,
+        ]))
+        await native_enemy_loot._retire(self.host, bridge, roll)
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(bridge.command.await_args_list[0], bridge.command.await_args_list[1])
+        self.host.checkpoint_native.assert_awaited_once()
+        self.assertTrue(native_host_save.cqc_retired(self.host.party[native_enemy_loot.STATE_KEY][self.guid]))
 
     async def test_refuses_another_members_bounty_or_identity_before_bank(self):
         bridge = SimpleNamespace(command=AsyncMock())

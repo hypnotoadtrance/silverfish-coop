@@ -2,15 +2,12 @@ local enemy_loot = {}
 local guest_save = require("guest_save")
 local transport = require("native_transport")
 local shell_view = require("native_enemy_shell_view")
+local profiles = require("native_enemy_loot_registry")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local cqc_class = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C"
-local cqc_path = dead_bridge .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
-local cqc_name = "NPC_State_Infantry_CQC_C " .. cqc_path
-local cqc_second_path = cqc_path:gsub("_0$", "_1")
-local cqc_names = {cqc_name, "NPC_State_Infantry_CQC_C " .. cqc_second_path}
-local cqc_paths = {[cqc_names[1]] = cqc_path, [cqc_names[2]] = cqc_second_path}
+local cqc_name = profiles[dead_bridge].names[1]
 local bandit_class = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C"
 local shells = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -24,7 +21,8 @@ local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SIL
 local enabled = observe and fixtures
 local ordinary = projection_enabled and os.getenv("SILVERFISH_COOP_NATIVE_CQC_LOOT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
-local worlds = { [map] = "World " .. map .. ".PlaytestMap_01", [dead_bridge] = "World " .. dead_bridge .. ".DeadBridge_P" }
+local worlds = { [map] = "World " .. map .. ".PlaytestMap_01" }
+for area, profile in pairs(profiles) do worlds[area] = "World " .. profile.world end
 local watch, escrow
 local watches, projections = {}, {}
 
@@ -66,8 +64,8 @@ local function read(host, current)
 end
 
 local function ordinary_host(state, phase, finishing)
-    if not ordinary or phase ~= "hosting" or state.map ~= dead_bridge or state.server ~= false or not state.listening
-        or not valid(state.world) or state.world:GetFullName() ~= worlds[dead_bridge] then return end
+    if not ordinary or phase ~= "hosting" or not profiles[state.map] or state.server ~= false or not state.listening
+        or not valid(state.world) or state.world:GetFullName() ~= worlds[state.map] then return end
     local host, fresh = transport.scoped_host(state, phase)
     if host and same(host.pawn:GetWorld(), state.world) and (fresh or finishing and finishing.ordinary
         and same(finishing.world, state.world) and same(finishing.host, host.pawn)) then return host.pawn end
@@ -81,8 +79,9 @@ local function member(state, phase, host, name)
 end
 
 local function cqc_actor(state, name)
-    local path = cqc_paths[name]
-    if state.map ~= dead_bridge or not path then return end
+    local profile = profiles[state.map]
+    local path = profile and profile.paths[name]
+    if not path then return end
     local actor = StaticFindObject(path)
     if valid(actor) and not actor:IsActorBeingDestroyed() and actor:GetFullName() == name
         and same(actor:GetWorld(), state.world) and same(actor:GetClass(), StaticFindObject(cqc_class)) then return actor end
@@ -105,13 +104,14 @@ local function stock_target(state, phase, scoped, status_row)
 end
 
 local function proxy_in(state, phase, name)
+    local profile = profiles[state.map]
     if not projection_enabled or phase ~= "connected" or state.server ~= true or state.listening ~= true
-        or state.map ~= dead_bridge then return end
+        or not profile then return end
     local world, controller = state.world, state.controller
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
-    if not valid(world) or world:GetFullName() ~= worlds[dead_bridge]
-        or not same(world.PersistentLevel, StaticFindObject(dead_bridge .. ".DeadBridge_P:PersistentLevel"))
+    if not valid(world) or world:GetFullName() ~= worlds[state.map]
+        or not same(world.PersistentLevel, StaticFindObject(profile.world .. ":PersistentLevel"))
         or not valid(pawn) or not same(pawn:GetClass(), StaticFindObject(pawn_class))
         or not valid(controller) or not same(controller:GetClass(), StaticFindObject(controller_class))
         or not same(pawn:GetWorld(), world) or not same(controller:GetWorld(), world)
@@ -153,7 +153,7 @@ function enemy_loot.clear()
     end
     watch, escrow = nil, nil
     watches = {}
-    for _, name in ipairs(cqc_names) do clear_projection(name) end
+    for name in pairs(projections) do clear_projection(name) end
 end
 
 function enemy_loot.clear_fixture()
@@ -161,14 +161,15 @@ function enemy_loot.clear_fixture()
 end
 
 function enemy_loot.departure_pending(state, phase)
-    return ordinary and phase == "hosting" and state.map == dead_bridge and
+    return ordinary and phase == "hosting" and profiles[state.map] ~= nil and
         type(SilverfishNativeCqcEnemyLootPending) == "function" and SilverfishNativeCqcEnemyLootPending() == true
 end
 
 function enemy_loot.revive_fixture_context(state, phase, expected, name)
-    if not enabled or not ordinary or phase ~= "hosting" or state.map ~= dead_bridge or not cqc_paths[expected]
+    local profile = profiles[state.map]
+    if not enabled or not ordinary or phase ~= "hosting" or not profile or not profile.paths[expected]
         or state.server ~= false or not state.listening or not valid(state.world)
-        or state.world:GetFullName() ~= worlds[dead_bridge] then return end
+        or state.world:GetFullName() ~= worlds[state.map] then return end
     local details = transport.scoped_host(state, phase)
     local host = details and details.pawn
     if not same(host, state.local_pawn and state.local_pawn.pawn) or not same(host:GetWorld(), state.world) then return end
@@ -182,7 +183,8 @@ end
 function enemy_loot.watched_cqc(state, phase, expected, receipt)
     local host, guest = participants(state, phase)
     local scoped = watches[expected] or watch
-    if state.map ~= dead_bridge or not cqc_paths[expected] or not scoped or scoped.name ~= expected
+    local profile = profiles[state.map]
+    if not profile or not profile.paths[expected] or not scoped or scoped.name ~= expected
         or not same(state.world, scoped.world)
         or not same(host, scoped.host) or not scoped.ordinary and not same(guest, scoped.guest) then return end
     if receipt then return host, guest end
@@ -203,7 +205,8 @@ end
 
 local function project_death(fields, state, phase)
     local name, epoch, guid = fields[3], fields[4], fields[5]
-    if #fields ~= 5 or not cqc_paths[name] or #epoch ~= 32 or epoch:find("[^0-9a-f]") or not is_guid(guid) then
+    local profile = profiles[state.map]
+    if #fields ~= 5 or not profile or not profile.paths[name] or #epoch ~= 32 or epoch:find("[^0-9a-f]") or not is_guid(guid) then
         error("native_enemy_loot_death_exact_receipt_required", 0)
     end
     local current = proxy_in(state, phase, name)
@@ -310,14 +313,17 @@ local function retire(state, phase, fields)
         escrow = captured
         return "exact stock ammunition already retired"
     end
-    local ammo = captured.ammo
-    if not valid(ammo) or not same(ammo:GetWorld(), state.world) or ammo:GetFullName() ~= captured.actor
-        or not same(ammo:GetClass(), StaticFindObject(shells)) or not ammo:HasAuthority() or ammo:IsActorBeingDestroyed() then
-        error("mutation_unverified_enemy_loot_exact_retirement_actor", 0)
+    if not captured.retiring then
+        local ammo = captured.ammo
+        if not valid(ammo) or not same(ammo:GetWorld(), state.world) or ammo:GetFullName() ~= captured.actor
+            or not same(ammo:GetClass(), StaticFindObject(shells)) or not ammo:HasAuthority() or ammo:IsActorBeingDestroyed() then
+            error("mutation_unverified_enemy_loot_exact_retirement_actor", 0)
+        end
+        retire_actor(ammo)
+        captured.retiring = true
     end
-    retire_actor(ammo)
-    if not shell_view.raw_retired(state.world, captured.actor) then error("mutation_unverified_enemy_loot_raw_actor_live", 0) end
     local ok, status = SilverfishFinishNativeCqcEnemyLoot(host:GetAddress(), captured.address)
+    if not ok and status == "native_enemy_loot_raw_retirement_pending" then error(status, 0) end
     if ok ~= true or status ~= "retired" then error("mutation_unverified_enemy_loot_retirement", 0) end
     captured.status, captured.raw_verified = "retired", true
     escrow = captured
@@ -397,18 +403,19 @@ local function approach(state, phase, fields)
 end
 
 function enemy_loot.sync(state, phase)
-    for _, name in ipairs(cqc_names) do
-        if projections[name] then
-            local ok, current = pcall(proxy_in, state, phase, name)
-            if not ok or not same_proxy(current, projections[name]) then clear_projection(name) end
-        end
+    for name, projection in pairs(projections) do
+        local ok, current = pcall(proxy_in, state, phase, name)
+        if not ok or not same_proxy(current, projection) then clear_projection(name) end
     end
     local _, first = next(watches)
     if first and valid(state.world) and not same(state.world, first.world) then enemy_loot.clear() end
-    if ordinary and state.map == dead_bridge then
+    local profile = profiles[state.map]
+    if ordinary and profile then
         local host = ordinary_host(state, phase)
         if not valid(host) or type(SilverfishSetNativeCqcEnemyLootScope) ~= "function"
-            or type(SilverfishReadNativeEnemyLoot) ~= "function" then return end
+            or type(SilverfishReadNativeEnemyLoot) ~= "function"
+            or (state.map ~= dead_bridge and (type(SilverfishNativeCqcEnemyLootAvailable) ~= "function"
+                or SilverfishNativeCqcEnemyLootAvailable() ~= 3)) then return end
         local arguments = {host:GetAddress(), 0}
         for _, guest in ipairs(state.guests or {}) do
             local pawn, save, character = member(state, phase, host, guest.name)
@@ -418,7 +425,7 @@ function enemy_loot.sync(state, phase)
                 arguments[#arguments + 1] = character
             end
         end
-        for _, name in ipairs(cqc_names) do
+        for _, name in ipairs(profile.names) do
             local actor = cqc_actor(state, name)
             local scoped = watches[name]
             local address = valid(actor) and actor:GetAddress() or scoped and scoped.address
@@ -459,14 +466,15 @@ function enemy_loot.command(fields, state, phase)
         return approach(state, phase, fields)
     end
     if action == "native-enemy-loot-clear" and #fields == 2 then
-        if not enabled or (ordinary and state.map == dead_bridge) then error("native_enemy_loot_fixture_unavailable", 0) end
+        if not enabled or (ordinary and profiles[state.map]) then error("native_enemy_loot_fixture_unavailable", 0) end
         enemy_loot.clear_fixture()
         return "stock enemy loot observer cleared"
     end
     if action ~= "native-enemy-loot-watch" then return end
     local expected = fields[3]
     local host, guest = participants(state, phase)
-    if (ordinary and state.map == dead_bridge) or not valid(host) or not valid(guest) or #fields ~= 3 or type(expected) ~= "string" or #expected > 512
+    if (state.map ~= map and (state.map ~= dead_bridge or ordinary)) or not valid(host) or not valid(guest) or #fields ~= 3
+        or type(expected) ~= "string" or #expected > 512
         or expected:find("%c")
         or type(SilverfishSetNativeEnemyLootScope) ~= "function" or type(SilverfishReadNativeEnemyLoot) ~= "function" then
         error("The stock enemy loot observer requires an exact staged host and enrolled guest", 0)
@@ -506,11 +514,14 @@ end
 
 function enemy_loot.rows(state, phase, status_row)
     local rows = {}
-    if ordinary and type(SilverfishNativeCqcEnemyLootAvailable) == "function" and SilverfishNativeCqcEnemyLootAvailable() == 2
+    local version = ordinary and type(SilverfishNativeCqcEnemyLootAvailable) == "function" and SilverfishNativeCqcEnemyLootAvailable()
+    if (version == 2 or version == 3)
         and type(SilverfishCaptureNativeEnemyLootEscrow) == "function" and type(SilverfishClaimNativeEnemyLootEscrow) == "function" then
-        rows[#rows + 1] = status_row("native-enemy-loot-cqc-capability", 2)
+        rows[#rows + 1] = status_row("native-enemy-loot-cqc-capability", version)
     end
-    for _, name in ipairs(cqc_names) do
+    local profile = profiles[state.map]
+    local names = profile and profile.names or {}
+    for _, name in ipairs(names) do
         local checked, current = pcall(proxy_in, state, phase, name)
         if checked and current then
             local actor = current.actor
@@ -520,12 +531,12 @@ function enemy_loot.rows(state, phase, status_row)
             if same_proxy(current, projection) and projection.epoch and hidden and not collision then
                 mode, epoch, guid = "projected", projection.epoch, projection.guid
             end
-            rows[#rows + 1] = status_row("native-enemy-loot-death-view", dead_bridge, name, mode, epoch, guid,
+            rows[#rows + 1] = status_row("native-enemy-loot-death-view", state.map, name, mode, epoch, guid,
                 hidden and 1 or 0, collision and 1 or 0)
         end
     end
-    if observe and phase == "connected" and state.server == true and state.map == dead_bridge and valid(state.world)
-        and state.world:GetFullName() == worlds[dead_bridge] then
+    if observe and phase == "connected" and state.server == true and profile and valid(state.world)
+        and state.world:GetFullName() == worlds[state.map] then
         local authorities, replicas, others = 0, 0, 0
         local class = StaticFindObject(cqc_class)
         for _, actor in ipairs(FindAllOf("NPC_State_Infantry_CQC_C") or {}) do
@@ -537,9 +548,9 @@ function enemy_loot.rows(state, phase, status_row)
                 else others = others + 1 end
             end
         end
-        for _, name in ipairs(cqc_names) do
+        for _, name in ipairs(names) do
             local exact = cqc_actor(state, name)
-            rows[#rows + 1] = status_row("native-enemy-loot-counterpart", dead_bridge, name,
+            rows[#rows + 1] = status_row("native-enemy-loot-counterpart", state.map, name,
                 valid(exact) and exact:GetLocalRole() or "-", valid(exact) and valid(exact.Controller) and 1 or 0,
                 valid(exact) and exact.Alive == true and 1 or 0, authorities, replicas, others)
         end
@@ -556,7 +567,7 @@ function enemy_loot.rows(state, phase, status_row)
         end
     end
     if watch then append(watch) end
-    for _, name in ipairs(cqc_names) do
+    for _, name in ipairs(names) do
         local scoped = watches[name]
         append(scoped)
         if scoped then

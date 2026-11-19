@@ -23,7 +23,8 @@ from . import native_dust_cabinet
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
-from .native_host_save import CQC_DROP_SOURCES, SLOT
+from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
+from .native_host_save import SLOT
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
@@ -461,9 +462,9 @@ async def stop_game(process) -> None:
 
 
 def _enemy_row(data: dict, key: str, actor: str, row: dict) -> None:
-    if actor in CQC_DROP_SOURCES:
+    if actor in ENEMY_LOOT_ACTORS:
         data.setdefault(key + "_by_actor", {})[actor] = row
-        if actor != CQC_DROP_SOURCES[0]:
+        if actor != ENEMY_LOOT_ACTORS[actor].actors[0]:
             return
     data[key] = row
 
@@ -1187,7 +1188,7 @@ class Bridge:
                         "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
                         "cache_unchanged": fields[10] == "1",
                     })
-                elif fields in (["native-enemy-loot-cqc-capability", "1"], ["native-enemy-loot-cqc-capability", "2"]):
+                elif (len(fields) == 2 and fields[0] == "native-enemy-loot-cqc-capability" and fields[1] in ("1", "2", "3")):
                     data["native_enemy_loot_cqc_capability"] = True
                     data["native_enemy_loot_cqc_version"] = int(fields[1])
                 elif fields in (["native-enemy-shell-view-capability", "1"], ["native-enemy-shell-view-capability", "2"]):
@@ -1203,7 +1204,7 @@ class Bridge:
                     _enemy_row(data, "native_enemy_loot_cqc", fields[2], {"map": fields[1], "bandit": fields[2],
                                                      "killer_character": None if fields[3] == "-" else fields[3],
                                                      "reserved": fields[4] == "1", "captured": fields[5] == "1"})
-                elif fields[0] == "native-enemy-loot-cqc-target" and len(fields) == 6 and fields[2] in CQC_DROP_SOURCES:
+                elif fields[0] == "native-enemy-loot-cqc-target" and len(fields) == 6 and fields[2] in ENEMY_LOOT_ACTORS:
                     data.setdefault("native_enemy_loot_cqc_targets", {})[fields[2]] = dict(
                         zip(("map", "actor", "target", "character", "ai_controller"), fields[1:]))
                 elif fields[0] == "native-enemy-loot-death-view" and len(fields) == 8:

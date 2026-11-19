@@ -6,6 +6,7 @@ import os
 import time
 
 from . import native_enemy_shells, native_host_save, native_loot, party
+from .enemy_loot_profiles import BY_ACTOR, BY_MAP, SHELLS, for_roll
 from .native_downed_markers import location
 from .native_gold import valid_guid
 from .native_host_save import CQC_DROP_SOURCE as CQC, CQC_DROP_SOURCES as CQC_ACTORS
@@ -19,7 +20,6 @@ RETIRE = "native-enemy-loot-retire"
 PENDING = "native_enemy_loot_roll_pending"
 STATE_KEY = "native_enemy_loot_rolls"
 CQC_SCOPE = "native_enemy_loot_cqc"
-SHELLS = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 DEATH_VIEW = "native_enemy_loot_death_view"
 SHELL_ACTOR = native_host_save.CQC_SHELL_ACTOR
 
@@ -27,7 +27,7 @@ SHELL_ACTOR = native_host_save.CQC_SHELL_ACTOR
 
 def _actor_row(game, key, actor):
     by_actor = game.get(key + "_by_actor")
-    if actor in CQC_ACTORS and isinstance(by_actor, dict):
+    if actor in BY_ACTOR and isinstance(by_actor, dict):
         return by_actor.get(actor, {})
     row = game.get(key, {})
     return row if actor in (row.get("bandit"), row.get("actor")) else {}
@@ -38,10 +38,12 @@ def source_for(game, actor):
 
 
 def watch_target(game: dict, target: str | None) -> str | None:
+    if not isinstance(target, str):
+        return None
     area = game.get("map")
     if area == MAP and target and target == game.get("native_bandit", {}).get("npc"):
         return target
-    if area == DEAD_BRIDGE and (target == CQC or target in CQC_ACTORS and _cqc_receipt(game, target)):
+    if (area == DEAD_BRIDGE and target == CQC) or (target in BY_ACTOR and _cqc_receipt(game, target)):
         return target
     return None
 
@@ -54,24 +56,21 @@ def _public_roll(roll):
     return {key: value for key, value in roll.items() if key not in ("escrow", "retirement")}
 
 
-def _raw_shell(actor):
-    return (isinstance(actor, str) and actor.startswith(SHELL_ACTOR)
-            and actor.removeprefix(SHELL_ACTOR).isascii() and actor.removeprefix(SHELL_ACTOR).isdecimal())
-
-
 def _exact_cqc_roll(roll, guid):
-    return (isinstance(roll, dict) and roll.get("map") == DEAD_BRIDGE and roll.get("bandit") in CQC_ACTORS
+    profile = for_roll(roll) if isinstance(roll, dict) else None
+    return (profile and profile.owns_shell(roll.get("actor"))
             and valid_guid(guid) and roll.get("guid") == guid and roll.get("class_path") == SHELLS
-            and type(roll.get("quantity")) is int and 3 <= roll["quantity"] <= 9 and _raw_shell(roll.get("actor")))
+            and type(roll.get("quantity")) is int and 3 <= roll["quantity"] <= 9)
 
 
 def defeated_cqc(records: dict, epoch: str, target: str = CQC) -> str | None:
-    if (target not in CQC_ACTORS or type(records) is not dict or not isinstance(epoch, str) or len(epoch) != 32
+    profile = BY_ACTOR.get(target)
+    if (not profile or type(records) is not dict or not isinstance(epoch, str) or len(epoch) != 32
             or any(char not in "0123456789abcdef" for char in epoch)):
         return None
     selected = None
     for guid, roll in records.items():
-        if not isinstance(roll, dict) or (roll.get("map"), roll.get("bandit"), roll.get("epoch")) != (DEAD_BRIDGE, target, epoch):
+        if not isinstance(roll, dict) or (roll.get("map"), roll.get("bandit"), roll.get("epoch")) != (profile.map, target, epoch):
             continue
         if selected is not None or not _exact_cqc_roll(roll, guid):
             return None
@@ -81,13 +80,15 @@ def defeated_cqc(records: dict, epoch: str, target: str = CQC) -> str | None:
 
 async def project_client(client) -> None:
     game, epoch = client.last_game, client.zone_epoch
+    area = game.get("map")
+    profile = BY_MAP.get(area)
     if (not client.transport.connected or client.stopping or client.needs_travel or client.server_transitioning
-            or client.expected_zone != DEAD_BRIDGE or time.monotonic() - client.gameplay_seen >= 3
-            or (game.get("state"), game.get("map")) != ("connected", DEAD_BRIDGE)):
+            or not profile or client.expected_zone != area or time.monotonic() - client.gameplay_seen >= 3
+            or game.get("state") != "connected"):
         return
-    for target in CQC_ACTORS:
+    for target in profile.actors:
         proof = _actor_row(client.last_game, DEATH_VIEW, target)
-        if (proof.get("map"), proof.get("actor")) != (DEAD_BRIDGE, target) or proof.get("state") not in ("present", "projected"):
+        if (proof.get("map"), proof.get("actor")) != (area, target) or proof.get("state") not in ("present", "projected"):
             continue
         guid = defeated_cqc(client.gameplay.get(STATE_KEY), epoch, target)
         if not guid or (proof.get("state"), proof.get("epoch"), proof.get("guid"), proof.get("hidden"), proof.get("collision")) == (
@@ -96,7 +97,7 @@ async def project_client(client) -> None:
         snapshot = await client.bridge.command("native-enemy-loot-project-death", target, epoch, guid, timeout=3)
         proof = _actor_row(snapshot, DEATH_VIEW, target)
         if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("actor")) != (
-            "connected", DEAD_BRIDGE, DEAD_BRIDGE, target
+            "connected", area, area, target
         ) or (proof.get("state") != "stock" and (
                 proof.get("state"), proof.get("epoch"), proof.get("guid"), proof.get("hidden"), proof.get("collision")
         ) != ("projected", epoch, guid, True, False)):
@@ -107,7 +108,7 @@ async def project_client(client) -> None:
 
 
 def _ordinary(host, area):
-    return area == DEAD_BRIDGE and getattr(host, "native_dead_bridge_enemy_loot", False) is True
+    return area in BY_MAP and getattr(host, "native_dead_bridge_enemy_loot", False) is True
 
 
 def _available(host, *, bank=False, fixture=False):
@@ -116,7 +117,7 @@ def _available(host, *, bank=False, fixture=False):
     if ((not host.fixtures and (not ordinary or fixture)) or not host.native_guest or not host.native_profile or host.stopping
             or ((host.transitioning or host.party["wipe"]) and not (bank and ordinary))
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
-            or area not in (MAP, DEAD_BRIDGE) or time.monotonic() - host.last_seen > 3):
+            or (area not in (MAP, DEAD_BRIDGE) and not ordinary) or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_enemy_loot_unavailable")
     if area == DEAD_BRIDGE and not ordinary and any(os.environ.get(name) != "1" for name in (
         "SILVERFISH_COOP_NATIVE_ENEMY_LOOT", "SILVERFISH_COOP_NATIVE_NPC_TEST",
@@ -131,7 +132,7 @@ async def approach(host, bridge, target: str | None) -> dict:
     roll = host.party.get(STATE_KEY, {}).get(guid) if sep and valid_guid(guid) else None
     character = host.roles().get(role)
     pawn = native_loot._scope(host, character) if character else None
-    if (not roll or roll.get("map") != area or (area == DEAD_BRIDGE and roll.get("bandit") not in CQC_ACTORS)
+    if (not roll or roll.get("map") != area or (area in BY_MAP and not for_roll(roll))
             or roll.get("claimed_by") is not None
             or not pawn or host.party["players"][character]["downed"]):
         raise party.RuleError("native_enemy_loot_fixture_unavailable")
@@ -152,13 +153,17 @@ async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=fro
 
 
 def _cqc_receipt(game, target):
+    if not isinstance(target, str):
+        return {}
+    profile = BY_ACTOR.get(target)
     scope = _actor_row(game, CQC_SCOPE, target)
-    return scope if target in CQC_ACTORS and (scope.get("map"), scope.get("bandit")) == (DEAD_BRIDGE, target) else {}
+    return scope if profile and (game.get("map"), scope.get("map"), scope.get("bandit")) == (profile.map, profile.map, target) else {}
 
 
 def pending(host):
-    return _ordinary(host, host.last_game.get("map")) and any(
-        _cqc_receipt(host.last_game, target).get("reserved") is True for target in CQC_ACTORS)
+    area = host.last_game.get("map")
+    return _ordinary(host, area) and any(
+        _cqc_receipt(host.last_game, target).get("reserved") is True for target in BY_MAP[area].actors)
 
 
 def _shell_epoch(host):
@@ -170,8 +175,9 @@ def _shell_epoch(host):
     return epoch
 
 
-def _eligible_drop(roll, guid):
-    return (_exact_cqc_roll(roll, guid) and roll.get("claimed_by") is None and location(roll.get("position"))
+def _eligible_drop(roll, guid, area):
+    return (_exact_cqc_roll(roll, guid) and roll.get("map") == area
+            and roll.get("claimed_by") is None and location(roll.get("position"))
             and native_enemy_shells.valid_epoch(roll.get("epoch")) and native_host_save.cqc_retired(roll))
 
 
@@ -180,30 +186,32 @@ def shell_candidates(host) -> dict | None:
     if not epoch:
         return None
     game = host.last_game
+    area = game["map"]
     points = [point for pawn in game.get("pawns", {}).values() if location(point := pawn.get("location"))]
     eligible = []
     for guid, roll in host.party.get(STATE_KEY, {}).items():
-        if _eligible_drop(roll, guid):
+        if _eligible_drop(roll, guid, area):
             nearest = min((math.dist(point, roll["position"]) for point in points), default=math.inf)
             eligible.append((nearest, roll["epoch"] != epoch, guid, roll))
     shells = {guid: [roll["quantity"], *roll["position"], roll["actor"]]
               for _, _, guid, roll in sorted(eligible)[:native_enemy_shells.LIMIT]}
-    return {"map": DEAD_BRIDGE, "epoch": epoch, "shells": shells} if shells else None
+    return {"map": area, "epoch": epoch, "shells": shells} if shells else None
 
 
 def shell_frame(host) -> dict | None:
     epoch = _shell_epoch(host)
+    area = host.last_game.get("map")
     proof = host.last_game.get(native_enemy_shells.AUTHORITY_KEY, {})
     eligible = proof.get("eligible")
     if (not epoch or host.last_game.get("native_enemy_shell_view_version") != 2
             or not isinstance(eligible, list) or len(eligible) > native_enemy_shells.LIMIT
             or (proof.get("map"), proof.get("epoch"), proof.get("pawn")) != (
-            DEAD_BRIDGE, epoch, native_loot._scope(host, "host"))):
+            area, epoch, native_loot._scope(host, "host"))):
         return None
     rolls = host.party.get(STATE_KEY, {})
     shells = {guid: [roll["quantity"], *roll["position"]] for guid in eligible
-              if valid_guid(guid) and _eligible_drop(roll := rolls.get(guid), guid)}
-    return {"map": DEAD_BRIDGE, "epoch": epoch, "shells": shells} if shells else None
+              if valid_guid(guid) and _eligible_drop(roll := rolls.get(guid), guid, area)}
+    return {"map": area, "epoch": epoch, "shells": shells} if shells else None
 
 
 def _stock_killer(host, source):
@@ -211,11 +219,12 @@ def _stock_killer(host, source):
         member = host.roles().get(source.get("killer_role"))
         return member if member and native_loot._scope(host, member) == source.get("killer_pawn") else None
     target = source.get("bandit")
+    profile = BY_ACTOR.get(target)
     record = _cqc_receipt(host.last_game, target)
     bounty = _actor_row(host.last_game, "native_enemy_bounty", target)
     pawn = source.get("killer_pawn")
-    if ((bounty.get("map"), bounty.get("bandit"), bounty.get("cache_unchanged")) != (DEAD_BRIDGE, target, True)
-            or not isinstance(pawn, str) or not pawn.startswith("Player_FP_C " + DEAD_BRIDGE + ".DeadBridge_P:PersistentLevel.")
+    if (not profile or (bounty.get("map"), bounty.get("bandit"), bounty.get("cache_unchanged")) != (profile.map, target, True)
+            or not isinstance(pawn, str) or not pawn.startswith(f"Player_FP_C {profile.world}:PersistentLevel.")
             or type(source.get("bounty_calls")) is not int or source["bounty_calls"] < 1):
         return None
     identity = record.get("killer_character")
@@ -239,13 +248,19 @@ async def _retire(host, bridge, roll):
     host.native_checkpoint_unsafe = True
     try:
         slot, guid = roll["escrow"]["slot"], roll["guid"]
-        snapshot = await bridge.command(RETIRE, roll["actor"], slot, guid, timeout=6)
+        for attempt in range(3):
+            try:
+                snapshot = await bridge.command(RETIRE, roll["actor"], slot, guid, timeout=6)
+                break
+            except RuntimeError as error:
+                if attempt == 2 or str(error) != "native_enemy_loot_raw_retirement_pending":
+                    raise
         result = snapshot.get("native_enemy_loot_escrow", {})
         scope = _cqc_receipt(snapshot, roll["bandit"])
         raw_proof = snapshot.get("native_enemy_loot_retire_proof")
         if ((snapshot.get("state"), snapshot.get("map"), result.get("state"), result.get("actor"), result.get("slot"), result.get("guid"))
-                != ("hosting", DEAD_BRIDGE, "retired", roll["actor"], slot, guid)
-                or raw_proof != {"schema": 1, "map": DEAD_BRIDGE, "actor": roll["actor"], "slot": slot, "guid": guid}
+                != ("hosting", roll["map"], "retired", roll["actor"], slot, guid)
+                or raw_proof != {"schema": 1, "map": roll["map"], "actor": roll["actor"], "slot": slot, "guid": guid}
                 or result.get("units") != roll["quantity"] or result.get("position") != roll["position"]
                 or scope.get("captured") is not True or scope.get("reserved") is not False):
             raise RuntimeError("The committed shotgun shells did not verify exact physical retirement")
@@ -261,7 +276,7 @@ async def observe(host, bridge):
     if not pending(host) or host.stopping or host.native_checkpoint_unsafe:
         return
     try:
-        for target in CQC_ACTORS:
+        for target in BY_MAP[host.last_game["map"]].actors:
             if _cqc_receipt(host.last_game, target).get("reserved") is True:
                 await bank(host, bridge, target)
     except party.RuleError as error:
@@ -271,13 +286,14 @@ async def observe(host, bridge):
 
 async def bank(host, bridge, target: str | None) -> dict:
     area = _available(host, bank=True)
+    profile = BY_MAP.get(area)
     cqc = _ordinary(host, area)
     source = source_for(host.last_game, target)
     if (source.get("state"), source.get("map"), source.get("loot_calls"), source.get("ammo_class")) != (
-            "stock_loot_observed", area, 1, SHELLS) or target != source.get("bandit") or (area == DEAD_BRIDGE and target not in CQC_ACTORS):
+            "stock_loot_observed", area, 1, SHELLS) or target != source.get("bandit") or (profile and target not in profile.actors):
         raise party.RuleError("native_enemy_loot_exact_drop_unavailable")
     ammo = source.get("ammo_actor")
-    if cqc and not _raw_shell(ammo):
+    if cqc and not profile.owns_shell(ammo):
         raise party.RuleError("native_enemy_loot_exact_drop_unavailable")
     scope = _cqc_receipt(host.last_game, target)
     for recorded in host.party.get(STATE_KEY, {}).values():
@@ -309,6 +325,8 @@ async def bank(host, bridge, target: str | None) -> dict:
         roll = {"map": area, "epoch": host.zone_epoch, "bandit": target, "actor": proof["actor"], "guid": guid,
                 "class_path": SHELLS, "quantity": proof["units"], "position": at, "killer": killer, "claimed_by": None,
                 "escrow": frame}
+        if cqc:
+            roll["profile"] = profile.id
         candidate = party.load_party(host.party)
         records = candidate.setdefault(STATE_KEY, {})
         if guid in records:
@@ -341,7 +359,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     roll = host.party.get(STATE_KEY, {}).get(guid)
-    if not roll or roll.get("map") != area or (area == DEAD_BRIDGE and roll.get("bandit") not in CQC_ACTORS):
+    if not roll or roll.get("map") != area or (area in BY_MAP and not for_roll(roll)):
         raise party.RuleError("native_enemy_loot_item_unavailable")
     if roll.get("claimed_by") is not None:
         raise party.RuleError("native_enemy_loot_already_claimed")
