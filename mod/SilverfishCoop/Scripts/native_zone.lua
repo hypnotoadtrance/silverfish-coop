@@ -394,11 +394,11 @@ local function nexus_rail_pocket(world, world_name, center, normal, sign)
     if representation == "userdata" and type(components.type) == "function" then representation = components:type() end
     -- UE4SS UFunction array returns are one-based Lua tables; direct TArray userdata also implements length.
     local count = (representation == "table" or representation == "TArray") and #components or nil
-    if not finite(count) or count < 2 or count > 24 then
+    if not finite(count) or count < 1 or count > 24 then
         error(string.format("Gold Nexus Rail crypt component census unavailable (type %s, count %s)",
             representation, tostring(count)), 0)
     end
-    local crypt, cube
+    local crypt
     local names = {}
     for index = 1, count do
         local component = components[index]
@@ -408,34 +408,34 @@ local function nexus_rail_pocket(world, world_name, center, normal, sign)
         if valid(component) then
             local name = component:GetFullName()
             names[#names + 1] = name:match("[^.]+$") or name
-            if name == "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then crypt = component end
-            if name == "StaticMeshComponent " .. path .. ".Cube" then cube = component end
+            if name == "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then
+                if crypt then error("Gold Nexus Rail crypt entrance mesh is ambiguous", 0) end
+                crypt = component
+            end
         end
     end
-    if not valid(crypt) or not valid(cube) then
-        error("Gold Nexus Rail crypt " .. (valid(crypt) and "rear cube" or "entrance mesh")
-            .. " component missing from stock census: " .. table.concat(names, ", "), 0)
+    if not valid(crypt) then
+        error("Gold Nexus Rail crypt entrance mesh missing from stock census: " .. table.concat(names, ", "), 0)
     end
-    for _, component in ipairs({crypt, cube}) do
-        local name = component:GetFullName()
-        if not same(component:GetClass(), component_class) then error("Gold Nexus Rail crypt component class changed: " .. name, 0) end
-        if not same(component:GetOwner(), portal) then error("Gold Nexus Rail crypt component owner changed: " .. name, 0) end
-        if not same(component:GetAttachParent(), root) then error("Gold Nexus Rail crypt component root changed: " .. name, 0) end
+    if not same(crypt:GetClass(), component_class) then error("Gold Nexus Rail crypt entrance mesh class changed", 0) end
+    if not same(crypt:GetOwner(), portal) then error("Gold Nexus Rail crypt entrance mesh owner changed", 0) end
+    if not same(crypt:GetAttachParent(), root) then error("Gold Nexus Rail crypt entrance mesh root changed", 0) end
+    local collision = crypt:GetCollisionEnabled()
+    if (collision ~= 1 and collision ~= 3) or crypt:GetCollisionResponseToChannel(2) ~= 2 then
+        error("Gold Nexus Rail crypt stock entrance mesh does not block player capsules", 0)
     end
     local mesh = crypt.StaticMesh
     if not valid(mesh) or mesh:GetFullName() ~= "StaticMesh /Game/Assets/StaticMeshes/Mesh_BuildingSets/Tunnels_Dungeons/SM_Env_Entrance_Crypt_01.SM_Env_Entrance_Crypt_01" then
         error("Gold Nexus Rail crypt entrance asset changed: " .. (valid(mesh) and mesh:GetFullName() or "missing"), 0)
     end
-    local origin, back, right = crypt:K2_GetComponentLocation(), cube:K2_GetComponentLocation(), crypt:GetRightVector()
-    if not vector(origin) or not vector(back) or not vector(right) then
+    local origin, right = crypt:K2_GetComponentLocation(), crypt:GetRightVector()
+    if not vector(origin) or not vector(right) then
         error("Gold Nexus Rail crypt stock component geometry is unavailable", 0)
     end
     local offset = math.sqrt((origin.X - center.X)^2 + (origin.Y - center.Y)^2)
     local facing = (right.X * normal.X + right.Y * normal.Y) * sign
-    local depth = side_of(back, center, normal) * sign
-    if offset > 3 or facing < .99 or math.abs(depth + 217.56) > 4 then
-        error(string.format("Gold Nexus Rail crypt geometry changed (offset %.2f, facing %.3f, rear depth %.2f)",
-            offset, facing, depth), 0)
+    if offset > 3 or facing < .99 then
+        error(string.format("Gold Nexus Rail crypt geometry changed (offset %.2f, facing %.3f)", offset, facing), 0)
     end
 end
 
@@ -522,7 +522,7 @@ local function place_expanded_overlap(state, details, route, position)
         local side = (index % 2 == 0 and -1 or 1) * lane_edge
         for _, clearance in ipairs({30, 45, 20}) do
             local distance = width + radius + clearance
-            -- The cooked cube's inner face is around 168 cm behind the pad.
+            -- The rear crypt stone begins around 229 cm out. Keep extra clearance for the optional portal cube.
             if distance + radius < 160 then
                 for _, offset in ipairs({side, side * .75}) do add_point(-distance, offset) end
             end
