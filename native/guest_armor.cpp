@@ -71,6 +71,7 @@ namespace
         int value;
         std::array<double, damage_fields.size()> damage;
         bool helmet{};
+        const U::TCHAR* vox{};
     };
     constexpr std::array armor_profiles{
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"), "bomber",
@@ -78,12 +79,14 @@ namespace
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"), "hazop",
             2.0, 1.2, 0.9, 12.0, 1400, {0.25, 0.0, 0.1, 0.3, 0.2, 0.2, 0.1, 0.15, 0.25, 0.2, 0.1}},
         ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"), "dust-filter",
-            0.4, 1.0, 1.0, 0.0, 80, {0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2, 0.0}, true},
+            0.4, 1.0, 1.0, 0.0, 80, {0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2, 0.0}, true,
+            STR("/Game/Assets/Sounds/AudioEffects/GasMask_Filter_01.GasMask_Filter_01")},
     };
     constexpr auto& bomber = armor_profiles[0];
     constexpr std::size_t slashing = 4, poison = 6, acid = 9;
     constexpr int max_items = 4096;
     constexpr int max_clients = 4;
+    constexpr auto vox_class = STR("/Script/Engine.SoundEffectSourcePresetChain");
 
     bool env(const char* name)
     {
@@ -337,7 +340,12 @@ namespace
         {
             auto* factions = field<U::FArrayProperty>(cdo, STR("DisguisableFactions"));
             auto* reputation = field<U::FMapProperty>(cdo, STR("RepBonus"));
-            if (!factions || !reputation || !field<U::FObjectProperty>(cdo, STR("VoxEffect")) || object(cdo, STR("VoxEffect")))
+            auto* chain_type = find<U::UClass>(vox_class);
+            auto* vox_property = field<U::FObjectProperty>(cdo, STR("VoxEffect"));
+            auto* voice = object(cdo, STR("VoxEffect"));
+            if (!factions || !reputation || !chain_type || !vox_property ||
+                vox_property->GetPropertyClass().Get() != chain_type ||
+                (profile.vox ? !exact(voice, chain_type) || voice->GetPathName() != profile.vox : voice != nullptr))
                 return nullptr;
             U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(cdo));
             if (list.Num() || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
@@ -707,6 +715,14 @@ namespace
 
         const auto* torso = head ? other_profile : selected;
         const auto* helmet = head ? selected : other_profile;
+        // The stock character copies the selected class's voice filter to this pawn.
+        auto* vox = helmet ? field<U::FObjectProperty>(scope.pawn, STR("Vox Effect")) : nullptr;
+        auto* next_voice = helmet ? object(armor_defaults(*helmet), STR("VoxEffect")) : nullptr;
+        if (helmet && (!vox || vox->GetPropertyClass().Get() != find<U::UClass>(vox_class) ||
+                       (helmet->vox && !next_voice)))
+            return report(lua, false, "native_guest_armor_voice_filter_unqualified");
+        auto* voice_slot = vox ? vox->ContainerPtrToValuePtr<void>(scope.pawn) : nullptr;
+        auto* old_voice = voice_slot ? vox->GetObjectPropertyValue(voice_slot) : nullptr;
         Projection projection;
         if (const auto error = projection.bind(scope.pawn); !error.empty()) return report(lua, false, error);
         auto* body = projection.body->ContainerPtrToValuePtr<void>(scope.pawn);
@@ -762,7 +778,8 @@ namespace
                                !restored_worn && restored_index == index)) &&
                 next_bag.matches(bag) && next_slot.matches(active) && next_body.matches(body) && next_helm.matches(helm) && next_resist.matches(resist) &&
                 projection.carry->GetPropertyValueInContainer(scope.pawn) == proof.carry_after &&
-                projection.minimum->GetPropertyValueInContainer(scope.pawn) == proof.minimum;
+                projection.minimum->GetPropertyValueInContainer(scope.pawn) == proof.minimum &&
+                (!voice_slot || vox->GetObjectPropertyValue(voice_slot) == next_voice);
         };
         if (worn && matches()) return report(lua, true, "already_applied", proof);
 
@@ -775,6 +792,7 @@ namespace
         next_body.restore(body);
         next_helm.restore(helm);
         next_resist.restore(resist);
+        if (voice_slot) vox->SetObjectPropertyValue(voice_slot, next_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
         if (scope.current() && matches()) return report(lua, true, previous ? "swapped" : worn ? "reapplied" : "equipped", proof);
@@ -787,12 +805,14 @@ namespace
         original_body.restore(body);
         original_helm.restore(helm);
         original_resist.restore(resist);
+        if (voice_slot) vox->SetObjectPropertyValue(voice_slot, old_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, old_carry);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, old_minimum);
         const bool rolled_back = scope.current() && original_bag.matches(bag) && original_slot.matches(active) &&
             original_body.matches(body) && original_helm.matches(helm) && original_resist.matches(resist) &&
             projection.carry->GetPropertyValueInContainer(scope.pawn) == old_carry &&
-            projection.minimum->GetPropertyValueInContainer(scope.pawn) == old_minimum;
+            projection.minimum->GetPropertyValueInContainer(scope.pawn) == old_minimum &&
+            (!voice_slot || vox->GetObjectPropertyValue(voice_slot) == old_voice);
         return report(lua, false, rolled_back ? "native_guest_armor_rolled_back" : "mutation_unverified_guest_armor_equip", proof);
     }
 
