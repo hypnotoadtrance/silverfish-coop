@@ -1,4 +1,4 @@
-"""Verify real Old Pipe pickup and a fenced stock swing or exact Dead Bridge hit."""
+"""Verify stock Old Pipe pickup and input at exact authored CQC encounters."""
 
 import argparse
 import asyncio
@@ -9,6 +9,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
+from live_authored_route_matrix_smoke import select_routes
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -20,11 +21,21 @@ from tools.silverfish import native_host_save
 from tools.silverfish.native_guest_melee import (AIM_FIXTURE, AIM_KEY, CANARY, CANARY_KEY, CONTACT_KEY, DAMAGE, EQUIP,
                                                 EQUIP_KEY, KIND, SWING, SWING_KEY, verified_damage, verified_miss)
 from tools.silverfish.enemy_loot_profiles import BY_MAP as CQC_ZONES
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, REFINERY
 
 
-async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False, second_cqc=False) -> None:
+REFINERY_ROUTES = (
+    "CrossRoads_P@Depot_Cross_Rail@Level_Exit_BP_C_1",
+    "RailYard_P@Slum_Depot@Level_Exit_BP_C_611",
+    "Slums_P@Slum_Refine@Level_Exit_BP_C_3",
+)
+
+
+async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False,
+                 second_cqc=False, refinery=False) -> None:
     mode = "ordinary-second-cqc-" if second_cqc else "ordinary-" if ordinary else "damage-" if stock_damage else ""
+    if refinery:
+        mode = "refinery-" + mode
     name = "stock-old-pipe-" + mode + uuid.uuid4().hex[:8]
     host, guest = ("--campaign", name), ("--profile", name)
     host_run, guest_run = work / "campaigns" / name / "run", work / "clients" / name / "run"
@@ -90,13 +101,13 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                 if target != "-":
                     diagnostic = await wait(host_run, lambda state: (row := state.get("game", {}).get(CONTACT_KEY, {}))
                                             and (row["map"], row["pawn"], row["guid"], row["serial"], row["target"]) == (
-                                                DEAD_BRIDGE, swing["pawn"], guid, swing["serial"], target)
+                                                area, swing["pawn"], guid, swing["serial"], target)
                                             and row["stage"] != "awaiting_contact", timeout=5)
                     proof["headless_contact"] = diagnostic["game"][CONTACT_KEY]
                     assert proof["headless_contact"]["camera_scope"] in ("unchanged", "restored"), proof["headless_contact"]
                 assert (swing["map"], swing["guid"], swing["status"], swing["presses"], swing["releases"],
                         swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
-                    DEAD_BRIDGE, guid, expected, 1, 1, 1, 1, True, True), swing
+                    area, guid, expected, 1, 1, 1, 1, True, True), swing
                 assert (verified_damage if expected == "stock_damage_verified" else verified_miss)(swing), swing
                 assert swing["target"] == target, (swing, target)
                 reply = await action(guest, SWING, "--target", guid, "--operation-id", event["operation_id"])
@@ -110,9 +121,36 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
             await asyncio.sleep(.16)
         raise RuntimeError(f"The real guest primary sequence {press['sequence']} did not return a stock Old Pipe receipt")
 
+    async def cross_exit(previous, destination, entrance, actor=None):
+        options = ("--entrance", entrance)
+        if actor is not None:
+            options += ("--exit-actor", actor)
+        for role, where in (("host", "near"), ("guest", "near"), ("host", "inside")):
+            await action(host, "native-exit-position", "--target", role, "--exit-position", where, *options)
+        arrived = await wait(host_run, lambda state: state.get("state") == "hosting"
+                             and state.get("generation") == previous["generation"]
+                             and state.get("zone_epoch") != previous["zone_epoch"] and not state.get("awaiting_zone_guest")
+                             and state.get("game", {}).get("map") == destination
+                             and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=80)
+        await wait(guest_run, lambda state: (state.get("state"), state.get("host_session"), state.get("zone_epoch"),
+                   state.get("character_id"), state.get("game", {}).get("map")) == (
+                   "connected", arrived["generation"], arrived["zone_epoch"], character, destination), timeout=80)
+        leg = {"source": previous["game"]["map"], "destination": destination, "entrance": entrance,
+               "source_epoch": previous["zone_epoch"], "destination_epoch": arrived["zone_epoch"]}
+        if actor is not None:
+            events = (await ask("events", *host, "--tail", "40"))["events"]
+            matches = [event for event in events if event["event"] == "native_authored_zone_request"
+                       and (event["source"], event["destination"], event["entrance"], event["actor"]) == (
+                           leg["source"], destination, entrance, actor)
+                       and event["result"].get("travel_epoch") == arrived["zone_epoch"] and event["result"]["ok"] is True]
+            assert len(matches) == 1, (leg, actor, matches)
+            leg["actor"] = actor
+        return arrived, leg
+
     try:
+        expanded = ("--native-expanded-zones",) if refinery else ()
         await launch("host", host, "--port", "0", "--start-zone", CROSSROADS, "--headless", "--fixtures",
-                     "--native-events", "--native-guest", "--native-zones", "--native-guest-melee-canary")
+                     "--native-events", "--native-guest", "--native-zones", "--native-guest-melee-canary", *expanded)
         ready = await wait(host_run, lambda state: state.get("state") == "hosting" and available(state), timeout=65)
         proof["placed_source"] = ready["game"][SOURCES_KEY][OLD_PIPE]
         invitation = await ask("invite", *host, "--name", "Stock Old Pipe tester", "--character", "Surface witness")
@@ -138,20 +176,16 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         if stock_damage or ordinary:
             denied = await action(host, DAMAGE, "--target", "guest", "--item-guid", guid, expected=False)
             assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
-            for role, where in (("host", "near"), ("guest", "near"), ("host", "inside")):
-                await action(host, "native-exit-position", "--target", role, "--exit-position", where, "--entrance", "DB_CR")
-            bound = await wait(host_run, lambda state: state.get("state") == "hosting"
-                               and state.get("generation") == coupled["generation"]
-                               and state.get("zone_epoch") != coupled["zone_epoch"] and not state.get("awaiting_zone_guest")
-                               and state.get("game", {}).get("map") == DEAD_BRIDGE
-                               and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=80)
-            await wait(guest_run, lambda state: (state.get("state"), state.get("host_session"), state.get("zone_epoch"),
-                       state.get("character_id"), state.get("game", {}).get("map")) == (
-                       "connected", bound["generation"], bound["zone_epoch"], character, DEAD_BRIDGE), timeout=80)
+            if refinery:
+                area = REFINERY
+                proof["stock_routes"] = []
+                for route in select_routes(REFINERY_ROUTES):
+                    coupled, leg = await cross_exit(coupled, route.destination, route.entrance, route.actor)
+                    proof["stock_routes"].append(leg)
+            else:
+                area = DEAD_BRIDGE
+                _, proof["stock_route"] = await cross_exit(coupled, area, "DB_CR")
             assert await inventory_item(character, guid) == before
-            area = DEAD_BRIDGE
-            proof["stock_route"] = {"source": CROSSROADS, "destination": area, "entrance": "DB_CR",
-                                    "source_epoch": coupled["zone_epoch"], "destination_epoch": bound["zone_epoch"]}
             denied = await action(host, CANARY, "--target", "guest", "--item-guid", guid, expected=False)
             assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
 
@@ -173,7 +207,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                        and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, KIND))
             proof["unassisted_primary_miss"] = await normal_primary(guid, "stock_miss_verified")
             lane = ("--amount", "2") if second_cqc else ()
-            target = CQC_ZONES[DEAD_BRIDGE].actors[int(second_cqc)]
+            target = CQC_ZONES[area].actors[int(second_cqc)]
             posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid, *lane))[AIM_KEY]
             assert (posed["map"], posed["pawn"], posed["guid"], posed["target"]) == (area, equipped["pawn"], guid, target), posed
             proof["headless_aim_setup"] = posed
@@ -227,9 +261,13 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--stock-damage", action="store_true", help="take the actual DB_CR exit and verify one stock NPC hit")
     modes.add_argument("--ordinary-primary", action="store_true", help="exercise the normal guest equip and primary input path")
-    parser.add_argument("--second-cqc", action="store_true", help="stage the second registered Dead Bridge CQC for ordinary primary")
+    parser.add_argument("--second-cqc", action="store_true", help="stage the second registered CQC for ordinary primary")
+    parser.add_argument("--refinery", action="store_true", help="use stock exits through Rail Yard and Slums to Refinery")
     options = parser.parse_args()
     if options.second_cqc and not options.ordinary_primary:
         parser.error("--second-cqc requires --ordinary-primary")
+    if options.refinery and not options.ordinary_primary:
+        parser.error("--refinery requires --ordinary-primary")
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None,
-                       stock_damage=options.stock_damage, ordinary=options.ordinary_primary, second_cqc=options.second_cqc))
+                       stock_damage=options.stock_damage, ordinary=options.ordinary_primary, second_cqc=options.second_cqc,
+                       refinery=options.refinery))
