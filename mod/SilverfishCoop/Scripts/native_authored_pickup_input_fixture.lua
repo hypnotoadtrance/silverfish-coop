@@ -20,7 +20,7 @@ local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
 local precise_distances = {
     [dust_filter] = {125, 160, 195},
-    [molasses] = {80, 110, 140, 170, 200},
+    [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
 }
 local cabinet_front = {[dust_filter] = 0, [molasses] = 180}

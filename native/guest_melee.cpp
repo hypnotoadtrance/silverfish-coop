@@ -16,6 +16,7 @@
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
@@ -207,7 +208,7 @@ namespace
         };
         if (std::ranges::find(words, nullptr) != words.end()) return false;
         int matches = 0;
-        const auto check = [&](const void* record, bool selected) {
+        const auto check_row = [&](const void* record, bool selected) {
             auto* item = klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(record));
             if (!passives.gear(item)) return false;
             Guid identity{};
@@ -227,12 +228,12 @@ namespace
             U::FScriptArrayHelper entries(property, property->ContainerPtrToValuePtr<void>(save));
             if (entries.Num() < 0 || entries.Num() > max_rows || (equipment && equipped >= entries.Num())) return false;
             for (int index = 0; index < entries.Num(); ++index)
-                if (!check(entries.GetRawPtr(index), equipment && index == equipped)) return false;
+                if (!check_row(entries.GetRawPtr(index), equipment && index == equipped)) return false;
         }
         for (auto* name : {STR("PlayerArmor"), STR("PlayerHelmet")})
         {
             auto* property = field<U::FStructProperty>(save, name);
-            if (!property || property->GetStruct().Get() != row || !check(property->ContainerPtrToValuePtr<void>(save), false))
+            if (!property || property->GetStruct().Get() != row || !check_row(property->ContainerPtrToValuePtr<void>(save), false))
                 return false;
         }
         return matches == 1;
