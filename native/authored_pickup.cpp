@@ -111,7 +111,7 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.Item_MRE_C_1"),
             STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"),
-            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 0,
+            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 0, true,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -298,8 +298,8 @@ namespace
             return "authored_pickup_stock_world_unqualified";
         if (!category || category->GetPropertyValueInContainer(actor) != profile.item_type)
             return "authored_pickup_stock_category_unqualified";
-        // The watch can settle from its authored table toward the cabin floor under stock physics.
-        // A claimed watch may fall when collision is disabled. Its exact scoped object stays hidden.
+        // Physics-enabled items can settle below their authored placement under vanilla simulation.
+        // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
         if (profile.physics && !require_placement) return nullptr;
         auto position = item->K2_GetActorLocation();
         const auto dx = position.GetX() - profile.x;
