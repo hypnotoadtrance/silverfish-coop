@@ -3585,6 +3585,8 @@ class Client:
                               retained: dict | None = None) -> dict:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
+        if action == native_authored_pickup.ACTION:
+            target = native_authored_pickup.request_target(target, self.zone_epoch)
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained

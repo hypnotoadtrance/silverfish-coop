@@ -1,4 +1,5 @@
 local input = {}
+local supply_profiles = require("authored_supply_catalog")
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local sources = {
@@ -29,6 +30,12 @@ local precise_distances = {
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
 }
+local supplies = {}
+for _, profile in ipairs(supply_profiles) do
+    supplies[profile.source] = profile
+    sources[profile.source] = profile.map
+    precise_distances[profile.source] = {95, 125, 155, 190}
+end
 local cabinet_front = {[dust_filter] = 0, [molasses] = 180}
 local cabinet_labels = {[dust_filter] = "authored_dust_cabinet", [molasses] = "authored_molasses_cabinet",
     [savlo_locker] = "authored_savlo_locker"}
@@ -131,6 +138,29 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
     local component = hit and hit.Component and hit.Component:Get()
     if same(component, box) then return true end
     return false, valid(component) and "interact:" .. component_name(component) or obstruction or "interact:-"
+end
+
+function input.authority_sight(state, phase, profile, pawn, actor)
+    if supplies[profile.source] ~= profile or phase ~= "hosting" or not state.listening or state.server ~= false
+        or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
+        or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
+        or actor:GetFullName() ~= profile.name .. " " .. profile.path or pawn.Dead ~= false then return false end
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local camera, box = pawn.Camera, actor.Box
+    if not valid(trace) or not owned(camera, pawn, "CameraComponent") or not owned(box, actor, "BoxComponent")
+        or not same(box, actor.RootComponent) then return false end
+    local origin, eye = vector(pawn:K2_GetActorLocation()), vector(camera:K2_GetComponentLocation())
+    local center, limit = vector(box:K2_GetComponentLocation()), pawn.InteractionRange
+    if not origin or not eye or not center or not finite(limit) or limit <= 0 or limit > 1000
+        or square(eye, origin) > 150^2 or square(origin, center) > 250^2 then return false end
+    local ignored, held = {pawn}, pawn.EquipedItem
+    if valid(held) and same(held:GetOwner(), pawn) and same(held:GetWorld(), state.world) then
+        ignored[#ignored + 1] = held
+    end
+    for _, point in ipairs(points(box, center, true)) do
+        if stock_sight(trace, pawn, box, eye, point, limit, ignored) then return true end
+    end
+    return false
 end
 
 local function restore_position(pawn, origin, facing)
@@ -239,7 +269,8 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     local distances = precise_distances[profile.source]
     if not distances then return end
     local label = "authored_pickup_fixture_" .. profile.source
-    if not approach_scope(state, phase, pawn, actor, sources[profile.source])
+    if (profile.stock_supply and supplies[profile.source] ~= profile)
+        or not approach_scope(state, phase, pawn, actor, sources[profile.source])
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
@@ -328,6 +359,7 @@ function input.press(state, phase, profile)
     local guest = phase == "connected" and state.server == true
     local inspect, press = SilverfishReadNativeAuthoredPickup, SilverfishProbeNativeInteractInput
     if not headless or (not guest and not (host and host_fixtures)) or not state.listening or profile.map ~= state.map
+        or (profile.stock_supply and supplies[profile.source] ~= profile)
         or sources[profile.source] ~= state.map or type(inspect) ~= "function" or type(press) ~= "function" then
         error("authored_pickup_stock_input_fixture_unavailable", 0)
     end

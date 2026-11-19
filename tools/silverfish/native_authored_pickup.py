@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from . import native_dust_cabinet, native_host_save, native_savlo_locker, party
+from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_gold import valid_guid
 from .travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
@@ -60,6 +61,7 @@ SOURCES = {
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
 }
+SOURCES.update({source: (row.area, row.actor, row.ammo.item_path) for source, row in STOCK_SUPPLIES.items()})
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
     MAP_SOURCES.setdefault(area, []).append(source)
@@ -76,7 +78,7 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source != OLD_PIPE]
+        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES]
         if len(defaults) == 1:
             return defaults[0]
     if isinstance(requested, str) and requested in sources:
@@ -111,9 +113,33 @@ async def project(service, bridge, pickups: dict) -> None:
         service.last_game = snapshot
 
 
+def request_target(target: str | None, epoch: str | None) -> str | None:
+    if isinstance(target, str) and target in STOCK_SUPPLIES:
+        if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
+            raise party.RuleError("native_authored_pickup_stale_zone")
+        return f"{target}@{epoch}"
+    return target
+
+
+def _current_pawn(host, character: str) -> str | None:
+    if character == "host":
+        return host.last_game.get("pawns", {}).get("local", {}).get("name")
+    member = host.native_recipients().get(character) or {}
+    return member.get("pawn") if member.get("connected") else None
+
+
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
-    if not isinstance(target, str) or target not in SOURCES or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
+    if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
+    target, has_epoch, epoch = target.partition("@")
+    is_supply = target in STOCK_SUPPLIES
+    if target not in SOURCES or (has_epoch and not is_supply):
+        raise party.RuleError("invalid_authored_pickup_request")
+    if is_supply:
+        if character == "host" and not has_epoch:
+            epoch = host.zone_epoch
+        if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch) or epoch != host.zone_epoch:
+            raise party.RuleError("native_authored_pickup_stale_zone")
     area, actor, item_class = SOURCES[target]
     if (not host.native_zones or host.native_profile is None or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
@@ -137,14 +163,18 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     if (host.party["wipe"] is not None or character in host.party["pending_spawns"]
             or host.party["players"].get(character, {}).get("downed")):
         raise party.RuleError("native_authored_pickup_owner_unavailable")
-    if character == "host":
-        pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
-    else:
-        member = host.native_recipients().get(character) or {}
-        pawn = member.get("pawn") if member.get("connected") else None
+    pawn = _current_pawn(host, character)
     if not pawn:
         raise party.RuleError("native_authored_pickup_owner_unavailable")
     await host.checkpoint_native(bridge)
+    if is_supply:
+        if epoch != host.zone_epoch or host.transitioning or host.stopping or host.native_checkpoint_unsafe or (
+                host.last_game.get("state"), host.last_game.get("map")) != ("hosting", area):
+            raise party.RuleError("native_authored_pickup_stale_zone")
+        if (target in host.party.get(STATE_KEY, {}) or _displayed(host.last_game, target).get("state") != "available"
+                or _current_pawn(host, character) != pawn or host.party["wipe"] is not None
+                or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
+            raise party.RuleError("native_authored_pickup_owner_or_source_changed")
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:

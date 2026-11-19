@@ -1,4 +1,5 @@
 #include "authored_pickup.hpp"
+#include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
 
 #include <algorithm>
@@ -47,6 +48,9 @@ namespace
         int item_type;
         std::optional<int> stack_units{};
         bool physics{};
+        const silverfish::guest_weapon_profiles::StockAmmo* stock_ammo{};
+        double stack_weight{};
+        int stack_value{};
     };
 
     constexpr std::array profiles{
@@ -155,6 +159,7 @@ namespace
             STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
             -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
         },
+#include "authored_supply_profiles.inc"
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
@@ -322,11 +327,27 @@ namespace
         return match == profiles.end() ? nullptr : &scopes[static_cast<std::size_t>(match - profiles.begin())];
     }
 
-    Scope* actor_scope(U::UObject* actor)
+    bool stock_ammo_matches(U::UObject* actor, const Profile& profile)
     {
-        if (!actor) return nullptr;
-        const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
-        return match != scopes.end() && local_scope(*match) ? &*match : nullptr;
+        const auto& ammo = *profile.stock_ammo;
+        auto* handle_type = find<U::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* handle = field<U::FStructProperty>(actor, STR("AmmoType"));
+        auto* caliber = field<U::FByteProperty>(actor, STR("Caliber"));
+        auto* table = field<U::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* name = field<U::FNameProperty>(handle_type, STR("RowName"));
+        auto* expected_table = find<U::UObject>(STR("/Game/Classes/Libraries/DataTables/AmmoTypes_DT.AmmoTypes_DT"));
+        auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
+        auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        const U::FName expected{ammo.row, U::FNAME_Find};
+        if (!actor->HasAnyFlags(U::RF_WasLoaded) || actor->GetClassPrivate() != find<U::UClass>(ammo.item) ||
+            !handle_type || !handle || handle->GetStruct().Get() != handle_type ||
+            !caliber || caliber->GetPropertyValueInContainer(actor) != ammo.caliber ||
+            !table || !name || !expected_table || expected.IsNone() || !weight || !value ||
+            std::abs(weight->GetPropertyValueInContainer(actor) - profile.stack_weight) > 1e-9 ||
+            !std::isfinite(weight->GetPropertyValueInContainer(actor)) ||
+            value->GetPropertyValueInContainer(actor) != profile.stack_value) return false;
+        const auto* row = handle->ContainerPtrToValuePtr<void>(actor);
+        return read(table, row) == expected_table && name->GetPropertyValueInContainer(row) == expected;
     }
 
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
@@ -347,6 +368,8 @@ namespace
             return "authored_pickup_stock_world_unqualified";
         if (!category || category->GetPropertyValueInContainer(actor) != profile.item_type)
             return "authored_pickup_stock_category_unqualified";
+        if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
+            return "authored_pickup_stock_ammo_profile_unqualified";
         // Physics-enabled items can settle below their authored placement under vanilla simulation.
         // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
         if (profile.physics && !require_placement) return nullptr;
@@ -371,6 +394,17 @@ namespace
         auto* value = object(actor, STR("Box"));
         return exact(value, STR("/Script/Engine.BoxComponent")) && value->GetOuterPrivate() == actor &&
             value == object(actor, STR("RootComponent")) ? value : nullptr;
+    }
+
+    Scope* actor_scope(U::UObject* actor)
+    {
+        if (!actor) return nullptr;
+        const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
+        if (match == scopes.end() || !local_scope(*match)) return nullptr;
+        if (match->profile->stock_ammo &&
+            (!exact_source(actor, match->world.Get(), *match->profile, !match->claimed) ||
+             source_box(actor) != match->box.Get())) return nullptr;
+        return &*match;
     }
 
     bool in_range(U::UObject* pawn, U::UObject* source)

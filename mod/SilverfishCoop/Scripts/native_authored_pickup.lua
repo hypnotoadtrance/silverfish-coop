@@ -143,6 +143,9 @@ local profiles = {
     },
 }
 local map_profiles = {}
+for _, profile in ipairs(require("authored_supply_catalog")) do
+    profiles[#profiles + 1] = profile
+end
 for _, profile in ipairs(profiles) do
     if not profile.fixture_only or (os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
         and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1") then
@@ -204,7 +207,7 @@ local function select_profile(requested)
     if requested == nil then
         local sole
         for _, profile in ipairs(binding.placements) do
-            if not profile.fixture_only then
+            if not profile.fixture_only and not profile.stock_supply then
                 if sole then sole = nil; break end
                 sole = profile.source
             end
@@ -244,6 +247,13 @@ local function claim(fields, state, phase, profile)
     if not valid(pawn) or not valid(save_class) or statics:DoesSaveGameExist(slot, 0) then
         report.status = "authored_pickup_claimant_or_slot_unavailable"
         return "authored loose pickup reported"
+    end
+    if profile.stock_supply then
+        local checked, visible = pcall(stock_input_fixture.authority_sight, state, phase, profile, pawn, StaticFindObject(profile.path))
+        if not checked or visible ~= true then
+            report.status = "authored_pickup_exact_authority_sight_required"
+            return "authored loose pickup reported"
+        end
     end
     local scratch = statics:CreateSaveGameObject(save_class)
     if not valid(scratch) then
