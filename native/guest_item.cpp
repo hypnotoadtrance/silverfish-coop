@@ -1084,7 +1084,7 @@ namespace
         if (reserve_before == 0)
             return reload_proof(lua, false, "no_matching_guest_ammo", before, before, 0, 0);
 
-        // The SG 71-A stock magazine reload exits after debiting the first matching Backpack stack.
+        // These stock magazine reloads exit after debiting the first matching Backpack stack.
         const auto available = stock_profile && stock_profile->reload_first_stack ? stacks.front().units : reserve_before;
         const auto transferred = nagant ? 1 : std::min(cap - before, available);
         auto needed = transferred;

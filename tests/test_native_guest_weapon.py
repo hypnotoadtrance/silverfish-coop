@@ -42,15 +42,21 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
         })
 
-    def test_only_stock_sg_71_a_uses_buckshot_and_first_stack_reload(self):
+    def test_only_stock_sg_71_a_uses_buckshot(self):
         ammo = guest_weapon_profiles.TWELVE_GAUGE_BUCK
         self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
                          (4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, 9))
         profiles = [profile for profile in guest_weapon_profiles.FIREARMS
-                    if profile.magazine and profile.magazine.reload_first_stack]
+                    if profile.magazine and profile.magazine.ammo == ammo]
         self.assertEqual([(profile.kind, profile.blueprint, profile.magazine.capacity) for profile in profiles],
                          [("sg-71-a", "Wep_ShotGun_SemiAuto", 10)])
-        self.assertEqual(profiles[0].magazine.ammo, ammo)
+
+    def test_only_audited_magazines_use_first_stack_reload(self):
+        same_stack = {profile.kind for profile in guest_weapon_profiles.FIREARMS
+                      if profile.magazine and profile.magazine.reload_first_stack}
+        self.assertEqual(same_stack, {
+            "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol", "sg-71-a",
+        })
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
