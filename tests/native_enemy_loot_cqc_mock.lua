@@ -142,6 +142,7 @@ print("Ordinary Dead Bridge loot: detached roster, reserved escrow, exact retire
 
 package.loaded.native_enemy_loot = enemy_loot
 package.loaded.native_guest_weapon = {}
+package.loaded.guest_weapon_registry = assert(loadfile("mod/SilverfishCoop/Scripts/guest_weapon_registry.lua"))()
 local npc_script = "mod/SilverfishCoop/Scripts/native_guest_npc.lua"
 local shot = {"request", "native-bandit-shot-fixture", npc:GetFullName(), scout:GetFullName(), guid}
 local function refused(adapter, fields, expected)
@@ -176,6 +177,17 @@ ready = true
 refused(fixture, shot, "native_bandit_shot_watch_required")
 assert(inspect_count == 2)
 print("Dead Bridge stock shot fixture reads the automatic watcher and requires the exact live actor and guest")
+
+ready = false
+local path = "BlueprintGeneratedClass " .. package.loaded.guest_weapon_registry.paths["sg-71-a"]
+local held, kind = object(22, "scout holds shotgun"), object(23, path)
+held.GetClass, held.HasAuthority = function() return kind end, function() return false end
+scout.EquipedItem = held
+SilverfishInspectNativeGuestWeapon = function() return true, "equipped", 1, 1 end
+refused(fixture, shot, "The verified standing guest, stock equipped weapon or living Bandit is unavailable")
+scout.EquipedItem = nil
+refused(fixture, shot, "guest_weapon_preloaded_magazine_required")
+print("The exact CQC fixture admits one stock SG-71 A round and retains the older light pistol requirement")
 
 local recover = {"request", "native-cqc-revive-approach", second:GetFullName(), scout:GetFullName()}
 state.local_pawn = {pawn = host, name = host:GetFullName()}

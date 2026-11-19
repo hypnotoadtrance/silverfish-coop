@@ -3,6 +3,7 @@ local transport = require("native_transport")
 local guest_save = require("guest_save")
 local guest_weapon = require("native_guest_weapon")
 local enemy_loot = require("native_enemy_loot")
+local weapon_profiles = require("guest_weapon_registry")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local world_name = "World " .. map .. ".PlaytestMap_01"
@@ -16,6 +17,7 @@ local stock_weapons = {
     ["BlueprintGeneratedClass /Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = true,
     ["BlueprintGeneratedClass /Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
 }
+local cqc_shotgun = "BlueprintGeneratedClass " .. weapon_profiles.paths["sg-71-a"]
 local aim_fixture
 local trace_color = { R = 0, G = 0, B = 0, A = 1 }
 
@@ -279,7 +281,7 @@ local function exact_watch(state, phase, host, guest, name, tracked)
     return (live.n == 15 or live.n == 23) and live[1] == "watching"
 end
 
-local function fire_aimed_weapon(state, phase, name, guid)
+local function fire_aimed_weapon(state, phase, name, guid, projectiles)
     local called, proof = pcall(function()
         guest_weapon.command({ "", "native-guest-weapon-fire", name, guid }, state, phase)
         for _, row in ipairs(guest_weapon.rows(state, phase, table.pack)) do
@@ -292,7 +294,7 @@ local function fire_aimed_weapon(state, phase, name, guid)
     end
     if proof[6] ~= 1 then return false, proof[7] end
     if proof[7] ~= "equipped" or type(proof[8]) ~= "number" or proof[9] ~= proof[8] - 1
-        or proof[10] ~= proof[9] or proof[11] ~= proof[9] or proof[12] ~= 1 then
+        or proof[10] ~= proof[9] or proof[11] ~= proof[9] or proof[12] ~= projectiles then
         return false, "mutation_unverified_native_bandit_shot_receipt"
     end
     return true
@@ -308,6 +310,9 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
         error("The exact enrolled guest or living Bandit is unavailable", 0)
     end
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local weapon, camera, capsule = guest.EquipedItem, guest.Camera, guest.CapsuleComponent
+    local weapon_class = valid(weapon) and weapon:GetClass():GetFullName()
+    local shotgun = tracked and weapon_class == cqc_shotgun
     if enemy_loot_fixture and guest.Dead == false and guest.IsWeaponBlocked == true
         and finite(detached.PlayerHealth) and detached.PlayerHealth <= 0 then
         if guid then error("downed", 0) end
@@ -324,13 +329,12 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
         if not checked or equipped ~= true or status ~= "equipped" or not finite(live) or live ~= stored then
             error("native_bandit_shot_equipped_guid_required", 0)
         end
-        if live < 2 then error("guest_weapon_preloaded_magazine_required", 0) end
+        if live < (shotgun and 1 or 2) then error("guest_weapon_preloaded_magazine_required", 0) end
     end
-    local weapon, camera, capsule = guest.EquipedItem, guest.Camera, guest.CapsuleComponent
     if guest.Dead ~= false or guest.IsWeaponBlocked ~= false or not valid(weapon) or not weapon:HasAuthority()
         or not same(weapon:GetWorld(), state.world) or not same(weapon:GetOwner(), guest)
         or not same(weapon:GetInstigator(), guest) or not same(weapon.User, guest) or not same(weapon.Player_Ref, guest)
-        or not stock_weapons[weapon:GetClass():GetFullName()] or weapon.HeldByPlayer ~= true
+        or (not shotgun and not stock_weapons[weapon_class]) or weapon.HeldByPlayer ~= true
         or not owned_component(camera, guest, "CameraComponent") or not owned_component(capsule, guest, "CapsuleComponent")
         or not owned_component(weapon.Arrow_Muzzle, weapon, "ArrowComponent")
         or not owned_component(bandit.CapsuleComponent, bandit, "CapsuleComponent") then
@@ -410,7 +414,7 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
             restore_pose()
             error("native_bandit_shot_scope_changed", 0)
         end
-        local fired, status = fire_aimed_weapon(state, phase, detail.name, guid)
+        local fired, status = fire_aimed_weapon(state, phase, detail.name, guid, shotgun and 9 or 1)
         if not fired then
             if not status:match("^mutation_unverified_") then restore_pose() end
             error(status, 0)

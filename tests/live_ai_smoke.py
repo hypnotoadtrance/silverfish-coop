@@ -170,15 +170,19 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             evidence["stock_client_spawn_denied"] = denied
 
         weapon_guid, remaining = None, None
+        loadout = "sg-71-a" if both_cqc else "light-pistol"
+        min_loaded, projectiles = (1, 9) if both_cqc else (2, 1)
+        projectile = "Projectile_ShotGun_Pellet_C" if both_cqc else "Projectile_Pistol_Light_C"
         if enemy_loot:
             await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            seeded = accepted("seed stock pistol", await combat_action(run, "native-guest-weapon-seed-light-pistol"))
+            seeded = accepted("stage stock loadout", await combat_action(run, "native-guest-weapon-seed", kind=loadout))
             weapon_guid = seeded["native_guest_weapon"]["guid"]
-            equipped = accepted("equip stock pistol", await combat_action(guest_run, "native-guest-weapon-equip", weapon_guid))
+            equipped = accepted("equip stock loadout", await combat_action(guest_run, "native-guest-weapon-equip", weapon_guid))
             proof = equipped["native_guest_weapon"]
             assert proof["status"] == "equipped" and proof["pawn"] == exact_pawn and proof["guid"] == weapon_guid, proof
             remaining = proof["stored_ammo"]
-            accepted("seed stock reserve", await combat_action(run, "native-guest-weapon-seed-ammo"))
+            reserve = accepted("stage the weapon's stock reserve", await combat_action(run, "native-guest-weapon-seed-ammo"))
+            evidence["stock_loadout"] = {"kind": loadout, "weapon": proof, "reserve": reserve["native_guest_weapon"]}
 
         if dead_bridge_cqc:
             target = CQC
@@ -307,12 +311,12 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     ), restored
                     revivals.append({"interaction": reply, "native": restored})
 
-                if remaining < 2:
+                if remaining < min_loaded:
                     loaded = await combat_action(guest_run, "native-guest-weapon-reload", weapon_guid)
                     if loaded.get("error") == "downed":
                         await wait(run, lambda state: killed(state) or guest_downed(state), timeout=4)
                         continue
-                    remaining = accepted("reload stock pistol", loaded)["native_guest_weapon"]["after"]
+                    remaining = accepted("reload stock firearm", loaded)["native_guest_weapon"]["after"]
                 fire = await combat_action(run, "native-bandit-shot-fixture", f"{target}|{weapon_guid}")
                 if not fire["ok"]:
                     if killed(status(run)):
@@ -323,12 +327,12 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         continue
                     if fire.get("error") == "No exact stock Bandit line of fire from the qualified staging points":
                         continue
-                    accepted("aim and fire the stock pistol", fire)
+                    accepted("aim and fire the stock firearm", fire)
                 aim = fire["native_bandit_aim"]
                 assert (aim["bandit"], aim["pawn"]) == (target, exact_pawn), aim
                 fired = fire["native_guest_weapon"]
                 assert (fired["pawn"], fired["guid"], fired["before"], fired["after"], fired["projectiles"]) == (
-                    exact_pawn, weapon_guid, remaining, remaining - 1, 1
+                    exact_pawn, weapon_guid, remaining, remaining - 1, projectiles
                 ), fired
                 remaining = fired["after"]
                 shots.append({"aim": aim, "shot": fired})
@@ -339,7 +343,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 area, target, "guest", exact_pawn
             ), observed
             assert shots and observed["hits"] > 0 and observed["loot_calls"] == 1 and observed["bounty_calls"] > 0, observed
-            assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"] != "-", observed
+            assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"].startswith(f"{projectile} "), observed
             proof_log["enemy_loot_from_exact_guest_projectile"] = observed
             bounty = actor_proof(resolved, "native_enemy_bounty", target)
             if bounty:
