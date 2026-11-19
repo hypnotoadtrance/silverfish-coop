@@ -37,6 +37,7 @@ namespace
     constexpr auto map_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
     constexpr auto pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto master_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C");
+    constexpr auto equipment_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto animator_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_AnimBP.MeleeWep_AnimBP_C");
     constexpr auto sequence_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/Melee_Slash_01.Melee_Slash_01");
     constexpr auto attack_path = STR("/Game/Classes/Libraries/Structs/MeleeAttack_Struct.MeleeAttack_Struct");
@@ -455,19 +456,28 @@ namespace
         auto* old_pipe = find<U::UClass>(pipe_path);
         auto* animator = find<U::UClass>(animator_path);
         auto* master = find<U::UClass>(master_path);
+        auto* equipment = find<U::UClass>(equipment_path);
         if (!live(pipe) || !old_pipe || pipe->GetClassPrivate() != old_pipe || !live(anim) ||
             !animator || anim->GetClassPrivate() != animator)
             return proof(lua, false, "native_guest_melee_stock_receiver_unqualified");
+        if (!master || !equipment || old_pipe->GetSuperClass() != master || master->GetSuperClass() != equipment)
+            return proof(lua, false, "native_guest_melee_stock_inheritance_unqualified");
+        // The stock melee primary calls Equipment_Master_BP. InputIntercept is
+        // declared on the separate firearm base and is absent from this chain.
+        if (pipe->GetPropertyByNameInChain(STR("InputIntercept")))
+            return proof(lua, false, "native_guest_melee_stock_input_intercept_unexpected");
         auto* primary = local_function(pipe, master, STR("Use_Item_Primary"), 2);
-        auto* contact = local_function(pipe, master, STR("Contact"), 1);
-        auto* hit = local_function(anim, animator, STR("AnimNotify_Hit"), 0);
-        auto* graph = local_function(anim, animator, STR("ExecuteUbergraph_MeleeWep_AnimBP"), 1);
+        if (!primary) return proof(lua, false, "native_guest_melee_stock_primary_unqualified");
         auto* held = primary_input<U::FBoolProperty>(primary, STR("Held"), offsetof(Primary, held));
-        if (!primary || primary->GetParmsSize() != sizeof(Primary) || !held ||
-            !primary_input<U::FDoubleProperty>(primary, STR("VarianceScaler"), offsetof(Primary, variance)) ||
-            !contact || !hit || !graph || !field<U::FObjectProperty>(pipe, STR("InputIntercept")) ||
-            object(pipe, STR("InputIntercept")))
-            return proof(lua, false, "native_guest_melee_stock_calls_unqualified");
+        if (primary->GetParmsSize() != sizeof(Primary) || !held ||
+            !primary_input<U::FDoubleProperty>(primary, STR("VarianceScaler"), offsetof(Primary, variance)))
+            return proof(lua, false, "native_guest_melee_stock_primary_parameters_unqualified");
+        auto* contact = local_function(pipe, master, STR("Contact"), 1);
+        if (!contact) return proof(lua, false, "native_guest_melee_stock_contact_unqualified");
+        auto* hit = local_function(anim, animator, STR("AnimNotify_Hit"), 0);
+        if (!hit) return proof(lua, false, "native_guest_melee_stock_hit_notify_unqualified");
+        auto* graph = local_function(anim, animator, STR("ExecuteUbergraph_MeleeWep_AnimBP"), 1);
+        if (!graph) return proof(lua, false, "native_guest_melee_stock_animation_graph_unqualified");
         candidate.pawn = pawn;
         candidate.save = save;
         candidate.canonical = canonical;

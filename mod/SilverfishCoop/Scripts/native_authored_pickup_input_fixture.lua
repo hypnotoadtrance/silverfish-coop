@@ -140,7 +140,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_clear_sight(state, pawn, actor, box, label, distances, front)
+local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -160,6 +160,12 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
     end
     if valid(pawn.EquipedItem) then sight_ignored[#sight_ignored + 1] = pawn.EquipedItem end
     local rays, blockers = points(box, center, true), {}
+    local angles = {0, 45, -45, 90, -90, 135, -135, 180}
+    if multilevel then
+        for _, angle in ipairs({22.5, -22.5, 67.5, -67.5, 112.5, -112.5, 157.5, -157.5}) do
+            angles[#angles + 1] = angle
+        end
+    end
     local moved, candidates = false, 0
     local function clear_sight(eye)
         for _, target in ipairs(rays) do
@@ -171,27 +177,41 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
     end
     local checked, placed = pcall(function()
         for _, distance in ipairs(distances) do
-            for _, angle in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
+            for _, angle in ipairs(angles) do
                 local heading = math.rad((front or 0) + angle)
                 local x, y = center.X + distance * math.cos(heading), center.Y + distance * math.sin(heading)
                 local top, bottom = center.Z + 160, center.Z - 240
-                local hit = cast(trace, pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom}, 0, false, floor_ignored)
-                local floor, normal = hit and vector(hit.ImpactPoint), hit and vector(hit.ImpactNormal)
-                if floor and normal and normal.Z >= 0.7 and floor.Z >= bottom and floor.Z < top - 1 then
-                    local point = {X = x, Y = y, Z = floor.Z + half_height + 2}
-                    local eye = {X = x + initial_eye.X - origin.X, Y = y + initial_eye.Y - origin.Y,
-                        Z = point.Z + initial_eye.Z - origin.Z}
-                    if square(point, center) <= 235^2 then
-                        candidates = candidates + 1
-                        if clear_sight(eye) and pawn:K2_TeleportTo(point, facing) then
-                            moved = true
-                            local actual, current_eye = vector(pawn:K2_GetActorLocation()), vector(camera:K2_GetComponentLocation())
-                            if actual and current_eye and square(actual, point) <= 18^2 and square(actual, center) <= 240^2
-                                and clear_sight(current_eye) then
-                                pawn:ForceNetUpdate()
-                                return true
+                local tested_heights = {}
+                for trace_kind = 1, multilevel and 2 or 1 do
+                    local from_z = top
+                    -- At the rail office a roof can sit directly above a walkable loft floor.
+                    for _ = 1, multilevel and 5 or 1 do
+                        local hit = cast(trace, pawn, {X = x, Y = y, Z = from_z}, {X = x, Y = y, Z = bottom},
+                            0, trace_kind == 2, floor_ignored)
+                        local floor, normal = hit and vector(hit.ImpactPoint), hit and vector(hit.ImpactNormal)
+                        if not floor or floor.Z < bottom or floor.Z > from_z then break end
+                        local height = math.floor(floor.Z + 0.5)
+                        if normal and normal.Z >= 0.7 and floor.Z < from_z - 1 and not tested_heights[height] then
+                            tested_heights[height] = true
+                            local point = {X = x, Y = y, Z = floor.Z + half_height + 2}
+                            local eye = {X = x + initial_eye.X - origin.X, Y = y + initial_eye.Y - origin.Y,
+                                Z = point.Z + initial_eye.Z - origin.Z}
+                            if square(point, center) <= 235^2 then
+                                candidates = candidates + 1
+                                if clear_sight(eye) and pawn:K2_TeleportTo(point, facing) then
+                                    moved = true
+                                    local actual, current_eye = vector(pawn:K2_GetActorLocation()),
+                                        vector(camera:K2_GetComponentLocation())
+                                    if actual and current_eye and square(actual, point) <= 18^2
+                                        and square(actual, center) <= 240^2 and clear_sight(current_eye) then
+                                        pawn:ForceNetUpdate()
+                                        return true
+                                    end
+                                end
                             end
                         end
+                        from_z = floor.Z - 3
+                        if from_z <= bottom then break end
                     end
                 end
             end
@@ -223,7 +243,8 @@ function input.precise_approach(state, phase, profile, pawn, actor)
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
-    approach_clear_sight(state, pawn, actor, actor.Box, label, distances, cabinet_front[profile.source])
+    approach_clear_sight(state, pawn, actor, actor.Box, label, distances, cabinet_front[profile.source],
+        profile.source == molasses)
     return "stock pickup floor and interaction sight verified"
 end
 
@@ -287,7 +308,7 @@ function input.open_cabinet(state, phase, pawn, actor, box, source)
         error(label .. "_fixture_scope_unavailable", 0)
     end
     local origin, facing = approach_clear_sight(state, pawn, actor, box, label .. "_fixture",
-        precise_distances[source], cabinet_front[source])
+        precise_distances[source], cabinet_front[source], source == molasses)
     local ok, receipt = pcall(press_stock, state, pawn, box, true, label .. "_stock_input", function()
         local delivered, why, sequence = press(pawn:GetAddress(), false)
         if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
