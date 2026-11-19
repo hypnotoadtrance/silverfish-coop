@@ -200,7 +200,9 @@ end
 
 local function owned_audio(actor)
     local component = actor.AudioComponent
-    if exact(component, "/Script/Engine.AudioComponent") and same(component:GetOwner(), actor) then return component end
+    if not valid(component) then return nil, "absent" end
+    if exact(component, "/Script/Engine.AudioComponent") and same(component:GetOwner(), actor) then return component, "owned" end
+    return nil, "foreign"
 end
 
 local function dormant(actor)
@@ -212,8 +214,8 @@ local function retired(world, actor, kind)
         return false
     end
     if kind == "sludge" then return true end
-    local audio = owned_audio(actor)
-    return same(retirement.component, audio) and audio:IsPlaying() == false
+    local audio, status = owned_audio(actor)
+    return retirement.audio_muted == true and (status == "absent" or same(retirement.component, audio) and audio.VolumeMultiplier == 0)
 end
 
 local function subway_scene(state)
@@ -252,18 +254,26 @@ local function qualified_retirement(scene)
 end
 
 local function retire_scene_actors(scene)
-    local receipt = {world = scene.world, sludge = scene.sludge, audio = scene.audio,
-        component = scene.audio and owned_audio(scene.audio)}
+    local receipt = retirement and same(retirement.world, scene.world) and retirement or {world = scene.world}
     for _, kind in ipairs({"sludge", "audio"}) do
-        local actor = receipt[kind]
+        local actor = scene[kind]
         if actor then
             actor:SetActorEnableCollision(false)
             actor:SetActorTickEnabled(false)
             actor:SetActorHiddenInGame(true)
             if not dormant(actor) then error("mutation_unverified_stock_subway_valve_" .. kind .. "_retirement", 0) end
+            receipt[kind] = actor
         end
     end
-    if receipt.component then receipt.component:Stop() end
+    if scene.audio then
+        local component = owned_audio(scene.audio)
+        if not valid(component) then error("mutation_unverified_stock_subway_valve_audio_owner", 0) end
+        -- Mixer playback state can outlive Destroy in a headless world. Verify the authored source is silent.
+        if component.VolumeMultiplier ~= 0 then component:SetVolumeMultiplier(0) end
+        if component.VolumeMultiplier ~= 0 then error("mutation_unverified_stock_subway_valve_audio_mute", 0) end
+        receipt.component, receipt.audio_muted = component, true
+        component:Stop()
+    end
     retirement = receipt
     if scene.sludge then scene.sludge:K2_DestroyActor() end
     if scene.audio then scene.audio:K2_DestroyActor() end
