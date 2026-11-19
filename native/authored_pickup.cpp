@@ -125,14 +125,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P.NorthEast_Rail_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P.NorthEast_Rail_P:PersistentLevel.Item_Molasis_C_1"),
             STR("/Game/Classes/Items/Item_Molasis.Item_Molasis_C"),
-            -16087.482435820171, 5321.0489255090415, 982.4550416480851, 9,
+            -16087.482435820171, 5321.0489255090415, 982.4550416480851, 0, std::nullopt, true,
         },
         Profile{
             "trench-savlo-keycard",
             STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P:PersistentLevel.KeyCard_Savlo_BP_C_1"),
             STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
-            30714.073646980298, -137718.5051940477, 2043.691163490359, 9,
+            30714.073646980298, -137718.5051940477, 2043.691163490359, 0,
         },
         Profile{
             "city-canned-peaches",
