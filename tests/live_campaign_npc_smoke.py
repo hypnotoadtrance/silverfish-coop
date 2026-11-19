@@ -218,13 +218,16 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         diagnostics = [row for row in rows if row[0] == "native-campaign-npc-combat-diagnostic"]
         if diagnostics and viewer == "host":
             row, = diagnostics
-            if len(row) != 7 or row[1] != MAP or row[2] not in {"active", "unavailable"}:
+            if len(row) != 11 or row[1] != MAP or row[2] not in {"active", "unavailable"}:
                 return None
             calls, attempts = map(int, row[3:5])
             if not 0 <= attempts <= calls:
                 return None
             result["combat_diagnostic"] = {"scope": row[2], "calls": calls, "attempts": attempts,
                                            "damage": row[5], "swing": row[6]}
+            if row[6] in {"stock_infection_delta_unverified", "stock_infection_verified"}:
+                result["combat_diagnostic"]["infection_delta"] = dict(zip(
+                    ("guest", "host", "reads", "writes"), map(int, row[7:]), strict=True))
         infection = [row for row in rows if row[0] == "native-campaign-npc-melee-sickness"]
         if infection and viewer == "host":
             hit, = infection
@@ -366,6 +369,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     evidence["last_combat_diagnostic"] = diagnostic
                     if diagnostic["calls"]:
                         evidence.setdefault("first_stock_damage_diagnostic", diagnostic)
+                        pawn = frame.get("combat", {}).get("guest_pawn")
+                        if pawn and (scoped := healthy_guest_sickness(status(host), pawn)):
+                            evidence["last_detached_sickness"] = scoped
                 continue
             client_history["frames"] += 1
             client_history["max_local_authority"] = max(client_history["max_local_authority"], frame["authority"])

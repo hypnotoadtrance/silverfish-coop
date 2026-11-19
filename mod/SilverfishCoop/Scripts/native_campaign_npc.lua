@@ -409,7 +409,7 @@ local function read_rows(state, phase, status_row)
         end
         if type(SilverfishReadCampaignNpcCombatDiagnostic) == "function" then
             local diagnostic = table.pack(SilverfishReadCampaignNpcCombatDiagnostic())
-            if diagnostic.n == 5 then
+            if diagnostic.n == 9 then
                 rows[#rows + 1] = status_row("native-campaign-npc-combat-diagnostic", map, table.unpack(diagnostic))
             end
         end

@@ -489,6 +489,7 @@ namespace
         int attempts{}, guest_hits{}, host_hits{};
         int damage_calls{};
         std::string_view damage_status{"waiting"}, swing_status{"waiting"};
+        SicknessSnapshot swing_after{};
     } combat_watch;
 
     std::atomic<bool> installed{};
@@ -815,6 +816,7 @@ namespace
             !read_health(combat_watch.guest_save.Get(), guest) || host != combat_watch.host_at_arm ||
             guest != combat_watch.pending_guest_after) return;
         const auto& before = combat_watch.pending_sickness;
+        combat_watch.swing_after = after;
         const auto delta = static_cast<std::int64_t>(after.guest_sickness) - before.guest_sickness;
         combat_watch.swing_status = "stock_infection_delta_unverified";
         if (!same_stock_sickness(before, after) || !after.guest_found || delta < 1 || delta > flayer_infection ||
@@ -1430,7 +1432,13 @@ namespace
         lua.set_integer(combat_watch.attempts);
         lua.set_string(combat_watch.damage_status.data());
         lua.set_string(combat_watch.swing_status.data());
-        return 5;
+        const auto& before = combat_watch.pending_sickness;
+        const auto& after = combat_watch.swing_after;
+        lua.set_integer(after.guest_sickness - static_cast<std::int64_t>(before.guest_sickness));
+        lua.set_integer(after.host_sickness - static_cast<std::int64_t>(before.host_sickness));
+        lua.set_integer(after.infect_reads - static_cast<std::int64_t>(before.infect_reads));
+        lua.set_integer(after.infect_writes - static_cast<std::int64_t>(before.infect_writes));
+        return 9;
     }
 
     int read_combat_sickness(const Lua& lua)
