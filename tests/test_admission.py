@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish.service import open_admission
+from tools.silverfish.runtime import MAP
+from tools.silverfish.service import Client, open_admission
 
 
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):
@@ -32,3 +33,22 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         result = await open_admission(transport, self.invite, {}, timeout=1, queue=True)
         self.assertFalse(result["accepted"])
         self.assertEqual(transport.connect.await_count, 1)
+
+    async def test_client_disables_routes_when_admission_does_not_confirm_selected_character(self):
+        invite = dict(self.invite, guest_id="guest", credential="credential", character_id="scout", game_build="build")
+        for character in (None, "different-character"):
+            with self.subTest(character=character):
+                response = {"accepted": True, "session_id": "a" * 32, "zone": MAP, "zone_epoch": "first"}
+                if character is not None:
+                    response["character_id"] = character
+                transport = Mock(address=("127.0.0.1", 7778), game_access=True,
+                                 connect=AsyncMock(return_value=response), disconnect=AsyncMock())
+                control = Mock()
+                client = Client(control, transport, invite, Mock())
+
+                with self.assertRaisesRegex(RuntimeError, "did not confirm the selected character"):
+                    await client.connect()
+
+                transport.disconnect.assert_awaited_once_with()
+                control.event.assert_not_called()
+                self.assertIsNone(client.host_session)

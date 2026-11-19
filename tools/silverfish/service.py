@@ -3099,6 +3099,9 @@ class Client:
         if not result.get("accepted") or not self.transport.game_access:
             self.next_retry = time.monotonic() + 3
             raise RuntimeError("Host declined admission")
+        if result.get("character_id") != request["character_id"]:
+            await self.transport.disconnect()
+            raise RuntimeError("Host admission did not confirm the selected character")
         session = result.get("session_id")
         if not isinstance(session, str) or len(session) != 32:
             await self.transport.disconnect()
