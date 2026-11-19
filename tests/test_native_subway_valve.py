@@ -1,4 +1,6 @@
 import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 import unittest
 from types import SimpleNamespace
@@ -6,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_host_save, native_subway_valve as valve, native_wire_board, party
 from tools.silverfish.campaign import CampaignFormatError
+from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import BOROUGH
 
 
@@ -43,6 +46,19 @@ def authority():
 
 
 class FloodControlTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_consumes_the_exact_stock_interact_target_once(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            inputs = directory / "input.tsv"
+            inputs.write_bytes(b"interact\t1\tsubway-valve\ninteract\t2\tsubway-valve-extra\ninteract\t3\tsubway-valve")
+            bridge = Bridge(directory, None)
+            self.assertEqual([target for _, target in bridge.interactions()], [valve.INPUT])
+            self.assertEqual(bridge.interactions(), [])
+            with inputs.open("ab") as output:
+                output.write(b"\n")
+            self.assertEqual([target for _, target in bridge.interactions()], [valve.INPUT])
+            self.assertEqual(bridge.interactions(), [])
+
     def test_board_and_objective_reject_wrong_actor_or_stock_delta(self):
         self.assertEqual(native_wire_board.fixture_selection(BOROUGH, valve.QUEST), (valve.QUEST,))
         with self.assertRaises(party.RuleError):

@@ -537,7 +537,8 @@ class Bridge:
             if target is not None and not target.isascii():
                 continue
             decoded = target.decode("ascii") if target is not None else None
-            if (target is not None and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
+            if (target is not None and decoded != native_subway_valve.INPUT
+                    and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
