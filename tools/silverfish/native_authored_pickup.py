@@ -5,7 +5,7 @@ import time
 
 from . import native_host_save, party
 from .native_gold import valid_guid
-from .travel import CITY, OBSERVATORY, RAIL_YARD
+from .travel import CITY, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
 
 SOURCE = "observatory-comp-board"
@@ -16,6 +16,7 @@ CITY_BRANDY = "city-paladin-brandy"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
+SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -26,6 +27,8 @@ SOURCES = {
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
     DEPOT_DOCUMENTS: (RAIL_YARD, f"Documents_DepotOffice_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
                       "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
+    SCIENTIST_BLANK_TAPE: (SCIENTIST_SHOP, f"DataTape_Blank_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3",
+                           "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

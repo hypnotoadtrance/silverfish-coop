@@ -12,6 +12,7 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
+local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local profiles = {
     {
         map = observatory,
@@ -51,6 +52,14 @@ local profiles = {
         path = depot .. ".RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
         class = "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C",
         name = "Documents_DepotOffice_BP_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = scientist,
+        source = "scientist-blank-data-tape",
+        path = scientist .. ".Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3",
+        class = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C",
+        name = "DataTape_Blank_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

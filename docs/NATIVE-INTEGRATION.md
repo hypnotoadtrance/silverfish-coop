@@ -96,6 +96,8 @@ The Gunsmith test opened 12 offers through stock Interact and checked Page Up an
 
 Two guests opened independent dialogues with the Observatory Castaway. The headless fixture aimed the camera and used the original trace and Interact callback. One guest read the stock story, returned to the greeting, and closed the conversation through four stock Interact events. The other guest kept its own session and could use its own choices. A cross-character confirmation and replay were refused, and the host's quest, wallet, and reputation snapshots matched.
 
+At the Scientist, one guest used eight stock Interact presses to ask Dr. Mosby about anomalies and drill data and accept Stone Maze Readings. A second guest could explore independently and received an already-present response when accepting again. The two stock topic flags and active quest survived a same-port host restart. The original save hashes matched.
+
 The verified fresh Wanderer preset uses the stock Observatory start, Mercy rules, and in-memory character application. A loopback host committed seed 142857 before accepting invitations. The starter armor, bag, and note retained their exact GUIDs after a same-port restart. The guest kept its independent default inventory. The original save files kept the same hashes.
 
 Isolated PlaytestMap runs recorded the exact guest's lethal Light Pistol projectile through the stock Bandit death callback and one stock loot roll. The default guest yielded six shotgun shells. In the Bounty run the detached guest's one permanent effect satisfied both stock checks and the Bandit yielded nine shells. The host's stock perk cache kept its original values. This evidence covers the qualified PlaytestMap Bandit.
@@ -131,6 +133,8 @@ At the Observatory, the guest fired seven stock rounds from the suppressed Light
 The Army Pistol, Pistol, Pistol02, and Tac Pistol passed the same stock input sequence. The headless fixture converted each exact stock item into an owned inventory row. The guest emptied each seven-round load, reloaded nine 9mm Ball rounds from their own reserve, and kept the exact item and all nine rounds after restart. The original save hashes matched.
 
 The 1911, Fancy 1911, and Heavy Pistol used the same primary and reload bindings with their exact stock .45 Ball profiles. The run refused to reload the empty 1911 with the guest's 9mm reserve. A split-stack run verified the Fancy 1911's first reload moved the exact two-round remainder into the magazine and left the next ten-round stack intact. Its second reload brought the magazine to eight. All three pistols and the remaining typed reserve survived restart, and the original save hashes matched.
+
+An Observatory headless fixture held the stock standard SMG trigger on the enrolled authority pawn. Explicit release ended a seven-round burst. Lease expiry ended a second nine-round burst. Both runs matched each magazine debit to one guest-owned projectile and saw no shots after release. The same weapon GUID restored its remaining nine rounds after restart. Remote trigger hold remains a separate input path under development.
 
 The SG 71-A fired one guest-owned shell into nine stock buckshot projectiles per press. The guest emptied the exact seven-shell load, refused nonmatching reserve ammunition, and reloaded two independent five-shell stacks in two presses. The exact weapon kept ten shells after restart, and the original save hashes matched.
 

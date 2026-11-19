@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -80,6 +82,13 @@ namespace
             STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
             -571.3226728526, -8316.4123004860, -199.9998970174, 1,
         },
+        Profile{
+            "scientist-blank-data-tape",
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3"),
+            STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
+            7580.6051850203, 5202.1434900782, -642.6426753447, 9,
+        },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
@@ -91,7 +100,13 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto inventory_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
+    constexpr auto default_item_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeDefaultItem");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
+    constexpr auto stone_maze_world = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P");
+    constexpr auto tape_station_path = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1");
+    constexpr auto tape_station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
+    constexpr auto blank_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
+    constexpr auto filled_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr std::array guid_members{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr std::size_t parameter_capacity = 256;
     constexpr double maximum_range_squared = 250.0 * 250.0;
@@ -428,6 +443,13 @@ namespace
             return result;
         }
 
+        void set_identity(void* value, const Guid& identity) const
+        {
+            auto* data = guid->ContainerPtrToValuePtr<void>(value);
+            for (std::size_t index = 0; index < words.size(); ++index)
+                words[index]->SetPropertyValueInContainer(data, std::bit_cast<std::int32_t>(identity[index]));
+        }
+
         bool authored(const void* value, U::UClass* item_class) const
         {
             return item_class && read(klass, value) == item_class && identity(value) != Guid{};
@@ -516,6 +538,208 @@ namespace
         lua.set_bool(ok);
         lua.set_string(detail);
         return 2;
+    }
+
+    bool parse_guid(std::string_view text, Guid& identity)
+    {
+        if (text.size() != 32 || text.find_first_not_of("0123456789ABCDEF") != std::string_view::npos) return false;
+        for (std::size_t index = 0; index < identity.size(); ++index)
+        {
+            const auto* part = text.data() + index * 8;
+            const auto parsed = std::from_chars(part, part + 8, identity[index], 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != part + 8) return false;
+        }
+        return identity != Guid{};
+    }
+
+    struct TapeStores
+    {
+        const RowSchema& rows;
+        U::FArrayProperty* equipment = field<U::FArrayProperty>(rows.save, STR("PlayerEquipment"));
+        U::FStructProperty* armor = field<U::FStructProperty>(rows.save, STR("PlayerArmor"));
+        U::FStructProperty* helmet = field<U::FStructProperty>(rows.save, STR("PlayerHelmet"));
+
+        bool valid() const
+        {
+            auto* equipment_row = equipment ? U::CastField<U::FStructProperty>(equipment->GetInner()) : nullptr;
+            return equipment_row && equipment_row->GetStruct().Get() == rows.type &&
+                armor && armor->GetStruct().Get() == rows.type && helmet && helmet->GetStruct().Get() == rows.type;
+        }
+
+        struct Found
+        {
+            int count{};
+            void* backpack_row{};
+        };
+
+        bool scan(U::UObject* save, const Guid& id, Found& found) const
+        {
+            found = {};
+            for (auto* property : {rows.array, equipment})
+            {
+                U::FScriptArrayHelper items(property, property->ContainerPtrToValuePtr<void>(save));
+                if (items.Num() < 0 || items.Num() > 1024) return false;
+                for (int index = 0; index < items.Num(); ++index)
+                {
+                    auto* row = items.GetRawPtr(index);
+                    if (rows.identity(row) != id) continue;
+                    ++found.count;
+                    if (property == rows.array) found.backpack_row = row;
+                }
+            }
+            for (auto* property : {armor, helmet})
+                if (rows.identity(property->ContainerPtrToValuePtr<void>(save)) == id) ++found.count;
+            return true;
+        }
+    };
+
+    U::UWorld* tape_owner_world(U::UObject* pawn, U::UObject* target, U::UObject* canonical)
+    {
+        if (!pawn || !target || !canonical || !boolean(pawn, STR("Dead"), false) ||
+            !boolean(pawn, STR("bActorIsBeingDestroyed"), false) || role(pawn) != 3 || object(pawn, STR("Save")) != target)
+            return nullptr;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        auto* controller = object(pawn, STR("Controller"));
+        auto* instance = object(world, STR("OwningGameInstance"));
+        auto* driver = object(world, STR("NetDriver"));
+        if (!live(world) || world->GetPathName() != stone_maze_world ||
+            !exact(instance, instance_path) || object(instance, STR("SaveSlot_Ref")) != canonical ||
+            !exact(controller, controller_path) || !boolean(controller, STR("bActorIsBeingDestroyed"), false) ||
+            role(controller) != 3 || object(controller, STR("Pawn")) != pawn ||
+            static_cast<U::AActor*>(controller)->GetWorld() != world || !live(driver) || object(driver, STR("World")) != world ||
+            !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")))
+            return nullptr;
+        auto* player = object(controller, STR("Player"));
+        const bool owned = target == canonical ? local_player(controller, player) :
+            connection(driver, player) && object(player, STR("PlayerController")) == controller &&
+            object(player, STR("OwningActor")) == controller;
+        return owned ? world : nullptr;
+    }
+
+    bool tape_station_reachable(U::UWorld* world, U::UObject* pawn)
+    {
+        auto* station = find<U::UObject>(tape_station_path);
+        auto* box = object(station, STR("Box"));
+        return exact(station, tape_station_class) && role(station) == 3 &&
+            boolean(station, STR("bActorIsBeingDestroyed"), false) && exact(box, STR("/Script/Engine.BoxComponent")) &&
+            box->GetOuterPrivate() == station && static_cast<U::AActor*>(station)->GetWorld() == world &&
+            static_cast<U::AActor*>(station)->GetLevel() == object(world, STR("PersistentLevel")) && in_range(pawn, station);
+    }
+
+    bool exclusive_tape_ids(const TapeStores& stores, U::UWorld* world, U::UObject* pawn, U::UObject* target,
+                            U::UObject* canonical, const Guid& blank, const Guid& filled)
+    {
+        const auto free = [&](U::UObject* save) {
+            TapeStores::Found left, right;
+            return stores.scan(save, blank, left) && stores.scan(save, filled, right) &&
+                left.count == 0 && right.count == 0;
+        };
+        if (target != canonical && !free(canonical)) return false;
+        auto* pawn_type = pawn->GetClassPrivate();
+        bool unique = true;
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* other, int, int) {
+            if (other == pawn || !live(other) || other->GetClassPrivate() != pawn_type || role(other) != 3 ||
+                static_cast<U::AActor*>(other)->GetWorld() != world) return RC::LoopAction::Continue;
+            auto* controller = object(other, STR("Controller"));
+            if (!exact(controller, controller_path) || object(controller, STR("Pawn")) != other)
+                return RC::LoopAction::Continue;
+            auto* save = object(other, STR("Save"));
+            unique = save != target && (!exact(save, save_path) || save == canonical || free(save));
+            return unique ? RC::LoopAction::Continue : RC::LoopAction::Break;
+        });
+        return unique;
+    }
+
+    int exchange_tape(const Lua& lua)
+    {
+        if (!ready() || !env("SILVERFISH_COOP_NATIVE_ZONE") || lua.get_stack_size() != 5 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
+            !lua.is_string(4) || !lua.is_string(5)) return result(lua, false, "stone_maze_tape_arguments");
+        const auto pawn_address = lua.get_integer();
+        const auto target_address = lua.get_integer();
+        const auto canonical_address = lua.get_integer();
+        Guid blank, filled;
+        if (pawn_address <= 0 || target_address <= 0 || canonical_address <= 0 || !parse_guid(lua.get_string(), blank))
+            return result(lua, false, "stone_maze_tape_arguments");
+        const auto supplied_guid = lua.get_string();
+        if (!parse_guid(supplied_guid, filled) || blank == filled) return result(lua, false, "stone_maze_tape_arguments");
+
+        RowSchema rows;
+        TapeStores stores{rows};
+        if (!rows.bind() || !stores.valid()) return result(lua, false, "stone_maze_tape_inventory_schema_unavailable");
+        auto* pawn = live_address(static_cast<Address>(pawn_address), find<U::UClass>(pawn_path));
+        auto* target = live_address(static_cast<Address>(target_address), rows.save);
+        auto* canonical = live_address(static_cast<Address>(canonical_address), rows.save);
+        auto* world = tape_owner_world(pawn, target, canonical);
+        if (!world || !tape_station_reachable(world, pawn) || !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
+            return result(lua, false, "stone_maze_exact_tape_owner_unavailable");
+
+        auto* blank_class = find<U::UClass>(blank_tape_path);
+        auto* filled_class = find<U::UClass>(filled_tape_path);
+        auto* base = find<U::UClass>(base_class);
+        auto* filled_cdo = filled_class ? filled_class->GetClassDefaultObject().Get() : nullptr;
+        auto* blank_cdo = blank_class ? blank_class->GetClassDefaultObject().Get() : nullptr;
+        auto* quantity = field<U::FIntProperty>(rows.type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+        const auto stock_tape = [&](U::UObject* cdo, U::UClass* type) {
+            auto* category = field<U::FByteProperty>(cdo, STR("ItemType"));
+            return cdo && base && cdo->HasAnyFlags(U::RF_ClassDefaultObject) && cdo->GetClassPrivate() == type &&
+                type->IsChildOf(base) && category && category->GetPropertyValueInContainer(cdo) == 9 &&
+                boolean(cdo, STR("Stacks"), false);
+        };
+        TapeStores::Found old, replacement;
+        if (!quantity || !stock_tape(blank_cdo, blank_class) || !stock_tape(filled_cdo, filled_class) ||
+            !stores.scan(target, blank, old) || !stores.scan(target, filled, replacement))
+            return result(lua, false, "stock_stone_maze_tapes_unavailable");
+
+        const auto success = [&](std::string_view status) {
+            result(lua, true, status);
+            lua.set_string(supplied_guid);
+            return 3;
+        };
+        if (old.count == 0 && replacement.count == 1 && replacement.backpack_row &&
+            rows.matches_actor(replacement.backpack_row, filled_cdo)) return success("already_exchanged");
+        if (old.count != 1 || !old.backpack_row || !rows.authored(old.backpack_row, blank_class) ||
+            quantity->GetPropertyValueInContainer(old.backpack_row) != 0 || replacement.count != 0)
+            return result(lua, false, "stone_maze_exact_blank_tape_required");
+
+        auto* fn = find<U::UFunction>(default_item_path);
+        auto* library = find<U::UObject>(library_path);
+        auto* type = parameter<U::FClassProperty>(fn, STR("Item_Class"), 0);
+        auto* context = parameter<U::FObjectProperty>(fn, STR("__WorldContext"), sizeof(void*));
+        auto* output = parameter<U::FStructProperty>(fn, STR("Item"), 2 * sizeof(void*), true);
+        if (!fn || !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) || fn->GetOuterPrivate() != library->GetClassPrivate() ||
+            fn->GetNumParms() != 3 || fn->GetReturnProperty() || fn->GetParmsSize() > parameter_capacity ||
+            fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || !type || type->GetMetaClass().Get() != base ||
+            !context || !context->GetPropertyClass().Get() || !pawn->IsA(context->GetPropertyClass().Get()) ||
+            !output || output->GetStruct().Get() != rows.type) return result(lua, false, "stock_tape_conversion_schema_unavailable");
+        alignas(std::max_align_t) std::array<std::byte, parameter_capacity> buffer{};
+        output->InitializeValue_InContainer(buffer.data());
+        const auto release_output = [output](std::byte* memory) { output->DestroyValue_InContainer(memory); };
+        const std::unique_ptr<std::byte, decltype(release_output)> initialized(buffer.data(), release_output);
+        type->SetObjectPropertyValue(type->ContainerPtrToValuePtr<void>(buffer.data()), filled_class);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(buffer.data()), pawn);
+        library->ProcessEvent(fn, buffer.data());
+        auto* generated = output->ContainerPtrToValuePtr<void>(buffer.data());
+        if (!rows.matches_actor(generated, filled_cdo) || tape_owner_world(pawn, target, canonical) != world ||
+            !stores.scan(target, blank, old) || old.count != 1 || !old.backpack_row ||
+            !rows.authored(old.backpack_row, blank_class) || quantity->GetPropertyValueInContainer(old.backpack_row) != 0 ||
+            !stores.scan(target, filled, replacement) || replacement.count != 0)
+            return result(lua, false, "stock_filled_tape_unverified");
+        rows.set_identity(generated, filled);
+
+        const auto destroy_row = [&rows](void* value) { rows.row->DestroyAndFreeValue(value); };
+        const std::unique_ptr<void, decltype(destroy_row)> original(rows.row->AllocateAndInitializeValue(), destroy_row);
+        if (!original) return result(lua, false, "stock_blank_tape_backup_unavailable");
+        auto* slot = old.backpack_row;
+        rows.row->CopyCompleteValue(original.get(), slot);
+        if (!rows.identical(original.get(), slot)) return result(lua, false, "stock_blank_tape_backup_unavailable");
+        rows.row->CopyCompleteValue(slot, generated);
+        if (stores.scan(target, blank, old) && old.count == 0 && stores.scan(target, filled, replacement) &&
+            replacement.count == 1 && replacement.backpack_row == slot && rows.identical(slot, generated))
+            return success("exchanged");
+        rows.row->CopyCompleteValue(slot, original.get());
+        return result(lua, false, rows.identical(slot, original.get()) ? "stock_filled_tape_copy_rolled_back" :
+            "mutation_unverified_stone_maze_tape_copy");
     }
 
     int set_scope(const Lua& lua)
@@ -697,6 +921,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);
+        lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);
         if (headless()) lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
     }

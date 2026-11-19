@@ -145,6 +145,8 @@ Within reach of the Borough or Scientist board, `native-bounty-board-list` shows
 
 Within reach of the Observatory Castaway, use `native-dialogue-open --target castaway`. The response returns the stock row, choices, and a confirmation token. Use `native-dialogue-choose --target TOKEN@ORDINAL` with an ordinal from that response. Read the next response for its current token and available choices.
 
+Use `native-dialogue-open --target mosby` at the Scientist to explore Mosby's stock topics. Once the party has asked about anomalies and drill data, his dialogue can issue Stone Maze Readings for the host campaign. Each guest keeps their own conversation and the party shares the unlocked topics.
+
 At Borough's board, use Up and Down to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos. Interact checks the selected contract. Press it again to accept or redeem when the panel prompts you. At the Scientist's board, the same controls redeem Find a Computer Board for the player carrying it.
 
 The Dead Bridge photography contract unlocks on Borough's board at 4 host XP. Equip a stock camera and center a turret before pressing primary input. Either player can take either photo. For scripted actions, use `native-turret-photo-capture --target turret-13` or `--target turret-15` while framing the matching turret. The host verifies the shot in the game and records each turret once. Return to Borough and use `native-quest-turnin --target Photo_DB_Turrets` for the shared cash and personal XP.

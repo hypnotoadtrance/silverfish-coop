@@ -45,6 +45,9 @@ namespace
     constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
     constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
+    constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
+    constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
+    constexpr auto stone_maze_id = STR("Clt_Tape_StoneMaze_01");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto quest_path = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
@@ -296,7 +299,8 @@ namespace
     enum class WirePhase { active, complete };
 
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
-                          U::UClass* weapon, U::UClass* ammo, WirePhase phase, int expected_final_step = 2)
+                          U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
+                          int expected_final_step = 2, int expected_xp = 1)
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -332,7 +336,7 @@ namespace
         }
         if (!found || final_step->GetPropertyValueInContainer(found) != expected_final_step ||
             consumed->GetPropertyValueInContainer(found) != (wanted != nullptr) ||
-            xp->GetPropertyValueInContainer(found) != 1 || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
+            xp->GetPropertyValueInContainer(found) != expected_xp || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
         const auto current_step = step->GetPropertyValueInContainer(found);
         if (phase == WirePhase::complete ? current_step != -10 : current_step < 1 || current_step > expected_final_step)
             return false;
@@ -340,9 +344,9 @@ namespace
         if (requested.Num() != (wanted ? 1 : 0) ||
             (wanted && objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted)) return false;
         U::FScriptArrayHelper rewards(items, items->ContainerPtrToValuePtr<void>(found));
-        if (!weapon && !ammo) return rewards.Num() == 0;
-        return weapon && ammo && rewards.Num() == 2 && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == weapon &&
-            item->GetObjectPropertyValue(rewards.GetRawPtr(1)) == ammo;
+        if (!first_reward) return !second_reward && rewards.Num() == 0;
+        return rewards.Num() == (second_reward ? 2 : 1) && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == first_reward &&
+            (!second_reward || item->GetObjectPropertyValue(rewards.GetRawPtr(1)) == second_reward);
     }
 
     bool wire_recipe(U::UObject* stock, U::UClass* weapon, U::UClass* ammo, WirePhase phase)
@@ -657,6 +661,8 @@ namespace
         const U::TCHAR* id;
         const U::TCHAR* item;
         int cash;
+        const U::TCHAR* reward{};
+        int xp = 1;
     };
 
     constexpr ObjectiveQuest copper_stop_objective{"wire", PartyWorld::borough, STR("Clt_Wire"), wire_path, 0};
@@ -664,6 +670,8 @@ namespace
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
+    constexpr ObjectiveQuest stone_maze_objective{"stone_maze", PartyWorld::scientist, stone_maze_id,
+        stone_maze_tape_path, 7500, stone_maze_armor_path, 3};
 
     template <const ObjectiveQuest& Quest>
     int stage_objective(const Lua& lua)
@@ -690,7 +698,9 @@ namespace
         const auto matches_recipe = [&] {
             if constexpr (copper_stop)
                 return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
-            return objective_recipe(party.stock, Quest.id, wanted, Quest.cash, nullptr, nullptr, WirePhase::active);
+            auto* reward = Quest.reward ? find<U::UClass>(Quest.reward) : nullptr;
+            return (!Quest.reward || reward) && objective_recipe(party.stock, Quest.id, wanted, Quest.cash, reward,
+                nullptr, WirePhase::active, 2, Quest.xp);
         };
         if (!inventory.bind(copper_stop) || !matches_recipe())
             return fail("wire_objective_active_recipe_required");
@@ -964,6 +974,173 @@ namespace
         pending.committed = true;
         return granted("granted");
     }
+
+    bool hazop_row(const Inventory& inventory, const void* row)
+    {
+        auto* klass = find<U::UClass>(stone_maze_armor_path);
+        auto* defaults = klass ? klass->GetClassDefaultObject().Get() : nullptr;
+        if (!row || !klass || !klass->IsChildOf(inventory.base_class) || inventory.klass(row) != klass ||
+            inventory.identity(row) == Guid{} || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            !bool_value(defaults, STR("Stacks"), false)) return false;
+        auto* kind = field<U::FByteProperty>(defaults, STR("ItemType"));
+        auto* ammo = field<U::FIntProperty>(defaults, STR("Ammo"));
+        auto* weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+        auto* value = field<U::FIntProperty>(defaults, STR("Value"));
+        auto* tag = field<U::FNameProperty>(defaults, STR("DataTag"));
+        auto* payload = field<U::FStructProperty>(defaults, STR("DataStruct"));
+        auto* never_drop = field<U::FBoolProperty>(defaults, STR("NeverDrop"));
+        return kind && kind->GetPropertyValueInContainer(defaults) == 7 && ammo && weight && value &&
+            weight->GetPropertyValueInContainer(defaults) == 2.0 && value->GetPropertyValueInContainer(defaults) == 1400 &&
+            inventory.ammo->GetPropertyValueInContainer(row) == ammo->GetPropertyValueInContainer(defaults) &&
+            inventory.weight->GetPropertyValueInContainer(row) == 2.0 && inventory.value->GetPropertyValueInContainer(row) == 1400 &&
+            tag && inventory.tag->GetPropertyValueInContainer(row) == tag->GetPropertyValueInContainer(defaults) &&
+            never_drop && inventory.never_drop->GetPropertyValueInContainer(row) == never_drop->GetPropertyValueInContainer(defaults) &&
+            payload && payload->GetStruct().Get() == inventory.data->GetStruct().Get() &&
+            inventory.data->Identical(inventory.data->ContainerPtrToValuePtr<void>(row), payload->ContainerPtrToValuePtr<void>(defaults));
+    }
+
+    bool stone_maze_completed(const Party& party)
+    {
+        auto* armor = find<U::UClass>(stone_maze_armor_path);
+        return armor && objective_recipe(party.stock, stone_maze_id, find<U::UClass>(stone_maze_tape_path), 7500,
+            armor, nullptr, WirePhase::complete, 2, 3);
+    }
+
+    const void* stone_maze_template(const Inventory& inventory, Address address, const Guid& guid)
+    {
+        auto* escrow = isolated_save(address, inventory);
+        if (!escrow || !inventory.same_as_defaults(escrow)) return nullptr;
+        U::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
+        return rows.Num() == 1 && inventory.identity(rows.GetRawPtr()) == guid && hazop_row(inventory, rows.GetRawPtr()) ?
+            rows.GetRawPtr() : nullptr;
+    }
+
+    struct AppendReward
+    {
+        U::FScriptArrayHelper& rows;
+        int before = rows.Num();
+        bool committed = false;
+
+        bool append(const Inventory& inventory, const void* row)
+        {
+            if (before < 0 || before >= max_inventory || rows.AddValues(1) != before || rows.Num() != before + 1) return false;
+            auto* added = rows.GetRawPtr(before);
+            inventory.row->CopyCompleteValue(added, row);
+            return inventory.identical(added, row) && hazop_row(inventory, added);
+        }
+
+        ~AppendReward()
+        {
+            if (!committed && rows.Num() == before + 1) rows.RemoveValues(before, 1);
+        }
+    };
+
+    int capture_stone_maze_reward(const Lua& lua)
+    {
+        std::array<Address, 3> args{};
+        if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args))
+            return reply(lua, false, "stone_maze_reward_capture_unavailable");
+        const auto guid = read_guid(lua.get_string());
+        Party party;
+        Inventory inventory;
+        if (guid == Guid{} || !inventory.bind(false) || !party.read(args[0], args[1], args[1], false, PartyWorld::scientist) ||
+            !stone_maze_completed(party)) return reply(lua, false, "stone_maze_reward_completed_host_required");
+        auto* escrow = isolated_save(args[2], inventory);
+        Inventory::Match stock;
+        if (!escrow || !inventory.same_as_defaults(escrow) || !inventory.locate(party.stock, guid, stock) ||
+            stock.count != 1 || stock.backpack_index < 0 || !hazop_row(inventory, stock.row))
+            return reply(lua, false, "stone_maze_reward_exact_host_hazop_required");
+        U::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
+        if (rows.Num() != 0) return reply(lua, false, "stone_maze_reward_empty_template_required");
+        ProtectedInventory protected_stock;
+        auto prepared = copy(inventory.row, stock.row);
+        if (!prepared || !protected_stock.capture(inventory, party.stock)) return reply(lua, false, "stone_maze_reward_snapshot_failed");
+        AppendReward guard{rows};
+        if (!guard.append(inventory, prepared.get()) || !protected_stock.unchanged() || !stone_maze_template(inventory, args[2], guid))
+            return reply(lua, false, "stone_maze_reward_template_append_unverified");
+        guard.committed = true;
+        return reply(lua, true, "captured");
+    }
+
+    int verify_stone_maze_reward(const Lua& lua)
+    {
+        std::array<Address, 1> args{};
+        const bool compare = lua.get_stack_size() == 3;
+        if (!available(lua, compare ? 3 : 2) || !lua.is_string(2) || (compare && !lua.is_integer(3)) || !read_addresses(lua, args))
+            return reply(lua, false, "stone_maze_reward_verify_unavailable");
+        const auto guid = read_guid(lua.get_string());
+        Inventory inventory;
+        const auto* stored = guid != Guid{} && inventory.bind(false) ? stone_maze_template(inventory, args[0], guid) : nullptr;
+        if (!stored) return reply(lua, false, "stone_maze_reward_empty_or_changed_template");
+        if (compare)
+        {
+            const auto source = lua.get_integer();
+            if (source <= 0 || static_cast<Address>(source) == args[0]) return reply(lua, false, "stone_maze_reward_distinct_source_required");
+            const auto* original = stone_maze_template(inventory, static_cast<Address>(source), guid);
+            if (!original || !inventory.identical(original, stored)) return reply(lua, false, "stone_maze_reward_payload_changed");
+        }
+        return reply(lua, true, "verified");
+    }
+
+    int grant_stone_maze_reward(const Lua& lua)
+    {
+        std::array<Address, 4> args{};
+        if (!available(lua, 6) || !lua.is_string(5) || !lua.is_string(6) || !read_addresses(lua, args))
+            return reply(lua, false, "stone_maze_reward_grant_unavailable");
+        const auto source = read_guid(lua.get_string());
+        const auto target = read_guid(lua.get_string());
+        Party party;
+        Inventory inventory;
+        if (source == Guid{} || target == Guid{} || source == target || !inventory.bind(false) ||
+            !party.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) || !stone_maze_completed(party))
+            return reply(lua, false, "stone_maze_reward_exact_detached_guest_required");
+        const auto* stored = stone_maze_template(inventory, args[3], source);
+        if (!stored) return reply(lua, false, "stone_maze_reward_exact_template_required");
+        auto prepared = copy(inventory.row, stored);
+        if (!prepared) return reply(lua, false, "stone_maze_reward_copy_failed");
+        inventory.set_identity(prepared.get(), target);
+
+        std::array<U::UObject*, max_guests + 2> owners{party.detached, party.stock};
+        std::ranges::copy(party.other, owners.begin() + 2);
+        std::array<ProtectedInventory, max_guests + 2> snapshots;
+        Inventory::Match prior;
+        if (!inventory.locate(party.detached, target, prior) || prior.count > 1) return reply(lua, false, "stone_maze_reward_guest_guid_conflict");
+        for (std::size_t i = 0; i < owners.size() && owners[i]; ++i)
+        {
+            Inventory::Match conflict;
+            if ((i != 0 && (!inventory.locate(owners[i], target, conflict) || conflict.count)) || !snapshots[i].capture(inventory, owners[i]))
+                return reply(lua, false, "stone_maze_reward_party_guid_or_snapshot_conflict");
+        }
+        if (prior.count == 1)
+            return prior.backpack_index >= 0 && inventory.identical(prior.row, prepared.get()) ? reply(lua, true, "already_granted") :
+                reply(lua, false, "stone_maze_reward_guest_guid_conflict");
+
+        auto* owned = inventory.backpack->ContainerPtrToValuePtr<void>(party.detached);
+        U::FScriptArrayHelper rows(inventory.backpack, owned);
+        if (rows.Num() >= max_inventory) return reply(lua, false, "stone_maze_reward_guest_backpack_full");
+        const auto* buffer = rows.Num() ? rows.GetRawPtr() : nullptr;
+        for (std::size_t i = 0; i < owners.size() && owners[i]; ++i)
+            for (auto* part : {inventory.backpack, inventory.equipment})
+            {
+                auto* data = part->ContainerPtrToValuePtr<void>(owners[i]);
+                U::FScriptArrayHelper siblings(part, data);
+                if ((i != 0 || part != inventory.backpack) && (data == owned || (buffer && siblings.Num() && siblings.GetRawPtr() == buffer)))
+                    return reply(lua, false, "stone_maze_reward_party_inventory_alias");
+            }
+
+        U::FScriptArrayHelper before(inventory.backpack, snapshots[0].before[0].get());
+        AppendReward guard{rows};
+        if (!guard.append(inventory, prepared.get())) return reply(lua, false, "mutation_unverified_stone_maze_reward_append");
+        for (int i = 0; i < before.Num(); ++i)
+            if (!inventory.identical(before.GetRawPtr(i), rows.GetRawPtr(i))) return reply(lua, false, "mutation_unverified_stone_maze_reward_inventory");
+        for (std::size_t i = 0; i < owners.size() && owners[i]; ++i)
+            if (!snapshots[i].unchanged(i == 0 ? 1 : 0)) return reply(lua, false, "mutation_unverified_stone_maze_reward_other_inventory");
+        Party current;
+        if (!current.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) || !party.same_identity(current) ||
+            !stone_maze_template(inventory, args[3], source)) return reply(lua, false, "mutation_unverified_stone_maze_reward_scope");
+        guard.committed = true;
+        return reply(lua, true, "granted");
+    }
 }
 
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
@@ -974,6 +1151,10 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
+    lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);
+    lua.register_function("SilverfishCaptureStoneMazeReward", capture_stone_maze_reward);
+    lua.register_function("SilverfishVerifyStoneMazeReward", verify_stone_maze_reward);
+    lua.register_function("SilverfishGrantStoneMazeReward", grant_stone_maze_reward);
     lua.register_function("SilverfishCaptureWireRewards", capture<false>);
     lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
     lua.register_function("SilverfishGrantWireRewards", grant<false>);
