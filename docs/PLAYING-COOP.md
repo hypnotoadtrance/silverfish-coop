@@ -86,10 +86,11 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
 | `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Loopback testing covered four guests at once. |
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
+| `--native-guest-held-fire` | Enables experimental hold and release for the standard SMG on a current matched native stage. The invitation enables the matching guest control. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
 | Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection. Home twice equips supported gear or uses one clean Bandage. End cancels a confirmation or closes the overlay. Reopen it to refresh the inventory. |
-| Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock firearm and reload controls explicitly. The stock primary path handles one shot per press. |
+| Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock firearm and reload controls explicitly. The default stock primary path handles one shot per press. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
 

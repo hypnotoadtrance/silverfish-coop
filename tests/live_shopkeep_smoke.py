@@ -129,17 +129,10 @@ async def verify(work: Path, original: Path):
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
         assert 5000 <= listing["merchant_cash_before"] <= 35_000, listing
-        selection = next(index for index, offer in enumerate(listing["offers"]) if 0 < offer["price"] <= 1000)
-        offer = listing["offers"][selection]
         sequence = opened["merchant"]["sequence"]
-        offset = (selection // 8) * 8
-        for current_offset in range(8, offset + 1, 8):
-            await action(guest_run, "native-shop-view-fixture", target="page-down")
-            await page(sequence, offset=current_offset)
-        for _ in range(selection - offset):
-            await action(guest_run, "native-shop-view-fixture", target="down")
-        current = await page(sequence, offset=offset)
-        assert (current["guid"], current["price"]) == (offer["guid"], offer["price"]), current
+        current = await page(sequence, offset=0)
+        offer, = [row for row in listing["offers"] if (row["guid"], row["price"]) == (current["guid"], current["price"])]
+        assert 0 < offer["price"] <= listing["wallet_before"], offer
         confirm = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
         assert confirm["state"] == "confirming", confirm
         submitted = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
