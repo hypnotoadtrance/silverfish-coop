@@ -96,6 +96,8 @@ The finite market service supports cash purchases and whole-stack sales at Obser
 
 The Gunsmith test opened 12 offers through stock Interact and checked Page Up and Page Down navigation. The guest paid 1,380 shared cash for 200 rounds of 9mm Ball. The guest's exact stack, the wallet, and the merchant's cash survived restart. The stock shelf remained available, and the original save hashes matched.
 
+At ShopKeep, the party entered through the stock NorthEast Rail door. The guest used the original reception dialogue and selected the cash response to open the merchant overlay. One finite Honey Egg moved to the guest's backpack for 18 shared cash. The merchant received 18, the host inventory stayed separate, and the greeting flag, owned item, and both balances survived restart. The original save hashes matched.
+
 Two guests opened independent dialogues with the Observatory Castaway. The headless fixture aimed the camera and used the original trace and Interact callback. One guest read the stock story, returned to the greeting, and closed the conversation through four stock Interact events. The other guest kept its own session and could use its own choices. A cross-character confirmation and replay were refused, and the host's quest, wallet, and reputation snapshots matched.
 
 At the Scientist, one guest used eight stock Interact presses to ask Dr. Mosby about anomalies and drill data and accept Stone Maze Readings. A second guest could explore independently and received an already-present response when accepting again. The two stock topic flags and active quest survived a same-port host restart. The original save hashes matched.

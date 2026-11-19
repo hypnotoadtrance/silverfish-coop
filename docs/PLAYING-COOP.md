@@ -100,6 +100,8 @@ At the supported CrossRoads crate, interact to open it. The shared loot panel ap
 
 The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
 
+At ShopKeep, use Interact at the reception and choose the cash-shop response to open the finite stock overlay.
+
 At Borough's board, use Interact to view your selected contract and press it again to accept or turn in when prompted. The prompt closes when you look away or move out of range.
 
 At the Observatory Castaway, guests can use Interact to open the stock story dialogue. Use Up and Down to select a response, then press Interact to confirm it. Each guest has a separate conversation.

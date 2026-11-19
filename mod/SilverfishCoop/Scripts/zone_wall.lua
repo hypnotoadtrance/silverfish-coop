@@ -424,8 +424,31 @@ function wall.command(fields, state, phase)
         center.Z = math.max(center.Z - clearance, math.min(start.Z, center.Z + clearance))
     end
     local from = distance_squared(start, center)
-    if not finite(from) or from > 1250 * 1250 or record.fixture.Box:IsOverlappingActor(pawn) then
-        error("Position the pawn near the exit before the swept wall probe", 0)
+    if finite(from) and from > 1250^2 and plan and plan.kind == "overlap" and not nexus_probe
+        and not (approach and approach.probe_arrival) then
+        -- Very wide exits can have a safe lane far from the box center.
+        local extent = record.component:GetScaledBoxExtent()
+        local normal, tangent = record.component:GetForwardVector(), record.component:GetRightVector()
+        local width, length = extent.X, extent.Y
+        if extent.Y < extent.X then normal, tangent, width, length = tangent, normal, length, width end
+        local dx, dy = start.X - center.X, start.Y - center.Y
+        local outward, lateral = dx * normal.X + dy * normal.Y, dx * tangent.X + dy * tangent.Y
+        local radius = pawn_capsule:GetScaledCapsuleRadius()
+        if finite(outward) and finite(lateral) and finite(radius) and radius >= 10 and radius <= 100
+            and math.abs(outward) >= width and math.abs(outward) <= width + 425
+            and math.abs(lateral) <= length + radius then
+            local depth = math.max(0, width - radius - 45) * (outward < 0 and -1 or 1)
+            local lane = math.max(0, length - radius - 35)
+            local side = math.max(-lane, math.min(lateral, lane))
+            center.X = center.X + depth * normal.X + side * tangent.X
+            center.Y = center.Y + depth * normal.Y + side * tangent.Y
+            from = distance_squared(start, center)
+        end
+    end
+    local overlapping = record.fixture.Box:IsOverlappingActor(pawn)
+    if not finite(from) or from > 1250^2 or overlapping then
+        error(string.format("Position the pawn near the exit before the swept wall probe (distance %.1f, overlapping %s)",
+            finite(from) and math.sqrt(from) or -1, tostring(overlapping)), 0)
     end
     if nexus_probe then
         local inward = record.original:GetRightVector()
