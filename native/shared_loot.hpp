@@ -27,7 +27,7 @@ namespace silverfish::shared_loot
     };
 
     RC::Unreal::UWorld* authored_crate_world(RC::Unreal::UObject* crate, std::string_view* reason = nullptr);
-    bool default_crate_settings(RC::Unreal::UObject* crate);
+    bool qualified_crate_settings(RC::Unreal::UObject* crate);
     bool qualify_escrow_owner(std::uintptr_t pawn, std::uintptr_t save, std::uintptr_t stock, EscrowOwner& owner);
     bool qualify_escrow_owner_in_world(RC::Unreal::UWorld* world, std::uintptr_t pawn, std::uintptr_t save,
                                       std::uintptr_t stock, EscrowOwner& owner);

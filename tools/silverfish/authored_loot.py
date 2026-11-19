@@ -363,9 +363,100 @@ PLACEMENTS += tuple(
 )
 
 
+_OVERRIDDEN_DEFAULTS = {
+    "/Game/Classes/Maps/Maps_Dungeons/Anex_01_P": (
+        (1, -996673472, "Millitary_Common"),
+        (3, -909390592, "Millitary_Common"),
+        (5, -1292397888, "Millitary_Common"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P": (
+        (1, -246955776, "Millitary_Common"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P": (
+        (2, -239753344, "Cargo"),
+        (4, -902249216, "Industrial"),
+        (6, -1543687264, "Cargo"),
+        (7, -925138176, "Industrial"),
+        (10, -6347904, "Cargo"),
+        (11, -143681152, "Rural"),
+        (12, -692648064, "Industrial"),
+        (13, -1220496256, "Rural"),
+        (14, -220099456, "Industrial"),
+        (19, -806909440, "Industrial"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P": (
+        (4, -1573595360, "Millitary_Common"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P": (
+        (1, -208075136, "Industrial"),
+        (2, -1385479296, "Industrial"),
+        (3, -1620166624, "Industrial"),
+        (6, -383739648, "Industrial"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P": (
+        (7, -223334400, "Coup_Gear"),
+        (9, -826685440, "Rural"),
+        (11, -1185644096, "Coup_Gear"),
+        (13, -1622669152, "Coup_Gear"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P": (
+        (1, -1202734464, "Coup_Gear"),
+        (3, -55848832, "Coup_Gear"),
+        (5, -608233984, "Coup_Gear"),
+        (7, -806176896, "Coup_Gear"),
+        (9, -1935789056, "Coup_Gear"),
+        (11, -1641102304, "Coup_Gear"),
+        (13, -245368832, "Coup_Gear"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P": (
+        (13, -621539968, "Rural"),
+        (15, -1822565392, "Millitary_Common"),
+        (17, -1578600416, "Rural"),
+        (23, -894009216, "Millitary_Common"),
+        (24, -651509120, "Millitary_Common"),
+        (28, -651509120, "Millitary_Common"),
+        (30, -651509120, "Millitary_Common"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P": (
+        (5, -809533952, "Millitary_Common"),
+        (7, -1952085944, "Millitary_Common"),
+        (15, -107058944, "Millitary_Common"),
+        (21, -1607104704, "Rural"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P": (
+        (1, -1728019072, "Coup_Gear"),
+        (2, -1728019072, "Coup_Gear"),
+        (3, -1728019072, "Coup_Gear"),
+        (4, -1728019072, "Coup_Gear"),
+        (6, -412244096, "Coup_Gear"),
+        (7, -412244096, "Coup_Gear"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P": (
+        (11, -1061311680, "Millitary_Common"),
+        (13, -968047168, "Millitary_Common"),
+        (14, -1526779968, "Coup_Gear"),
+        (17, -1643787936, "Coup_Gear"),
+        (19, -1458418560, "Coup_Gear"),
+        (21, -1213904256, "Coup_Gear"),
+        (23, -995696896, "Coup_Gear"),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Swamp_01_P": (
+        (3, -319223680, "Cargo"),
+    ),
+}
+
+
+OVERRIDDEN_PLACEMENTS = tuple(
+    (area, f"LootCrate_Small_BP_C_{index}", salt, row)
+    for area, placements in _OVERRIDDEN_DEFAULTS.items()
+    for index, salt, row in placements
+)
+CRATE_PROFILES = tuple((*placement, None) for placement in PLACEMENTS) + OVERRIDDEN_PLACEMENTS
+
+
 def full_name(area: str, actor: str) -> str:
     return f"LootCrate_Small_BP_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.{actor}"
 
 
-CRATES = {full_name(area, actor): area for area, actor, _ in PLACEMENTS}
+CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])

@@ -312,7 +312,7 @@ namespace
         auto* value = field<Unreal::FIntProperty>(context.crate, STR("SpawnedValue"));
         if (!value || value->GetPropertyValueInContainer(context.crate) != 0 ||
             !read_bool(context.crate, STR("Looted"), false) ||
-            !silverfish::shared_loot::default_crate_settings(context.crate)) return "stock_crate_not_ready";
+            !silverfish::shared_loot::qualified_crate_settings(context.crate)) return "stock_crate_not_ready";
 
         if (const auto error = qualify_opener(pawn, save, stock, context); !error.empty()) return error;
         context.box = object_field(context.crate, STR("Box"));
@@ -978,6 +978,14 @@ namespace
         }
         return seed_result(lua, true, "seeded");
     }
+    const silverfish::authored_loot::Profile* profile_for(Unreal::UObject* crate)
+    {
+        if (!live(crate) || crate->GetClassPrivate() != find<Unreal::UClass>(crate_class)) return nullptr;
+        const auto path = crate->GetPathName();
+        const auto& profiles = silverfish::authored_loot::profiles;
+        const auto match = std::ranges::find_if(profiles, [&](const auto& entry) { return path == entry.actor; });
+        return match == profiles.end() ? nullptr : &*match;
+    }
 }
 
 namespace silverfish::shared_loot
@@ -989,12 +997,8 @@ namespace silverfish::shared_loot
             return nullptr;
         };
         if (!live(crate)) return refuse("crate_missing");
-        if (crate->GetClassPrivate() != find<Unreal::UClass>(crate_class)) return refuse("crate_identity");
-        const auto path = crate->GetPathName();
-        const auto profile = std::ranges::find_if(authored_loot::profiles, [&](const auto& entry) {
-            return path == entry.actor;
-        });
-        if (profile == authored_loot::profiles.end()) return refuse("crate_identity");
+        const auto* profile = profile_for(crate);
+        if (!profile) return refuse("crate_identity");
         auto* actor = static_cast<Unreal::AActor*>(crate);
         auto* world = actor->GetWorld();
         if (!live(world) || world->GetPathName() != profile->world ||
@@ -1007,23 +1011,41 @@ namespace silverfish::shared_loot
         return world;
     }
 
-    bool default_crate_settings(Unreal::UObject* crate)
+    bool qualified_crate_settings(Unreal::UObject* crate)
     {
-        if (!read_bool(crate, STR("GuaranteeSpawn"), false) || !read_bool(crate, STR("IgnoreKarma"), false))
-            return false;
+        const auto* profile = profile_for(crate);
+        if (!profile || !read_bool(crate, STR("GuaranteeSpawn"), false) ||
+            !read_bool(crate, STR("IgnoreKarma"), false)) return false;
         // Keep the previously live-qualified stock route on its existing guards.
-        if (crate->GetPathName() == authored_loot::profiles.front().actor) return true;
+        if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate() ||
             !read_bool(crate, STR("Ping_IfOpened"), false)) return false;
-        for (const auto* name : {STR("Replenish_Mode"), STR("Loot_Override")})
-        {
-            auto* property = crate->GetPropertyByNameInChain(name);
-            if (!property || property->GetArrayDim() != 1 ||
-                !property->Identical(property->ContainerPtrToValuePtr<void>(crate),
-                                     property->ContainerPtrToValuePtr<void>(defaults))) return false;
-        }
-        return true;
+
+        auto* replenish = crate->GetPropertyByNameInChain(STR("Replenish_Mode"));
+        auto* handle = field<Unreal::FStructProperty>(crate, STR("Loot_Override"));
+        if (!replenish || replenish->GetArrayDim() != 1 || !handle ||
+            !replenish->Identical(replenish->ContainerPtrToValuePtr<void>(crate),
+                                  replenish->ContainerPtrToValuePtr<void>(defaults))) return false;
+        auto* live_handle = handle->ContainerPtrToValuePtr<void>(crate);
+        if (!profile->loot_override)
+            return handle->Identical(live_handle, handle->ContainerPtrToValuePtr<void>(defaults));
+
+        auto* type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* table_class = find<Unreal::UClass>(STR("/Script/Engine.DataTable"));
+        auto* stock_table = find<Unreal::UObject>(
+            STR("/Game/Classes/Libraries/DataTables/LootTables_DT.LootTables_DT"));
+        auto* table = field<Unreal::FObjectProperty>(type, STR("DataTable"));
+        auto* row = field<Unreal::FNameProperty>(type, STR("RowName"));
+        if (!type || handle->GetStruct().Get() != type || !table_class || !live(stock_table) ||
+            stock_table->GetClassPrivate() != table_class || !table || table->GetPropertyClass().Get() != table_class ||
+            table->GetOffset_Internal() != 0 || !row || row->GetOffset_Internal() != sizeof(void*)) return false;
+
+        // Cooked rows may omit the table pointer and let the stock container
+        // use LootTables_DT. Any explicitly assigned table must be that asset.
+        auto* assigned = table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(live_handle));
+        return (!assigned || assigned == stock_table) &&
+               row->GetPropertyValueInContainer(live_handle).ToString() == profile->loot_override;
     }
 
     bool qualify_escrow_owner(Address pawn, Address save, Address stock, EscrowOwner& owner)

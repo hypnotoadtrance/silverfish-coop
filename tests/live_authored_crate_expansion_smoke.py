@@ -18,11 +18,12 @@ if str(REPO) not in sys.path:
 
 from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_loot import CRATES, full_name
-from tools.silverfish.travel import CISTERN, CITY, RAIL_YARD
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, RAIL_YARD
 
 
 SCENES = {
     "city": (CITY, ("LootCrate_Small_BP_C_5", "LootCrate_Small_BP_C_7")),
+    "crossroads-overrides": (CROSSROADS, ("LootCrate_Small_BP_C_2", "LootCrate_Small_BP_C_11", "LootCrate_Small_BP_C_14")),
     "rail-yard": (RAIL_YARD, ("LootCrate_Small_BP_C_3",)),
     "cistern": (CISTERN, ("LootCrate_Small_BP_C_7",)),
     "beach": ("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P", ("LootCrate_Small_BP_C_10",)),

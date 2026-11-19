@@ -185,7 +185,7 @@ namespace
 
     bool ready_profile(U::UObject* crate, U::UWorld* world)
     {
-        if (!silverfish::shared_loot::default_crate_settings(crate)) return false;
+        if (!silverfish::shared_loot::qualified_crate_settings(crate)) return false;
         auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
         if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate) return false;
         if (boolean(crate, STR("Looted"), true)) return true;
