@@ -3991,7 +3991,7 @@ class Client:
                         raise ValueError("Select an input for the current staged inventory page")
                     self.last_game = await self.bridge.command(action, str(view["sequence"]), view["map"], key, timeout=5)
                     result = {key: self.last_game.get(key, {}) for key in (
-                        "native_guest_inventory_equip_view", "native_guest_inventory_use_view",
+                        "native_guest_inventory_equip_view", "native_guest_inventory_use_view", native_inventory.SPLIT_VIEW,
                     )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")

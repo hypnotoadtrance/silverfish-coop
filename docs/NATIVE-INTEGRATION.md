@@ -136,6 +136,8 @@ Two further two-player runs exercised the original Interact input at both Dead B
 
 A same-port restart test left one of the two Dead Bridge shell stacks unclaimed. The stock NPC spawned again. The old seven-shell stack kept its original GUID and gained a cue in the new visit. The host rejected a request from the old visit and accepted stock Interact at the new cue. The claim cleared the cue for both players, and the original nine save hashes matched.
 
+In Refinery, the guest defeated both placed CQC troopers with the stock SG 71-A. The host claimed the separate seven- and nine-shell rolls through stock Interact. Each claim removed the cue from both views and refused a competing claim. Both defeated-enemy projections restored after reconnect, and all nine original save hashes matched.
+
 A natural CrossRoads refresh spawned five SwarmLarge Husks at the authored squad marker. After the pair moved into range, the guest saw five simulated replicas and had zero local Husk authority or AI initialization across 270 observed frames. The replicas stayed visible through a brief Direct IP reconnect. The guard also covers early client spawn calls for the three qualified Husk squads. That run recorded no local attempt to generate one of those squads.
 
 In a separate opt-in run, stock CrossRoads Antfarm spawned two host-controlled Flayers in one authored squad. The guest received two simulated replicas and the guard stopped one local saved-squad spawn. Neither replica initialized a local AI controller. Both stayed visible after reconnect.
