@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -13,6 +14,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -36,6 +38,7 @@ namespace
         const Unreal::TCHAR* world;
         const Unreal::TCHAR* actor;
         const Unreal::TCHAR* data;
+        const Unreal::TCHAR* camera_barter_replacement{};
     };
 
     constexpr std::array merchants{
@@ -54,6 +57,12 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1"),
             STR("/Game/Classes/Libraries/DataAssets/Merchants/BlacMarket_ShopData.BlacMarket_ShopData"),
         },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Shop_BP_C_2"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/Science_ShopData.Science_ShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Barter_BP_C_107"),
+        },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
     constexpr auto panel_class = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C");
@@ -67,6 +76,7 @@ namespace
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto camera_class = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto saved_shop_struct = STR("/Game/Classes/Libraries/Structs/ShopInventory_SaveStruct.ShopInventory_SaveStruct");
     constexpr auto payload_struct = STR("/Script/StructUtils.InstancedStruct");
@@ -146,6 +156,7 @@ namespace
         Unreal::UObject* guest{};
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
+        bool camera_only{};
     };
 
     bool qualified_connection(const Context& context)
@@ -228,6 +239,20 @@ namespace
         return (x * x + y * y + z * z) < distance * distance;
     }
 
+    bool cash_counter_open(Unreal::UObject* shop)
+    {
+        auto* box = read_object(shop, STR("Box"));
+        auto* function = find<Unreal::UFunction>(STR("/Script/Engine.PrimitiveComponent:GetCollisionEnabled"));
+        auto* output = field<Unreal::FByteProperty>(function, STR("ReturnValue"));
+        std::uint8_t mode{};
+        if (!exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) ||
+            !function || !output || output != function->GetReturnProperty() || output->GetOffset_Internal() != 0 ||
+            function->GetNumParms() != 1 || function->GetParmsSize() != sizeof(mode) ||
+            !function->HasAnyFunctionFlags(Unreal::FUNC_Native)) return false;
+        box->ProcessEvent(function, &mode);
+        return mode == 1 || mode == 3;
+    }
+
     std::string_view bind_context(const std::array<Address, 5>& input, Context& context)
     {
         const MerchantProfile* profile = nullptr;
@@ -240,6 +265,7 @@ namespace
             break;
         }
         if (!profile) return "shop_exact_merchant_unavailable";
+        context.camera_only = profile->camera_barter_replacement != nullptr;
         context.world = find<Unreal::UWorld>(profile->world);
         auto* data = find<Unreal::UObject>(profile->data);
         if (!live(context.world) || !exact(context.shop, find<Unreal::UClass>(shop_class)) ||
@@ -269,6 +295,14 @@ namespace
             return "shop_exact_guest_and_canonical_saves_unavailable";
         if (!read_bool(context.stock, STR("BarterOnly"), false))
             return "shop_stock_cash_trade_unavailable";
+        if (context.camera_only)
+        {
+            auto* conversion = find<Unreal::UObject>(profile->camera_barter_replacement);
+            if (!exact(conversion, find<Unreal::UClass>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C"))) ||
+                !authority(conversion, context.world) || read_object(context.shop, STR("BarterReplacement")) != conversion ||
+                read_object(conversion, STR("MerchantData")) != data || !cash_counter_open(context.shop))
+                return "shop_scientist_cash_counter_unavailable";
+        }
         if (!qualified_connection(context))
             return "shop_exact_guest_connection_unavailable";
         if (!context.panel || read_object(context.panel, STR("Target")) != context.shop ||
@@ -401,6 +435,18 @@ namespace
             return result;
         }
 
+        void replace_identity(void* value, const Guid& key) const
+        {
+            auto* data = guid->ContainerPtrToValuePtr<void>(value);
+            for (std::size_t index = 0; index < words.size(); ++index)
+                words[index]->SetPropertyValueInContainer(data, std::bit_cast<std::int32_t>(key[index]));
+        }
+
+        Unreal::UClass* item_type(const void* value) const
+        {
+            return Unreal::Cast<Unreal::UClass>(type->GetObjectPropertyValue(type->ContainerPtrToValuePtr<void>(value)));
+        }
+
         bool ident(const void* first, const void* second) const
         {
             return row->Identical(first, second) &&
@@ -472,14 +518,17 @@ namespace
                 debit->GetNumParms() == 2 && debit->GetParmsSize() >= 5 && debit->GetParmsSize() <= 8;
         }
 
-        int amount(const Context& context) const
+        std::pair<int, bool> flag_value(const Context& context, const Unreal::TCHAR* key) const
         {
             struct Parameters { Unreal::FName name; bool found{}; std::int32_t amount{}; };
             static_assert(sizeof(Parameters) == 16 && offsetof(Parameters, amount) == 12);
-            Parameters params{Unreal::FName{STR("Player_Cash")}};
+            Parameters params{Unreal::FName{key}};
             context.instance->ProcessEvent(read, &params);
-            return found->GetPropertyValueInContainer(&params) ? value->GetPropertyValueInContainer(&params) : 0;
+            const auto exists = found->GetPropertyValueInContainer(&params);
+            return {exists ? value->GetPropertyValueInContainer(&params) : 0, exists};
         }
+
+        int amount(const Context& context) const { return flag_value(context, STR("Player_Cash")).first; }
 
         void change(const Context& context, int price, bool deduct) const
         {
@@ -500,11 +549,87 @@ namespace
         bool stackable{};
     };
 
+    Guid new_stock_guid(const Layout& layout)
+    {
+        auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetGuidLibrary"));
+        auto* function = find<Unreal::UFunction>(STR("/Script/Engine.KismetGuidLibrary:NewGuid"));
+        auto* result = field<Unreal::FStructProperty>(function, STR("ReturnValue"));
+        Guid guid{};
+        if (!library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !function || !result ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || result != function->GetReturnProperty() ||
+            result->GetStruct().Get() != layout.guid->GetStruct().Get() || result->GetOffset_Internal() != 0 ||
+            function->GetNumParms() != 1 || function->GetParmsSize() != sizeof(guid) ||
+            !function->HasAnyFunctionFlags(Unreal::FUNC_Native)) return {};
+        library->ProcessEvent(function, &guid);
+        return guid;
+    }
+
+    template<typename T>
+    T* parameter(Unreal::UFunction* function, const Unreal::TCHAR* name, int offset, bool output)
+    {
+        auto* value = field<T>(function, name);
+        return value && value->GetOffset_Internal() == offset && offset + value->GetSize() <= function->GetParmsSize() &&
+            value->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
+            value->HasAnyPropertyFlags(Unreal::CPF_OutParm) == output ? value : nullptr;
+    }
+
+    struct CameraReputation
+    {
+        static constexpr std::uint8_t commune = 2;
+        Unreal::UFunction* apply{};
+        int reward{}, expected{};
+
+        bool bind(const Context& context, const Wallet& wallet, int price)
+        {
+            if (!context.camera_only) return true;
+            auto* faction = field<Unreal::FByteProperty>(context.shop, STR("Rep Faction"));
+            // The unmodified Camera quote is at most ceil(125 * 2.5). The stock Skinflint branch starts above 1000.
+            if (!faction || faction->GetPropertyValueInContainer(context.shop) != commune || price > 313) return false;
+            apply = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddPlayerRep"));
+            auto* passive = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect"));
+            auto* count = parameter<Unreal::FBoolProperty>(passive, STR("CountInstances"), 8, false);
+            auto* instances = parameter<Unreal::FIntProperty>(passive, STR("Instances"), 12, true);
+            if (!apply || !passive || apply->GetOuterPrivate() != context.instance->GetClassPrivate() ||
+                passive->GetOuterPrivate() != context.instance->GetClassPrivate() ||
+                apply->GetNumParms() != 2 || apply->GetParmsSize() != 8 ||
+                !parameter<Unreal::FByteProperty>(apply, STR("Faction"), 0, false) ||
+                !parameter<Unreal::FIntProperty>(apply, STR("RepDifference"), 4, false) ||
+                passive->GetNumParms() != 4 || passive->GetParmsSize() != 16 ||
+                !parameter<Unreal::FNameProperty>(passive, STR("EffectName"), 0, false) || !count || !instances ||
+                !parameter<Unreal::FBoolProperty>(passive, STR("EffectActive"), 9, true)) return false;
+            struct Effect { Unreal::FName name; bool count{}, active{}; std::int32_t instances{}; };
+            static_assert(sizeof(Effect) == 16 && offsetof(Effect, instances) == 12);
+            Effect trait{Unreal::FName{STR("IntensePersonality")}};
+            count->SetPropertyValueInContainer(&trait, true);
+            context.instance->ProcessEvent(passive, &trait);
+            const auto stacks = instances->GetPropertyValueInContainer(&trait);
+            reward = price / 100;
+            const auto [before, found] = wallet.flag_value(context, STR("Rep_Commune"));
+            const auto change = static_cast<std::int64_t>(reward) * (found ? 1LL + stacks : 1LL);
+            const auto after = before + change;
+            if (stacks < 0 || change > max_money || after > max_money) return false;
+            expected = static_cast<int>(after);
+            return true;
+        }
+
+        void commit(const Context& context) const
+        {
+            if (!apply) return;
+            struct Params { std::uint8_t faction; std::int32_t amount; } values{commune, reward};
+            static_assert(sizeof(Params) == 8 && offsetof(Params, amount) == 4);
+            context.instance->ProcessEvent(apply, &values);
+        }
+
+        bool verified(const Context& context, const Wallet& wallet) const
+        {
+            return !apply || wallet.flag_value(context, STR("Rep_Commune")).first == expected;
+        }
+    };
+
     std::string_view item_offer(const Layout& layout, const void* row, Offer& result)
     {
         result.guid = layout.identity(row);
-        auto* klass = Unreal::Cast<Unreal::UClass>(
-            layout.type->GetObjectPropertyValue(layout.type->ContainerPtrToValuePtr<void>(row)));
+        auto* klass = layout.item_type(row);
         if (result.guid == Guid{} || !live(klass) || !klass->IsChildOf(layout.item_base))
             return "shop_offer_identity_invalid";
         result.path = RC::to_string(klass->GetPathName());
@@ -615,8 +740,22 @@ namespace
         if (money < 0 || cash < 0) return response(lua, false, "shop_wallet_unavailable");
         std::uint8_t changed{};
         context.panel->ProcessEvent(layout.quote_refresh, &changed);
-        auto* source = layout.finite->ContainerPtrToValuePtr<void>(context.shop);
-        Unreal::FScriptArrayHelper stock_rows(layout.finite, source);
+        auto* source_property = layout.finite;
+        const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
+        bool reusable = false;
+        if (context.camera_only)
+        {
+            auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
+            if (!limited || !camera) return response(lua, false, "shop_camera_stock_unavailable");
+            reusable = !limited->GetPropertyValueInContainer(context.shop);
+            if (reusable)
+            {
+                source_property = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
+                if (!layout.is_array(source_property)) return response(lua, false, "shop_camera_shelf_unavailable");
+            }
+        }
+        auto* source = source_property->ContainerPtrToValuePtr<void>(context.shop);
+        Unreal::FScriptArrayHelper stock_rows(source_property, source);
         if (stock_rows.Num() < 0 || stock_rows.Num() > max_offers) return response(lua, false, "shop_offer_count_unavailable");
         std::set<Guid> seen;
         std::string rows;
@@ -627,10 +766,13 @@ namespace
             const auto* item = stock_rows.GetRawPtr(i);
             const auto key = layout.identity(item);
             if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
+            if (context.camera_only && layout.item_type(item) != camera) continue;
             if constexpr (Buying)
                 if (key != chosen) continue;
             Offer row;
             if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
+            if (context.camera_only && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
+                return response(lua, false, "shop_exact_camera_offer_unavailable");
             rows += encode(row);
             if constexpr (Buying)
             {
@@ -647,6 +789,9 @@ namespace
             return response(lua, false, "shop_funds_unavailable");
         if (layout.owner_has(context.guest, chosen) || layout.owner_has(context.stock, chosen))
             return response(lua, false, "shop_inventory_guid_conflict");
+        CameraReputation reputation;
+        if (!reputation.bind(context, wallet, selected.price))
+            return response(lua, false, "shop_camera_reputation_unqualified");
 
         auto* target = layout.backpack->ContainerPtrToValuePtr<void>(context.guest);
         auto* saved = layout.saved_shops->ContainerPtrToValuePtr<void>(context.stock);
@@ -656,57 +801,58 @@ namespace
         const int old_stock = stock_rows.Num();
         if (old_size < 0 || old_size >= max_items || (old_size && backpack.GetRawPtr() == stock_rows.GetRawPtr()))
             return response(lua, false, "shop_guest_backpack_unavailable");
-        auto source_before = copy(layout.finite, source);
+        auto source_before = copy(source_property, source);
         auto target_before = copy(layout.backpack, target);
         auto saved_before = copy(layout.saved_shops, saved);
         auto flags_before = copy(layout.flags, flags);
         auto transferred = copy(layout.row, stock_rows.GetRawPtr(index));
         if (!source_before || !target_before || !saved_before || !flags_before || !transferred)
             return response(lua, false, "shop_before_image_unavailable");
+        if (reusable)
+        {
+            const auto minted = new_stock_guid(layout);
+            if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
+                layout.owner_has(context.stock, minted)) return response(lua, false, "shop_camera_guid_unavailable");
+            layout.replace_identity(transferred.get(), minted);
+            selected.guid = minted;
+            rows = encode(selected);
+        }
 
         const auto add = backpack.AddValue();
         if (add == old_size && backpack.Num() == old_size + 1)
         {
             layout.row->CopyCompleteValue(backpack.GetRawPtr(add), transferred.get());
-            stock_rows.RemoveValues(index);
+            if (!reusable) stock_rows.RemoveValues(index);
             wallet.change(context, selected.price, true);
             layout.merchant_cash->SetPropertyValueInContainer(context.shop, cash + selected.price);
+            reputation.commit(context);
             context.shop->ProcessEvent(layout.save, nullptr);
-            bool verified = stock_rows.Num() == old_stock - 1 && backpack.Num() == old_size + 1 &&
+            bool verified = stock_rows.Num() == old_stock - (reusable ? 0 : 1) && backpack.Num() == old_size + 1 &&
                 layout.ident(backpack.GetRawPtr(add), transferred.get()) &&
-                wallet.amount(context) == money - selected.price && qualified_connection(context) &&
+                wallet.amount(context) == money - selected.price && reputation.verified(context, wallet) && qualified_connection(context) &&
                 read_object(context.pawn, STR("Save")) == context.guest &&
                 read_object(context.instance, STR("SaveSlot_Ref")) == context.stock &&
                 layout.verify_saved(context, true);
-            Unreal::FScriptArrayHelper previous_stock(layout.finite, source_before.get());
+            Unreal::FScriptArrayHelper previous_stock(source_property, source_before.get());
             for (int i = 0; verified && i < stock_rows.Num(); ++i)
-                verified = layout.ident(stock_rows.GetRawPtr(i), previous_stock.GetRawPtr(i + (i >= index ? 1 : 0)));
+                verified = layout.ident(stock_rows.GetRawPtr(i), previous_stock.GetRawPtr(i + (!reusable && i >= index ? 1 : 0)));
             Unreal::FScriptArrayHelper previous_bag(layout.backpack, target_before.get());
             for (int i = 0; verified && i < old_size; ++i)
                 verified = layout.ident(backpack.GetRawPtr(i), previous_bag.GetRawPtr(i));
             if (verified)
                 return response(lua, true, "purchased", rows, money, money - selected.price, cash, cash + selected.price);
         }
-        layout.finite->CopyCompleteValue(source, source_before.get());
+        source_property->CopyCompleteValue(source, source_before.get());
         layout.backpack->CopyCompleteValue(target, target_before.get());
         layout.saved_shops->CopyCompleteValue(saved, saved_before.get());
         layout.flags->CopyCompleteValue(flags, flags_before.get());
         layout.merchant_cash->SetPropertyValueInContainer(context.shop, cash);
-        if (!layout.equal(layout.finite, source, layout.finite, source_before.get(), max_offers) ||
+        if (!layout.equal(source_property, source, source_property, source_before.get(), max_offers) ||
             !layout.equal(layout.backpack, target, layout.backpack, target_before.get(), max_items) ||
             !layout.flags->Identical(flags, flags_before.get()) || !layout.saved_shops->Identical(saved, saved_before.get()) ||
             wallet.amount(context) != money || layout.merchant_cash->GetPropertyValueInContainer(context.shop) != cash)
             return response(lua, false, "mutation_unverified_shop_restore");
         return response(lua, false, "shop_commit_readback_failed_rolled_back");
-    }
-
-    template<typename T>
-    T* sale_parameter(Unreal::UFunction* function, const Unreal::TCHAR* name, int offset, bool output)
-    {
-        auto* value = field<T>(function, name);
-        return value && value->GetOffset_Internal() == offset && offset + value->GetSize() <= function->GetParmsSize() &&
-            value->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
-            value->HasAnyPropertyFlags(Unreal::CPF_OutParm) == output ? value : nullptr;
     }
 
     struct Sale
@@ -716,15 +862,15 @@ namespace
             STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:WeaponHasAmmo"));
         Unreal::UObject* library = find<Unreal::UObject>(
             STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
-        Unreal::FStructProperty* add_item = sale_parameter<Unreal::FStructProperty>(add, STR("Item"), 0, false);
-        Unreal::FIntProperty* destination = sale_parameter<Unreal::FIntProperty>(add, STR("Inventory"), 80, false);
-        Unreal::FIntProperty* preferred = sale_parameter<Unreal::FIntProperty>(add, STR("PreferredIndex"), 84, false);
-        Unreal::FBoolProperty* success = sale_parameter<Unreal::FBoolProperty>(add, STR("Success"), 88, true);
-        Unreal::FIntProperty* added_index = sale_parameter<Unreal::FIntProperty>(add, STR("Index"), 92, true);
-        Unreal::FBoolProperty* stacked = sale_parameter<Unreal::FBoolProperty>(add, STR("ItemWasStacked"), 96, true);
-        Unreal::FStructProperty* ammo_item = sale_parameter<Unreal::FStructProperty>(ammo_check, STR("Item"), 0, true);
-        Unreal::FObjectProperty* world_arg = sale_parameter<Unreal::FObjectProperty>(ammo_check, STR("__WorldContext"), 80, false);
-        Unreal::FBoolProperty* has_ammo = sale_parameter<Unreal::FBoolProperty>(ammo_check, STR("AmmoTrue"), 88, true);
+        Unreal::FStructProperty* add_item = parameter<Unreal::FStructProperty>(add, STR("Item"), 0, false);
+        Unreal::FIntProperty* destination = parameter<Unreal::FIntProperty>(add, STR("Inventory"), 80, false);
+        Unreal::FIntProperty* preferred = parameter<Unreal::FIntProperty>(add, STR("PreferredIndex"), 84, false);
+        Unreal::FBoolProperty* success = parameter<Unreal::FBoolProperty>(add, STR("Success"), 88, true);
+        Unreal::FIntProperty* added_index = parameter<Unreal::FIntProperty>(add, STR("Index"), 92, true);
+        Unreal::FBoolProperty* stacked = parameter<Unreal::FBoolProperty>(add, STR("ItemWasStacked"), 96, true);
+        Unreal::FStructProperty* ammo_item = parameter<Unreal::FStructProperty>(ammo_check, STR("Item"), 0, true);
+        Unreal::FObjectProperty* world_arg = parameter<Unreal::FObjectProperty>(ammo_check, STR("__WorldContext"), 80, false);
+        Unreal::FBoolProperty* has_ammo = parameter<Unreal::FBoolProperty>(ammo_check, STR("AmmoTrue"), 88, true);
         Unreal::FNameProperty* tag{};
         Unreal::FArrayProperty* infinite{};
 
@@ -761,12 +907,12 @@ namespace
             if (!faction) return false;
             if (faction->GetPropertyValueInContainer(context.shop) == 4) return true;
             auto* query = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Find_PlayerReputation"));
-            auto* target = sale_parameter<Unreal::FByteProperty>(query, STR("Faction"), 0, false);
-            auto* points = sale_parameter<Unreal::FIntProperty>(query, STR("Points"), 4, true);
+            auto* target = parameter<Unreal::FByteProperty>(query, STR("Faction"), 0, false);
+            auto* points = parameter<Unreal::FIntProperty>(query, STR("Points"), 4, true);
             if (!target || !points || query->GetOuterPrivate() != context.instance->GetClassPrivate() ||
                 query->GetNumParms() != 4 || query->GetParmsSize() != 8 ||
-                !sale_parameter<Unreal::FByteProperty>(query, STR("Relationship"), 1, true) ||
-                !sale_parameter<Unreal::FByteProperty>(query, STR("Reputation"), 2, true)) return false;
+                !parameter<Unreal::FByteProperty>(query, STR("Relationship"), 1, true) ||
+                !parameter<Unreal::FByteProperty>(query, STR("Reputation"), 2, true)) return false;
             alignas(8) std::array<std::byte, 8> params{};
             target->SetPropertyValueInContainer(params.data(), 4);
             context.instance->ProcessEvent(query, params.data());
@@ -778,8 +924,8 @@ namespace
             auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetMathLibrary"));
             auto* function = find<Unreal::UFunction>(STR("/Script/Engine.KismetMathLibrary:GetDays"));
             auto* time = field<Unreal::FStructProperty>(context.stock, STR("GameTime"));
-            auto* input = sale_parameter<Unreal::FStructProperty>(function, STR("A"), 0, false);
-            auto* output = sale_parameter<Unreal::FIntProperty>(function, STR("ReturnValue"), 8, true);
+            auto* input = parameter<Unreal::FStructProperty>(function, STR("A"), 0, false);
+            auto* output = parameter<Unreal::FIntProperty>(function, STR("ReturnValue"), 8, true);
             auto* timespan = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Timespan"));
             if (!library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !function ||
                 function->GetOuterPrivate() != library->GetClassPrivate() || function->GetNumParms() != 2 ||
@@ -858,6 +1004,7 @@ namespace
 
         Context context;
         if (const auto state = bind_context(input, context); !state.empty()) return response(lua, false, state);
+        if (context.camera_only) return response(lua, false, "shop_stock_sales_unavailable");
         Layout layout;
         Sale sale;
         Wallet wallet;

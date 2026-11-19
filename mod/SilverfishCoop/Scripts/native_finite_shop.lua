@@ -14,6 +14,9 @@ local merchants = {
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"] = {
         level = "Shop_BlackMarket_01", actor = "Shop_BP_C_1", data = "BlacMarket_ShopData",
     },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"] = {
+        level = "Shop_Scientist_01", actor = "Shop_BP_C_2", data = "Science_ShopData", barter = "Barter_BP_C_107",
+    },
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
 local shop_class = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
@@ -94,6 +97,15 @@ local function merchant(state, phase, pawn_name)
         or not same(instance, state.world.OwningGameInstance) or not same(instance.SaveSlot_Ref, stock)
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then
         refused("exact_stock_merchant_unavailable")
+    end
+    if profile.barter then
+        local replacement = StaticFindObject(world .. ":PersistentLevel." .. profile.barter)
+        local collision = actor.Box:GetCollisionEnabled()
+        if not exact(replacement, "/Game/Classes/Actors/Barter_BP.Barter_BP_C")
+            or not same(replacement:GetWorld(), state.world) or not same(replacement, actor.BarterReplacement)
+            or not same(replacement.MerchantData, actor.MerchantData) or (collision ~= 1 and collision ~= 3) then
+            refused("scientist_cash_counter_unavailable")
+        end
     end
     return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance}
 end

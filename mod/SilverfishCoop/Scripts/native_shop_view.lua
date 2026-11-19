@@ -3,12 +3,13 @@ local view = {}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local profiles = {}
-local function register_merchant(map, level, actor, data, title)
+local function register_merchant(map, level, actor, data, title, barter)
     local world = map .. "." .. level
     local path = world .. ":PersistentLevel." .. actor
     profiles[map] = {
         map = map, world = "World " .. world, actor_object_path = path, actor_name = "Shop_BP_C " .. path,
         data_path = "/Game/Classes/Libraries/DataAssets/Merchants/" .. data .. "." .. data, title = title,
+        barter_path = barter and world .. ":PersistentLevel." .. barter or nil,
     }
 end
 
@@ -18,6 +19,8 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
     "Shop_ScavBar_P", "Shop_BP_C_2", "ScavBar_ShopData", "Scav Bar merchant")
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01",
     "Shop_BlackMarket_01", "Shop_BP_C_1", "BlacMarket_ShopData", "Black Market merchant")
+register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
+    "Shop_Scientist_01", "Shop_BP_C_2", "Science_ShopData", "Scientist Shop camera", "Barter_BP_C_107")
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
@@ -89,6 +92,13 @@ local function qualified_actor(current)
     if not exact(actor, actor_path) or actor:GetFullName() ~= profile.actor_name or not same(actor:GetWorld(), current.world)
         or actor:IsActorBeingDestroyed() or not same(actor.MerchantData, StaticFindObject(profile.data_path))
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then return nil end
+    if profile.barter_path then
+        local barter = StaticFindObject(profile.barter_path)
+        local collision = actor.Box:GetCollisionEnabled()
+        if not exact(barter, "/Game/Classes/Actors/Barter_BP.Barter_BP_C")
+            or not same(actor.BarterReplacement, barter) or not same(barter:GetWorld(), current.world)
+            or not same(barter.MerchantData, actor.MerchantData) or (collision ~= 1 and collision ~= 3) then return nil end
+    end
     return actor
 end
 
