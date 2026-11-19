@@ -801,7 +801,7 @@ namespace
         {
             if (live(actor) && std::string_view(fault) == "authored_pickup_stock_placement_unqualified")
             {
-                const auto point = actor->K2_GetActorLocation();
+                auto point = actor->K2_GetActorLocation();
                 return result(lua, false, std::format("{}:{:.1f},{:.1f},{:.1f}", fault, point.GetX(), point.GetY(), point.GetZ()));
             }
             return result(lua, false, fault);
