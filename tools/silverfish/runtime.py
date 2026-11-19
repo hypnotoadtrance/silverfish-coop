@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_downed_markers
+from . import native_authored_pickup, native_dialogue, native_downed_markers
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
@@ -462,6 +462,7 @@ class Bridge:
         self.shop_view_offset = 0
         self.broker_input_offset = 0
         self.wire_board_offset = 0
+        self.dialogue_offset = 0
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -621,6 +622,27 @@ class Bridge:
                 events.append((int(fields[1]), int(fields[2]), *fields[3:]))
         return events
 
+    def native_dialogue_requests(self) -> list[tuple[int, str, str, str]]:
+        try:
+            with (self.directory / "native-dialogue-events").open("rb") as stream:
+                stream.seek(self.dialogue_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.dialogue_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if len(fields) != 5 or fields[0] != "dialogue-input":
+                continue
+            _, serial, pawn, token, choice = fields
+            if (serial.isascii() and serial.isdigit() and len(serial) <= 16 and 0 < (sequence := int(serial)) < 2**53
+                    and pawn.startswith("Player_FP_C ") and len(pawn) <= 512
+                    and ((token, choice) == ("-", "-") or choice in ("1", "3") and native_dialogue.valid_token(token))):
+                events.append((sequence, pawn, token, choice))
+        return events
+
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
         try:
             with (self.directory / "death.tsv").open("rb") as stream:
@@ -748,6 +770,7 @@ class Bridge:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
+            dialogue_frame, dialogue_lines, dialogue_choices = None, [], []
             matrix_rows, marker_rows = [], []
             marker_frame = None
             malformed_markers = False
@@ -786,6 +809,16 @@ class Bridge:
                         marker_rows.append(fields)
                     else:
                         malformed_markers = True
+                elif (fields[0] == "player-local-input" and len(fields) == 15
+                      and fields[2] in ("standing", "downed") and fields[3] in ("verified", "waiting")
+                      and fields[14] in ("not_applicable", "clear", "open", "closed", "waiting")
+                      and all(value in ("0", "1", "-") for value in fields[4:14])):
+                    flags = ("stock_context", "reduced_context", "look", "move", "jump", "inventory",
+                             "primary", "secondary", "reload", "interact")
+                    data["player_local_input"] = {"pawn": fields[1], "state": fields[2], "verification": fields[3],
+                                                  "host_inventory": fields[14],
+                                                  **{key: {"0": False, "1": True, "-": None}[value]
+                                                     for key, value in zip(flags, fields[4:14], strict=True)}}
                 elif fields[0] == "native-inventory-canary" and len(fields) == 4:
                     data["native_inventory_canary"] = {
                         "state": fields[1], "binding_restored": fields[2] == "1", "detail": fields[3],
@@ -809,16 +842,6 @@ class Bridge:
                     data["native_zone_wall"] = {
                         "state": fields[1], "host_open": fields[2] == "1", "slot": fields[3],
                         "outcome": fields[4], "remaining_uu": _finite(fields[5]), "failure": fields[6],
-                elif (fields[0] == "player-local-input" and len(fields) == 15
-                      and fields[2] in ("standing", "downed") and fields[3] in ("verified", "waiting")
-                      and fields[14] in ("not_applicable", "clear", "open", "closed", "waiting")
-                      and all(value in ("0", "1", "-") for value in fields[4:14])):
-                    flags = ("stock_context", "reduced_context", "look", "move", "jump", "inventory",
-                             "primary", "secondary", "reload", "interact")
-                    data["player_local_input"] = {"pawn": fields[1], "state": fields[2], "verification": fields[3],
-                                                  "host_inventory": fields[14],
-                                                  **{key: {"0": False, "1": True, "-": None}[value]
-                                                     for key, value in zip(flags, fields[4:14], strict=True)}}
                     }
                 elif fields[0] == "native-door" and len(fields) == 4:
                     data["native_door"] = {
@@ -909,6 +932,24 @@ class Bridge:
                     balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
                     photo.update(zip(balances, map(int, fields[10:])))
                     data["native_turret_photo"] = photo
+                elif fields[0] == "native-dialogue-view" and len(fields) == 6:
+                    pawn, state, serial, row, token = fields[1:]
+                    sequence = int(serial)
+                    has_row = row in native_dialogue.ROWS and native_dialogue.valid_token(token)
+                    if (not pawn.startswith("Player_FP_C ") or len(pawn) > 512 or not 0 <= sequence < 2**53
+                            or state not in ("waiting", "armed", "pending", "open", "closed")
+                            or not (has_row or (row, token) == ("-", "-")) or (state == "open" and not has_row)
+                            or (has_row and state not in ("pending", "open"))):
+                        raise ValueError("Invalid local Castaway dialogue view")
+                    data["native_dialogue_view"] = dict(pawn=pawn, state=state, sequence=sequence, row=row, token=token)
+                elif fields[0] == "native-dialogue-stock":
+                    if dialogue_frame is not None:
+                        raise ValueError("Duplicate stock Castaway dialogue frame")
+                    dialogue_frame = fields
+                elif fields[0] == "native-dialogue-line":
+                    dialogue_lines.append(fields)
+                elif fields[0] == "native-dialogue-choice":
+                    dialogue_choices.append(fields)
                 elif fields[0] == "native-bounty-board" and len(fields) == 4:
                     data["native_bounty_board"] = dict(zip(("map", "pawn", "board"), fields[1:]))
                 elif fields[0] in COLLECTION_PREFIXES and len(fields) == 15 and fields[14] in ("0", "1"):
@@ -1458,6 +1499,9 @@ class Bridge:
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
             if data.get("schema") == 1 and "state" in data:
+                local_input = data.get("player_local_input")
+                if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):
+                    del data["player_local_input"]
                 if marker_frame is not None and not malformed_markers:
                     with contextlib.suppress(ValueError):
                         data[native_downed_markers.KEY] = native_downed_markers.parse(marker_frame, marker_rows, data.get("map"))
@@ -1472,6 +1516,10 @@ class Bridge:
                         data["native_authored_pickup"] = placed[source]
                     if source in intents:
                         data["native_authored_pickup_interaction"] = intents[source]
+                if dialogue_frame or dialogue_lines or dialogue_choices:
+                    if not dialogue_frame or data.get("state") != "hosting" or data.get("map") != native_dialogue.OBSERVATORY:
+                        raise ValueError("Stock Castaway dialogue frame has no qualified listen world")
+                    data["native_dialogue_stock"] = native_dialogue.parse_stock(dialogue_frame, dialogue_lines, dialogue_choices)
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))
@@ -1499,9 +1547,6 @@ class Bridge:
             if self.process.poll() is not None:
                 raise RuntimeError(f"Staged game exited with code {self.process.returncode}")
             snapshot = self.snapshot()
-                local_input = data.get("player_local_input")
-                if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):
-                    del data["player_local_input"]
             if snapshot is not None and condition(snapshot):
                 return snapshot
             await asyncio.sleep(0.15)

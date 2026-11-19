@@ -144,6 +144,7 @@ def parser() -> argparse.ArgumentParser:
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
+        "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture",
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",

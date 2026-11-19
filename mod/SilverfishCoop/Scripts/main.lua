@@ -16,6 +16,7 @@ local native_broker_quest = require("native_broker_quest")
 local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
+local native_dialogue = require("native_dialogue")
 local native_computer_board = require("native_computer_board")
 local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
@@ -404,6 +405,7 @@ local function run_command(fields, state, current_phase)
         native_enemy_loot.clear()
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
+    if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
     if command == "join" or command == "leave" then
         native_world_view.clear()
         native_inventory_view.clear()
@@ -806,6 +808,7 @@ local function run_command(fields, state, current_phase)
         or native_wire_quest.command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
+        or native_dialogue.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
         or native_meet_broker.command(fields, state, current_phase)
         or native_flood_jammer.command(fields, state, current_phase)
@@ -939,6 +942,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_meet_broker.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1162,6 +1166,7 @@ local function tick()
         vitals.sync(state, current_phase)
         players.sync(state, current_phase)
         native_wire_board.sync(state, current_phase)
+        native_dialogue.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
         return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
     end)
@@ -1180,6 +1185,7 @@ native_guest_primary_input.start(bridge, players.is_downed)
 native_host_camera.start(bridge, players.is_downed)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
+native_dialogue.start(bridge, players)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)
