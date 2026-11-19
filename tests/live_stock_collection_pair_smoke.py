@@ -25,7 +25,7 @@ SAVLO_KEYCARD_RUN = CollectionSmoke(
     (OBSERVATORY, CROSSROADS, RUIN_FIELDS, BEACH, FORT_LETO, BEACH, RUIN_FIELDS, CROSSROADS,
      DEAD_BRIDGE, STONE_MAZE, ANNEX, TRENCH, ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, OBSERVATORY),
     {"8": ("Rep_Freelancer", 100)}, accept_before_pickup=True, stock_pickup=True,
-    advantage=(("Adv_Freelancer", 300),), savlo_locker=True,
+    advantage=(("Adv_Freelancer", 0),), savlo_locker=True,
 )
 
 

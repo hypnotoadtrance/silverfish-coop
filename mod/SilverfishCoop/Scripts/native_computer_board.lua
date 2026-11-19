@@ -262,12 +262,13 @@ local function valid_transition(spec, before, after, step, cash, xp, expected_re
             return false, ("reputation[%d]=%d/%d,found=%s"):format(faction, observed.amount, amount, tostring(observed.found))
         end
     end
+    -- Stock TurnIn_Quest reads ReputationGain. Advantage_Faction
+    -- is part of the authored recipe and is applied by other quest graphs.
     for faction, previous in pairs(before.advantage) do
         local observed = after.advantage[faction]
-        local delta = expected_rep and spec.advantage[faction] or 0
-        if observed.amount ~= previous.amount + delta or observed.found ~= (previous.found or delta ~= 0) then
+        if observed.amount ~= previous.amount or observed.found ~= previous.found then
             return false, ("advantage[%d]=%d/%d,found=%s"):format(
-                faction, observed.amount, previous.amount + delta, tostring(observed.found))
+                faction, observed.amount, previous.amount, tostring(observed.found))
         end
     end
     return true
@@ -309,9 +310,6 @@ local function redeem(spec, context, before, objective, identity, owner)
             expected_rep[faction] = prior.amount + spec.reputation[faction] * (prior.found and 1 + trait.Instances or 1)
             if not int32(expected_rep[faction]) then refuse(spec, "reputation_range") end
         end
-    end
-    for faction, previous in pairs(before.advantage) do
-        if not int32(previous.amount + spec.advantage[faction]) then refuse(spec, "advantage_range") end
     end
     if not int32(before.cash + spec.cash) or not int32(before.xp + 1) then refuse(spec, "reward_range") end
 
