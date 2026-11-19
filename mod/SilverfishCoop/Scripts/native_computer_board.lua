@@ -116,6 +116,16 @@ local recipes = {
         redeem_map = observatory, wrong_board = "observatory_redemption_required",
         stage_objective = "SilverfishStageSavloKeycardObjective",
     },
+    ["native-black-box"] = {
+        id = "Clct_Radio_Scar", title = "Black Box", fault = "black_box",
+        objective_path = "/Game/Classes/Items/Key_Items/Item_InniRadio_01.Item_InniRadio_01_C",
+        cash = 12000, difficulty = 12, fail_on_death = false, redeem = 3, fixture_xp = 12,
+        offered_boards = {3, 1}, factions = {8}, reputation = {[8] = 50},
+        reputation_flags = {[8] = "Rep_Freelancer"}, advantage = {[8] = 50},
+        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true,
+        redeem_map = observatory, wrong_board = "observatory_redemption_required",
+        stage_objective = "SilverfishStageBlackBoxObjective", completion_flag = "Simmi_BlackBox",
+    },
 }
 local operations = {}
 for prefix, spec in pairs(recipes) do
@@ -188,19 +198,26 @@ local function recipe(spec, row)
     if not row then refuse(spec, "quest_row_unavailable") end
     local boards, objective, rep, advantage = row[keys.boards], row[keys.objective], row[keys.rep], row[keys.advantage]
     local ping, track = row[keys.ping], row[keys.track]
+    local flags = row[keys.flags]
+    local completion = spec.completion_flag and FName(spec.completion_flag, EFindName.FNAME_Find)
     if type(ping) == "userdata" then ping = ping:ToString() end
     if type(track) == "userdata" then track = track:ToString() end
     if row[keys.final] ~= 2 or row[keys.cash] ~= spec.cash or row[keys.xp] ~= 1 or row[keys.redeem] ~= spec.redeem
         or row[keys.kind] ~= 2 or row[keys.difficulty] ~= spec.difficulty
         or row[keys.fail] ~= spec.fail_on_death or row[keys.global] ~= true
         or row[keys.consume] ~= true or count(row[keys.items]) ~= 0 or count(row[keys.quests]) ~= 0
-        or not row[keys.prereq] or #row[keys.prereq] ~= 0 or not row[keys.flags] or #row[keys.flags] ~= 0
+        or not row[keys.prereq] or #row[keys.prereq] ~= 0
+        or not flags or #flags ~= (completion and 1 or 0)
         or ping ~= "None" or spec.no_track_flag and track ~= "None" and track ~= "" or count(boards) ~= #spec.offered_boards
         or count(objective) ~= 1 or not valid(objective[1])
         or objective[1]:GetFullName() ~= "BlueprintGeneratedClass " .. spec.objective_path
         or not exact_map(advantage, spec.advantage) then refuse(spec, "quest_recipe_unqualified") end
     for index, board_id in ipairs(spec.offered_boards) do
         if boards[index] ~= board_id then refuse(spec, "quest_recipe_unqualified") end
+    end
+    if completion and (completion:GetComparisonIndex() == 0 or completion:ToString() ~= spec.completion_flag
+        or not flags:Contains(completion) or flags:Find(completion):get() ~= 1) then
+        refuse(spec, "quest_completion_recipe_unqualified")
     end
     if not exact_map(rep, spec.reputation) then refuse(spec, "quest_reputation_unqualified") end
     if spec.one_stack_unit then
@@ -259,9 +276,17 @@ local function progress(spec, context)
             advantage[faction] = {amount = amount, found = found}
         end
     end
+    local completion
+    if spec.completion_flag then
+        local amount, found = wire_check(spec, wire.stock_flag, context.instance, spec.completion_flag)
+        if amount ~= (step == -10 and 1 or 0) or step == -10 and not found then
+            refuse(spec, "quest_completion_state_unqualified")
+        end
+        completion = {amount = amount, found = found}
+    end
     return {step = step, cash = wire_check(spec, wire.stock_flag, context.instance, "Player_Cash"),
         xp = wire_check(spec, wire.stock_flag, context.instance, "Player_Xp"),
-        rep = reputation(spec, context), advantage = advantage}
+        rep = reputation(spec, context), advantage = advantage, completion = completion}
 end
 
 local function unchanged(context)
@@ -289,6 +314,13 @@ local function valid_transition(spec, before, after, step, cash, xp, expected_re
         if observed.amount ~= previous.amount or observed.found ~= previous.found then
             return false, ("advantage[%d]=%d/%d,found=%s"):format(
                 faction, observed.amount, previous.amount, tostring(observed.found))
+        end
+    end
+    if before.completion then
+        local expected = step == -10 and 1 or before.completion.amount
+        local found = step == -10 or before.completion.found
+        if not after.completion or after.completion.amount ~= expected or after.completion.found ~= found then
+            return false, "completion_flag_changed"
         end
     end
     return true
@@ -431,6 +463,10 @@ function contract.rows(state, phase, status_row)
         state.map == proof.spec.redeem_map and 1 or 0)}
     for _, faction in ipairs(proof.spec.factions) do
         rows[#rows + 1] = status_row(proof.prefix .. "-reputation", faction, before.rep[faction].amount, after.rep[faction].amount)
+    end
+    if proof.spec.completion_flag then
+        rows[#rows + 1] = status_row(proof.prefix .. "-completion", proof.spec.completion_flag,
+            before.completion.amount, before.completion.found and 1 or 0, after.completion.amount, after.completion.found and 1 or 0)
     end
     return rows
 end

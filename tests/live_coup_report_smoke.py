@@ -41,6 +41,7 @@ class CollectionSmoke:
     savlo_locker: bool = False
     pickup_location: tuple[float, float, float] | None = None
     conditional_pickup: bool = False
+    completion_flag: str | None = None
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -131,7 +132,7 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         assert owner["slot"] != member["slot"] and member["character_id"] == character, member
         directory = native_host_save.directory(root / "game-user")
         wanted = ("Player_Cash", "Player_Xp", *(flag for flag, _ in plan.reputation.values()),
-                  *(flag for flag, _ in plan.advantage))
+                  *(flag for flag, _ in plan.advantage), *((plan.completion_flag,) if plan.completion_flag else ()))
         balances = {}
         for role, frame in (("host", owner), ("guest", member)):
             flags = stock_flags(directory, frame, redemption)
@@ -324,6 +325,10 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         locker_key = None
 
         async def collect_pickup():
+            if plan.completion_flag:
+                denied = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
+                assert denied["error"] == f"{spec.key}_unavailable", denied
+                evidence["wrong_map_turn_in"] = denied["error"]
             if plan.conditional_pickup:
                 await verify_drop_projection()
             selected = ("--pickup-source", source)
@@ -458,11 +463,20 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         expected_reputation = {flag: reputation[faction]["before"] + delta
                                for faction, (flag, delta) in plan.reputation.items()}
         expected_advantage = {flag: before["host"][flag] + delta for flag, delta in plan.advantage}
+        completion = {}
+        if plan.completion_flag:
+            flag = plan.completion_flag
+            assert before["host"][flag] == before["guest"][flag] == 0 and redeemed["completion_flag"] == flag, redeemed
+            completion[flag] = 1
         assert after["host"] == dict(before["host"], Player_Cash=before["host"]["Player_Cash"] + spec.cash,
-                                     Player_Xp=before["host"]["Player_Xp"] + 1, **expected_reputation, **expected_advantage), after
+                                     Player_Xp=before["host"]["Player_Xp"] + 1, **expected_reputation,
+                                     **expected_advantage, **completion), after
         assert after["guest"] == dict(before["guest"], Player_Xp=before["guest"]["Player_Xp"] + 1), after
         evidence.update(stock_turn_in=redeemed, stock_after=after)
-        assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"
+        replay = await action(guest, "native-quest-turnin", "--target", quest)
+        assert replay["effect"] == "native_quest_already_settled", replay
+        if plan.completion_flag:
+            assert replay["completion_flag"] == plan.completion_flag, replay
 
         await stop(host, authority)
         await stop(guest, peer)

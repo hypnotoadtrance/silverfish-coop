@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
+from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_gold import valid_guid
@@ -64,6 +64,7 @@ SOURCES = {
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
     DEAD_DROP: (native_dead_drop.MAP, native_dead_drop.ACTOR, native_dead_drop.CLASS),
+    native_black_box.SOURCE: (native_black_box.MAP, native_black_box.ACTOR, native_black_box.CLASS),
     STOLEN_BAG: (FOREST, f"Brokers_ArtifactsBag_C {FOREST}.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
                  "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
 }

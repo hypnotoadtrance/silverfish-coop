@@ -21,7 +21,8 @@ LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
 LENNY = native_flood_jammer.LENNY
 QUESTS = {
     SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
-    OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id, native_computer_board.DEAD_DROP.quest_id}),
+    OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id, native_computer_board.DEAD_DROP.quest_id,
+                            native_computer_board.BLACK_BOX.quest_id}),
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id,
                         native_subway_valve.QUEST}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
@@ -29,6 +30,7 @@ QUESTS = {
                          native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
                             native_computer_board.STOLEN_BAG.quest_id, native_computer_board.DEAD_DROP.quest_id,
+                            native_computer_board.BLACK_BOX.quest_id,
                             LAKE_JAMMER.quest, LENNY.quest}),
 }
 PREFLIGHTS = {

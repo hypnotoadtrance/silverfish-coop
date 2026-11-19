@@ -173,6 +173,13 @@ namespace
             -2411.2730396058255, -28557.413414035567, 542.1560096044024, 0,
         },
         Profile{
+            "gorge-insurrectionist-recorder",
+            STR("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P.Gorge_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P.Gorge_01_P:PersistentLevel.Item_InniRadio_01_C_3"),
+            STR("/Game/Classes/Items/Key_Items/Item_InniRadio_01.Item_InniRadio_01_C"),
+            3656.771352378591, 2466.248841434704, 3590.8622264942896, 11,
+        },
+        Profile{
             "forest-brokers-artifacts-bag",
             STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1"),

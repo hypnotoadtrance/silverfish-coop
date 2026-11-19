@@ -15,6 +15,7 @@ local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
 local stolen_bag = "Clt_StolenBag"
 local dead_drop = "DeadDrop_CrossRoads"
+local black_box = "Clct_Radio_Scar"
 local pocket_watch = "Clt_Watch"
 local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
@@ -30,17 +31,17 @@ local function board_profile(area, level, suffix, id, quests, display_global)
 end
 local profiles = {
     [shopkeep] = board_profile(shopkeep, "Shop_ShopKeep_P", "1", 2, {molasses}),
-    [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard, dead_drop}, true),
+    [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard, dead_drop, black_box}, true),
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report, flood_control}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
-    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny, stolen_bag, dead_drop}, true),
+    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny, stolen_bag, dead_drop, black_box}, true),
 }
 local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
     [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
-    [dead_drop] = "CrossRoads Dead Drop"}
+    [dead_drop] = "CrossRoads Dead Drop", [black_box] = "Black Box"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -58,6 +59,12 @@ local prompt = {
     elsewhere = "Deliver one Computer Board to the Scientist bounty board.",
 }
 local contract_prompt = {
+    [black_box] = {
+        offer = "Recover the flight recorder in the Gorge.\nInteract again to accept the contract.",
+        elsewhere = "Deliver the recorder to Simmi's Observatory bounty board.",
+        missing = "Bring the flight recorder in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the recorder for 12,000 shared cash.\nInteract again to turn it in.",
+    },
     [dead_drop] = {
         offer = "Collect the sealed bag in CrossRoads.\nInteract again to accept the contract.",
         elsewhere = "Deliver the sealed bag to the Black Market bounty board.",

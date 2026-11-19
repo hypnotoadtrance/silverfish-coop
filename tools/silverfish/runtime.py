@@ -21,6 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
+from . import native_black_box
 from . import native_subway_valve
 from . import native_kill_volume
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
@@ -1150,6 +1151,9 @@ class Bridge:
                 elif fields[0].endswith("-reputation") and len(fields) == 4 and (spec := COLLECTION_PREFIXES.get(fields[0].removesuffix("-reputation"))):
                     if spec.key in data and fields[1] in spec.factions:
                         data[spec.key]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                elif fields[0] == native_black_box.COMPLETION_TAG and native_black_box.KEY in data:
+                    proof = data[native_black_box.KEY]
+                    proof["completion"] = None if "completion" in proof else native_black_box.parse_completion(fields)
                 elif fields[0] == "native-meet-broker" and len(fields) == 13:
                     proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")

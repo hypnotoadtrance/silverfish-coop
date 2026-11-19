@@ -144,6 +144,15 @@ local profiles = {
         approach = { { 140, 0 }, { 115, 115 }, { 115, -115 }, { -115, 0 } },
     },
     {
+        map = "/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P",
+        source = "gorge-insurrectionist-recorder",
+        path = "/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P.Gorge_01_P:PersistentLevel.Item_InniRadio_01_C_3",
+        class = "/Game/Classes/Items/Key_Items/Item_InniRadio_01.Item_InniRadio_01_C",
+        name = "Item_InniRadio_01_C",
+        approach = { { -100, 0 }, { 100, 0 }, { 0, -100 }, { 0, 100 } },
+        authority_sight = true,
+    },
+    {
         map = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
         source = "forest-brokers-artifacts-bag",
         path = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",

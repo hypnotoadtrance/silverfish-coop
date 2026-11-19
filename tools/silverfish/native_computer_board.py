@@ -3,7 +3,7 @@
 import time
 from dataclasses import dataclass
 
-from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
+from . import native_authored_pickup, native_black_box, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .native_tape_profiles import PUMP, TapeProfile
 from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
@@ -82,9 +82,12 @@ MOLASSES = CollectionContract("Clt_Molasis", "native-molasses", "Get Molasses", 
 SAVLO_KEYCARD = CollectionContract("Clct_SavloKey", "native-savlo-keycard", "Hall Pass", OBSERVATORY,
                                    "observatory_redemption_required", 50000, frozenset({"8"}), "consumed_keycard",
                                    native_authored_pickup.SAVLO_KEYCARD, frozenset({OBSERVATORY}), fixture_xp=14)
+BLACK_BOX = CollectionContract(native_black_box.QUEST, native_black_box.PREFIX, "Black Box", OBSERVATORY,
+                              "observatory_redemption_required", 12000, frozenset({"8"}), "consumed_radio",
+                              native_black_box.SOURCE, frozenset({OBSERVATORY, BLACK_MARKET}), fixture_xp=12)
 CONTRACTS = {spec.quest_id: spec for spec in (
     COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, STOLEN_BAG, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
-    DEAD_DROP,
+    DEAD_DROP, BLACK_BOX,
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
@@ -137,6 +140,8 @@ async def _command(host, bridge, spec: CollectionContract, action: str, pawn: st
             or action == "preflight" and (any(proof[f"{field}_before"] != proof[f"{field}_after"] for field in ("step", "cash", "xp"))
                                       or any(row["before"] != row["after"] for row in reputation.values()))):
         raise RuntimeError(f"The stock {spec.title} report did not preserve preflight state and item custody")
+    if spec is BLACK_BOX and not native_black_box.valid_completion(proof):
+        raise RuntimeError("The stock Black Box report omitted its canonical completion flag")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
@@ -250,6 +255,8 @@ async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning
                 or proof["cash_before"] != before["cash_after"] or proof["xp_before"] != before["xp_after"]
                 or any(row["before"] != before["reputation"][faction]["after"]
                        or not turning_in and row["before"] != row["after"] for faction, row in reputation.items())
+                or spec is BLACK_BOX and (proof["completion"]["before"], proof["completion"]["before_found"]) !=
+                    (before["completion"]["after"], before["completion"]["after_found"])
                 or turning_in and (proof.get("objective_guid"), proof.get("objective_owner")) != arguments):
             raise RuntimeError(f"The stock {spec.title} transition did not reconcile with its authoritative preflight")
 
@@ -266,6 +273,8 @@ async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning
                           reputation={faction: row["after"] for faction, row in reputation.items()},
                           objective_owner=actor)
             record[spec.consumed_field] = arguments[0]
+            if spec is BLACK_BOX:
+                record["completion_flag"] = native_black_box.COMPLETION_FLAG
         candidate.setdefault("native_quests", {})[spec.quest_id] = record
         required = frozenset({actor}) if turning_in and actor != "host" else frozenset()
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)

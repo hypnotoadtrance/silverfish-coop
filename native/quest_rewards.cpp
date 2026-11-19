@@ -55,6 +55,7 @@ namespace
     constexpr auto dead_drop_item_path = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C");
     constexpr auto dead_drop_quest_id = STR("DeadDrop_CrossRoads");
     constexpr auto stolen_bag_item_path = STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C");
+    constexpr auto black_box_item_path = STR("/Game/Classes/Items/Key_Items/Item_InniRadio_01.Item_InniRadio_01_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
     constexpr auto stone_maze_id = STR("Clt_Tape_StoneMaze_01");
@@ -688,6 +689,8 @@ namespace
         dead_drop_item_path, 300};
     constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
         stolen_bag_item_path, 1200};
+    constexpr ObjectiveQuest black_box_objective{"black_box", PartyWorld::observatory, STR("Clct_Radio_Scar"),
+        black_box_item_path, 12000};
     constexpr ObjectiveQuest pocket_watch_objective{"pocket_watch", PartyWorld::scav_bar, STR("Clt_Watch"),
         pocket_watch_item_path, 1000, nullptr, 1, true};
     constexpr ObjectiveQuest savlo_ring_objective{"savlo_ring", PartyWorld::scav_bar, STR("Clct_EvilEye"),
@@ -1402,6 +1405,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
     lua.register_function("SilverfishStageStolenBagObjective", stage_objective<stolen_bag_objective>);
+    lua.register_function("SilverfishStageBlackBoxObjective", stage_objective<black_box_objective>);
     lua.register_function("SilverfishStageCrossroadsDeadDropObjective", stage_objective<dead_drop_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
