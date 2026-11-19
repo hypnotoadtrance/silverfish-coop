@@ -148,6 +148,8 @@ local function damage_pose(state, pawn)
     local tint = {R = 0, G = 0, B = 0, A = 0}
     local bearing = math.atan(forward.Y, forward.X) + math.pi
     local moved = false
+    local floor_hits, floors, teleports, eyes, probes = 0, 0, 0, 0, 0
+    local refusals = {}
     local ran, clear = pcall(function()
         for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 180}) do
             local heading = bearing + math.rad(offset)
@@ -157,6 +159,7 @@ local function damage_pose(state, pawn)
                 local floor = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = anchor.Z + 275},
                     {X = x, Y = y, Z = anchor.Z - 245}, 0, false, {pawn}, 0, hit, true, tint, tint, 0)
                 hit = hit.OutHit or hit
+                if floor == true then floor_hits = floor_hits + 1 end
                 local base, normal = floor == true and point(hit.ImpactPoint), point(hit.ImpactNormal)
                 local component = hit.Component and hit.Component:Get()
                 if base and normal and normal.Z >= 0.75 and finite(hit.Time) and hit.Time > 0 and hit.Time <= 1
@@ -164,11 +167,14 @@ local function damage_pose(state, pawn)
                     and valid(component) and component:GetCollisionObjectType() == 0 then
                     local position = {X = x, Y = y, Z = base.Z + half + 3}
                     local yaw = math.deg(math.atan(anchor.Y - y, anchor.X - x))
-                    if math.abs(position.Z - anchor.Z) <= 75
-                        and pawn:K2_TeleportTo(position, {Pitch = 0, Yaw = yaw, Roll = 0}) then
+                    if math.abs(position.Z - anchor.Z) <= 75 then floors = floors + 1 end
+                    if math.abs(position.Z - anchor.Z) <= 75 and
+                        pawn:K2_TeleportTo(position, {Pitch = 0, Yaw = yaw, Roll = 0}) then
                         moved = true
+                        teleports = teleports + 1
                         local actual, eye = point(pawn:K2_GetActorLocation()), point(camera:K2_GetComponentLocation())
                         if actual and eye and distance(actual, position) <= 18 and distance(eye, actual) <= 150 then
+                            eyes = eyes + 1
                             for _, height in ipairs({10, 25, -5}) do
                                 local pitch = math.deg(math.atan(anchor.Z + height - eye.Z,
                                     math.sqrt((anchor.X - eye.X)^2 + (anchor.Y - eye.Y)^2)))
@@ -177,10 +183,16 @@ local function damage_pose(state, pawn)
                                 if math.abs(aim.Pitch) <= 35 then
                                     controller:SetControlRotation(aim)
                                     camera:K2_SetWorldRotation(aim, false, {}, true)
-                                    if check(pawn:GetAddress()) == true then
+                                    probes = probes + 1
+                                    local ready, reason = check(pawn:GetAddress())
+                                    if ready == true then
                                         pawn:ForceNetUpdate()
                                         return true
                                     end
+                                    if type(reason) ~= "string" or #reason > 32 or not reason:match("^[a-z_]+$") then
+                                        reason = "pose_probe_abi"
+                                    end
+                                    refusals[reason] = (refusals[reason] or 0) + 1
                                 end
                             end
                         end
@@ -193,7 +205,11 @@ local function damage_pose(state, pawn)
     if ran and clear then return original end
     if moved then restore_pose(original) end
     if not ran then error(clear, 0) end
-    error("native_guest_melee_stock_damage_sight_unavailable", 0)
+    local diagnostic = {}
+    for reason, count in pairs(refusals) do diagnostic[#diagnostic + 1] = reason .. "=" .. count end
+    table.sort(diagnostic)
+    error(("native_guest_melee_stock_damage_sight_unavailable:hits=%d:floor=%d:teleport=%d:eyes=%d:probes=%d:%s")
+        :format(floor_hits, floors, teleports, eyes, probes, table.concat(diagnostic, ",")), 0)
 end
 
 local function read(scope, abort)

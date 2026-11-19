@@ -126,15 +126,19 @@ namespace
             prop->GetOffset_Internal() + prop->GetSize() <= function->GetParmsSize() ? prop : nullptr;
     }
 
-    bool vector_field(U::FStructProperty* value)
+    constexpr auto vector_path = STR("/Script/CoreUObject.Vector");
+    constexpr auto impact_vector_path = STR("/Script/Engine.Vector_NetQuantize");
+
+    bool vector_field(U::FStructProperty* value, const U::TCHAR* type = vector_path)
     {
+        auto* structure = find<U::UScriptStruct>(type);
         return value && value->GetSize() == sizeof(Vector) &&
-            value->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            structure && value->GetStruct().Get() == structure;
     }
 
-    std::optional<Vector> read_vector(U::FStructProperty* value, const void* buffer)
+    std::optional<Vector> read_vector(U::FStructProperty* value, const void* buffer, const U::TCHAR* type = vector_path)
     {
-        if (!buffer || !vector_field(value)) return {};
+        if (!buffer || !vector_field(value, type)) return {};
         Vector point{};
         std::memcpy(point.data(), value->ContainerPtrToValuePtr<void>(buffer), sizeof(point));
         return std::ranges::all_of(point, [](double axis) { return std::isfinite(axis); })
@@ -236,10 +240,11 @@ namespace
 
         bool bound() const
         {
-            return type && component && vector_field(impact) && blocking && penetrating && time && distance && depth;
+            return type && component && vector_field(impact, impact_vector_path) &&
+                blocking && penetrating && time && distance && depth;
         }
 
-        U::UObject* owned_component(const void* row, U::UObject* enemy) const
+        U::UObject* contact_component(const void* row) const
         {
             if (!row || penetrating->GetPropertyValueInContainer(row)) return nullptr;
             const float reached = distance->GetPropertyValueInContainer(row);
@@ -247,7 +252,13 @@ namespace
             if (!std::isfinite(reached) || reached <= 1 || reached > sweep_range || !std::isfinite(fraction) ||
                 fraction <= 0 || fraction > 1 || depth->GetPropertyValueInContainer(row) != 0.0f) return nullptr;
             auto* value = component->GetPropertyValueInContainer(row).Get();
-            return live(value) && value->GetOuterPrivate() == enemy ? value : nullptr;
+            return live(value) ? value : nullptr;
+        }
+
+        U::UObject* owned_component(const void* row, U::UObject* enemy) const
+        {
+            auto* value = contact_component(row);
+            return value && value->GetOuterPrivate() == enemy ? value : nullptr;
         }
     };
 
@@ -257,19 +268,28 @@ namespace
         U::UObject* first{};
     };
 
-    std::optional<TraceProof> stock_trace(U::UObject* pipe, U::UObject* pawn, U::UObject* enemy)
+    std::optional<TraceProof> stock_trace(U::UObject* pipe, U::UObject* pawn, U::UObject* enemy,
+                                          std::string_view* refusal = nullptr)
     {
+        const auto reject = [&](std::string_view reason) -> std::optional<TraceProof> {
+            if (refusal) *refusal = reason;
+            return {};
+        };
         auto* camera = object(pawn, STR("Camera"));
         if (!live(camera) || camera->GetOuterPrivate() != pawn ||
-            camera->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.CameraComponent"))) return {};
+            camera->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.CameraComponent")))
+            return reject("camera_identity");
         const auto origin = component_vector(camera, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
         const auto direction = component_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
         if (!origin || !direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
-            return {};
+            return reject("camera_vector_abi");
         const SweepHit hit;
         TraceCall line, sphere;
-        if (!hit.bound() || !line.bind(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingleForObjects"), 13) ||
-            !sphere.bind(STR("/Script/Engine.KismetSystemLibrary:SphereTraceMulti"), 14)) return {};
+        if (!hit.bound()) return reject("hit_result_abi");
+        if (!line.bind(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingleForObjects"), 13))
+            return reject("line_call_abi");
+        if (!sphere.bind(STR("/Script/Engine.KismetSystemLibrary:SphereTraceMulti"), 14))
+            return reject("sphere_call_abi");
         auto* objects = parameter<U::FArrayProperty>(line.fn, STR("ObjectTypes"));
         auto* kind = objects ? U::CastField<U::FByteProperty>(objects->GetInner()) : nullptr;
         auto* line_hit = parameter<U::FStructProperty>(line.fn, STR("OutHit"));
@@ -279,7 +299,8 @@ namespace
         auto* hit_entry = hits ? U::CastField<U::FStructProperty>(hits->GetInner()) : nullptr;
         if (!kind || kind->GetOffset_Internal() != 0 || !line_hit || line_hit->GetStruct().Get() != hit.type ||
             !line_hit->HasAnyPropertyFlags(U::CPF_OutParm) || !radius || !channel || !hit_entry ||
-            hit_entry->GetStruct().Get() != hit.type || !hits->HasAnyPropertyFlags(U::CPF_OutParm)) return {};
+            hit_entry->GetStruct().Get() != hit.type || !hits->HasAnyPropertyFlags(U::CPF_OutParm))
+            return reject("trace_parameters_abi");
 
         TraceBuffer single;
         const auto destination = ahead(*origin, *direction, sweep_range);
@@ -295,12 +316,15 @@ namespace
         if (line.returned->GetPropertyValueInContainer(data))
         {
             const auto* row = line_hit->ContainerPtrToValuePtr<void>(data);
-            const auto impact = read_vector(hit.impact, row);
-            if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.owned_component(row, enemy)) return {};
+            const auto impact = read_vector(hit.impact, row, impact_vector_path);
+            if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.contact_component(row))
+                return reject("line_contact");
+            // Stock clips the sphere's sweep at this surface. The sphere contacts below
+            // still have to belong to the exact target, even when the ray hits a wall.
             contact = *impact;
         }
         if (std::hypot(contact[0] - (*origin)[0], contact[1] - (*origin)[1], contact[2] - (*origin)[2]) <= sweep_radius)
-            return {};
+            return reject("line_too_near");
 
         TraceBuffer area;
         sphere.inputs(area, pipe, pawn, *origin, ahead(contact, *direction, -sweep_radius), false);
@@ -310,14 +334,17 @@ namespace
         channel->SetPropertyValueInContainer(data, 6);
         sphere.library->ProcessEvent(sphere.fn, data);
         U::FScriptArrayHelper contacted(hits, hits->ContainerPtrToValuePtr<void>(data));
-        if (contacted.Num() < 1 || contacted.Num() > 16) return {};
+        if (contacted.Num() < 1) return reject("sphere_empty");
+        if (contacted.Num() > 16) return reject("sphere_bounds");
         U::UObject* first{};
         for (int index = 0; index < contacted.Num(); ++index)
         {
-            auto* component = hit.owned_component(contacted.GetRawPtr(index), enemy);
-            if (!component) return {};
+            auto* component = hit.contact_component(contacted.GetRawPtr(index));
+            if (!component) return reject("sphere_contact");
+            if (component->GetOuterPrivate() != enemy) return reject("sphere_other_actor");
             if (!first) first = component;
         }
+        if (refusal) *refusal = "ready";
         return TraceProof{*origin, *direction, first};
     }
 
@@ -844,6 +871,7 @@ namespace
     int damage_pose(const Lua& lua)
     {
         bool clear = false;
+        std::string_view status = "arguments";
         if (enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_integer())
         {
             auto* pawn = pawn_at(lua.get_integer());
@@ -852,14 +880,18 @@ namespace
             auto* pipe = object(pawn, STR("EquipedItem"));
             auto* world = find<U::UWorld>(damage_map);
             auto* target = placed_enemy(world);
-            clear = target && pawn && static_cast<U::AActor*>(pawn)->GetWorld() == world &&
-                silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical) &&
-                live(pipe) && pipe->GetClassPrivate() == find<U::UClass>(pipe_path) &&
-                object(pipe, STR("Player_Ref")) == pawn && object(pipe, STR("Owner")) == pawn &&
-                stock_trace(pipe, pawn, target).has_value();
+            if (!target) status = "placed_target";
+            else if (!pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world ||
+                !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical))
+                status = "detached_owner";
+            else if (!live(pipe) || pipe->GetClassPrivate() != find<U::UClass>(pipe_path) ||
+                object(pipe, STR("Player_Ref")) != pawn || object(pipe, STR("Owner")) != pawn)
+                status = "equipped_pipe";
+            else clear = stock_trace(pipe, pawn, target, &status).has_value();
         }
         lua.set_bool(clear);
-        return 1;
+        lua.set_string(status);
+        return 2;
     }
 
     template <bool damage> int start(const Lua& lua)
