@@ -91,9 +91,16 @@ async def verify(work: Path, vanilla_saved: Path):
         evidence["routes"].append(evidence.pop("pending_route"))
         return arrived
 
-    async def board_state(*states):
-        await wait(guest_run, lambda frame: (row := frame.get("game", {}).get("native_wire_board", {}))
-                   and row.get("board") == valve.BOARD and row.get("quest") == valve.QUEST and row.get("state") in states)
+    async def board_state(*states, selected=True):
+        def qualified(frame):
+            game = frame.get("game", {})
+            row = game.get("native_wire_board", {})
+            return (game.get("state") == "connected" and game.get("map") == BOROUGH
+                    and row.get("board") == valve.BOARD and row.get("state") in states
+                    and row.get("pawn") == game.get("pawns", {}).get("local", {}).get("name")
+                    and (not selected or row.get("quest") == valve.QUEST))
+
+        await wait(guest_run, qualified)
 
     async def board_press(expected):
         proof = (await action(guest, "native-wire-board-fixture", "--target", valve.QUEST))["native_wire_board"]
@@ -132,7 +139,7 @@ async def verify(work: Path, vanilla_saved: Path):
         guest_proc = await launch(guest, "guest", "join", *guest, "--invite", invite["invite_file"], *guest_flags)
         current = await paired(BOROUGH)
         await action(host, valve.APPROACH, "--target", "guest")
-        await board_state("armed", "focused")
+        await board_state("armed", "focused", selected=False)
         await board_press("loading")
         await board_state("offer")
         await board_press("starting")
@@ -168,7 +175,7 @@ async def verify(work: Path, vanilla_saved: Path):
         current = await cross(current, CITY, "Subway")
         current = await cross(current, BOROUGH, "City_Borough")
         await action(host, valve.APPROACH, "--target", "guest")
-        await board_state("armed", "focused")
+        await board_state("armed", "focused", selected=False)
         await board_press("loading")
         await board_state("ready")
         quote = (await action(guest, valve.PREFLIGHT))[valve.BOARD_KEY]
