@@ -497,4 +497,5 @@ def full_name(area: str, actor: str) -> str:
 
 
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
+GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS)
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])

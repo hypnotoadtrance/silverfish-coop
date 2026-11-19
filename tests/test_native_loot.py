@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 from tools.silverfish import native_host_save, native_loot, party, runtime
 from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, PLACEMENTS, OVERRIDDEN_PLACEMENTS, full_name
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, RAIL_YARD
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, OBSERVATORY, RAIL_YARD
 
 
 OTHER_CRATE = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
@@ -132,6 +132,36 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await native_loot.perform(host, bridge, "host", "open", OTHER_CRATE, OPERATION), result)
         bridge.command.assert_awaited_once()
         host.checkpoint_native.assert_awaited_once()
+
+    async def test_trait_queries_follow_the_exact_authored_guarantee(self):
+        guaranteed_crate = full_name(OBSERVATORY, "LootCrate_Small_BP_C_1")
+        for area, crate, calls, can_commit in (
+            (OBSERVATORY, guaranteed_crate, 0, True),
+            (OBSERVATORY, guaranteed_crate, 1, False),
+            (CROSSROADS, OTHER_CRATE, 0, False),
+        ):
+            with self.subTest(crate=crate, trait_calls=calls):
+                host = self.host(area)
+
+                async def open_crate(verb, pawn, current, slot, *, timeout):
+                    self.assertEqual((verb, pawn, current), ("native-loot-open", PAWN, crate))
+                    self.frame(area, slot)
+                    proof = {"action": "open", "map": area, "pawn": PAWN, "crate": crate, "escrow_slot": slot,
+                             "ok": True, "invoked": True, "looted": True, "trait_calls": calls, "items": [ITEM],
+                             "item_count": 1, "lucky_looter": True, "trait_source": "canonical"}
+                    return self.game(area, native_loot=proof)
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=open_crate))
+                if can_commit:
+                    result = await native_loot.perform(host, bridge, "host", "open", crate, OPERATION)
+                    self.assertEqual(result["native_loot_roll"]["trait_calls"], 0)
+                    self.assertTrue(result["native_loot_roll"]["lucky_looter"])
+                    host.checkpoint_native.assert_awaited_once()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "exact stock crate roll did not verify"):
+                        await native_loot.perform(host, bridge, "host", "open", crate, OPERATION)
+                    host.checkpoint_native.assert_not_awaited()
+                    self.assertTrue(host.stopping)
 
     async def test_claim_requires_exact_scope_and_retries_keep_the_original_crate(self):
         rolls = {crate: self.roll(CROSSROADS, crate, str(index) * 32)

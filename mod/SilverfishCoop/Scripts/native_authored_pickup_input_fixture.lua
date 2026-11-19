@@ -2,6 +2,7 @@ local input = {}
 local supply_profiles = require("authored_supply_catalog")
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
@@ -186,7 +187,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel)
+local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel, tall_aim)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -205,7 +206,7 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
         if valid(detail.pawn) then floor_ignored[#floor_ignored + 1] = detail.pawn end
     end
     if valid(pawn.EquipedItem) then sight_ignored[#sight_ignored + 1] = pawn.EquipedItem end
-    local rays, blockers = points(box, center, true), {}
+    local rays, blockers = points(box, center, tall_aim ~= false), {}
     local angles = {0, 45, -45, 90, -90, 135, -135, 180}
     if multilevel then
         for _, angle in ipairs({22.5, -22.5, 67.5, -67.5, 112.5, -112.5, 157.5, -157.5}) do
@@ -293,6 +294,21 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],
         profile.source == molasses or profile.source == shelf_source)
     return "stock pickup floor and interaction sight verified"
+end
+
+function input.approach_docks_crate(state, phase, profile, pawn, actor, box)
+    if profile.map ~= docks or profile.guarantee_spawn ~= true
+        or require("authored_loot_registry")[profile.index] ~= profile
+        or not approach_scope(state, phase, pawn, actor, docks) or not actor:HasAuthority()
+        or not same(StaticFindObject(profile.path), actor) or actor:GetFullName() ~= profile.name
+        or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
+        error("native_loot_docks_fixture_scope_unavailable", 0)
+    end
+    local forward = vector(box:GetForwardVector())
+    local bearing = forward and math.deg(math.atan(forward.Y, forward.X)) or 0
+    -- Match the exact center and edge rays used by the local crate F fixture.
+    approach_clear_sight(state, pawn, actor, box, "native_loot_docks_fixture",
+        {95, 125, 155, 195, 225}, bearing, true, false)
 end
 
 local function restored(camera, original)

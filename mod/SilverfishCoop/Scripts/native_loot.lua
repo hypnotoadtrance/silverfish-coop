@@ -18,6 +18,7 @@ local item_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local max_inventory, max_effects = 4096, 256
 local crate_fixture_trace_color = {R = 0, G = 0, B = 0, A = 1}
+local docks_map = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 
 local maps, names = {}, {}
 for _, profile in ipairs(registry) do
@@ -294,6 +295,11 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
+    if scope.profile.guarantee_spawn and scope.profile.map == docks_map then
+        local input = require("native_authored_pickup_input_fixture")
+        input.approach_docks_crate(state, phase, scope.profile, pawn, scope.crate, scope.box)
+        return loot.qualify(state, phase, pawn_name, requested_crate)
+    end
     if scope.profile.index > 3 then return crate_fixture_floor(state, phase, scope, pawn_name, requested_crate, rotation) end
     for _, distance in ipairs({ 180, 240, 130 }) do
         for _, offset in ipairs({ { distance, 0 }, { -distance, 0 }, { 0, distance }, { 0, -distance } }) do

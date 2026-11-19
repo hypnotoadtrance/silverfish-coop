@@ -214,9 +214,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
             assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
-            assert roll["lucky_looter"] and roll["trait_calls"] >= 1, roll
+            assert roll["lucky_looter"], roll
             if guaranteed:
-                assert roll["trait_calls"] == 1 and 1 <= len(roll["items"]) <= 2, roll
+                assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
+            else:
+                assert 1 <= roll["trait_calls"] <= 3, roll
             if name == "guaranteed-docks":
                 assert {item["class_path"] for item in roll["items"]} <= FISH_CANNERY_ITEMS, roll
             if forced:

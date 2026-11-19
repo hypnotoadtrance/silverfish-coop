@@ -706,6 +706,13 @@ namespace
         const bool account = caller->Object() == scope.context.crate && caller->Node() == scope.schema.karma;
         const bool roll = index >= 0 && caller->Node() == scope.schema.roll;
         if (!account && !roll) return;
+        // GuaranteeSpawn bypasses both AffectKarma's accounting branch and
+        // each child's RollKarma. The stock weighted table still runs.
+        if (scope.context.guarantee_spawn)
+        {
+            scope.problem = "stock_loot_guaranteed_karma_branch_changed";
+            return;
+        }
 
         const auto& schema = scope.schema;
         const auto* locals = frame.Object() == object ? frame.Locals() : nullptr;
@@ -869,10 +876,9 @@ namespace
         {
             if (!restored) scope.problem = "stock_loot_fixture_original_stream_unverified";
             else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
-            else if (scope.accounts != 1) scope.problem = "stock_loot_open_karma_query_unverified";
+            else if (!context.guarantee_spawn && scope.accounts != 1)
+                scope.problem = "stock_loot_open_karma_query_unverified";
             else if (scope.spawns != std::array{1, 1}) scope.problem = "stock_loot_open_roll_calls_unverified";
-            else if (context.guarantee_spawn && scope.rolls != std::array{0, 0})
-                scope.problem = "stock_loot_guaranteed_karma_branch_changed";
             else if (object_field(context.crate, STR("Player")) != context.pawn)
                 scope.problem = "stock_loot_open_opener_changed";
             else if (object_field(context.world, STR("OwningGameInstance")) != context.instance ||
