@@ -16,7 +16,10 @@ local merchants = {
         level = "Shop_BlackMarket_01", actor = "Shop_BP_C_1", data = "BlacMarket_ShopData",
     },
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"] = {
-        level = "Shop_Scientist_01", actor = "Shop_BP_C_2", data = "Science_ShopData", barter = "Barter_BP_C_107",
+        level = "Shop_Scientist_01", actor = "Shop_BP_C_2", data = "Science_ShopData", barter = "Barter_BP_C_107", camera = true,
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"] = {
+        level = "Shop_Gunsmith_P", actor = "Shop_BP_C_1", data = "AmmoShopData", barter = "Barter_BP_C_1", neutral = true,
     },
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
@@ -108,7 +111,7 @@ local function merchant(state, phase, pawn_name, allow_host)
     local pawn, stock
     local detail = state.local_pawn
     if detail and detail.name == pawn_name then
-        if not allow_host or not profile.barter then refused("scientist_host_camera_only") end
+        if not allow_host or not profile.camera then refused("scientist_host_camera_only") end
         pawn, stock = canonical_host(state, detail, pawn_name)
     else
         local accepted
@@ -139,7 +142,10 @@ local function merchant(state, phase, pawn_name, allow_host)
         if not exact(replacement, "/Game/Classes/Actors/Barter_BP.Barter_BP_C")
             or not same(replacement:GetWorld(), state.world) or not same(replacement, actor.BarterReplacement)
             or not same(replacement.MerchantData, actor.MerchantData) or (collision ~= 1 and collision ~= 3) then
-            refused("scientist_cash_counter_unavailable")
+            refused(profile.camera and "scientist_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
+        end
+        if profile.neutral and (replacement.AcceptCash ~= true or actor["Rep Faction"] ~= 0) then
+            refused("gunsmith_neutral_profile_unverified")
         end
     end
     return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance}

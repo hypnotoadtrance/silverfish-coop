@@ -17,6 +17,8 @@ local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
 local native_computer_board = require("native_computer_board")
+local native_flood_jammer = require("native_flood_jammer")
+local native_flood_jammer_projection = require("native_flood_jammer_projection")
 local native_turret_photo_quest = require("native_turret_photo_quest")
 local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
@@ -59,6 +61,7 @@ local native_guest_weapon = require("native_guest_weapon")
 local native_guest_npc = require("native_guest_npc")
 local native_guest_reload_input = require("native_guest_reload_input")
 local native_guest_primary_input = require("native_guest_primary_input")
+local native_guest_clock = require("native_guest_clock")
 local native_host_camera = require("native_host_camera")
 local native_guest_consumable = require("native_guest_consumable")
 local native_guest_regen = require("native_guest_regen")
@@ -387,9 +390,11 @@ local function run_command(fields, state, current_phase)
         native_inventory_view.clear()
         native_bag_projection.clear()
         native_authored_pickup.clear()
+        native_flood_jammer_projection.clear()
         native_shop_view.clear()
         native_campaign_npc.clear()
         native_guest_primary_input.reset()
+        native_guest_clock.clear()
         native_host_camera.reset()
         native_loot_crate_input.clear()
         native_loot_view.clear()
@@ -772,6 +777,7 @@ local function run_command(fields, state, current_phase)
         or native_guest_npc.command(fields, state, current_phase)
         or native_guest_reload_input.command(fields, state, current_phase)
         or native_guest_primary_input.command(fields, state, current_phase)
+        or native_guest_clock.command(fields, state, current_phase)
         or native_host_camera.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -782,6 +788,8 @@ local function run_command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
+        or native_flood_jammer.command(fields, state, current_phase)
+        or native_flood_jammer_projection.command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
@@ -897,6 +905,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_clock.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -908,6 +917,8 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_flood_jammer_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1063,6 +1074,7 @@ local function tick()
     native_shop_view.sync(state, current_phase)
     native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
+    native_guest_clock.sync(state, current_phase)
     native_host_camera.sync(state, current_phase)
     native_enemy_loot.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)

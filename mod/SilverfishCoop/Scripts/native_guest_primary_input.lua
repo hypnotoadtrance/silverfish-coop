@@ -9,7 +9,10 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
-local kinds = { smg = true, ["light-pistol"] = true, ["nagant-scoped"] = true, camera = true }
+local kinds = {
+    smg = true, ["smg-standard"] = true, ["light-pistol"] = true, ["light-pistol-suppressed"] = true,
+    ["nagant-scoped"] = true, camera = true,
+}
 local event_path, is_downed, binding, fixture_proof
 
 local function valid(object)

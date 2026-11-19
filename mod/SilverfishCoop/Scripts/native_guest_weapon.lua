@@ -6,12 +6,21 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local smg_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
 local pistol_path = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
+local standard_smg_path = "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"
+local suppressed_pistol_path = "/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local weapon_kinds = {
     [smg_path] = "smg",
+    [standard_smg_path] = "smg-standard",
     [pistol_path] = "light-pistol",
+    [suppressed_pistol_path] = "light-pistol-suppressed",
     ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = "nagant-scoped",
+}
+local seed_profiles = {
+    ["light-pistol"] = pistol_path,
+    ["light-pistol-suppressed"] = suppressed_pistol_path,
+    ["smg-standard"] = standard_smg_path,
 }
 local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local observation
@@ -66,10 +75,10 @@ function guest_weapon.command(fields, state, phase)
     local inspect = operations.inspect
     local name, guid = fields[3], fields[4]
     local fixture = action == "seed" or action == "seed-ammo"
-    local pistol_fixture = action == "seed" and #fields == 5 and fixtures and headless and fields[5] == "light-pistol"
+    local seed_profile = action == "seed" and #fields == 5 and fixtures and headless and seed_profiles[fields[5]]
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
-    if not enabled or (#fields ~= 4 and not pistol_fixture) or phase ~= "hosting"
+    if not enabled or (#fields ~= 4 and not seed_profile) or phase ~= "hosting"
         or (not equipped_target and (not guid or #guid ~= 32 or guid:find("[^0-9A-F]"))) then
         error("A native weapon operation needs an exact guest and item GUID", 0)
     end
@@ -90,13 +99,13 @@ function guest_weapon.command(fields, state, phase)
     end
     if not pawn or not detached then error("The exact guest weapon save is unavailable", 0) end
     if fixture then
-        local path = action == "seed-ammo" and ammo_path or pistol_fixture and pistol_path or smg_path
+        local path = action == "seed-ammo" and ammo_path or seed_profile or smg_path
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) end
     end
 
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
-    local seed_variant = pistol_fixture and { "light-pistol" } or {}
+    local seed_variant = seed_profile and { fields[5] } or {}
     local ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid, table.unpack(seed_variant))
     local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after
     if action == "fire" then projectiles = fifth end

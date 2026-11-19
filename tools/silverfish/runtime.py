@@ -19,6 +19,7 @@ from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from .native_authored_pickup import SOURCE as AUTHORED_PICKUP_SOURCE
 from .native_guest_npc import parse_bandit
+from .native_guest_weapon import PRIMARY_KINDS
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -264,6 +265,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
+           guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
@@ -286,6 +288,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW", None)
@@ -311,6 +315,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Stock guest reload input requires a staged native client")
     if guest_primary_input and (port is not None or not native_zones):
         raise ValueError("Stock guest primary input requires a staged native client")
+    if guest_clock and (port is not None or not native_zones):
+        raise ValueError("The stock guest clock requires a staged native client")
     if host_camera_input and (port is None or not native_guest or not native_zones):
         raise ValueError("Stock host camera input requires a staged native campaign host")
     if guest_inventory_view and (port is not None or not native_zones):
@@ -354,6 +360,10 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES"] = "1"
+    if guest_clock:
+        env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK"] = "1"
+        if headless:
+            env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES"] = "1"
     if host_camera_input:
         env["SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT"] = "1"
     if guest_inventory_view:
@@ -478,7 +488,7 @@ class Bridge:
             if (len(fields) != 6 or fields[0] != "native-guest-primary-intent"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
                     or not 0 < (sequence := int(fields[1])) < 2**53
-                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol", "nagant-scoped", "camera")
+                    or not valid_guid(fields[4]) or fields[5] not in PRIMARY_KINDS
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
                 continue
             events.append((sequence, *fields[2:]))
@@ -855,6 +865,39 @@ class Bridge:
                 elif (fields[0] == "native-computer-board-reputation" and len(fields) == 4
                       and fields[1] in ("2", "4", "5") and "native_computer_board" in data):
                     data["native_computer_board"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                elif fields[0] == "native-flood-jammer" and len(fields) == 12:
+                    names = ("operation", "map", "pawn", "board", "quest")
+                    numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
+                    proof = dict(zip(names, fields[1:6]))
+                    proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:]))
+                    data["native_flood_jammer"] = {**proof, "reputation": {}}
+                elif (fields[0] == "native-flood-jammer-reputation" and len(fields) == 4
+                      and fields[1] in ("5", "8") and "native_flood_jammer" in data):
+                    data["native_flood_jammer"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                elif fields[0] == "native-flood-jammer-objective" and len(fields) == 12 and fields[9] in ("host", "guest", "-"):
+                    names = ("step_before", "step_after", "xp_before", "xp_after")
+                    numeric = dict((name, None if value == "-" else int(value)) for name, value in zip(names, fields[5:9]))
+                    data["native_flood_jammer_objective"] = {
+                        "map": fields[1], "jammer": fields[2], "trigger": fields[3], "state": fields[4],
+                        **numeric, "shooter_role": fields[9], "shooter": fields[10], "projectile": fields[11],
+                    }
+                elif fields[0] == "native-flood-jammer-aim" and len(fields) == 7 and valid_guid(fields[4]):
+                    data["native_flood_jammer_aim"] = dict(zip(("map", "pawn", "jammer", "guid"), fields[1:5]),
+                                                         distance=_finite(fields[5]), component=fields[6])
+                elif (fields[0] == "native-flood-jammer-projection" and len(fields) == 5
+                      and fields[3] in ("present", "hidden", "absent")):
+                    data["native_flood_jammer_projection"] = dict(zip(("map", "actor", "state", "audio"), fields[1:]))
+                elif fields[0] == "native-guest-clock" and len(fields) == 9 and fields[6] in ("armed", "projected"):
+                    data["native_guest_clock"] = {
+                        "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),
+                        "milliseconds": int(fields[5]), "state": fields[6], "calls": int(fields[7]),
+                        "original_client_milliseconds": None if fields[8] == "-" else int(fields[8]),
+                    }
+                elif fields[0] == "native-guest-clock-fixture" and len(fields) == 8:
+                    data["native_guest_clock_fixture"] = {
+                        "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),
+                        "milliseconds": int(fields[5]), "calls": int(fields[6]), "text": fields[7],
+                    }
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
                 elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
@@ -912,6 +955,12 @@ class Bridge:
                     data["native_campaign_npc_approach"] = {"map": fields[1], "member": fields[2], "host_pawn": fields[3],
                                                            "guest_pawn": fields[4], "host_distance": _finite(fields[5]),
                                                            "guest_distance": _finite(fields[6])}
+                elif fields[0] == "native-campaign-npc-approach-geometry" and len(fields) == 8:
+                    data["native_campaign_npc_approach_geometry"] = {
+                        "map": fields[1], "member": fields[2], "sweep": _finite(fields[3]),
+                        "floor_pairs": int(fields[4]), "placed_pairs": int(fields[5]),
+                        "trace": fields[6], "component": fields[7],
+                    }
                 elif fields[0] == "native-campaign-npc-refresh" and len(fields) == 13:
                     keys = ("population", "capacity", "markers", "eligible_markers", "stock_calls")
                     data["native_campaign_npc_refresh"] = {
@@ -937,7 +986,7 @@ class Bridge:
                     }
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol", "nagant-scoped", "camera"):
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in PRIMARY_KINDS:
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],

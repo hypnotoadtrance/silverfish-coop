@@ -5,7 +5,7 @@ from itertools import groupby
 import json
 from pathlib import Path
 
-from .authored_routes import AUTHORED_ROUTES, MAPS
+from .authored_routes import AUTHORED_ROUTES, MAPS, ROUTE_MAPS
 
 
 HEADER = """#pragma once
@@ -117,8 +117,8 @@ def literal(value: str) -> str:
 
 
 def render() -> str:
-    worlds = {basename(package): package for package in MAPS}
-    if len(worlds) != len(MAPS) or any(not name.isascii() or not name.isidentifier() for name in worlds):
+    worlds = {basename(package): package for package in ROUTE_MAPS}
+    if len(worlds) != len(ROUTE_MAPS) or any(not name.isascii() or not name.isidentifier() for name in worlds):
         raise ValueError("Authored route worlds need unique C++ identifiers")
 
     content = [HEADER]

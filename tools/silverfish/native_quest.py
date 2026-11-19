@@ -1,6 +1,6 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
-from . import native_broker, native_computer_board, native_wire_quest, native_rewards, native_turret_photo, party
+from . import native_broker, native_computer_board, native_flood_jammer, native_wire_quest, native_rewards, native_turret_photo, party
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -51,6 +51,11 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
     if target == native_computer_board.QUEST_ID and verb in ("native-quest-start", "native-quest-turnin"):
         operation = native_computer_board.start if verb == "native-quest-start" else native_computer_board.turn_in
         return await operation(host, bridge, actor)
+    if target == native_flood_jammer.QUEST_ID:
+        if verb not in ("native-quest-start", "native-quest-turnin"):
+            raise party.RuleError("native_flood_jammer_requires_the_authored_objective")
+        operation = native_flood_jammer.START if verb == "native-quest-start" else native_flood_jammer.TURN_IN
+        return await native_flood_jammer.act(host, bridge, actor, operation)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
     roles = host.roles()

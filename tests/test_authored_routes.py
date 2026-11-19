@@ -1,16 +1,18 @@
 import unittest
 
-from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS
+from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS, ROUTE_MAPS
 from tools.silverfish.generate_authored_exit_registry import render, render_wall_routes
 from tools.silverfish.travel import (
-    CISTERN, CROSSROADS, DEAD_BRIDGE, EAST_WING, OBSERVATORY, RAIL_YARD, RUIN_FIELDS, SCI_TUNNEL, SCIENTIST_SHOP,
+    BEACH, CISTERN, CROSSROADS, DEAD_BRIDGE, EAST_WING, GOLD_NEXUS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD,
+    RUIN_FIELDS, SCI_TUNNEL, SCIENTIST_SHOP, SLUMS,
 )
 
 
 class AuthoredRouteTests(unittest.TestCase):
     def test_all_catalog_maps_are_reachable_from_core(self):
-        self.assertEqual(len(AUTHORED_ROUTES), 138)
+        self.assertEqual(len(AUTHORED_ROUTES), 145)
         self.assertEqual(len(MAPS), 54)
+        self.assertEqual(ROUTE_MAPS - MAPS, {GOLD_NEXUS})
         self.assertEqual(len({(row.source, row.actor) for row in AUTHORED_ROUTES}), len(AUTHORED_ROUTES))
         reached = {CROSSROADS, DEAD_BRIDGE, OBSERVATORY, CISTERN}
         while True:
@@ -19,6 +21,27 @@ class AuthoredRouteTests(unittest.TestCase):
                 break
             reached = connected
         self.assertEqual(reached, MAPS)
+
+    def test_golden_nexus_has_seven_outbound_stock_pads(self):
+        swamp = "/Game/Classes/Maps/Maps_OverWorld/Swamp_01_P"
+        pads = [entry for entry in AUTHORED_ROUTES if entry.source == GOLD_NEXUS]
+        self.assertFalse(any(entry.destination == GOLD_NEXUS for entry in AUTHORED_ROUTES))
+        expected = {
+            178: (CROSSROADS, "Nexus_CrossRoads", 278), 179: (NORTHEAST_RAIL, "Nexus_M35", 705),
+            180: (swamp, "Nexus_Swamp", 3), 181: (CROSSROADS, "Nexus_CrossRoads", 278),
+            182: (CROSSROADS, "Nexus_CrossRoads", 278), 183: (SLUMS, "Nexus_Slums", 287),
+            184: (BEACH, "Nexus_Beach", 139),
+        }
+        self.assertEqual(len(pads), len(expected))
+        native, walls = render(), render_wall_routes()
+        self.assertIn(f'inline constexpr World GoldNexus_P{{STR("{GOLD_NEXUS}.GoldNexus_P")', native)
+        self.assertIn(f'["{GOLD_NEXUS}"] = {{', walls)
+        for actor_id, (destination, tag, marker_id) in expected.items():
+            actor = f"Level_Exit_BP_C_{actor_id}"
+            pad, = [entry for entry in pads if entry.actor == actor]
+            self.assertEqual((pad.destination, pad.entrance, pad.arrival_actor, pad.kind, pad.travel_time_step),
+                             (destination, tag, f"LevelExit_Spawn_BP_C_{marker_id}", "overlap", 1))
+            self.assertIn(f'{{ actor = "{actor}", kind = "overlap", entrance = "{tag}" }}', walls)
 
     def test_overlaps_preserve_stock_marker_and_clock_step(self):
         route, = (entry for entry in AUTHORED_ROUTES if entry.source == CROSSROADS and entry.destination == RAIL_YARD)

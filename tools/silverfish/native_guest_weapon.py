@@ -11,13 +11,19 @@ GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
-CLASS_PATHS = {"/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C",
-               "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C",
-               "/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C",
-               CAMERA_PATH}
+FIRE_CLASSES = {
+    "smg": "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C",
+    "smg-standard": "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C",
+    "light-pistol": "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C",
+    "light-pistol-suppressed": "/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C",
+    "nagant-scoped": "/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C",
+}
+CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH}
+PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera"))
+SEED_KINDS = frozenset({"light-pistol", "light-pistol-suppressed", "smg-standard"})
 
 
-async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, pistol_fixture=False,
+async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
                   bandit_fixture: str | None = None) -> dict:
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
@@ -29,12 +35,14 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         raise party.RuleError("invalid_weapon_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
+    if seed_kind is not None and (action != "native-guest-weapon-seed" or not isinstance(seed_kind, str) or seed_kind not in SEED_KINDS):
+        raise party.RuleError("invalid_guest_weapon_fixture_kind")
 
     scope = host.native_recipients().get(character)
     if not scope or not scope["connected"]:
         raise party.RuleError("guest_not_active")
     operation = action.removeprefix("native-guest-weapon-")
-    extra = ("light-pistol",) if pistol_fixture else ()
+    extra = (seed_kind,) if seed_kind is not None else ()
     fingerprint = [action, guid, bandit_fixture or (extra[0] if extra else None)]
     mutates = operation != "inspect"
     if mutates:

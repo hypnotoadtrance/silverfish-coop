@@ -10,12 +10,15 @@ from .travel import OBSERVATORY, SCIENTIST_SHOP
 ACTOR = f"Shop_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Shop_BP_C_2"
 SCAV_BAR = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+GUNSMITH = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
 CAMERA = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+BALL_AMMO = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 MERCHANTS = {
     OBSERVATORY: ACTOR,
     SCAV_BAR: f"Shop_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.Shop_BP_C_2",
     BLACK_MARKET: f"Shop_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1",
     SCIENTIST_SHOP: f"Shop_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.Shop_BP_C_2",
+    GUNSMITH: f"Shop_BP_C {GUNSMITH}.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1",
 }
 ACTIONS = ("native-finite-shop-list", "native-finite-shop-buy", "native-finite-shop-sale-quote", "native-finite-shop-sell")
 MAX_PRICE = (1 << 31) - 1
@@ -147,7 +150,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             raise
         proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased")
         reported = proof["offers"]
-        if area == SCIENTIST_SHOP and len(reported) == 1:
+        shelf_class = {SCIENTIST_SHOP: CAMERA, GUNSMITH: BALL_AMMO}.get(area)
+        if (not sale and shelf_class and len(reported) == 1
+                and offer["class_path"] == reported[0]["class_path"] == shelf_class):
             proof["offer_guid"] = guid
             proof["stock_source"] = "limited_stock" if reported[0]["guid"] == guid else "stock_shelf"
             reported = [dict(reported[0], guid=guid)]

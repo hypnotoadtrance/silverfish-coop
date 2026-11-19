@@ -32,6 +32,8 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto smg_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
     constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
+    constexpr auto standard_smg_path = STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C");
+    constexpr auto suppressed_pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C");
     constexpr auto nagant_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C");
     constexpr auto nagant_primary_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C:Use_Item_Primary");
     constexpr auto rifle_fmj_path = STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C");
@@ -47,6 +49,8 @@ namespace
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto ammo_fixture_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
+    constexpr auto ball_projectile_path =
+        STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto projectile_path =
@@ -229,11 +233,11 @@ namespace
         return matched;
     }
 
-    std::string_view resolve(const Lua& lua, Context& context, bool* seed_pistol)
+    std::string_view resolve(const Lua& lua, Context& context, const Unreal::TCHAR** seed_variant)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
-        if (!Unreal::IsInGameThreadRaw() || (count != 3 && !(seed_pistol && count == 4 && lua.is_string(4))) ||
+        if (!Unreal::IsInGameThreadRaw() || (count != 3 && !(seed_variant && count == 4 && lua.is_string(4))) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
@@ -241,9 +245,12 @@ namespace
             return "guest_pawn_save_and_guid_required";
         if (count == 4)
         {
-            if (!env("SILVERFISH_COOP_HEADLESS") || lua.get_string() != "light-pistol")
-                return "stock_guest_weapon_fixture_profile_unqualified";
-            *seed_pistol = true;
+            if (!env("SILVERFISH_COOP_HEADLESS")) return "stock_guest_weapon_fixture_profile_unqualified";
+            const auto kind = lua.get_string();
+            if (kind == "light-pistol") *seed_variant = pistol_path;
+            else if (kind == "light-pistol-suppressed") *seed_variant = suppressed_pistol_path;
+            else if (kind == "smg-standard") *seed_variant = standard_smg_path;
+            else return "stock_guest_weapon_fixture_profile_unqualified";
         }
 
         auto* pawn_class = find<Unreal::UClass>(pawn_path);
@@ -378,12 +385,55 @@ namespace
             boolean(weapon, STR("UseEatherAsAmmo"), false);
     }
 
+    struct MagazineProfile
+    {
+        const Unreal::TCHAR* path;
+        int capacity;
+        int burst_length;
+        double fire_rate;
+    };
+
+    constexpr std::array stock_ball_magazines{
+        MagazineProfile{suppressed_pistol_path, 14, 1, 0.05},
+        MagazineProfile{standard_smg_path, 30, 0, 0.075},
+    };
+
+    const MagazineProfile* stock_ball_magazine(Unreal::UClass* weapon)
+    {
+        for (const auto& profile : stock_ball_magazines)
+            if (weapon && weapon == find<Unreal::UClass>(profile.path)) return &profile;
+        return nullptr;
+    }
+
+    bool stock_ball_magazine_shape(Unreal::UObject* weapon, const MagazineProfile& profile)
+    {
+        auto* magazine = field<Unreal::FIntProperty>(weapon, STR("MagSize"));
+        auto* burst = field<Unreal::FIntProperty>(weapon, STR("BurstLength"));
+        auto* caliber = field<Unreal::FByteProperty>(weapon, STR("Caliber"));
+        auto* cost = field<Unreal::FIntProperty>(weapon, STR("AmmoCost_PerShot"));
+        auto* rate = field<Unreal::FDoubleProperty>(weapon, STR("FireRate"));
+        return magazine && magazine->GetPropertyValueInContainer(weapon) == profile.capacity &&
+            burst && burst->GetPropertyValueInContainer(weapon) == profile.burst_length &&
+            caliber && caliber->GetPropertyValueInContainer(weapon) == 0 &&
+            cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
+            rate && rate->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
+            field<Unreal::FObjectProperty>(weapon, STR("InputIntercept")) && !object(weapon, STR("InputIntercept")) &&
+            boolean(weapon, STR("Action_OnRelease"), false) && boolean(weapon, STR("SingleReload"), false) &&
+            boolean(weapon, STR("UseEatherAsAmmo"), false);
+    }
+
     Unreal::UClass* qualified_weapon(Unreal::UObject* item_class)
     {
         auto* weapon = Unreal::Cast<Unreal::UClass>(item_class);
         auto* base = find<Unreal::UClass>(weapon_base_path);
         if (!live(weapon) || !base || !weapon->IsChildOf(base)) return nullptr;
         if (weapon == find<Unreal::UClass>(smg_path) || weapon == find<Unreal::UClass>(pistol_path)) return weapon;
+        if (const auto* profile = stock_ball_magazine(weapon))
+        {
+            auto* defaults = weapon->GetClassDefaultObject().Get();
+            return defaults && defaults->GetClassPrivate() == weapon && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+                stock_ball_magazine_shape(defaults, *profile) ? weapon : nullptr;
+        }
         if (weapon != find<Unreal::UClass>(nagant_path)) return nullptr;
         auto* defaults = weapon->GetClassDefaultObject().Get();
         return defaults && defaults->GetClassPrivate() == weapon && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
@@ -588,7 +638,7 @@ namespace
         {
             auto* defaults = context.weapon->GetClassDefaultObject().Get();
             auto* magazine = field<Unreal::FIntProperty>(defaults, STR("MagSize"));
-            const auto minimum = context.weapon == find<Unreal::UClass>(nagant_path) ? 0 : 1;
+            const auto minimum = (context.weapon == find<Unreal::UClass>(nagant_path) || stock_ball_magazine(context.weapon)) ? 0 : 1;
             if (!magazine || loaded < minimum || loaded > magazine->GetPropertyValueInContainer(defaults))
                 return result(lua, false, "guest_weapon_magazine_unqualified");
         }
@@ -678,6 +728,15 @@ namespace
         return Unreal::Cast<Unreal::UClass>(item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(data)));
     }
 
+    bool stock_ball_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
+    {
+        if (!ammo || ammo != find<Unreal::UClass>(ammo_fixture_path) ||
+            !projectile || projectile != find<Unreal::UClass>(ball_projectile_path)) return false;
+        auto* data = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
+        auto* caliber = data ? field<Unreal::FByteProperty>(data->GetStruct().Get(), ammo_caliber_name) : nullptr;
+        return caliber && caliber->GetPropertyValueInContainer(data->ContainerPtrToValuePtr<void>(actor)) == 0;
+    }
+
     bool nagant_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
     {
         if (!ammo || !projectile) return false;
@@ -747,6 +806,7 @@ namespace
 
         const Unreal::FName use_name{STR("Use_Item_Primary")};
         const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
+        const auto* stock_ball = stock_ball_magazine(context.weapon);
         auto* action = find<Unreal::UFunction>(nagant ? nagant_primary_path : primary_path);
         struct Parameters { bool held{}; double variance{}; } parameters;
         auto* held = input<Unreal::FBoolProperty>(action, STR("Held"), offsetof(Parameters, held));
@@ -759,7 +819,8 @@ namespace
                 action->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))))
             return report(false, "stock_guest_weapon_primary_schema_unavailable");
 
-        if (!boolean(actor, STR("Action_OnRelease"), nagant) || (nagant && (disarm || !nagant_shape(actor))))
+        if (!boolean(actor, STR("Action_OnRelease"), nagant) || (nagant && (disarm || !nagant_shape(actor))) ||
+            (stock_ball && !stock_ball_magazine_shape(actor, *stock_ball)))
             return report(false, "guest_weapon_release_mode_unqualified");
         if (nagant && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
             live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
@@ -778,10 +839,11 @@ namespace
         const auto before = live_ammo->GetPropertyValueInContainer(actor);
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         auto* projectile = disarm ? nullptr : single_stock_projectile(actor);
-        const auto minimum = nagant ? 1 : 2;
+        const auto minimum = nagant || stock_ball ? 1 : 2;
         if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
                         shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
-                        (nagant && !nagant_round(actor, mounted_ammo(actor), projectile))))
+                        (nagant && !nagant_round(actor, mounted_ammo(actor), projectile)) ||
+                        (stock_ball && !stock_ball_round(actor, mounted_ammo(actor), projectile))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
         Unreal::FWeakObjectPtr held_actor;
@@ -905,10 +967,12 @@ namespace
         auto* actor = equipped(context, inventory);
         if (!actor) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
         const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
+        const auto* stock_ball = stock_ball_magazine(context.weapon);
         if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
             !boolean(actor, STR("SingleReload"), nagant) || !boolean(actor, STR("UseEatherAsAmmo"), false) ||
+            (stock_ball && !stock_ball_magazine_shape(actor, *stock_ball)) ||
             (nagant && (!nagant_shape(actor) || !boolean(actor, STR("ReloadInput"), false) ||
                 !mounted_payload_matches(actor, inventory))))
             return reload_proof(lua, false, "guest_weapon_reload_ineligible");
@@ -923,7 +987,9 @@ namespace
 
         auto* ammo_class = mounted_ammo(actor);
         AmmoStackSchema stack_schema;
-        if (!stack_schema.read(ammo_class, inventory) || (nagant && !nagant_round(actor, ammo_class, single_stock_projectile(actor))))
+        if (!stack_schema.read(ammo_class, inventory) ||
+            (nagant && !nagant_round(actor, ammo_class, single_stock_projectile(actor))) ||
+            (stock_ball && !stock_ball_round(actor, ammo_class, single_stock_projectile(actor))))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
 
         const auto before = rounds->GetPropertyValueInContainer(actor);
@@ -1052,13 +1118,13 @@ namespace
             if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return fail("native_guest_weapon_fixtures_disabled");
         }
         Context context;
-        bool seed_pistol = false;
-        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_pistol : nullptr);
+        const auto* seed_variant = smg_path;
+        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_variant : nullptr);
             !error.empty()) return fail(error);
         Inventory inventory;
         if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo)
         {
-            const auto path = operation == Operation::SeedAmmo ? ammo_fixture_path : seed_pistol ? pistol_path : smg_path;
+            const auto path = operation == Operation::SeedAmmo ? ammo_fixture_path : seed_variant;
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class)))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"

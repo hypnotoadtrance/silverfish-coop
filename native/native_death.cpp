@@ -35,6 +35,8 @@
 #include "broker_menu.hpp"
 #include "broker_input.hpp"
 #include "campaign_npc.hpp"
+#include "flood_jammer.hpp"
+#include "guest_clock.hpp"
 #include "guest_primary_input.hpp"
 #include "guest_consumable.hpp"
 #include "guest_regen.hpp"
@@ -1229,6 +1231,8 @@ namespace
             silverfish::native_broker_menu::uninstall_hooks();
             silverfish::native_broker_input::uninstall_hooks();
             silverfish::campaign_npc::uninstall_hooks();
+            silverfish::native_flood_jammer::uninstall_hooks();
+            silverfish::native_guest_clock::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
             silverfish::native_guest_sickness::uninstall_hooks();
             silverfish::native_loot_crate_input::uninstall_hooks();
@@ -1263,6 +1267,8 @@ namespace
             silverfish::native_broker_menu::install_hooks();
             silverfish::native_broker_input::install_hooks();
             silverfish::campaign_npc::install_hooks();
+            silverfish::native_flood_jammer::install_hooks();
+            silverfish::native_guest_clock::install_hooks();
             silverfish::native_guest_primary_input::install_hooks();
             silverfish::native_guest_sickness::install_hooks();
             silverfish::native_loot_crate_input::install_hooks();
@@ -1338,6 +1344,8 @@ namespace
             silverfish::native_broker_menu::register_lua(lua);
             silverfish::native_broker_input::register_lua(lua);
             silverfish::campaign_npc::register_lua(lua);
+            silverfish::native_flood_jammer::register_lua(lua);
+            silverfish::native_guest_clock::register_lua(lua);
             silverfish::native_guest_primary_input::register_lua(lua);
             silverfish::native_guest_consumable::register_lua(lua);
             silverfish::native_guest_regen::register_lua(lua);
@@ -1389,6 +1397,7 @@ namespace
                 silverfish::native_broker_menu::clear_scope();
                 silverfish::native_broker_input::clear_scope();
                 silverfish::campaign_npc::clear_scope();
+                silverfish::native_guest_clock::clear_scope();
                 silverfish::native_guest_primary_input::clear_scope();
                 silverfish::native_guest_sickness::clear_scope();
                 silverfish::native_loot_crate_input::clear_scope();

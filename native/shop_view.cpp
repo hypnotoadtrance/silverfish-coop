@@ -33,7 +33,7 @@ namespace
         const Unreal::TCHAR* world;
         const Unreal::TCHAR* actor;
         const Unreal::TCHAR* data;
-        const Unreal::TCHAR* camera_barter_replacement{};
+        const Unreal::TCHAR* barter_replacement{};
     };
 
     constexpr std::array merchants{
@@ -58,6 +58,12 @@ namespace
             STR("/Game/Classes/Libraries/DataAssets/Merchants/Science_ShopData.Science_ShopData"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Barter_BP_C_107"),
         },
+        Merchant{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/AmmoShopData.AmmoShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Barter_BP_C_1"),
+        },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
     constexpr auto action_path = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C:SendInteractionToActor");
@@ -72,7 +78,7 @@ namespace
         std::uint64_t generation{};
         bool host{};
         bool accepting{};
-        bool scientist_camera{};
+        bool requires_cash_mode{};
         Unreal::FWeakObjectPtr pawn, controller, player, instance, world, driver, connection, shop, box, data;
         Unreal::FWeakObjectPtr barter_replacement;
         Unreal::UClass* pawn_type{};
@@ -184,7 +190,7 @@ namespace
             object_field(controller, STR("Player")) != player || object_field(player, STR("PlayerController")) != controller ||
             object_field(controller, STR("Pawn")) != pawn || object_field(pawn, STR("Controller")) != controller ||
             !field<Unreal::FObjectProperty>(driver, STR("ServerConnection"))) return false;
-        if (binding.scientist_camera)
+        if (binding.requires_cash_mode)
         {
             auto* replacement = binding.barter_replacement.Get();
             auto* save = object_field(instance, STR("SaveSlot_Ref"));
@@ -255,11 +261,11 @@ namespace
         auto* box = object_field(shop, STR("Box"));
         if (!exact(shop, shop_type) || !live(data) ||
             !exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")))) return false;
-        if (profile->camera_barter_replacement)
+        if (profile->barter_replacement)
         {
-            auto* replacement = find<Unreal::UObject>(profile->camera_barter_replacement);
+            auto* replacement = find<Unreal::UObject>(profile->barter_replacement);
             if (!exact(replacement, find<Unreal::UClass>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C")))) return false;
-            next.scientist_camera = true;
+            next.requires_cash_mode = true;
             next.barter_replacement = replacement;
         }
         auto* controller = object_field(pawn, STR("Controller"));

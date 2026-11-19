@@ -1,5 +1,14 @@
 -- Generated from tools/silverfish/authored_routes.py.
 return {
+    ["/Game/Classes/Maps/Dreams/GoldNexus_P"] = {
+        { actor = "Level_Exit_BP_C_178", kind = "overlap", entrance = "Nexus_CrossRoads" },
+        { actor = "Level_Exit_BP_C_179", kind = "overlap", entrance = "Nexus_M35" },
+        { actor = "Level_Exit_BP_C_180", kind = "overlap", entrance = "Nexus_Swamp" },
+        { actor = "Level_Exit_BP_C_181", kind = "overlap", entrance = "Nexus_CrossRoads" },
+        { actor = "Level_Exit_BP_C_182", kind = "overlap", entrance = "Nexus_CrossRoads" },
+        { actor = "Level_Exit_BP_C_183", kind = "overlap", entrance = "Nexus_Slums" },
+        { actor = "Level_Exit_BP_C_184", kind = "overlap", entrance = "Nexus_Beach" },
+    },
     ["/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "Wall_Annex" },
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Maze_Annex" },

@@ -38,7 +38,8 @@ namespace
         const Unreal::TCHAR* world;
         const Unreal::TCHAR* actor;
         const Unreal::TCHAR* data;
-        const Unreal::TCHAR* camera_barter_replacement{};
+        const Unreal::TCHAR* cash_barter_replacement{};
+        bool camera_only{};
     };
 
     constexpr std::array merchants{
@@ -62,6 +63,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Shop_BP_C_2"),
             STR("/Game/Classes/Libraries/DataAssets/Merchants/Science_ShopData.Science_ShopData"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Barter_BP_C_107"),
+            true,
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/AmmoShopData.AmmoShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Barter_BP_C_1"),
         },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
@@ -77,6 +85,7 @@ namespace
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto camera_class = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
+    constexpr auto gunsmith_ammo_class = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto saved_shop_struct = STR("/Game/Classes/Libraries/Structs/ShopInventory_SaveStruct.ShopInventory_SaveStruct");
     constexpr auto payload_struct = STR("/Script/StructUtils.InstancedStruct");
@@ -156,7 +165,7 @@ namespace
         Unreal::UObject* guest{};
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
-        bool camera_only{};
+        bool camera_only{}, guards_neutral_purchase{};
         bool host{};
     };
 
@@ -290,7 +299,8 @@ namespace
             break;
         }
         if (!profile) return "shop_exact_merchant_unavailable";
-        context.camera_only = profile->camera_barter_replacement != nullptr;
+        context.camera_only = profile->camera_only;
+        context.guards_neutral_purchase = profile->cash_barter_replacement && !profile->camera_only;
         context.world = find<Unreal::UWorld>(profile->world);
         auto* data = find<Unreal::UObject>(profile->data);
         if (!live(context.world) || !exact(context.shop, find<Unreal::UClass>(shop_class)) ||
@@ -321,13 +331,20 @@ namespace
             return "shop_exact_guest_and_canonical_saves_unavailable";
         if (!read_bool(context.stock, STR("BarterOnly"), false))
             return "shop_stock_cash_trade_unavailable";
-        if (context.camera_only)
+        if (profile->cash_barter_replacement)
         {
-            auto* conversion = find<Unreal::UObject>(profile->camera_barter_replacement);
+            auto* conversion = find<Unreal::UObject>(profile->cash_barter_replacement);
             if (!exact(conversion, find<Unreal::UClass>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C"))) ||
                 !authority(conversion, context.world) || read_object(context.shop, STR("BarterReplacement")) != conversion ||
                 read_object(conversion, STR("MerchantData")) != data || !cash_counter_open(context.shop))
-                return "shop_scientist_cash_counter_unavailable";
+                return context.camera_only ? "shop_scientist_cash_counter_unavailable" : "shop_gunsmith_cash_counter_unavailable";
+            if (context.guards_neutral_purchase)
+            {
+                auto* faction = field<Unreal::FByteProperty>(context.shop, STR("Rep Faction"));
+                if (static_cast<Unreal::AActor*>(conversion)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
+                    !read_bool(conversion, STR("AcceptCash"), true) || !faction || faction->GetPropertyValueInContainer(context.shop) != 0)
+                    return "shop_gunsmith_neutral_profile_unverified";
+            }
         }
         if (!qualified_connection(context))
             return context.host ? "shop_exact_host_connection_unavailable" : "shop_exact_guest_connection_unavailable";
@@ -601,6 +618,31 @@ namespace
             value->HasAnyPropertyFlags(Unreal::CPF_OutParm) == output ? value : nullptr;
     }
 
+    struct PassiveEffect
+    {
+        Unreal::FName name;
+        bool count{}, active{};
+        std::int32_t instances{};
+    };
+
+    bool read_purchase_effect(const Context& context, PassiveEffect& effect)
+    {
+        auto* method = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect"));
+        auto* count = parameter<Unreal::FBoolProperty>(method, STR("CountInstances"), 8, false);
+        auto* active = parameter<Unreal::FBoolProperty>(method, STR("EffectActive"), 9, true);
+        auto* instances = parameter<Unreal::FIntProperty>(method, STR("Instances"), 12, true);
+        static_assert(sizeof(PassiveEffect) == 16 && offsetof(PassiveEffect, instances) == 12);
+        if (!method || method->GetOuterPrivate() != context.instance->GetClassPrivate() ||
+            method->GetNumParms() != 4 || method->GetParmsSize() != sizeof(PassiveEffect) ||
+            !parameter<Unreal::FNameProperty>(method, STR("EffectName"), 0, false) || !count || !active || !instances)
+            return false;
+        count->SetPropertyValueInContainer(&effect, true);
+        context.instance->ProcessEvent(method, &effect);
+        effect.active = active->GetPropertyValueInContainer(&effect);
+        effect.instances = instances->GetPropertyValueInContainer(&effect);
+        return effect.instances >= 0;
+    }
+
     struct CameraReputation
     {
         static constexpr std::uint8_t commune = 2;
@@ -614,28 +656,17 @@ namespace
             // The unmodified Camera quote is at most ceil(125 * 2.5). The stock Skinflint branch starts above 1000.
             if (!faction || faction->GetPropertyValueInContainer(context.shop) != commune || price > 313) return false;
             apply = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddPlayerRep"));
-            auto* passive = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect"));
-            auto* count = parameter<Unreal::FBoolProperty>(passive, STR("CountInstances"), 8, false);
-            auto* instances = parameter<Unreal::FIntProperty>(passive, STR("Instances"), 12, true);
-            if (!apply || !passive || apply->GetOuterPrivate() != context.instance->GetClassPrivate() ||
-                passive->GetOuterPrivate() != context.instance->GetClassPrivate() ||
+            if (!apply || apply->GetOuterPrivate() != context.instance->GetClassPrivate() ||
                 apply->GetNumParms() != 2 || apply->GetParmsSize() != 8 ||
                 !parameter<Unreal::FByteProperty>(apply, STR("Faction"), 0, false) ||
-                !parameter<Unreal::FIntProperty>(apply, STR("RepDifference"), 4, false) ||
-                passive->GetNumParms() != 4 || passive->GetParmsSize() != 16 ||
-                !parameter<Unreal::FNameProperty>(passive, STR("EffectName"), 0, false) || !count || !instances ||
-                !parameter<Unreal::FBoolProperty>(passive, STR("EffectActive"), 9, true)) return false;
-            struct Effect { Unreal::FName name; bool count{}, active{}; std::int32_t instances{}; };
-            static_assert(sizeof(Effect) == 16 && offsetof(Effect, instances) == 12);
-            Effect trait{Unreal::FName{STR("IntensePersonality")}};
-            count->SetPropertyValueInContainer(&trait, true);
-            context.instance->ProcessEvent(passive, &trait);
-            const auto stacks = instances->GetPropertyValueInContainer(&trait);
+                !parameter<Unreal::FIntProperty>(apply, STR("RepDifference"), 4, false)) return false;
+            PassiveEffect trait{Unreal::FName{STR("IntensePersonality")}};
+            if (!read_purchase_effect(context, trait)) return false;
             reward = price / 100;
             const auto [before, found] = wallet.flag_value(context, STR("Rep_Commune"));
-            const auto change = static_cast<std::int64_t>(reward) * (found ? 1LL + stacks : 1LL);
+            const auto change = static_cast<std::int64_t>(reward) * (found ? 1LL + trait.instances : 1LL);
             const auto after = before + change;
-            if (stacks < 0 || change > max_money || after > max_money) return false;
+            if (change > max_money || after > max_money) return false;
             expected = static_cast<int>(after);
             return true;
         }
@@ -768,59 +799,91 @@ namespace
         if (money < 0 || cash < 0) return response(lua, false, "shop_wallet_unavailable");
         std::uint8_t changed{};
         context.panel->ProcessEvent(layout.quote_refresh, &changed);
-        auto* source_property = layout.finite;
+        auto* finite = layout.finite;
+        Unreal::FArrayProperty* shelf{};
         const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
-        bool reusable = false;
-        if (context.camera_only)
+        const Unreal::UClass* gunsmith_ammo{};
+        if (context.camera_only || context.guards_neutral_purchase)
         {
             auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
-            if (!limited || !camera) return response(lua, false, "shop_camera_stock_unavailable");
-            reusable = !limited->GetPropertyValueInContainer(context.shop);
-            if (reusable)
+            if (!limited || (context.camera_only && !camera))
+                return response(lua, false, context.camera_only ? "shop_camera_stock_unavailable" : "shop_gunsmith_stock_mode_unavailable");
+            if (!limited->GetPropertyValueInContainer(context.shop))
             {
-                source_property = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
-                if (!layout.is_array(source_property)) return response(lua, false, "shop_camera_shelf_unavailable");
+                shelf = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
+                if (!layout.is_array(shelf))
+                    return response(lua, false, context.camera_only ? "shop_camera_shelf_unavailable" : "shop_gunsmith_shelf_unavailable");
+                if (context.camera_only) finite = nullptr;
+                else
+                {
+                    gunsmith_ammo = find<Unreal::UClass>(gunsmith_ammo_class);
+                    if (!gunsmith_ammo) return response(lua, false, "shop_gunsmith_ammo_class_unavailable");
+                }
             }
         }
-        auto* source = source_property->ContainerPtrToValuePtr<void>(context.shop);
-        Unreal::FScriptArrayHelper stock_rows(source_property, source);
-        if (stock_rows.Num() < 0 || stock_rows.Num() > max_offers) return response(lua, false, "shop_offer_count_unavailable");
+        Unreal::FArrayProperty* source_property{};
         std::set<Guid> seen;
         std::string rows;
         Offer selected;
-        int index = -1;
-        for (int i = 0; i < stock_rows.Num(); ++i)
+        int index = -1, listed = 0, ammo_shelf_count = 0;
+        for (auto* inventory : {finite, shelf})
         {
-            const auto* item = stock_rows.GetRawPtr(i);
-            const auto key = layout.identity(item);
-            if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
-            if (context.camera_only && layout.item_type(item) != camera) continue;
-            if constexpr (Buying)
-                if (key != chosen) continue;
-            Offer row;
-            if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
-            if (context.camera_only && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
-                return response(lua, false, "shop_exact_camera_offer_unavailable");
-            rows += encode(row);
-            if constexpr (Buying)
+            if (!inventory) continue;
+            const bool gunsmith_shelf = gunsmith_ammo && inventory == shelf;
+            Unreal::FScriptArrayHelper items(inventory, inventory->ContainerPtrToValuePtr<void>(context.shop));
+            if (items.Num() < 0 || items.Num() > max_offers) return response(lua, false, "shop_offer_count_unavailable");
+            for (int i = 0; i < items.Num(); ++i)
             {
-                selected = std::move(row);
-                index = i;
+                const auto* item = items.GetRawPtr(i);
+                const auto key = layout.identity(item);
+                if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
+                if (context.camera_only && layout.item_type(item) != camera) continue;
+                if (gunsmith_shelf)
+                {
+                    if (layout.item_type(item) != gunsmith_ammo) continue;
+                    ++ammo_shelf_count;
+                }
+                if constexpr (Buying)
+                    if (key != chosen) continue;
+                if (++listed > max_offers) return response(lua, false, "shop_offer_count_unavailable");
+                Offer row;
+                if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
+                if (context.camera_only && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
+                    return response(lua, false, "shop_exact_camera_offer_unavailable");
+                if (gunsmith_shelf && (!row.stackable || row.quantity != 200 || row.value != 600))
+                    return response(lua, false, "shop_gunsmith_exact_ammo_offer_unavailable");
+                rows += encode(row);
+                if constexpr (Buying)
+                {
+                    selected = std::move(row);
+                    index = i;
+                    source_property = inventory;
+                }
             }
         }
+        if (gunsmith_ammo && ammo_shelf_count != 1) return response(lua, false, "shop_gunsmith_ammo_shelf_ambiguous");
         if constexpr (!Buying)
             return response(lua, true, "listed", rows, money, money, cash, cash);
-        if (index < 0) return response(lua, false, "shop_offer_no_longer_available");
+        if (!source_property || index < 0) return response(lua, false, "shop_offer_no_longer_available");
         if (expected_wallet != money || selected.quantity != quantity || selected.price != expected_price)
             return response(lua, false, "shop_quote_changed");
         if (money < selected.price || cash > max_money - selected.price)
             return response(lua, false, "shop_funds_unavailable");
         if (layout.owner_has(context.guest, chosen) || layout.owner_has(context.stock, chosen))
             return response(lua, false, "shop_inventory_guid_conflict");
+        if (context.guards_neutral_purchase && selected.price > 1000)
+        {
+            PassiveEffect skinflint{Unreal::FName{STR("Skinflint")}};
+            if (!read_purchase_effect(context, skinflint) || skinflint.active)
+                return response(lua, false, "shop_gunsmith_skinflint_effect_unverified");
+        }
         CameraReputation reputation;
         if (!reputation.bind(context, wallet, selected.price))
             return response(lua, false, "shop_camera_reputation_unqualified");
 
+        const bool reusable = source_property == shelf;
+        auto* source = source_property->ContainerPtrToValuePtr<void>(context.shop);
+        Unreal::FScriptArrayHelper stock_rows(source_property, source);
         auto* target = layout.backpack->ContainerPtrToValuePtr<void>(context.guest);
         auto* saved = layout.saved_shops->ContainerPtrToValuePtr<void>(context.stock);
         auto* flags = layout.flags->ContainerPtrToValuePtr<void>(context.stock);
@@ -840,7 +903,8 @@ namespace
         {
             const auto minted = new_stock_guid(layout);
             if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
-                layout.owner_has(context.stock, minted)) return response(lua, false, "shop_camera_guid_unavailable");
+                layout.owner_has(context.stock, minted))
+                return response(lua, false, context.camera_only ? "shop_camera_guid_unavailable" : "shop_gunsmith_ammo_guid_unavailable");
             layout.replace_identity(transferred.get(), minted);
             selected.guid = minted;
             rows = encode(selected);

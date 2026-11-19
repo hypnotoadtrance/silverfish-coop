@@ -12,7 +12,9 @@ local text_path = "/Script/UMG.TextBlock"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local equippable_paths = {
     ["/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
+    ["/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"] = true,
     ["/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = true,
+    ["/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"] = true,
     ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = true,
     ["/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"] = true,
 }

@@ -305,11 +305,11 @@ local function probe_player(state, selector)
     return match
 end
 
-local function expanded_overlap(map, tag)
+local function expanded_overlap(map, tag, actor)
     if not expanded or not fixture_mode or not headless or not tag then return end
     local selected
     for _, route in ipairs(expanded_fixtures[map] or {}) do
-        if route.kind == "overlap" and route.entrance == tag then
+        if route.kind == "overlap" and route.entrance == tag and (not actor or route.actor == actor) then
             if selected then error("The staged entrance selects multiple authored overlap exits", 0) end
             selected = route
         end
@@ -582,12 +582,19 @@ function zone.command(fields, state, phase)
         SilverfishReleaseNativeZoneRequest()
         return "native exit request released"
     end
-    local slot, position, entrance = fields[3], fields[4], fields[5]
-    if (#fields ~= 4 and #fields ~= 5) or (position ~= "near" and position ~= "inside" and position ~= "far") then
+    local slot, position, entrance, actor = fields[3], fields[4], fields[5], fields[6]
+    if #fields < 4 or #fields > 6 or (position ~= "near" and position ~= "inside" and position ~= "far") then
         error("Expected native-exit-position with a pawn and near, inside, or far", 0)
     end
     local route = routes[state.map]
-    local authored = expanded_overlap(state.map, entrance)
+    if actor and (#actor > 80 or not actor:match("^Level_Exit_BP_C_%d+$") or not entrance or entrance == "") then
+        error("Choose an exact stock overlap actor with its entrance tag", 0)
+    end
+    local authored = expanded_overlap(state.map, entrance, actor)
+    if actor then
+        if not authored then error("The exact authored overlap and entrance pair is unavailable", 0) end
+        return place_expanded_overlap(state, probe_player(state, slot), authored, position)
+    end
     local legacy = route.fixture and route.entrance == entrance and route
         or (route.secondary and route.secondary.entrance == entrance and route.secondary)
     if authored and (not legacy or legacy.fixture ~= authored.actor) then

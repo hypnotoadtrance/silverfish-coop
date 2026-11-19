@@ -13,8 +13,8 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop,
-               native_gold, native_green, native_guest_consumable, native_guest_npc,
+from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
+               native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_turret_photo,
                native_wipe_view, native_wire_board, party, wipe)
@@ -36,7 +36,8 @@ POSITION_MAX_AGE = 3.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
-                        native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER, native_computer_board.PREFLIGHT,
+                        native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
+                        native_computer_board.PREFLIGHT, native_flood_jammer.PREFLIGHT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1219,7 +1220,7 @@ class Host:
             pawn = member["pawn"]
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
-            if native_gold.valid_guid(equipped.get("guid")) and kind in ("smg", "light-pistol", "nagant-scoped"):
+            if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
             if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
                     and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
@@ -1316,6 +1317,8 @@ class Host:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action == native_computer_board.PREFLIGHT and target is None:
                 result = await native_computer_board.preflight(self, bridge, character)
+            elif action == native_flood_jammer.PREFLIGHT and target is None:
+                result = await native_flood_jammer.preflight(self, bridge, character)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1973,9 +1976,10 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()
                     pistol = action == "native-guest-weapon-seed-light-pistol"
+                    kind = "light-pistol" if pistol else request.get("kind")
                     result = await native_guest_weapon.perform(self, bridge, character, request.get("operation_id") or path.stem,
                                                                "native-guest-weapon-seed" if pistol else action, guid,
-                                                               pistol_fixture=pistol)
+                                                               seed_kind=kind)
                 elif action in ("native-loot-inspect", "native-loot-open", "native-loot-approach",
                                 "native-loot-seed", "native-loot-claim"):
                     operation = action.removeprefix("native-loot-")
@@ -2054,6 +2058,14 @@ class Host:
                 elif action == native_computer_board.APPROACH and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_computer_board.approach(self, bridge, actor)
+                elif action == native_flood_jammer.PREFLIGHT and request.get("target") is None:
+                    result = await native_flood_jammer.preflight(self, bridge, "host")
+                elif action == native_flood_jammer.APPROACH and self.fixtures:
+                    actor = self.roles().get(request.get("target") or "host")
+                    result = await native_flood_jammer.approach(self, bridge, actor)
+                elif action == native_flood_jammer.AIM:
+                    actor = self.roles().get(request.get("target") or "guest")
+                    result = await native_flood_jammer.aim_fixture(self, bridge, actor, request.get("item_guid"))
                 elif action == native_wire_quest.APPROACH:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_wire_quest.approach(self, bridge, actor)
@@ -2163,19 +2175,22 @@ class Host:
                 elif action in ("native-exit-position", "native-exit-wall-probe") and self.native_zones and self.fixtures:
                     target = request.get("target")
                     entrance = request.get("entrance")
+                    exit_actor = request.get("exit_actor")
                     placing = action == "native-exit-position"
                     if target not in self.roles():
                         raise ValueError("Specify a current player for the exit fixture")
+                    if exit_actor is not None and (not isinstance(exit_actor, str) or not entrance or not self.expanded_zones):
+                        raise ValueError("A named exit fixture requires an exact expanded stock entrance and actor")
                     if entrance is not None:
                         source = self.last_game.get("map")
                         legacy_tag = any(area == source and tag == entrance for (area, _), tag in AUTHORED_EXITS.items())
                         expanded_matches = sum(route.source == source and route.entrance == entrance
+                                               and (exit_actor is None or route.actor == exit_actor)
                                                and (not placing or route.kind == "overlap")
                                                for route in AUTHORED_ROUTES) if self.expanded_zones else 0
-                        if placing and expanded_matches > 1:
-                            raise ValueError("The staged entrance selects multiple authored overlap exits")
-                        expanded_tag = expanded_matches > 0
-                        if not (legacy_tag or expanded_tag):
+                        if expanded_matches > 1:
+                            raise ValueError("The staged entrance has multiple stock exits. Choose an exact --exit-actor")
+                        if not (expanded_matches == 1 or exit_actor is None and legacy_tag):
                             raise ValueError("Choose an authored exit entrance tag in the host's current map")
                     alias, binding = self.role_pawn(target)
                     if not alias:
@@ -2188,12 +2203,16 @@ class Host:
                         arguments.append(position)
                     if entrance:
                         arguments.append(entrance)
+                    if exit_actor is not None:
+                        arguments.append(exit_actor)
                     snapshot = await bridge.command(*arguments, timeout=4)
                     if placing:
                         result = {"native_zone": snapshot.get("native_zone"), "target": target,
                                   "position": position, "entrance": entrance}
                     else:
                         result = {"native_zone_wall": snapshot.get("native_zone_wall")}
+                    if exit_actor is not None:
+                        result["exit_actor"] = exit_actor
                 elif action in ("native-door-position", "native-door-probe") and self.native_zones and self.fixtures:
                     target = request.get("target")
                     if target not in self.roles():
@@ -2505,6 +2524,7 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            await native_flood_jammer.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True
@@ -2885,7 +2905,7 @@ async def character_catalog(work: Path, invitation: Path, name: str | None,
 
 class Client:
     def __init__(self, control: Control, transport, invite: dict, bridge: Bridge, auto_delay: float = 1, *,
-                 allowed_maps: frozenset[str] = PLAYTEST_MAPS, guest_primary_input: bool = False):
+                 allowed_maps: frozenset[str] = PLAYTEST_MAPS, guest_primary_input: bool = False, guest_clock: bool = False):
         self.control = control
         self.transport = transport
         self.invite = invite
@@ -2906,6 +2926,7 @@ class Client:
         self.next_snapshot = 0.0
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
+        self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
         self.native_return_retry_allowed = False
@@ -3045,7 +3066,8 @@ class Client:
             timeout = 15
         if action == "native-quest-turnin" and target == native_wire_quest.QUEST_ID:
             timeout = 22
-        if action in (native_turret_photo.CAPTURE, native_turret_photo.SHUTTER) or target in (native_turret_photo.QUEST_ID, native_computer_board.QUEST_ID):
+        if action in (native_turret_photo.CAPTURE, native_turret_photo.SHUTTER) or target in (
+                native_turret_photo.QUEST_ID, native_computer_board.QUEST_ID, native_flood_jammer.QUEST_ID):
             timeout = 20
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
@@ -3081,7 +3103,7 @@ class Client:
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and (camera or kind in ("smg", "light-pistol", "nagant-scoped")))
+                    and native_gold.valid_guid(guid) and (camera or kind in native_guest_weapon.FIRE_CLASSES))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
             try:
@@ -3318,10 +3340,13 @@ class Client:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
+                    await native_flood_jammer.project_client(self)
                     if self.invite.get("native_loot_input"):
                         self.last_game = await native_loot.project_opened(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE))
                 await self.project_world_view()
+                if self.guest_clock:
+                    await self.guest_clock.sync(self)
             except (OSError, RuntimeError) as error:
                 self.next_projection = time.monotonic() + 2
                 self.control.event("gameplay_projection_error", reason=str(error))
@@ -3401,6 +3426,17 @@ class Client:
                         raise ValueError("Equip an authenticated stock guest weapon before exercising primary input")
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
+                elif action == native_guest_clock.FIXTURE and self.guest_clock:
+                    if self.last_game.get("state") != "connected" or not self.last_game.get("native_guest_clock"):
+                        raise ValueError("Connect and wait for an authenticated host clock frame")
+                    snapshot = await self.bridge.command(action, timeout=4)
+                    proof = snapshot.get("native_guest_clock_fixture", {})
+                    if (proof.get("map"), proof.get("pawn"), proof.get("epoch")) != (
+                        snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"), self.zone_epoch
+                    ) or not proof.get("text") or proof.get("calls", 0) < 1:
+                        raise RuntimeError("The original stock clock widget did not verify the host time")
+                    self.last_game = snapshot
+                    result = {"native_guest_clock_fixture": proof, "native_guest_clock": snapshot.get("native_guest_clock", {})}
                 elif action == "native-inventory-view-fixture":
                     if self.last_game.get("state") != "connected":
                         raise ValueError("Connect the staged inventory viewer first")
@@ -3574,17 +3610,19 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             control.status(active=True, role="client", state="starting")
             transport = await link.start_client()
             bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
+            guest_clock = native_zones and staged_script(work, "native_guest_clock.lua")
             process = launch(work, directory / "game-user", bridge_directory, headless,
                              native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
                              guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
                              native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
                              native_loot_input=native_loot_input, broker_input=broker_input,
-                             native_wipe_view=wipe_view_enabled)
+                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock)
             bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:
                 maps |= EXPANDED_MAPS
-            client = Client(control, transport, invite, bridge, allowed_maps=maps, guest_primary_input=guest_primary_input)
+            client = Client(control, transport, invite, bridge, allowed_maps=maps, guest_primary_input=guest_primary_input,
+                            guest_clock=guest_clock)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
             try:

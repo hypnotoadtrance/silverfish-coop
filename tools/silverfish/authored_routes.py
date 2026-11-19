@@ -8,6 +8,8 @@ component and pointer, since runtime child names can differ.
 from dataclasses import dataclass
 from typing import Literal
 
+from .travel import GOLD_NEXUS
+
 
 DOOR_TRAVEL_COMPONENT = "Level_Exit_BP"
 DOOR_ARRIVAL_COMPONENT = "LevelExit_Spawn_BP"
@@ -56,6 +58,7 @@ _PACKAGES = {
     for name in names
 }
 MAPS = frozenset(_PACKAGES.values())
+ROUTE_MAPS = MAPS | {GOLD_NEXUS}
 
 
 # Source and destination package names, entrance, exit actor, arrival marker,
@@ -130,6 +133,19 @@ _OVERLAPS = (
     ("Swamp_01_P", "Gorge_01_P", "Swamp_Scar", "Level_Exit_BP_C_109", "LevelExit_Spawn_BP_C_1", 15),
     ("Swamp_01_P", "Rev_NorthBase_P", "Swamp_Rev", "Level_Exit_BP_C_2", "LevelExit_Spawn_BP_C_1", 15),
     ("TrashPit_P", "NorthEast_Rail_P", "M35_Maw", "Level_Exit_BP_C_169", "LevelExit_Spawn_BP_C_704", 8),
+)
+
+
+# The Golden Cube reaches this hub through its own inventory transaction.
+# These stock pads qualify departures only, leaving ordinary campaign starts unchanged.
+_GOLD_NEXUS_PADS = (
+    ("CrossRoads_P", "Nexus_CrossRoads", "Level_Exit_BP_C_178", "LevelExit_Spawn_BP_C_278"),
+    ("NorthEast_Rail_P", "Nexus_M35", "Level_Exit_BP_C_179", "LevelExit_Spawn_BP_C_705"),
+    ("Swamp_01_P", "Nexus_Swamp", "Level_Exit_BP_C_180", "LevelExit_Spawn_BP_C_3"),
+    ("CrossRoads_P", "Nexus_CrossRoads", "Level_Exit_BP_C_181", "LevelExit_Spawn_BP_C_278"),
+    ("CrossRoads_P", "Nexus_CrossRoads", "Level_Exit_BP_C_182", "LevelExit_Spawn_BP_C_278"),
+    ("Slums_P", "Nexus_Slums", "Level_Exit_BP_C_183", "LevelExit_Spawn_BP_C_287"),
+    ("Beach_01_P", "Nexus_Beach", "Level_Exit_BP_C_184", "LevelExit_Spawn_BP_C_139"),
 )
 
 
@@ -279,6 +295,10 @@ AUTHORED_ROUTES = (
     *(
         AuthoredRoute(_PACKAGES[source], _PACKAGES[destination], entrance, "overlap", actor, marker, time_step)
         for source, destination, entrance, actor, marker, time_step in _OVERLAPS
+    ),
+    *(
+        AuthoredRoute(GOLD_NEXUS, _PACKAGES[destination], entrance, "overlap", actor, marker, travel_time_step=1)
+        for destination, entrance, actor, marker in _GOLD_NEXUS_PADS
     ),
     # The stock Observatory marker adds a trailing e to the dock's tag.
     AuthoredRoute(_PACKAGES["Tut_Dock_P"], _PACKAGES["Observitory_P"], "Obs_Dock", "overlap",

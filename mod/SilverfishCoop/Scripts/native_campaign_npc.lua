@@ -16,7 +16,7 @@ local types = {
     husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
         stages = { stock_initial = true, stock_refresh = true }, combat_radii = { 550, 680, 820 } },
     flayer = { name = "NPC_Flayer_C", path = "/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C", limit = 2,
-        stages = { stock_antfarm = true }, combat_radii = { 425, 510, 635 } },
+        stages = { stock_antfarm = true }, combat_radii = { 235, 275, 295 } },
 }
 local view = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer" and "flayer" or "husk"
@@ -29,6 +29,8 @@ local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local trace_color = { R = 0, G = 0, B = 0, A = 0 }
 local approach_radius, readback_tolerance = 4000, 60
+local flayer_sweep, flayer_sweep_margin = 350, 25
+local flayer_angles = { 0, 30, -30, 50, -50 }
 local active, approach, refresh
 
 local function valid(value)
@@ -160,7 +162,7 @@ local function at(pawn, target, tolerance)
     return current and distance(current, target) <= tolerance and current
 end
 
-local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored)
+local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, flayer)
     local covered = floor_at(trace, host, anchor, anchor.X - math.cos(angle) * 3500,
         anchor.Y - math.sin(angle) * 3500, ignored)
     local exposed = floor_at(trace, guest, anchor, x, y, ignored)
@@ -168,6 +170,10 @@ local function safe_melee_placement(trace, host, guest, target, cohort, anchor, 
     for _, actor in ipairs(cohort) do
         local location = point(actor:K2_GetActorLocation())
         if not location or distance(covered, location) < 2500 then return end
+    end
+    if flayer then
+        if distance(exposed, anchor) <= flayer_sweep - flayer_sweep_margin then return covered, exposed end
+        return
     end
     local hit = {}
     local blocked = trace:LineTraceSingle(guest.pawn, exposed, anchor, 0, false,
@@ -179,26 +185,61 @@ local function safe_melee_placement(trace, host, guest, target, cohort, anchor, 
     end
 end
 
+local function forward_melee_trace(trace, target, guest, location)
+    local start, facing = point(target:K2_GetActorLocation()), point(target:GetActorForwardVector())
+    if not start or not facing or distance(start, location) > flayer_sweep - flayer_sweep_margin then return "sweep_range" end
+    local dx, dy = location.X - start.X, location.Y - start.Y
+    local length = math.sqrt(dx ^ 2 + dy ^ 2)
+    local facing_length = math.sqrt(facing.X ^ 2 + facing.Y ^ 2)
+    if length < 1 or facing_length < 0.5 or dx * facing.X + dy * facing.Y < length * facing_length / 2 then
+        return "front_cone"
+    end
+    -- ResolveMelee uses a forward Visibility line between these actor locations and an empty ignore list.
+    local hit = {}
+    local found = trace:LineTraceSingle(target, start, location, 0, false, {}, 0, hit, true, trace_color, trace_color, 0)
+    hit = hit.OutHit or hit
+    if found ~= true or hit.bBlockingHit ~= true then return "clear" end
+    if hit.bStartPenetrating == true then return "start_penetrating" end
+    local component = hit.Component and hit.Component:Get()
+    if not valid(component) or not same(component:GetOwner(), guest.pawn) then return "other_hit" end
+    local collision = component:GetCollisionEnabled()
+    if collision ~= 1 and collision ~= 3 then return "guest_collision_unqualified" end
+    return "guest_hit", component:GetFullName()
+end
+
 local function place_pair(world, host, guest, target, cohort)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local anchor = point(target:K2_GetActorLocation())
     if not valid(trace) or not anchor then error("stock_husk_approach_geometry_unavailable", 0) end
     local ignored = { host.pawn, guest.pawn }
     for _, actor in ipairs(cohort) do ignored[#ignored + 1] = actor end
+    local flayer = combat_fixture and view == "flayer"
+    local angles, diagnostics = {}, nil
+    if flayer then
+        local facing = point(target:GetActorForwardVector())
+        if target.Melee_SweepRange ~= flayer_sweep or not facing or facing.X ^ 2 + facing.Y ^ 2 < 0.25 then
+            error("stock_flayer_approach_sweep_unqualified", 0)
+        end
+        local heading = math.atan(facing.Y, facing.X)
+        for _, offset in ipairs(flayer_angles) do angles[#angles + 1] = heading + math.rad(offset) end
+        diagnostics = { floors = 0, placements = 0, trace = "not_tried" }
+    else
+        for step = 0, 11 do angles[#angles + 1] = step * math.pi / 6 end
+    end
     local radii = combat_fixture and types[view].combat_radii or { 2800, 2200, 3400, 1800 }
     for _, radius in ipairs(radii) do
-        for step = 0, 11 do
-            local angle = step * math.pi / 6
+        for _, angle in ipairs(angles) do
             local x, y = anchor.X + math.cos(angle) * radius, anchor.Y + math.sin(angle) * radius
             local first, second
             if combat_fixture then
-                first, second = safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored)
+                first, second = safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, flayer)
             else
                 local dx, dy = -math.sin(angle) * 150, math.cos(angle) * 150
                 first = floor_at(trace, host, anchor, x + dx, y + dy, ignored)
                 second = floor_at(trace, guest, anchor, x - dx, y - dy, ignored)
             end
             if first and second and (combat_fixture or math.abs(first.Z - second.Z) <= 120) then
+                if diagnostics then diagnostics.floors = diagnostics.floors + 1 end
                 local ok, first_read, second_read = pcall(function()
                     if host.pawn:K2_TeleportTo(first, host.facing) ~= true
                         or not at(host.pawn, first, readback_tolerance)
@@ -207,13 +248,21 @@ local function place_pair(world, host, guest, target, cohort)
                     local host_at, guest_at = at(host.pawn, first, readback_tolerance),
                         at(guest.pawn, second, readback_tolerance)
                     if host_at and guest_at and distance(host_at, anchor) <= approach_radius
-                        and distance(guest_at, anchor) <= approach_radius then return host_at, guest_at end
+                        and distance(guest_at, anchor) <= approach_radius then
+                        if flayer then
+                            diagnostics.placements = diagnostics.placements + 1
+                            diagnostics.trace, diagnostics.component = forward_melee_trace(trace, target, guest, guest_at)
+                            if diagnostics.trace ~= "guest_hit" then return end
+                        end
+                        return host_at, guest_at
+                    end
                 end)
                 if ok and first_read and second_read then
                     host.pawn:ForceNetUpdate()
                     guest.pawn:ForceNetUpdate()
-                    return distance(first_read, anchor), distance(second_read, anchor)
+                    return distance(first_read, anchor), distance(second_read, anchor), diagnostics
                 end
+                if not ok and diagnostics then diagnostics.trace = "callback_failed" end
                 local restored = true
                 for _, player in ipairs({ host, guest }) do
                     local checked, result = pcall(function()
@@ -226,6 +275,10 @@ local function place_pair(world, host, guest, target, cohort)
                 if not restored then error("mutation_unverified_stock_husk_approach_restore", 0) end
             end
         end
+    end
+    if diagnostics then
+        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d trace=%s",
+            diagnostics.floors, diagnostics.placements, diagnostics.trace), 0)
     end
     error("stock_husk_approach_no_safe_floor_pair", 0)
 end
@@ -261,13 +314,13 @@ function campaign_npc.command(fields, state, phase)
             error("stock_" .. view .. "_combat_scope_unavailable", 0)
         end
     end
-    local placed, host_distance, guest_distance = pcall(place_pair, state.world, first, second, target, cohort)
+    local placed, host_distance, guest_distance, geometry = pcall(place_pair, state.world, first, second, target, cohort)
     if not placed then
         if combat_fixture and type(SilverfishClearCampaignNpcCombat) == "function" then SilverfishClearCampaignNpcCombat() end
         error(host_distance, 0)
     end
     approach = { world = state.world:GetAddress(), member = fields[3], host = host.name, guest = guest.name,
-        host_distance = host_distance, guest_distance = guest_distance }
+        host_distance = host_distance, guest_distance = guest_distance, geometry = geometry }
     return "verified headless pair placement near an exact stock " .. view
 end
 
@@ -342,6 +395,11 @@ local function read_rows(state, phase, status_row)
         and state.guests and #state.guests == 1 and state.guests[1].name == approach.guest then
         rows[#rows + 1] = status_row("native-campaign-npc-approach", state.map, approach.member,
             approach.host, approach.guest, approach.host_distance, approach.guest_distance)
+        local geometry = approach.geometry
+        if geometry then
+            rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, flayer_sweep,
+                geometry.floors, geometry.placements, geometry.trace, geometry.component)
+        end
     end
     return rows
 end

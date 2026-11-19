@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .control import select_run, status, submit
 from .authored_routes import MAPS as EXPANDED_MAPS
+from .native_guest_weapon import SEED_KINDS
 from .runtime import REPO, prepare_game
 from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
 
@@ -135,7 +136,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
-        "native-guest-bandage", "native-inventory-view-key-fixture",
+        "native-guest-bandage", "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
@@ -151,6 +152,7 @@ def parser() -> argparse.ArgumentParser:
         "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",
         "native-host-camera-aim-fixture", "native-host-camera-equip-fixture", "refresh-invite",
         "native-computer-board-preflight", "native-computer-board-approach",
+        "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-inventory-list",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
@@ -166,12 +168,14 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
     action.add_argument("--amount", type=int, help="controlled damage amount for fixture tests")
+    action.add_argument("--kind", choices=sorted(SEED_KINDS), help="stock weapon class for a headless weapon seed")
     action.add_argument("--x", type=float, help="normalized world X movement")
     action.add_argument("--y", type=float, help="normalized world Y movement")
     action.add_argument("--milliseconds", type=int, help="movement duration, from 50 to 1000")
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
+    action.add_argument("--exit-actor", help="select the exact stock actor when an entrance has multiple pads")
     action.add_argument("--item-guid", help="exact secondary item GUID for a fixture")
     return cli
 
@@ -236,6 +240,10 @@ async def execute(opts):
         return status(directory)
     if operation == "events":
         return _events(directory, opts.tail)
+    if opts.kind is not None and opts.action != "native-guest-weapon-seed":
+        raise ValueError("--kind applies only to the headless native guest weapon seed")
+    if opts.exit_actor is not None and (not opts.entrance or opts.action not in ("native-exit-position", "native-exit-wall-probe")):
+        raise ValueError("--exit-actor requires --entrance and a headless exit position or wall probe")
     retained = {}
     for value in opts.keep or ():
         item, separator, count = value.partition("=")
@@ -245,7 +253,8 @@ async def execute(opts):
     return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
                         amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
                         retained=retained if opts.action == "keep" else None,
-                        exit_position=opts.exit_position, entrance=opts.entrance, item_guid=opts.item_guid)
+                        exit_position=opts.exit_position, entrance=opts.entrance, exit_actor=opts.exit_actor,
+                        item_guid=opts.item_guid, kind=opts.kind)
 
 
 def main() -> int:

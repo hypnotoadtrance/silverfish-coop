@@ -64,6 +64,8 @@ namespace silverfish::authored_exits
             STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P")};
         inline constexpr World Funnel_01_P{STR("/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P.Funnel_01_P"),
             STR("/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P")};
+        inline constexpr World GoldNexus_P{STR("/Game/Classes/Maps/Dreams/GoldNexus_P.GoldNexus_P"),
+            STR("/Game/Classes/Maps/Dreams/GoldNexus_P")};
         inline constexpr World Gorge_01_P{STR("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P.Gorge_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P")};
         inline constexpr World Lab_E206_P{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
@@ -166,6 +168,20 @@ namespace silverfish::authored_exits
     };
 
     inline constexpr std::array routes{
+        Route{detail::GoldNexus_P, detail::CrossRoads_P, Mode::overlap,
+            STR("Level_Exit_BP_C_178"), STR("Nexus_CrossRoads"), STR("LevelExit_Spawn_BP_C_278"), 1},
+        Route{detail::GoldNexus_P, detail::NorthEast_Rail_P, Mode::overlap,
+            STR("Level_Exit_BP_C_179"), STR("Nexus_M35"), STR("LevelExit_Spawn_BP_C_705"), 1},
+        Route{detail::GoldNexus_P, detail::Swamp_01_P, Mode::overlap,
+            STR("Level_Exit_BP_C_180"), STR("Nexus_Swamp"), STR("LevelExit_Spawn_BP_C_3"), 1},
+        Route{detail::GoldNexus_P, detail::CrossRoads_P, Mode::overlap,
+            STR("Level_Exit_BP_C_181"), STR("Nexus_CrossRoads"), STR("LevelExit_Spawn_BP_C_278"), 1},
+        Route{detail::GoldNexus_P, detail::CrossRoads_P, Mode::overlap,
+            STR("Level_Exit_BP_C_182"), STR("Nexus_CrossRoads"), STR("LevelExit_Spawn_BP_C_278"), 1},
+        Route{detail::GoldNexus_P, detail::Slums_P, Mode::overlap,
+            STR("Level_Exit_BP_C_183"), STR("Nexus_Slums"), STR("LevelExit_Spawn_BP_C_287"), 1},
+        Route{detail::GoldNexus_P, detail::Beach_01_P, Mode::overlap,
+            STR("Level_Exit_BP_C_184"), STR("Nexus_Beach"), STR("LevelExit_Spawn_BP_C_139"), 1},
         Route{detail::Anex_01_P, detail::TheWall_01_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_0"), STR("Wall_Annex"), STR("Dungeon_TransitionDoor_BP_C_3"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_364")},

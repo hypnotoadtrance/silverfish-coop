@@ -70,7 +70,9 @@ namespace
 
     constexpr std::array equipment{
         Equipment{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C")},
+        Equipment{"smg-standard", STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C")},
         Equipment{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")},
+        Equipment{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C")},
         Equipment{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C")},
         Equipment{"camera", camera_path},
     };

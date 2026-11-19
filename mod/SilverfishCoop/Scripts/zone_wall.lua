@@ -3,6 +3,8 @@ local zones = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE_WALLS") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
+local named_fixtures = expanded and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+    and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local authored_routes = enabled and expanded and require("authored_wall_routes") or {}
 local trigger_class = "/Script/Engine.TriggerBox"
 local exit_class = "Level_Exit_BP_C"
@@ -306,9 +308,28 @@ function wall.command(fields, state, phase)
     if fields[2] ~= "native-exit-wall-probe" then return end
     local selector = fields[3]
     local exact = type(selector) == "string" and #selector <= 512 and selector:match("^Player_FP_C /Game/[^%c]+$")
-    local tag = fields[4]
+    local tag, actor = fields[4], fields[5]
     local index = not tag and primary_key
-    if tag then
+    local plan
+    if actor then
+        if not named_fixtures or not tag or tag == "" or #actor > 80
+            or (not actor:match("^Level_Exit_BP_C_%d+$") and not actor:match("^Dungeon_TransitionDoor_BP_C_%d+$")) then
+            error("Choose an exact stock wall actor with its entrance tag in a headless fixture", 0)
+        end
+        for _, candidate in ipairs(authored_routes[state.map] or {}) do
+            if candidate.actor == actor and candidate.entrance == tag then
+                if plan then error("More than one wall matches the requested actor and entrance", 0) end
+                plan = candidate
+            end
+        end
+        if not plan then error("The exact authored wall and entrance pair is unavailable", 0) end
+        index = plan.actor
+    elseif tag then
+        local planned = 0
+        for _, route in ipairs(authored_routes[state.map] or {}) do
+            if route.entrance == tag then planned = planned + 1 end
+        end
+        if planned > 1 then error("More than one wall matches the requested entrance", 0) end
         for key, candidate in pairs(records) do
             if candidate.tag == tag then
                 if index then error("More than one wall matches the requested entrance", 0) end
@@ -318,10 +339,34 @@ function wall.command(fields, state, phase)
     end
     local record = index and records[index]
     if not enabled or phase ~= "hosting" or not record or not same(record.world, state.world)
-        or not valid(record.actor) or not valid(record.component) or #fields > 4
+        or not valid(record.actor) or not valid(record.component) or #fields > 5
         or type(selector) ~= "string"
         or (not exact and selector ~= "local" and selector ~= "guest" and not selector:match("^guest[2-4]$")) then
         error("Expected a local slot or exact guest pawn with an optional authored entrance tag", 0)
+    end
+    if plan then
+        local world_name = state.map .. "." .. state.map:match("[^/]+$")
+        local class = plan.kind == "door" and door_class or exit_class
+        local source = qualified_source(record.fixture, state.world, plan)
+        if state.server ~= false or state.listening ~= true or state.world:GetFullName() ~= "World " .. world_name
+            or not source or not source:HasAuthority()
+            or source:GetFullName() ~= class .. " " .. world_name .. ":PersistentLevel." .. plan.actor
+            or record.tag ~= plan.entrance or record.kind ~= plan.kind or not same(record.original, source.Box)
+            or not same(record.original:GetOwner(), source)
+            or not in_world(record.actor, state.world) or not same(record.component:GetOwner(), record.actor)
+            or not same(record.actor.RootComponent, record.component) or record.actor:GetActorEnableCollision() ~= true
+            or record.component:GetCollisionEnabled() ~= query_only
+            or record.component:GetCollisionObjectType() ~= world_static
+            or record.component:GetCollisionResponseToChannel(pawn_channel) ~= block then
+            error("The selected stock wall geometry is stale or unavailable", 0)
+        end
+        local box, shape = record.original, record.component
+        local offset = distance_squared(box:K2_GetComponentLocation(), shape:K2_GetComponentLocation())
+        local extents = distance_squared(box:GetScaledBoxExtent(), shape:GetScaledBoxExtent())
+        if not finite(offset) or offset > 0.01 or not finite(extents) or extents > 0.01
+            or not same_rotation(box:K2_GetComponentRotation(), shape:K2_GetComponentRotation()) then
+            error("The selected stock wall geometry is stale or unavailable", 0)
+        end
     end
     local pawn, slot
     for _, details in ipairs(state.pawns) do
@@ -341,7 +386,7 @@ function wall.command(fields, state, phase)
     local start = pawn:K2_GetActorLocation()
     local approach = record.approach
     -- Tall authored boxes are entered at terrain height, well below their center.
-    if (approach and approach.probe_arrival) or (not approach and record.kind) then
+    if (approach and approach.probe_arrival) or ((plan or not approach) and record.kind) then
         local extent = record.component:GetScaledBoxExtent()
         if approach and approach.probe_arrival then
             local forward = record.fixture:GetActorForwardVector()
@@ -365,10 +410,10 @@ function wall.command(fields, state, phase)
         remaining = finite(remaining) and math.sqrt(remaining) or -1 }
     if outcome == "other" then
         local name = valid(component) and component:GetFullName() or "unknown component"
-        return string.format("native exit sweep other (%s, start %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
-            name, start.X, start.Y, start.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
+        return string.format("native exit sweep other%s (%s, start %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
+            plan and " at stock " .. plan.actor or "", name, start.X, start.Y, start.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
     end
-    return "native exit sweep " .. outcome
+    return "native exit sweep " .. outcome .. (plan and " at stock " .. plan.actor or "")
 end
 
 function wall.rows(status_row)

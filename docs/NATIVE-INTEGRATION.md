@@ -100,4 +100,11 @@ The clean Bandage test ran the stock `GainHealth` operation while the guest was 
 
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
+## Pending live verification
+
+- The authored travel registry covers 145 directed exits across 55 worlds. The seven Golden Nexus pads use their stock destination markers and one-step travel time. The three CrossRoads pads share an entrance tag, so headless position and wall probes require the exact pad actor.
+- The Flood Plains contract follows the placed jammer's stock damage and power-signal sequence. The adapter checks authoritative quest progress and can hide the defeated jammer on each guest. The new smoke test uses an actual guest-owned projectile and checks both stock save files after settlement.
+- The suppressed Light Pistol and standard SMG use stock 9mm Ball. Their smoke test covers full magazine depletion and reload through the original input bindings. The Gunsmith's cash counter can list the stock 200-round Ball shelf when the host's settings enable reusable stock.
+- The guest's stock time header uses a fresh host clock frame while leaving the guest save intact. The clock smoke exercises the original widget at Observatory and can follow the stock exits to the time-only Cistern.
+
 The stock Silverfish build ships Unreal's Null subsystem. A Steam Invite test needs an authorized Steamworks integration under the game's App ID and two separately entitled Steam sessions for a real invite round-trip. The existing Direct IP path supports local two-process testing without Steam. [Steamworks setup](https://partner.steamgames.com/doc/sdk/api) · [Steam lobby invites](https://partner.steamgames.com/doc/api/ISteamMatchmaking#InviteUserToLobby)
