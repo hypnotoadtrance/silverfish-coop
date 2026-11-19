@@ -93,13 +93,13 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
 | Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection. Press Home to preview a supported equip, use, or ammo split and again to confirm. The overlay splits half the selected ammo stack, rounded down. End cancels a confirmation or closes the overlay. Reopen it to refresh the inventory. |
-| Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock firearm and reload controls explicitly. The default stock primary path handles one shot per press. |
+| Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock primary and reload controls explicitly. The standard firearm path handles one shot per press. Dead Bridge also has a scoped Old Pipe equip and primary path. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
 
-The current stage has qualified stock paths for selected rest points, exits, transport items, an authored CrossRoads loot crate, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
+The current stage has qualified stock paths for selected rest points, exits, transport items, qualified stock small crates, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
 
-At the supported CrossRoads crate, interact to open it. The shared loot panel appears while a player stands within reach of the opened crate. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
+At a qualified stock small crate, press Interact to open it. The shared loot panel appears while a player stands within reach of the opened crate. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
 
 The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
 
@@ -114,6 +114,8 @@ At the Observatory Castaway, guests can use Interact to open the stock story dia
 At the Stone Maze station, face the station and press Interact to review the exact blank tape offered from your backpack. Press Interact again to exchange it. Back at the Scientist's board, select Stone Maze Readings and use the same review and confirmation sequence.
 
 ## Machine-readable controls
+
+The shared crate roll appears under `gameplay.native_loot_rolls` for the current map. Use the selected row's exact `guid` and crate key as `GUID@CRATE` with `native-loot-claim --target`. Supply an `--operation-id` of 32 lowercase hexadecimal characters and reuse it for the same action on retry. A stock cash claim returns `native_loot_claim.wallet_credit` with `amount`, `before`, and `after`. Read `gameplay.shared_wallet` for the current balance, including later changes.
 
 Run the commands below on the PC with the targeted launcher. Use `--campaign` for the host and `--profile` for the guest.
 
