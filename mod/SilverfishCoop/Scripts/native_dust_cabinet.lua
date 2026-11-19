@@ -98,11 +98,10 @@ local function inspect(state, phase)
             or not same(box:GetAttachParent(), frame) then return nil, "box_identity" end
     end
     local closed = box and not actor.Looted and door_roll(first, 0) and door_roll(second, 0)
-    local opened = not box and door_roll(first, 95) and door_roll(second, -95)
+    local doors_open = door_roll(first, 95) and door_roll(second, -95)
     return { actor = actor, pawn = pawn, world = state.world, box = box, host = host,
-        closed = closed, opened = opened, looted = actor.Looted,
-        roll_first = first.RelativeRotation and first.RelativeRotation.Roll,
-        roll_second = second.RelativeRotation and second.RelativeRotation.Roll }
+        closed = closed, box_retired = count == 0, doors_open = doors_open, looted = actor.Looted,
+        first_rotation = first.RelativeRotation, second_rotation = second.RelativeRotation }
 end
 
 local function qualified_epoch(value)
@@ -159,15 +158,22 @@ function cabinet.rows(state, phase, status_row)
     local name, epoch
     if scene.closed then
         name = "closed"
-    elseif scene.host and scene.opened and scene.looted then
+    elseif scene.host and scene.box_retired and scene.looted then
         name = "opened"
     elseif not scene.host and not scene.looted and same_projection(scene) then
-        name, epoch = scene.opened and "projected" or "projecting", projection.epoch
+        name, epoch = scene.box_retired and "projected" or "projecting", projection.epoch
     else
         return {status_row("native-dust-cabinet-diagnostic", area, "stock_animation_or_box", scene.looted,
-            scene.box ~= nil, scene.roll_first or "-", scene.roll_second or "-")}
+            scene.box ~= nil)}
     end
-    return {status_row("native-dust-cabinet", name, area, actor_name, scene.pawn:GetFullName(), epoch or "-")}
+    local rows = {status_row("native-dust-cabinet", name, area, actor_name, scene.pawn:GetFullName(), epoch or "-",
+        scene.closed and "closed" or scene.doors_open and "open" or "unverified")}
+    if not scene.closed and not scene.doors_open then
+        local first, second = scene.first_rotation or {}, scene.second_rotation or {}
+        rows[#rows + 1] = status_row("native-dust-cabinet-diagnostic", area, "stock_door_angles",
+            first.Pitch or "-", first.Yaw or "-", first.Roll or "-", second.Pitch or "-", second.Yaw or "-", second.Roll or "-")
+    end
+    return rows
 end
 
 return cabinet

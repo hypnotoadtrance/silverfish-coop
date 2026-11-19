@@ -21,15 +21,18 @@ def valid_epoch(epoch) -> bool:
 
 
 def parse(fields: list[str], phase: str, area: str) -> dict:
-    if len(fields) != 6:
+    if len(fields) not in (6, 7):
         raise ValueError("Invalid stock Dust Filter cabinet report size")
-    tag, state, report_map, actor, pawn, epoch = fields
+    tag, state, report_map, actor, pawn, epoch = fields[:6]
+    doors = fields[6] if len(fields) == 7 else None
     projected = state in ("projecting", "projected")
     if (tag != "native-dust-cabinet" or report_map != area or area != RAIL_YARD or actor != ACTOR
             or len(pawn) > 512 or _PAWN.fullmatch(pawn) is None or state not in _STATES.get(phase, ())
-            or (not valid_epoch(epoch) if projected else epoch != "-")):
+            or (not valid_epoch(epoch) if projected else epoch != "-")
+            or (doors is not None and doors not in (("closed",) if state == "closed" else ("open", "unverified")))):
         raise ValueError("Invalid stock Dust Filter cabinet scope")
-    return {"state": state, "map": area, "actor": actor, "pawn": pawn, "epoch": epoch if projected else None}
+    return {"state": state, "map": area, "actor": actor, "pawn": pawn, "epoch": epoch if projected else None,
+            "doors": doors}
 
 
 def observed(game: dict, state: str) -> dict:

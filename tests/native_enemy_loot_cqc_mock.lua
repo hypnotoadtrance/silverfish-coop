@@ -259,3 +259,75 @@ assert(qualified:find(row("native-enemy-loot", refinery, profile.names[1], "watc
 assert(qualified:find(row("native-enemy-loot", refinery, profile.names[2], "watching"), 1, true))
 assert(not qualified:find(npc:GetFullName(), 1, true))
 print("Refinery uses native profile capability 3 and watches only its two authenticated placed encounters")
+
+local start, target = {X = 1000, Y = 0, Z = 90}, {X = 0, Y = 0, Z = 90}
+local location, angle = start, {Pitch = 0, Yaw = 0, Roll = 0}
+local moves, shots, solid_entrance = 0, 0, false
+scout.IsWeaponBlocked, scout_save.PlayerHealth = false, 250
+scout.K2_GetActorLocation = function() return location end
+scout.K2_GetActorRotation = function() return angle end
+scout.K2_TeleportTo = function(_, point) location = point; moves = moves + 1; return true end
+scout.ForceNetUpdate = function() end
+local controller = object(33, "scout controller")
+controller.GetControlRotation = function() return angle end
+controller.SetControlRotation = function() end
+state.guests[1].controller_object = controller
+
+local function component(id, class, owner, at)
+    local result, type_object = object(id, class), object(id + 100, "Class /Script/Engine." .. class)
+    result.GetOwner, result.GetClass = function() return owner end, function() return type_object end
+    result.K2_GetComponentLocation = at
+    result.RelativeRotation = angle
+    result.K2_SetRelativeRotation = function(self, orientation) self.RelativeRotation = orientation end
+    result.K2_SetWorldRotation = result.K2_SetRelativeRotation
+    result.K2_GetComponentRotation = function(self) return self.RelativeRotation end
+    result.GetForwardVector = function(self)
+        local pitch, yaw = math.rad(self.RelativeRotation.Pitch), math.rad(self.RelativeRotation.Yaw)
+        return {X = math.cos(yaw)*math.cos(pitch), Y = math.sin(yaw)*math.cos(pitch), Z = math.sin(pitch)}
+    end
+    return result
+end
+
+local weapon = object(34, "stock SG-71 A")
+weapon.HasAuthority, weapon.GetWorld = npc.HasAuthority, host.GetWorld
+weapon.GetClass = function() return kind end
+weapon.GetOwner = function() return scout end
+weapon.GetInstigator = weapon.GetOwner
+weapon.User, weapon.Player_Ref, weapon.HeldByPlayer = scout, scout, true
+weapon.Arrow_Muzzle = component(35, "ArrowComponent", weapon, scout.K2_GetActorLocation)
+scout.EquipedItem = weapon
+scout.Camera = component(36, "CameraComponent", scout, scout.K2_GetActorLocation)
+scout.CapsuleComponent = component(37, "CapsuleComponent", scout, scout.K2_GetActorLocation)
+scout.CapsuleComponent.GetScaledCapsuleHalfHeight = function() return 88 end
+local target_name = profile.names[1]
+local enemy = objects[profile.paths[target_name]]
+enemy.CapsuleComponent = component(38, "CapsuleComponent", enemy, function() return target end)
+local contact = component(39, "SkeletalMeshComponent", enemy, function() return target end)
+objects["/Script/Engine.Default__KismetSystemLibrary"].LineTraceSingle = function(_, _, from, _, channel, _, _, _, hit)
+    if channel == 0 then
+        if from.X == start.X and not solid_entrance then return false end
+        hit.ImpactPoint, hit.ImpactNormal = {X = from.X, Y = from.Y, Z = 0}, {X = 0, Y = 0, Z = 1}
+    else
+        assert(channel == 2 and location.X ~= start.X)
+        hit.Component = {Get = function() return contact end}
+    end
+    return true
+end
+local guest_weapon = package.loaded.native_guest_weapon
+guest_weapon.command = function(fields)
+    assert(fields[2] == "native-guest-weapon-fire" and fields[3] == "scout" and fields[4] == guid)
+    assert(location.X ~= start.X and location.X <= 360)
+    shots = shots + 1
+end
+guest_weapon.rows = function()
+    return {{"native-guest-weapon", refinery, "fire", "scout", guid, 1, "equipped", 7, 6, 6, 6, 9}}
+end
+local refinery_shot = {"request", "native-bandit-shot-fixture", target_name, "scout", guid}
+refused(fixture, refinery_shot, "native_bandit_shot_refinery_return_floor_unavailable")
+assert(moves == 0 and shots == 0)
+solid_entrance = true
+assert(fixture.command(refinery_shot, state, "hosting") == "stock Bandit aim and fire verified")
+assert(moves == 2 and shots == 1 and location == start and scout_save.PlayerHealth == 250)
+local aim = fixture.rows(state, "hosting", table.pack)[1]
+assert(aim[2] == refinery and aim[3] == target_name and aim[9] >= 640 and aim[10] == 0)
+print("Refinery headless shot fires one stock pulse from a clear lane, then restores the exact floor-checked starting pose")

@@ -6,6 +6,7 @@ local enemy_loot = require("native_enemy_loot")
 local weapon_profiles = require("guest_weapon_registry")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
+local refinery = "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"
 local world_name = "World " .. map .. ".PlaytestMap_01"
 local source_name = "AI_Spawner_Single_BP_C " .. map .. ".PlaytestMap_01:PersistentLevel.AI_Spawner_Single_BP_C_4"
 local bandit_class = "BlueprintGeneratedClass /Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C"
@@ -71,8 +72,13 @@ function npc.rows(state, phase, status_row)
     if state.map ~= map and aim and same(state.world, aim.world) then
         local _, watched = enemy_loot.watched_cqc(state, phase, aim.name, true)
         if same(watched, aim.guest) then
-            return { status_row("native-bandit-aim", state.map, aim.name, watched:GetFullName(),
-                aim.distance, aim.yaw, aim.pitch, aim.component) }
+            local arguments = { "native-bandit-aim", state.map, aim.name, watched:GetFullName(),
+                aim.distance, aim.yaw, aim.pitch, aim.component }
+            if aim.withdrawal then
+                arguments[#arguments + 1] = aim.withdrawal.distance
+                arguments[#arguments + 1] = aim.withdrawal.return_error
+            end
+            return { status_row(table.unpack(arguments)) }
         end
     end
     local pawn = active(state, phase)
@@ -355,6 +361,13 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
         or not original.muzzle then error("The stock Bandit aim geometry is unavailable", 0) end
     local context = { trace = trace, host = host, guest = guest, bandit = bandit, weapon = weapon,
         controller = controller, camera = camera, muzzle = muzzle, head = enemy_loot_fixture and stock_head(bandit, point) }
+    local withdraw = state.map == refinery and tracked and guid and shotgun
+    if withdraw then
+        local back = floor_at(context, original.position, original.position.X, original.position.Y, height)
+        if not back or math.abs(back.Z - original.position.Z) > 35 then
+            error("native_bandit_shot_refinery_return_floor_unavailable", 0)
+        end
+    end
     local moved = false
     local applied, distance, aim, contact = pcall(function()
         local _, now = look_from(original.position, point)
@@ -416,13 +429,32 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
             restore_pose()
             error("native_bandit_shot_scope_changed", 0)
         end
+        local shot_position = withdraw and guest:K2_GetActorLocation()
+        if withdraw and not vector(shot_position) then
+            restore_pose()
+            error("native_bandit_shot_refinery_pose_unavailable", 0)
+        end
         local fired, status = fire_aimed_weapon(state, phase, detail.name, guid, shotgun and 9 or 1)
         if not fired then
             if not status:match("^mutation_unverified_") then restore_pose() end
             error(status, 0)
         end
-        local updated = pcall(function() guest:ForceNetUpdate() end)
-        if not updated then error("mutation_unverified_native_bandit_shot_net_update", 0) end
+        if withdraw then
+            -- The stock wrapper has emitted the actual projectiles and debited the round.
+            -- Return the fixture shooter to the exact standing position they came from.
+            restore_pose()
+            local actual = guest:K2_GetActorLocation()
+            if not vector(actual) or not same(guest:GetWorld(), state.world) then
+                error("mutation_unverified_native_bandit_shot_return", 0)
+            end
+            local _, return_error = look_from(actual, original.position)
+            local _, withdrawal = look_from(shot_position, actual)
+            if return_error > 25 then error("mutation_unverified_native_bandit_shot_return", 0) end
+            receipt.withdrawal = { distance = withdrawal, return_error = return_error }
+        else
+            local updated = pcall(function() guest:ForceNetUpdate() end)
+            if not updated then error("mutation_unverified_native_bandit_shot_net_update", 0) end
+        end
         aim_fixture = receipt
         return "stock Bandit aim and fire verified"
     end

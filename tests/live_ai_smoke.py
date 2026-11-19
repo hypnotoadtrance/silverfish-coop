@@ -336,6 +336,9 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     accepted("aim and fire the stock firearm", fire)
                 aim = fire["native_bandit_aim"]
                 assert (aim["bandit"], aim["pawn"]) == (target, exact_pawn), aim
+                if refinery_cqc:
+                    distance, deviation = (aim["withdrawal"][field] for field in ("distance", "return_error"))
+                    assert distance >= 0 and 0 <= deviation <= 25, aim
                 fired = fire["native_guest_weapon"]
                 assert (fired["pawn"], fired["guid"], fired["before"], fired["after"], fired["projectiles"]) == (
                     exact_pawn, weapon_guid, remaining, remaining - 1, projectiles

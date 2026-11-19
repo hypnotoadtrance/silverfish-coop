@@ -1040,10 +1040,14 @@ class Bridge:
                     }
                 elif fields[0] == "native-bandit":
                     data["native_bandit"] = parse_bandit(fields)
-                elif fields[0] == "native-bandit-aim" and len(fields) == 8:
+                elif fields[0] == "native-bandit-aim" and len(fields) in (8, 10):
                     data["native_bandit_aim"] = {"map": fields[1], "bandit": fields[2], "pawn": fields[3],
                                                  "range": _finite(fields[4]), "yaw": _finite(fields[5]), "pitch": _finite(fields[6]),
                                                  "component": fields[7]}
+                    if len(fields) == 10:
+                        data["native_bandit_aim"]["withdrawal"] = {
+                            "distance": _finite(fields[8]), "return_error": _finite(fields[9]),
+                        }
                 elif fields[0] == "native-broker-input" and len(fields) == 6:
                     data["native_broker_input"] = {"map": fields[1], "pawn": fields[2], "station": fields[3],
                                                    "state": fields[4], "sequence": int(fields[5])}

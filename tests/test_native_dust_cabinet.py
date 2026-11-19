@@ -29,6 +29,9 @@ class NativeDustCabinetTests(unittest.IsolatedAsyncioTestCase):
     def test_raw_status_has_exact_actor_phase_and_epoch(self):
         fields = ["native-dust-cabinet", "projected", RAIL_YARD, cabinet.ACTOR, PAWN, EPOCH]
         self.assertEqual(cabinet.parse(fields, "connected", RAIL_YARD)["epoch"], EPOCH)
+        self.assertEqual(cabinet.parse([*fields, "unverified"], "connected", RAIL_YARD)["doors"], "unverified")
+        with self.assertRaises(ValueError):
+            cabinet.parse([*fields, "closed"], "connected", RAIL_YARD)
         with self.assertRaises(ValueError):
             cabinet.parse(fields, "hosting", RAIL_YARD)
         for index, value in [(2, "OtherMap"), (3, cabinet.ACTOR[:-1] + "7"), (4, "Player_FP_C Fake"), (5, "-" * 32)]:
