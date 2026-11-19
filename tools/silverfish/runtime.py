@@ -1455,6 +1455,11 @@ class Bridge:
                     data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
                                                     "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
                                                     "total": int(fields[6]), "count": int(fields[7])}
+                elif fields == ["native-inventory-sort-capability", "1"]:
+                    data["native_inventory_sort_capability"] = 1
+                elif fields[0] == "native-inventory-sort" and len(fields) == 5:
+                    data["native_inventory_sort"] = {"map": fields[1], "pawn": fields[2], "state": fields[3],
+                                                     "count": int(fields[4])}
                 elif fields == ["native-inventory-split-capability", "1"]:
                     data[native_inventory.SPLIT_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]

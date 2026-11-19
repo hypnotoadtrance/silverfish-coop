@@ -19,8 +19,8 @@ from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 
 
-async def verify(work: Path, vanilla_saved: Path):
-    name = "inventory-split-" + uuid.uuid4().hex[:8]
+async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
+    name = ("inventory-sort-" if sort_backpack else "inventory-split-") + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     guest = ("--profile", name)
     run = work / "campaigns" / name / "run"
@@ -84,9 +84,28 @@ async def verify(work: Path, vanilla_saved: Path):
         first = await enrolled()
         host_before = await page(host, "host")
         source = uuid.uuid4().hex.upper()
+        if sort_backpack:
+            weapon = uuid.uuid4().hex.upper()
+            seeded_weapon = await ask("action", *host, "native-guest-weapon-seed", "--item-guid", weapon)
+            assert seeded_weapon["native_guest_weapon"]["guid"] == weapon, seeded_weapon
         seeded = await ask("action", *host, "native-guest-weapon-seed-ammo", "--item-guid", source)
         assert seeded["native_guest_weapon"]["guid"] == source, seeded
-        quantities(await page(guest, character), {source: 9})
+        rows = await page(guest, character)
+        quantities(rows, {source: 9})
+        if sort_backpack:
+            assert [row["guid"] for row in rows] == [weapon, source], rows
+            sort_request = ("action", *guest, "native-inventory-sort", "--operation-id", uuid.uuid4().hex)
+            sorted_receipt = (await ask(*sort_request))["native_inventory_sort"]
+            assert (sorted_receipt["owner"], sorted_receipt["state"], sorted_receipt["count"]) == (character, "sorted", 2), sorted_receipt
+            reordered = await page(guest, character)
+            assert [row["guid"] for row in reordered] == [source, weapon], reordered
+            before = {row["guid"]: {key: value for key, value in row.items() if key != "index"} for row in rows}
+            after = {row["guid"]: {key: value for key, value in row.items() if key != "index"} for row in reordered}
+            assert before == after and await page(host, "host") == host_before
+            assert (await ask(*sort_request))["native_inventory_sort"] == sorted_receipt
+            stable = (await ask("action", *guest, "native-inventory-sort"))["native_inventory_sort"]
+            assert (stable["state"], stable["count"]) == ("already_sorted", 2) and await page(guest, character) == reordered
+            evidence["stock_category_sort"] = {"before": rows, "after": reordered, "receipt": sorted_receipt}
         split = ("action", *guest, "native-inventory-split", "--target")
         refused = await ask(*split, f"{source}|4|8", success=False)
         assert refused["error"] == "native_inventory_split_refused_stale_quantity", refused
@@ -129,6 +148,8 @@ async def verify(work: Path, vanilla_saved: Path):
         assert await page(host, "host") == host_before
         evidence["stock_inventory_controls"] = applied
         evidence["host_inventory_unchanged"] = True
+        if sort_backpack:
+            latest_inventory = await page(guest, character)
 
         await stop(host, authority)
         await stop(guest, client)
@@ -141,6 +162,10 @@ async def verify(work: Path, vanilla_saved: Path):
         assert (await ask(*ui_replay))["native_inventory_split"]["new_guid"] == ui_created
         assert (await ask(*request))["native_inventory_split"] == receipt
         evidence["restart_quantities"] = quantities(await page(guest, character), expected)
+        if sort_backpack:
+            assert await page(guest, character) == latest_inventory
+            assert (await ask(*sort_request))["native_inventory_sort"] == sorted_receipt
+            evidence["stock_category_sort"]["replayed_after_restart"] = True
         evidence["verified"] = True
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
@@ -163,5 +188,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--sort-backpack", action="store_true", help="verify stock sort on a mixed backpack before splitting")
     settings = parser.parse_args()
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve()))
+    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack))

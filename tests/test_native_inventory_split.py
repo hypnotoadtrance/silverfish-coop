@@ -97,6 +97,43 @@ class StackSplitTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
             self.assertFalse(host.party["receipts"])
 
+    async def test_backpack_sort_is_qualified_to_one_guest_and_replays_once(self):
+        with TemporaryDirectory() as temporary, CampaignStore(temporary) as store:
+            host = self.host(store)
+            host.last_game[inventory.SORT_CAPABILITY] = 1
+            report = {"map": OBSERVATORY, "pawn": PAWN, "count": 2, "state": "sorted"}
+            snapshot = {**host.last_game, inventory.SORT_KEY: report}
+            bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+            result = await inventory.sort_backpack(host, bridge, "guest", None, OPERATION)
+            self.assertEqual(result, {inventory.SORT_KEY: {"owner": "guest", **report}})
+            self.assertEqual(await inventory.sort_backpack(host, bridge, "guest", None, OPERATION), result)
+            with self.assertRaisesRegex(party.RuleError, "guest_not_active"):
+                await inventory.sort_backpack(host, bridge, "other", None, OPERATION)
+            self.assertEqual(store.status()["world"]["party"]["receipts"]["guest"][0]["result"], result)
+            bridge.command.assert_awaited_once_with(inventory.SORT, PAWN, timeout=6)
+            host.checkpoint_native.assert_awaited_once()
+            self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_backpack_sort_distinguishes_clean_refusal_from_unverified_mutation(self):
+        with TemporaryDirectory() as temporary, CampaignStore(temporary) as store:
+            host = self.host(store)
+            host.last_game[inventory.SORT_CAPABILITY] = 1
+            bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError("native_inventory_sort_refused_stock_schema")))
+            with self.assertRaisesRegex(party.RuleError, "native_inventory_sort_refused_stock_schema"):
+                await inventory.sort_backpack(host, bridge, "guest", None, OPERATION)
+            self.assertFalse(host.native_checkpoint_unsafe)
+            self.assertFalse(host.stopping)
+            bridge.command.side_effect = None
+            bridge.command.return_value = {
+                **host.last_game, inventory.SORT_KEY: {"map": OBSERVATORY, "pawn": "somebody else",
+                                                      "count": 2, "state": "sorted"},
+            }
+            with self.assertRaisesRegex(RuntimeError, "exact guest inventory"):
+                await inventory.sort_backpack(host, bridge, "guest", None, OPERATION)
+            self.assertTrue(host.native_checkpoint_unsafe)
+            self.assertTrue(host.stopping)
+            host.checkpoint_native.assert_not_awaited()
+
     async def test_overlay_rechecks_exact_visible_selection_before_dispatching_split(self):
         view = {"state": "splitting", "sequence": 18, "map": OBSERVATORY,
                 "pawn": PAWN, "class_path": NINE_MM_BALL.item_path, "guid": GUID, "count": 9}

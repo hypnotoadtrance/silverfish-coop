@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <ranges>
 #include <string>
@@ -66,6 +67,7 @@ namespace
     constexpr auto update_mag_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:Update_Mag");
     constexpr auto equip_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Equip_NextItem");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
+    constexpr auto sort_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SortItemArray");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto guid_path = STR("/Script/CoreUObject.Guid");
@@ -247,6 +249,41 @@ namespace
         return matched;
     }
 
+    std::string_view resolve_owner(Context& context, std::int64_t pawn_address, std::int64_t save_address)
+    {
+        auto* pawn_class = find<Unreal::UClass>(pawn_path);
+        auto* save_class = find<Unreal::UClass>(save_path);
+        auto* instance_class = find<Unreal::UClass>(instance_path);
+        auto* controller_class = find<Unreal::UClass>(controller_path);
+        auto* connection_class = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
+        if (!pawn_class || !save_class || !instance_class || !controller_class || !connection_class)
+            return "stock_guest_weapon_class_unavailable";
+
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
+            if (reinterpret_cast<std::uintptr_t>(candidate) != static_cast<std::uintptr_t>(pawn_address))
+                return RC::LoopAction::Continue;
+            if (candidate->GetClassPrivate() == pawn_class && authority(candidate)) context.pawn = candidate;
+            return RC::LoopAction::Break;
+        });
+        if (!context.pawn) return "authoritative_guest_pawn_required";
+        context.save = object(context.pawn, STR("Save"));
+        if (!live(context.save) || context.save->GetClassPrivate() != save_class ||
+            reinterpret_cast<std::uintptr_t>(context.save) != static_cast<std::uintptr_t>(save_address))
+            return "detached_guest_save_required";
+
+        context.world = static_cast<Unreal::AActor*>(context.pawn)->GetWorld();
+        context.instance = object(context.world, STR("OwningGameInstance"));
+        context.stock = object(context.instance, STR("SaveSlot_Ref"));
+        context.controller = object(context.pawn, STR("Controller"));
+        context.connection = object(context.controller, STR("Player"));
+        if (!context.world || !live(context.instance) || context.instance->GetClassPrivate() != instance_class ||
+            !live(context.stock) || context.stock->GetClassPrivate() != save_class || context.stock == context.save ||
+            !live(context.controller) || context.controller->GetClassPrivate() != controller_class ||
+            !live(context.connection) || !context.connection->IsA(connection_class) || !ownership_current(context))
+            return "authenticated_guest_detached_save_required";
+        return {};
+    }
+
     std::string_view resolve(const Lua& lua, Context& context, const Unreal::TCHAR** seed_variant,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr)
     {
@@ -287,37 +324,7 @@ namespace
             *seed_variant = profile->path;
         }
 
-        auto* pawn_class = find<Unreal::UClass>(pawn_path);
-        auto* save_class = find<Unreal::UClass>(save_path);
-        auto* instance_class = find<Unreal::UClass>(instance_path);
-        auto* controller_class = find<Unreal::UClass>(controller_path);
-        auto* connection_class = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
-        if (!pawn_class || !save_class || !instance_class || !controller_class || !connection_class)
-            return "stock_guest_weapon_class_unavailable";
-
-        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
-            if (reinterpret_cast<std::uintptr_t>(candidate) != static_cast<std::uintptr_t>(pawn_address))
-                return RC::LoopAction::Continue;
-            if (candidate->GetClassPrivate() == pawn_class && authority(candidate)) context.pawn = candidate;
-            return RC::LoopAction::Break;
-        });
-        if (!context.pawn) return "authoritative_guest_pawn_required";
-        context.save = object(context.pawn, STR("Save"));
-        if (!live(context.save) || context.save->GetClassPrivate() != save_class ||
-            reinterpret_cast<std::uintptr_t>(context.save) != static_cast<std::uintptr_t>(save_address))
-            return "detached_guest_save_required";
-
-        context.world = static_cast<Unreal::AActor*>(context.pawn)->GetWorld();
-        context.instance = object(context.world, STR("OwningGameInstance"));
-        context.stock = object(context.instance, STR("SaveSlot_Ref"));
-        context.controller = object(context.pawn, STR("Controller"));
-        context.connection = object(context.controller, STR("Player"));
-        if (!context.world || !live(context.instance) || context.instance->GetClassPrivate() != instance_class ||
-            !live(context.stock) || context.stock->GetClassPrivate() != save_class || context.stock == context.save ||
-            !live(context.controller) || context.controller->GetClassPrivate() != controller_class ||
-            !live(context.connection) || !context.connection->IsA(connection_class) || !ownership_current(context))
-            return "authenticated_guest_detached_save_required";
-        return {};
+        return resolve_owner(context, pawn_address, save_address);
     }
 
     struct Inventory
@@ -358,9 +365,8 @@ namespace
         }
     };
 
-    std::string_view locate(const Context& context, Inventory& inventory, Unreal::UClass* expected_class = nullptr)
+    std::string_view bind_inventory(const Context& context, Inventory& inventory)
     {
-        if (!expected_class) expected_class = context.weapon;
         inventory.backpack = field<Unreal::FArrayProperty>(context.save, STR("PlayerBackpack"));
         inventory.equipment = field<Unreal::FArrayProperty>(context.save, STR("PlayerEquipment"));
         inventory.type = inventory.backpack ? Unreal::CastField<Unreal::FStructProperty>(inventory.backpack->GetInner()) : nullptr;
@@ -384,6 +390,13 @@ namespace
             inventory.words[index] = field<Unreal::FIntProperty>(guid_type, guid_names[index]);
             if (!inventory.words[index]) return "guest_weapon_guid_schema_unavailable";
         }
+        return {};
+    }
+
+    std::string_view locate(const Context& context, Inventory& inventory, Unreal::UClass* expected_class = nullptr)
+    {
+        if (const auto error = bind_inventory(context, inventory); !error.empty()) return error;
+        if (!expected_class) expected_class = context.weapon;
         if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(context.save)) == context.guid ||
             inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(context.save)) == context.guid)
             return "guest_weapon_guid_conflict";
@@ -1644,6 +1657,121 @@ namespace
         void operator()(void* storage) const { type->DestroyAndFreeValue(storage); }
     };
 
+    int sort_backpack(const Lua& lua)
+    {
+        if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || !Unreal::IsInGameThreadRaw() ||
+            lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
+            return result(lua, false, "native_inventory_sort_refused_scope");
+        const auto pawn_address = lua.get_integer();
+        const auto save_address = lua.get_integer();
+        Context context;
+        if (pawn_address <= 0 || save_address <= 0 || !resolve_owner(context, pawn_address, save_address).empty())
+            return result(lua, false, "native_inventory_sort_refused_owner");
+        if (!ready_pawn(context) || std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+                return hold.fenced && hold.pawn.Get() == context.pawn;
+            })) return result(lua, false, "native_inventory_sort_refused_busy");
+
+        Inventory inventory;
+        if (!bind_inventory(context, inventory).empty())
+            return result(lua, false, "native_inventory_sort_refused_inventory_layout");
+        auto* backpack = inventory.backpack;
+        auto* current = backpack->ContainerPtrToValuePtr<void>(context.save);
+        Unreal::FScriptArrayHelper references(backpack, current);
+        const auto count = references.Num();
+        if (count < 0 || count > max_inventory)
+            return result(lua, false, "native_inventory_sort_refused_backpack_size");
+
+        auto* function = find<Unreal::UFunction>(sort_path);
+        auto* library = find<Unreal::UObject>(library_path);
+        auto* input = field<Unreal::FArrayProperty>(function, STR("ItemArray"));
+        auto* world_context = field<Unreal::FObjectProperty>(function, STR("__WorldContext"));
+        auto* output = field<Unreal::FArrayProperty>(function, STR("SortedItemArray"));
+        auto* row_type = inventory.type->GetStruct().Get();
+        auto* payload = field<Unreal::FStructProperty>(row_type, payload_name);
+        const auto matches_array = [row_type](Unreal::FArrayProperty* array, int offset) {
+            auto* row = array ? Unreal::CastField<Unreal::FStructProperty>(array->GetInner()) : nullptr;
+            return row && row->GetStruct().Get() == row_type && array->GetOffset_Internal() == offset &&
+                array->GetSize() == 0x10 && array->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
+                array->HasAnyPropertyFlags(Unreal::CPF_OutParm) && !array->HasAnyPropertyFlags(Unreal::CPF_ReturnParm);
+        };
+        if (!function || !library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || !function->HasAnyFunctionFlags(Unreal::FUNC_Static) ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || function->GetNumParms() != 3 ||
+            function->GetParmsSize() != 0x28 || function->GetReturnProperty() || !matches_array(input, 0) ||
+            !input->HasAnyPropertyFlags(Unreal::CPF_ReferenceParm) || !matches_array(output, 0x18) ||
+            output->HasAnyPropertyFlags(Unreal::CPF_ReferenceParm) || !world_context ||
+            world_context->GetOffset_Internal() != 0x10 || world_context->GetSize() != sizeof(void*) ||
+            !world_context->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            world_context->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm) ||
+            !world_context->GetPropertyClass().Get() || !context.pawn->IsA(world_context->GetPropertyClass().Get()) ||
+            !payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
+            return result(lua, false, "native_inventory_sort_refused_stock_schema");
+
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value original(backpack->AllocateAndInitializeValue(), {backpack});
+        if (!original) return result(lua, false, "native_inventory_sort_refused_storage");
+        backpack->CopyCompleteValue(original.get(), current);
+        Unreal::FScriptArrayHelper before(backpack, original.get());
+        auto* base = inventory.item_class->GetMetaClass().Get();
+        std::map<Guid, const void*> originals;
+        for (int index = 0; index < count; ++index)
+        {
+            const auto* row = before.GetRawPtr(index);
+            const auto id = inventory.identity(row);
+            auto* type = Unreal::Cast<Unreal::UClass>(inventory.row_class(row));
+            if (id == Guid{} || !live(type) || !base || !type->IsChildOf(base) || !originals.emplace(id, row).second)
+                return result(lua, false, "native_inventory_sort_refused_source_row");
+        }
+
+        alignas(std::max_align_t) std::array<std::byte, 0x28> parameters{};
+        auto* storage = parameters.data();
+        input->InitializeValue_InContainer(storage);
+        output->InitializeValue_InContainer(storage);
+        const auto destroy = [input, output](std::byte* data) {
+            output->DestroyValue_InContainer(data);
+            input->DestroyValue_InContainer(data);
+        };
+        const std::unique_ptr<std::byte, decltype(destroy)> cleanup(storage, destroy);
+        input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), original.get());
+        world_context->SetObjectPropertyValue(world_context->ContainerPtrToValuePtr<void>(storage), context.pawn);
+        library->ProcessEvent(function, storage);
+
+        auto* candidate = output->ContainerPtrToValuePtr<void>(storage);
+        Unreal::FScriptArrayHelper after(output, candidate);
+        if (after.Num() != count)
+            return result(lua, false, "native_inventory_sort_refused_stock_count");
+        for (int index = 0; index < count; ++index)
+        {
+            const auto* row = after.GetRawPtr(index);
+            auto previous = originals.extract(inventory.identity(row));
+            if (previous.empty() || !inventory.type->Identical(previous.mapped(), row) ||
+                !payload->Identical(payload->ContainerPtrToValuePtr<void>(previous.mapped()),
+                                    payload->ContainerPtrToValuePtr<void>(row)))
+                return result(lua, false, "native_inventory_sort_refused_payload");
+        }
+
+        if (!ownership_current(context) || !backpack->Identical(original.get(), current))
+            return result(lua, false, "mutation_unverified_native_inventory_sort_scope");
+        const bool changed = !backpack->Identical(candidate, current);
+        if (changed)
+        {
+            backpack->CopyCompleteValue(current, candidate);
+            if (!ownership_current(context) || !backpack->Identical(candidate, current))
+            {
+                if (ownership_current(context))
+                {
+                    backpack->CopyCompleteValue(current, original.get());
+                    if (backpack->Identical(original.get(), current))
+                        return result(lua, false, "native_inventory_sort_refused_rolled_back");
+                }
+                return result(lua, false, "mutation_unverified_native_inventory_sort");
+            }
+        }
+        result(lua, true, changed ? "sorted" : "already_sorted");
+        lua.set_integer(count);
+        return 3;
+    }
+
     int split_ammo(const Lua& lua)
     {
         Context context;
@@ -1802,6 +1930,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishFireNativeGuestWeapon", run<Operation::Fire>);
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
+    lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
     {
         if (env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_HEADLESS"))

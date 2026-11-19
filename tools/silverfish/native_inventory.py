@@ -20,6 +20,9 @@ SPLIT_CAPABILITY = "native_inventory_split_capability"
 SPLIT_CLASSES = frozenset(ammo.item_path for ammo in (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK))
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 SPLIT_VIEW = "native_guest_inventory_split_view"
+SORT = "native-inventory-sort"
+SORT_CAPABILITY = "native_inventory_sort_capability"
+SORT_KEY = "native_inventory_sort"
 
 
 def split_target(value):
@@ -91,6 +94,59 @@ async def split_stack(host, bridge, character: str, target, operation: str) -> d
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     host.control.event("native_guest_inventory_split_committed", operation_id=operation, revision=revision, **result[SPLIT_KEY])
+    return result
+
+
+async def sort_backpack(host, bridge, character: str, target, operation: str) -> dict:
+    if target is not None or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("native_inventory_sort_requires_operation_id")
+    game = host.last_game
+    if (not host.native_guest or not host.native_zones or not host.native_profile or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(SORT_CAPABILITY) != 1
+            or time.monotonic() - host.last_seen > 3):
+        raise party.RuleError("native_inventory_sort_unavailable")
+    owner = host.native_recipients().get(character, {})
+    player = host.party["players"].get(character)
+    if not owner.get("connected") or not owner.get("pawn") or not player:
+        raise party.RuleError("guest_not_active")
+    fingerprint = [SORT, None, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
+        raise party.RuleError("native_inventory_sort_refused_downed_or_respawning")
+
+    area, pawn = game["map"], owner["pawn"]
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(SORT, pawn, timeout=6)
+        except RuntimeError as error:
+            if str(error).startswith("native_inventory_sort_refused_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(SORT_KEY, {})
+        count = proof.get("count")
+        if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn")) !=
+                ("hosting", area, area, pawn) or proof.get("state") not in ("sorted", "already_sorted")
+                or type(count) is not int or not 0 <= count <= 4096):
+            raise RuntimeError("The stock backpack sort did not verify the exact guest inventory")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        result = {SORT_KEY: {"owner": character, **proof}}
+        candidate = party.load_party(host.party)
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    host.party, host.native_checkpoint_unsafe = candidate, False
+    host.control.event("native_guest_inventory_sort_committed", operation_id=operation, revision=revision, **result[SORT_KEY])
     return result
 
 

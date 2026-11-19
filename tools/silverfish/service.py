@@ -50,7 +50,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
-                        "native-inventory-list", native_inventory.SPLIT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
+                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
@@ -1535,6 +1535,8 @@ class Host:
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
                                                    target, request["operation_id"])
+            elif action == native_inventory.SORT:
+                result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
                 offset = target if target is not None else "0"
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:

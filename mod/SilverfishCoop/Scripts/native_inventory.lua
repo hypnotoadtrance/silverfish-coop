@@ -1,7 +1,7 @@
 local inventory = {}
 local guest_save = require("guest_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split
+local observation, split, sorted
 local page_size = 16
 
 local function guid(value)
@@ -31,7 +31,27 @@ local function split_stack(fields, state, phase)
     return "native guest ammo stack split verified"
 end
 
+local function sort_backpack(fields, state, phase)
+    sorted = nil
+    if #fields ~= 3 or phase ~= "hosting" or not state.listening or state.server ~= false
+        or type(SilverfishSortNativeGuestBackpack) ~= "function" then
+        error("native_inventory_sort_refused_scope", 0)
+    end
+    local name = fields[3]
+    local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+    if not exact or not pawn or not save then error("native_inventory_sort_refused_owner", 0) end
+    local ok, status, count = SilverfishSortNativeGuestBackpack(pawn:GetAddress(), save:GetAddress())
+    if ok ~= true then error(tostring(status), 0) end
+    if (status ~= "sorted" and status ~= "already_sorted") or math.type(count) ~= "integer"
+        or count < 0 or count > 4096 then
+        error("mutation_unverified_native_inventory_sort_receipt", 0)
+    end
+    sorted = { map = state.map, pawn = name, status = status, count = count }
+    return "native guest backpack sort verified"
+end
+
 function inventory.command(fields, state, phase)
+    if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
     if fields[2] ~= "native-inventory-census" then return end
     observation = nil
@@ -64,7 +84,7 @@ function inventory.command(fields, state, phase)
 end
 
 function inventory.reset()
-    observation, split = nil, nil
+    observation, split, sorted = nil, nil, nil
 end
 
 function inventory.rows(state, phase, status_row)
@@ -76,6 +96,12 @@ function inventory.rows(state, phase, status_row)
     if split and split.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-split", split.map, split.pawn, split.source, split.created,
             split.class, split.before, split.remaining, split.taken)
+    end
+    if type(SilverfishSortNativeGuestBackpack) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-sort-capability", 1)
+    end
+    if sorted and sorted.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-sort", sorted.map, sorted.pawn, sorted.status, sorted.count)
     end
     local report = observation
     if not report or report.map ~= state.map then return rows end
