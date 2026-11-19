@@ -649,7 +649,7 @@ namespace
     void clear()
     {
         settle_drop_projection();
-        drop_settled_actor = {};
+        drop_settled_actor.Reset();
         drop_settles_at = {};
         for (auto& scope : scopes) clear(scope);
     }
