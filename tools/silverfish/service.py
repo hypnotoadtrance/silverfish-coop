@@ -45,7 +45,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
-                        "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
+                        "native-inventory-list", native_inventory.SPLIT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
@@ -1421,6 +1421,8 @@ class Host:
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
+        if self.last_game.get(native_inventory.SPLIT_CAPABILITY) == 1:
+            gameplay[native_inventory.SPLIT_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
@@ -1520,6 +1522,8 @@ class Host:
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
                     raise party.RuleError("invalid_inventory_offset")
                 result = await native_inventory.inspect(self, bridge, character, int(offset))
+            elif action == native_inventory.SPLIT:
+                result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"])
             elif action == "native-quest-list":
                 result = {"native_quest_page": native_quest_catalog.page(await self.read_quest_catalog(bridge), target)}
             elif action == native_broker.INTERACT:
@@ -3427,6 +3431,7 @@ class Client:
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.last_primary_intent = 0
         self.last_inventory_use = 0
+        self.last_inventory_split = 0
         self.last_crate_intent = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
@@ -3693,8 +3698,12 @@ class Client:
                     or type(total) is not int or not 0 <= total <= native_inventory.MAX_ITEMS
                     or type(items) is not list or len(items) != min(native_inventory.PAGE_SIZE, total)):
                 raise ValueError("The host did not return this guest's exact stock inventory page")
-            entries = tuple(f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
-                            for row in items)
+            splits = (self.gameplay.get(native_inventory.SPLIT_CAPABILITY) == 1
+                      and self.last_game.get("native_inventory_split_view_capability") is True)
+            entries = tuple(
+                f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
+                + ("|split" if splits and native_inventory.splittable(row) else "") for row in items
+            )
             snapshot = await self.bridge.command("native-inventory-view-render", str(sequence), area, "0",
                                                  str(total), *entries, timeout=5)
             proof = snapshot.get("native_inventory_view", {})
@@ -4132,6 +4141,7 @@ class Client:
             await self.service_inventory_view(active)
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)
+            await native_inventory.service_split_view(self, active)
             if self.shop_view:
                 await self.shop_view.sync(self, active)
             frame = (self.gameplay.get(native_enemy_shells.FRAME_KEY) if active and self.transport.game_access

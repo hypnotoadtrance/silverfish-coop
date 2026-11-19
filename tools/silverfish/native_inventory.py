@@ -1,15 +1,142 @@
 """Read pages from the native save frame of one authenticated character."""
 
 import asyncio
+from contextlib import suppress
+import re
 import time
+import uuid
 
 from . import native_host_save, party
+from .guest_weapon_profiles import FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from .native_gold import valid_guid
 
 
 PAGE_SIZE = 16
 MAX_ITEMS = 8194
 SOURCES = {"backpack", "equipment", "armor", "helmet"}
+SPLIT = "native-inventory-split"
+SPLIT_KEY = "native_inventory_split"
+SPLIT_CAPABILITY = "native_inventory_split_capability"
+SPLIT_CLASSES = frozenset(ammo.item_path for ammo in (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK))
+_SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
+SPLIT_VIEW = "native_guest_inventory_split_view"
+
+
+def split_target(value):
+    match = _SPLIT_TARGET.fullmatch(value) if isinstance(value, str) else None
+    if match and valid_guid(match[1]):
+        amount, expected = int(match[2]), int(match[3])
+        if 1 <= amount < expected <= 2**31 - 1:
+            return match[1], amount, expected
+    return None
+
+
+def splittable(row):
+    quantity = row.get("quantity")
+    return (row.get("source") == "backpack" and row.get("class_path") in SPLIT_CLASSES
+            and row.get("stackable") is True and row.get("important") is False
+            and type(quantity) is int and 1 < quantity < 2**31)
+
+
+async def split_stack(host, bridge, character: str, target, operation: str) -> dict:
+    selection = split_target(target)
+    if not selection or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("native_inventory_split_requires_guid_amount_and_expected_quantity")
+    game = host.last_game
+    if (not host.native_guest or not host.native_zones or not host.native_profile or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(SPLIT_CAPABILITY) != 1
+            or time.monotonic() - host.last_seen > 3):
+        raise party.RuleError("native_inventory_split_unavailable")
+    owner = host.native_recipients().get(character)
+    player = host.party["players"].get(character)
+    if not owner or not owner["connected"] or not owner.get("pawn") or not player:
+        raise party.RuleError("guest_not_active")
+    fingerprint = [SPLIT, target, None]
+    for receipt in host.party["receipts"].get(character, []):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
+        raise party.RuleError("native_inventory_split_refused_downed_or_respawning")
+    source, take, expected = selection
+    area, pawn = game["map"], owner["pawn"]
+    campaign = host.store.status()["campaign_id"]
+    created = uuid.uuid5(uuid.NAMESPACE_OID, f"{SPLIT}:{campaign}:{character}:{operation}").hex.upper()
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(SPLIT, pawn, source, created, str(take), str(expected), timeout=6)
+        except RuntimeError as error:
+            if str(error).startswith("native_inventory_split_refused_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(SPLIT_KEY, {})
+        if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
+                or tuple(proof.get(key) for key in ("map", "pawn", "source_guid", "new_guid", "quantity_before",
+                                                   "remaining", "split")) != (area, pawn, source, created, expected, expected - take, take)
+                or proof.get("class_path") not in SPLIT_CLASSES):
+            raise RuntimeError("The native inventory split did not verify both exact stock stacks")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        result = {SPLIT_KEY: {"state": "split", "owner": character, **proof}}
+        candidate = party.load_party(host.party)
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    host.party, host.native_checkpoint_unsafe = candidate, False
+    host.control.event("native_guest_inventory_split_committed", operation_id=operation, revision=revision, **result[SPLIT_KEY])
+    return result
+
+
+async def service_split_view(client, active: bool) -> None:
+    view = client.last_game.get(SPLIT_VIEW, {})
+    sequence = view.get("sequence")
+    if view.get("state") != "splitting" or type(sequence) is not int or not client.last_inventory_split < sequence < 2**53:
+        return
+    client.last_inventory_split = sequence
+    area, pawn, source, expected, item_class = (view.get(key) for key in ("map", "pawn", "guid", "count", "class_path"))
+    if (not active or client.stopping or not client.host_session or not client.zone_epoch
+            or client.gameplay.get(SPLIT_CAPABILITY) != 1 or time.monotonic() - client.gameplay_seen >= 3
+            or area != client.last_game.get("map") or item_class not in SPLIT_CLASSES
+            or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
+            or not valid_guid(source) or type(expected) is not int or not 1 < expected < 2**31):
+        return
+    epoch = client.host_session, client.zone_epoch
+    operation = uuid.uuid5(client.bridge.input_namespace, f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-split:{sequence}").hex
+    outcome = "refused"
+    try:
+        page = (await client.gameplay_action("native-inventory-list", operation, "0"))["native_inventory"]
+        if (page["owner"] != client.invite["character_id"] or page["offset"] != 0 or
+                not any(row["guid"] == source and splittable(row) and (row["class_path"], row["quantity"]) ==
+                        (item_class, expected) for row in page["items"])):
+            raise ValueError("The selected stack is no longer on the authenticated inventory page")
+        current = client.bridge.snapshot() or {}
+        if ((client.host_session, client.zone_epoch) != epoch or current.get("state") != "connected"
+                or current.get("map") != area or current.get(SPLIT_VIEW) != view
+                or current.get("pawns", {}).get("local", {}).get("name") != pawn):
+            raise ValueError("The inventory split confirmation expired")
+        take = expected // 2
+        response = await client.gameplay_action(SPLIT, operation, f"{source}|{take}|{expected}")
+        proof = response[SPLIT_KEY]
+        if (tuple(proof.get(key) for key in ("state", "owner", "map", "class_path", "source_guid", "quantity_before",
+                                           "split", "remaining")) != (
+                "split", client.invite["character_id"], area, item_class, source, expected, take, expected - take
+        ) or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == source):
+            raise ValueError("The host did not verify the selected stack split")
+        outcome = "split"
+        client.control.event("native_guest_inventory_stack_split", operation_id=operation, view_sequence=sequence, **proof)
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
+        client.control.event("native_guest_inventory_split_rejected", operation_id=operation, view_sequence=sequence,
+                             reason=str(error))
+    with suppress(OSError, RuntimeError):
+        client.last_game = await client.bridge.command("native-inventory-view-split-result", str(sequence), area, source,
+                                                       outcome, timeout=2)
 
 
 async def read_page(host, bridge, frame: dict, offset: int) -> dict:

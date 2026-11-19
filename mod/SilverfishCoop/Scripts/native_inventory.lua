@@ -1,9 +1,38 @@
 local inventory = {}
+local guest_save = require("guest_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation
+local observation, split
 local page_size = 16
 
+local function guid(value)
+    return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value:find("[^0]")
+end
+
+local function split_stack(fields, state, phase)
+    local name, source, created = fields[3], fields[4], fields[5]
+    local take, expected = math.tointeger(tonumber(fields[6])), math.tointeger(tonumber(fields[7]))
+    if #fields ~= 7 or phase ~= "hosting" or not state.listening or state.server ~= false
+        or not guid(source) or not guid(created) or source == created or not take or not expected
+        or take < 1 or expected <= take or expected > 2147483647
+        or type(SilverfishSplitNativeGuestAmmoStack) ~= "function" then
+        error("native_inventory_split_refused_scope", 0)
+    end
+    local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+    if not exact or not pawn or not save then error("native_inventory_split_refused_owner", 0) end
+    local ok, status, before, remaining, taken, class = SilverfishSplitNativeGuestAmmoStack(
+        pawn:GetAddress(), save:GetAddress(), source, created, take, expected)
+    if ok ~= true then error(tostring(status), 0) end
+    if status ~= "split" or before ~= expected or remaining ~= before - take or taken ~= take
+        or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$") then
+        error("mutation_unverified_native_inventory_split_receipt", 0)
+    end
+    split = {map = state.map, pawn = name, source = source, created = created, class = class,
+        before = before, remaining = remaining, taken = taken}
+    return "native guest ammo stack split verified"
+end
+
 function inventory.command(fields, state, phase)
+    if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
     if fields[2] ~= "native-inventory-census" then return end
     observation = nil
     local slot, offset = fields[3], math.tointeger(tonumber(fields[4]))
@@ -35,13 +64,22 @@ function inventory.command(fields, state, phase)
 end
 
 function inventory.reset()
-    observation = nil
+    observation, split = nil, nil
 end
 
 function inventory.rows(state, phase, status_row)
+    if phase ~= "hosting" then return {} end
+    local rows = {}
+    if type(SilverfishSplitNativeGuestAmmoStack) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-split-capability", 1)
+    end
+    if split and split.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-split", split.map, split.pawn, split.source, split.created,
+            split.class, split.before, split.remaining, split.taken)
+    end
     local report = observation
-    if not report or phase ~= "hosting" or report.map ~= state.map then return {} end
-    local rows = {status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows)}
+    if not report or report.map ~= state.map then return rows end
+    rows[#rows + 1] = status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows)
     for _, row in ipairs(report.rows) do rows[#rows + 1] = status_row("native-inventory-census-item", table.unpack(row)) end
     return rows
 end

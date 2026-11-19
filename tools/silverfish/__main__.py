@@ -184,7 +184,7 @@ def parser() -> argparse.ArgumentParser:
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-lake-jammer-preflight", "native-lake-jammer-approach", "native-lake-jammer-aim",
         "native-lenny-preflight", "native-lenny-approach", "native-lenny-aim", "native-lenny-revive-approach",
-        "native-inventory-list",
+        "native-inventory-list", "native-inventory-split",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
         "native-finite-shop-sale-quote", "native-finite-shop-sell",
@@ -196,7 +196,7 @@ def parser() -> argparse.ArgumentParser:
         "native-transport-probe",
         "native-matrix-inspect", "native-matrix-seed", "native-matrix-equip", "native-matrix-fuel", "native-matrix-probe",
     ])
-    action.add_argument("--target", help="character ID, loot ID, or full destination map path")
+    action.add_argument("--target", help="character ID, loot ID, destination map path, or quoted GUID|AMOUNT|EXPECTED for an ammo split")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
     action.add_argument("--amount", type=int, help="quantity or lane index for the selected fixture")
     action.add_argument("--kind", choices=sorted(SEED_KINDS), help="stock weapon class for a headless weapon seed")

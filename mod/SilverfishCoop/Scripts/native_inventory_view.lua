@@ -18,6 +18,11 @@ local meals = {
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
+local split_ammo = {
+    ["/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"] = true,
+    ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
+    ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
+}
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
 local input_keys, held = {}, {}
@@ -147,7 +152,9 @@ local function page(fields)
     end
     local records, seen, slots = {}, {}, {}
     for index = 7, #fields do
-        local guid, source, slot, amount, class = fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_./%-]+)$")
+        local marked = fields[index]:match("^(.+)|split$")
+        local guid, source, slot, amount, class = (marked or fields[index]):match(
+            "^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_./%-]+)$")
         local quantity = integer(amount, 2147483647)
         local item = class and #class <= 512 and class:match("%.([%w_%-]+)_C$")
         local index_in_source = integer(slot, 4095)
@@ -165,9 +172,11 @@ local function page(fields)
         local name = item:gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or mre_enabled and meals[class]
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
+        local splittable = marked ~= nil and source == "backpack" and split_ammo[class] == true and quantity > 1
+        if marked and not splittable then error("The authenticated inventory split row did not qualify", 0) end
         if usable then name = consumable end
         records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
-            name = name, label = string.format("%s   %d x %s", sources[source], quantity, name)}
+            name = name, quantity = quantity, splittable = splittable, label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
     return offset, total, records
 end
@@ -181,7 +190,17 @@ local function show()
         lines[#lines + 1] = (index == row.selection and "> " or "  ") .. entry.label
     end
     local selected = records[row.selection]
-    if row.use_state == "confirming" then
+    if row.split_state == "confirming" then
+        lines[#lines + 1] = string.format("Split off %d rounds? Home confirms. End cancels.", selected.quantity // 2)
+    elseif row.split_state == "splitting" then
+        lines[#lines + 1] = "Ammo stack split pending"
+    elseif row.split_state == "split" then
+        lines[#lines + 1] = "Ammo stack split. Reopen inventory to refresh."
+    elseif row.split_state == "refused" then
+        lines[#lines + 1] = "Ammo stack split unavailable. Reopen inventory to refresh."
+    elseif selected and selected.splittable then
+        lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
+    elseif row.use_state == "confirming" then
         lines[#lines + 1] = "Use one " .. selected.name .. "? Home confirms. End cancels."
     elseif row.use_state == "using" then
         lines[#lines + 1] = selected.name .. " use pending"
@@ -242,6 +261,7 @@ local function select_item()
     local selected = observation.records[observation.selection]
     observation.equip_state = selected and selected.equippable and "selecting" or "read_only"
     observation.use_state = selected and selected.usable and "selecting" or nil
+    observation.split_state = nil
     observation.confirm_guid = nil
 end
 
@@ -250,11 +270,11 @@ local function choose(current, action)
     local row = observation
     local selected = row.records[row.selection]
     if action == "back" then
-        if row.equip_state == "confirming" or row.use_state == "confirming" then
+        if row.equip_state == "confirming" or row.use_state == "confirming" or row.split_state == "confirming" then
             select_item()
         elseif ready(current, true) then
             remove_display()
-            row.state, row.equip_state, row.use_state = "closed", nil, nil
+            row.state, row.equip_state, row.use_state, row.split_state = "closed", nil, nil, nil
             emit(current, row.sequence, false)
             return true
         end
@@ -268,6 +288,12 @@ local function choose(current, action)
                 row.request_guid, row.use_state = selected.guid, "using"
             else
                 row.use_state, row.confirm_guid = "confirming", selected.guid
+            end
+        elseif action == "confirm" and selected.splittable then
+            if row.split_state == "confirming" and row.confirm_guid == selected.guid then
+                row.request_guid, row.split_state = selected.guid, "splitting"
+            else
+                row.split_state, row.confirm_guid = "confirming", selected.guid
             end
         elseif action == "confirm" and selected.equippable then
             if row.equip_state == "confirming" and row.confirm_guid == selected.guid then
@@ -323,7 +349,8 @@ function inventory_view.command(fields, state, phase)
     if operation ~= "native-inventory-view-render" and operation ~= "native-inventory-view-unavailable"
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
         and operation ~= "native-inventory-view-equip-result"
-        and operation ~= "native-inventory-view-use-result" then return end
+        and operation ~= "native-inventory-view-use-result"
+        and operation ~= "native-inventory-view-split-result" then return end
     local current = context(state, phase)
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
@@ -355,6 +382,14 @@ function inventory_view.command(fields, state, phase)
         observation.use_state = fields[6]
         show()
         return "verified inventory item result displayed"
+    elseif operation == "native-inventory-view-split-result" then
+        if #fields ~= 6 or observation.split_state ~= "splitting" or fields[5] ~= observation.request_guid
+            or (fields[6] ~= "split" and fields[6] ~= "refused") or not ready(current, false) then
+            error("The authenticated result does not match the pending inventory split", 0)
+        end
+        observation.split_state = fields[6]
+        show()
+        return "verified inventory split result displayed"
     end
     if observation.state ~= "pending" then
         error("The authenticated inventory view is already displayed", 0)
@@ -381,9 +416,11 @@ end
 
 function inventory_view.rows(state, phase, status_row)
     local current = context(state, phase)
-    if not current or not observation or not same_context(current, observation.context) then return {} end
-    local rows = {status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
-        observation.offset or 0, observation.total or 0, observation.count or 0)}
+    if not current then return {} end
+    local rows = {status_row("native-inventory-split-view-capability", 1)}
+    if not observation or not same_context(current, observation.context) then return rows end
+    rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
+        observation.offset or 0, observation.total or 0, observation.count or 0)
     if observation.state == "rendered" and observation.equip_state then
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-equip-view", observation.sequence, current.map,
@@ -393,6 +430,11 @@ function inventory_view.rows(state, phase, status_row)
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-use-view", observation.sequence, current.map,
             current.name, selected.guid, observation.use_state)
+    end
+    if observation.split_state and ready(current, false) then
+        local selected = observation.records[observation.selection]
+        rows[#rows + 1] = status_row("native-guest-inventory-split-view", observation.sequence, current.map,
+            current.name, selected.guid, selected.class, observation.split_state, selected.quantity)
     end
     return rows
 end

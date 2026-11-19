@@ -20,6 +20,7 @@ from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet
+from . import native_inventory
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -1417,6 +1418,26 @@ class Bridge:
                     data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
                                                     "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
                                                     "total": int(fields[6]), "count": int(fields[7])}
+                elif fields == ["native-inventory-split-capability", "1"]:
+                    data[native_inventory.SPLIT_CAPABILITY] = 1
+                elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]
+                      and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
+                      and fields[5] in native_inventory.SPLIT_CLASSES):
+                    data[native_inventory.SPLIT_KEY] = dict(
+                        map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
+                        quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]),
+                    )
+                elif fields == ["native-inventory-split-view-capability", "1"]:
+                    data["native_inventory_split_view_capability"] = True
+                elif (fields[0] == "native-guest-inventory-split-view" and len(fields) == 8
+                      and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
+                      and 0 < (sequence := int(fields[1])) < 2**53
+                      and fields[2] == data.get("map") and 0 < len(fields[3]) <= 512 and valid_guid(fields[4])
+                      and fields[5] in native_inventory.SPLIT_CLASSES and fields[6] in {"confirming", "splitting", "split", "refused"}
+                      and fields[7].isascii() and fields[7].isdigit() and len(fields[7]) <= 10
+                      and 1 < (count := int(fields[7])) < 2**31):
+                    data["native_guest_inventory_split_view"] = dict(sequence=sequence, map=fields[2], pawn=fields[3],
+                                                                   guid=fields[4], class_path=fields[5], state=fields[6], count=count)
                 elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
                     data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
                                                                  "pawn": fields[3], "guid": fields[4], "state": fields[5]}
