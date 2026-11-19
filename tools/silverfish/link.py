@@ -944,6 +944,7 @@ class ClientLink:
         self._context = None
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
+        self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
 
@@ -1032,6 +1033,7 @@ class ClientLink:
         return await protocol.request(_encode_action(payload), timeout)
 
     def _from_game(self, data: bytes, address: Address) -> None:
+        self.game_local_datagrams += 1
         if not _is_loopback(address[0]) or not 0 < len(data) <= _MAX_GAME_PACKET:
             return
         protocol = self._protocol
@@ -1045,6 +1047,7 @@ class ClientLink:
     def reset_game_endpoint(self) -> None:
         """Accept a new local Unreal socket on the next deliberate game join."""
         self._game_endpoint = None
+        self.game_local_datagrams = 0
         self.game_packets_sent = self.game_packets_received = 0
 
     async def _open_game_socket(self, local_host: str, local_port: int) -> asyncio.DatagramTransport:

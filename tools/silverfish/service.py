@@ -17,7 +17,7 @@ from . import (link, matrix_service, native_authored_pickup, native_blue, native
                native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
-               native_wipe_view, native_wire_board, party, wipe)
+               native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
@@ -3140,6 +3140,7 @@ class Client:
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
         self.native_return_retry_allowed = False
+        self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.last_primary_intent = 0
@@ -3184,6 +3185,7 @@ class Client:
             raise RuntimeError("Host did not return a supported zone")
         if self.zone_epoch and result["zone_epoch"] != self.zone_epoch:
             self.needs_travel = True
+            self.empty_zone_retry.note_transition(session, result["zone_epoch"], result["zone"])
         self.zone_epoch = result["zone_epoch"]
         self.expected_zone = result["zone"]
         self.host_session = session
@@ -3217,9 +3219,11 @@ class Client:
             self.last_game = self.bridge.snapshot() or self.last_game
             self.control.event("native_game_join_timeout", zone_epoch=self.zone_epoch,
                                phase=self.last_game.get("state"), map=self.last_game.get("map"),
-                               sent=self.transport.game_packets_sent, received=self.transport.game_packets_received)
+                               sent=self.transport.game_packets_sent, received=self.transport.game_packets_received,
+                               local_datagrams=self.transport.game_local_datagrams)
             raise
         self.needs_travel = False
+        self.empty_zone_retry.clear()
 
     async def leave_for_rejoin(self, state: dict) -> None:
         if state.get("state") != "ready":
@@ -3241,6 +3245,8 @@ class Client:
             await self.open_game_link(timeout=10 if early_retry else 18, renew_endpoint=reservation is not None)
         except TimeoutError:
             if not early_retry:
+                if reservation is None and await self.empty_zone_retry.after_timeout(self, epoch):
+                    return
                 raise
             await self.refresh_gameplay()
             if (self.native_return_reservation != reservation or self.zone_epoch != epoch
@@ -3524,6 +3530,7 @@ class Client:
                     if self.zone_epoch and epoch != self.zone_epoch:
                         self.needs_travel = True
                         self.loot_tracking = None
+                        self.empty_zone_retry.note_transition(self.host_session, epoch, reply["zone"])
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
