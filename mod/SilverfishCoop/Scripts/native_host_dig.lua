@@ -157,7 +157,8 @@ local function read_acquisition(ctx, pending)
     local user = valid(actor) and same(actor.User, ctx.pawn)
     return nil, ("pickup=%s,rows=%s,row=%s/%s/%s,index=%s,actor=%s,owned=%s/%s/%s/%s,held=%s,ammo=%s,guest=%s,save=%s,retry=%s"):format(
         retired and "retired" or "live", tostring(amount), row and row.source or "-", row and row.index or "-",
-        row and row.ammo or "-", tostring(ctx.save.PlayerEquipIndex), valid(actor) and actor:GetClass():GetName() or "-",
+        row and row.ammo or "-", tostring(ctx.save.PlayerEquipIndex),
+        valid(actor) and actor:GetFullName():match("^%S+") or "-",
         tostring(owner == true), tostring(instigator == true), tostring(reference == true), tostring(user == true),
         tostring(valid(actor) and actor.HeldByPlayer == true), valid(actor) and tostring(actor.Ammo) or "-",
         tostring(guest_amount), tostring(bindings), tostring(pending.retried == true))
