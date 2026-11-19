@@ -1,11 +1,18 @@
 import asyncio
 import secrets
+import time
 import unittest
-from unittest.mock import patch
+from contextlib import suppress
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from aioquic.quic.events import ConnectionTerminated
 from cryptography.hazmat.primitives import serialization
 
+from tools.silverfish import link, party
+from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.link import (
     LinkError,
     load_server_identity,
@@ -13,6 +20,8 @@ from tools.silverfish.link import (
     start_client,
     start_host,
 )
+from tools.silverfish.runtime import MAP
+from tools.silverfish.service import Client, Host
 
 
 class DatagramInbox(asyncio.DatagramProtocol):
@@ -24,6 +33,26 @@ class DatagramInbox(asyncio.DatagramProtocol):
 
     async def next(self):
         return await asyncio.wait_for(self.messages.get(), 3)
+
+
+class PacketBlackhole(asyncio.DatagramProtocol):
+    def __init__(self, remote):
+        self.remote = remote
+        self.peer = None
+        self.blocked = False
+        self.discarded = 0
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        if addr != self.remote:
+            self.peer = addr
+        destination = self.peer if addr == self.remote else self.remote
+        if self.blocked:
+            self.discarded += 1
+        elif destination is not None:
+            self.transport.sendto(data, destination)
 
 
 class LinkTests(unittest.IsolatedAsyncioTestCase):
@@ -611,6 +640,127 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(LinkError, "private key"):
             load_server_identity(make_server_identity().certificate_pem, key)
         self.assertTrue((await self.connect_guest(identity=restored))["accepted"])
+
+
+class ClientReconnectTests(unittest.IsolatedAsyncioTestCase):
+    async def udp(self, protocol_factory):
+        transport, protocol = await asyncio.get_running_loop().create_datagram_endpoint(
+            protocol_factory, local_addr=("127.0.0.1", 0),
+        )
+        self.addCleanup(transport.close)
+        return transport, protocol
+
+    @staticmethod
+    async def wait_until(condition, timeout=8):
+        async with asyncio.timeout(timeout):
+            while not condition():
+                await asyncio.sleep(0.025)
+
+    async def test_production_client_reauthenticates_after_bidirectional_packet_blackhole(self):
+        self.enterContext(patch.multiple(link, _IDLE_TIMEOUT=1.5, _KEEPALIVE_INTERVAL=0.2))
+        directory = Path(self.enterContext(TemporaryDirectory()))
+        store = self.enterContext(CampaignStore(directory))
+        game_host, host_inbox = await self.udp(DatagramInbox)
+        game_guest, guest_inbox = await self.udp(DatagramInbox)
+        identity = make_server_identity()
+        host_control = Mock(generation="1" * 32)
+        host = Host(store, host_control, "test-build", identity, "127.0.0.1", 0, False, None,
+                    native_backend=None, native_events=False, native_guest=False)
+        host.last_game = {"state": "hosting", "map": MAP, "pawns": {
+            "local": {"name": "host pawn", "health": 100, "location": [0, 0, 0]},
+            "guest": {"name": "guest pawn", "health": 100, "location": [50, 0, 0]},
+        }}
+        host.last_seen = time.monotonic()
+        guest = store.issue_invitation("Guest", "Scout")
+        guest_id, character_id = guest["guest_id"], guest["character_id"]
+        party.add_player(host.party, "host")
+        party.add_player(host.party, character_id)
+        server = await start_host("127.0.0.1", 0, *game_host.get_extra_info("sockname"), identity,
+                                  host.admit, host.disconnected, on_request=host.guest_request)
+        self.addAsyncCleanup(server.close)
+        proxy_udp, proxy = await self.udp(lambda: PacketBlackhole(server.address))
+        transport = await start_client()
+        self.addAsyncCleanup(transport.close)
+        address, port = proxy_udp.get_extra_info("sockname")
+        invite = dict(guest, host=address, port=port, certificate=identity.certificate_pem, game_build=host.game_build)
+        client_control = Mock()
+        client_control.requests.return_value = ()
+
+        game = {"state": "ready", "map": MAP}
+        join_commands = []
+
+        async def command(action, endpoint):
+            self.assertEqual(action, "join")
+            self.assertEqual(endpoint, f"127.0.0.1:{transport.address[1]}")
+            join_commands.append(action)
+            game["state"] = "connected"
+            return dict(game)
+
+        async def wait_for(predicate, *, timeout):
+            snapshot = dict(game)
+            self.assertTrue(predicate(snapshot))
+            return snapshot
+
+        bridge = SimpleNamespace(
+            process=SimpleNamespace(poll=lambda: None), snapshot=lambda: dict(game), command=command, wait_for=wait_for,
+            interactions=tuple, native_inventory_view_requests=tuple, native_inventory_equip_requests=tuple,
+        )
+        client = Client(client_control, transport, invite, bridge, auto_delay=0.05)
+
+        async def exchange(payload, host_endpoint, local_endpoint):
+            game_guest.sendto(payload, local_endpoint)
+            self.assertEqual(await host_inbox.next(), (payload, host_endpoint))
+            game_host.sendto(payload, host_endpoint)
+            self.assertEqual(await guest_inbox.next(), (payload, local_endpoint))
+
+        initial = await client.connect()
+        self.assertEqual((initial["character_id"], initial["resumed"]), (character_id, False))
+        host.guest_pawn = "guest pawn"
+        lease_id = host.guest["lease_id"]
+        await client.open_game_link()
+        monitor = asyncio.create_task(client.run())
+
+        async def stop_monitor():
+            monitor.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor
+
+        self.addAsyncCleanup(stop_monitor)
+        host_endpoint, local_endpoint = server.guest_endpoint(guest_id), transport.address
+        await self.wait_until(lambda: client.gameplay.get("players", {}).get("guest", {}).get("character_id") == character_id)
+        await exchange(b"before the outage", host_endpoint, local_endpoint)
+
+        proxy.blocked = True
+        try:
+            await self.wait_until(lambda: not server.connected(guest_id) and not transport.connected
+                                  and host.guest["disconnected"] is not None)
+            self.assertEqual(host.guest["lease_id"], lease_id)
+            reserved, = store.status()["leases"]
+            self.assertEqual((reserved["character_id"], reserved["state"]), (character_id, "reserved"))
+            self.assertGreater(proxy.discarded, 0)
+            self.assertFalse(client.suspended)
+            last_gameplay_before_resume = client.gameplay_seen
+        finally:
+            proxy.blocked = False
+
+        await self.wait_until(lambda: transport.connected and host.guest["disconnected"] is None
+                              and client.gameplay_seen > last_gameplay_before_resume)
+        self.assertTrue(server.connected(guest_id))
+        authenticated = [call.kwargs for call in client_control.event.call_args_list
+                         if call.args == ("client_link_authenticated",)]
+        self.assertEqual(authenticated, [
+            {"character_id": character_id, "resumed": False},
+            {"character_id": character_id, "resumed": True},
+        ])
+        active, = store.status()["leases"]
+        self.assertEqual((active["character_id"], active["state"], host.guest["lease_id"]),
+                         (character_id, "active", lease_id))
+        self.assertEqual(host.guest_pawn, "guest pawn")
+        self.assertEqual(client.gameplay["players"]["guest"]["character_id"], character_id)
+        self.assertEqual((client.host_session, client.zone_epoch), (initial["session_id"], initial["zone_epoch"]))
+        self.assertEqual(join_commands, ["join"])
+        self.assertEqual((server.guest_endpoint(guest_id), transport.address), (host_endpoint, local_endpoint))
+        await exchange(b"after reauthentication", host_endpoint, local_endpoint)
 
 
 if __name__ == "__main__":

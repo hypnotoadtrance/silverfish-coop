@@ -4,6 +4,8 @@ The staged Direct IP build supports an experimental native party of up to four g
 
 A same-PC Direct IP transport run used a non-loopback host-only interface and a selected UDP port. Four authenticated guests exchanged fragmented 12 KiB gameplay packets on separate routes. One guest reconnected on the same game-facing endpoints while another exchanged packets. Pausing gameplay forwarding for travel left control requests working. The run used UDP test endpoints in place of Unreal game instances.
 
+An earlier two-instance loopback run cut the guest's UDP path until the host reserved the character. After the path came back, the guest authenticated automatically and regained the same stock CrossRoads pawn. The run also checked that the original single-player save hashes matched. The offline regression repeats the connection loss with the real Direct IP transport and campaign lease. It verifies that both game relay endpoints and the character lease survive and carry traffic after reconnecting.
+
 | Area | Verified or implemented in the staged build | Work before campaign play |
 | --- | --- | --- |
 | Hosting and players | Authenticated Direct IP, guest-owned character selection, native replicated movement, reconnect and host restart. A five-instance run enrolled four guests with separate saves and completed stock travel, sleep, and wipe recovery. | Live coverage across separate PCs. Steam Invite is deferred |
