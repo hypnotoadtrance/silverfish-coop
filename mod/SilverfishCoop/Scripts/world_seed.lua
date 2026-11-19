@@ -91,6 +91,12 @@ function world_seed.prepare_travel_seed(state, phase, destination)
     prepare(state, destination, instance, save, save.InstanceSeed)
 end
 
+function world_seed.prepare_loaded_seed(state, phase, destination)
+    if phase ~= "ready" or not routes[destination] then error("A loaded co-op save requires the staged title menu", 0) end
+    local instance, save = host_save(state, phase)
+    prepare(state, destination, instance, save, save.InstanceSeed)
+end
+
 local function initial_stream_seed(world, instance)
     local actor
     for _, candidate in ipairs(FindAllOf(day_cycle_class) or {}) do

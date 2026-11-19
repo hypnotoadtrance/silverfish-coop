@@ -199,6 +199,10 @@ def qualified_authored_routes(work: Path) -> bool:
             and native_death_backend(work, metadata) == "cpp")
 
 
+def staged_script(work: Path, name: str) -> bool:
+    return ((work / "stage" / SHIPPING).parent / "ue4ss" / "Mods" / "SilverfishCoop" / "Scripts" / name).is_file()
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -550,6 +554,11 @@ class Bridge:
                         "state": fields[1], "source": fields[2], "destination": fields[3], "expected": int(fields[4]),
                         "observed": int(fields[5]) if fields[5] != "-" else None,
                         "stock_stream": int(fields[6]) if fields[6] != "-" else None, "reason": fields[7],
+                    }
+                elif fields[0] == "native-host-save" and len(fields) == 8:
+                    data["native_host_save"] = {
+                        "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
+                        "seed": int(fields[5]), "backpack_count": int(fields[6]), "equipment_count": int(fields[7]),
                     }
                 elif fields[0] == "native-rule" and len(fields) == 3:
                     data.setdefault("native_rules", {})[fields[1]] = int(fields[2])

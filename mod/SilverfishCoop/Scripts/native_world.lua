@@ -4,6 +4,7 @@ local routes = require("zone_maps")
 local world_seed = require("world_seed")
 
 native_world.prepare_seed = world_seed.prepare_seed
+native_world.prepare_loaded_seed = world_seed.prepare_loaded_seed
 native_world.prepare_travel_seed = world_seed.prepare_travel_seed
 
 local playtest_maps = {

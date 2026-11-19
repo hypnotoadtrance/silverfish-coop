@@ -8,6 +8,7 @@ local native_blue = require("native_blue")
 local native_death = require("native_death")
 local native_dream = require("native_dream")
 local native_hazard = require("native_hazard")
+local native_host_save = require("native_host_save")
 local native_inventory = require("native_inventory")
 local native_pickup = require("native_pickup")
 local native_shop = require("native_shop")
@@ -297,11 +298,17 @@ local function run_command(fields, state, current_phase)
         native_hazard.clear("co-op session is changing")
     end
     if command == "host" then
-        if (#fields ~= 3 and #fields ~= 4) or not supported_map(argument) then
+        local load_save = #fields == 5 and fields[4] == "native-save"
+        if (not load_save and #fields ~= 3 and #fields ~= 4) or not supported_map(argument) then
             error("Expected a packaged game map", 0)
         end
         if role ~= "idle" then error("Leave the current session before hosting", 0) end
-        native_world.prepare_seed(state, current_phase, argument, fields[4])
+        if load_save then
+            native_host_save.prepare(state, current_phase, fields[5])
+            native_world.prepare_loaded_seed(state, current_phase, argument)
+        else
+            native_world.prepare_seed(state, current_phase, argument, fields[4])
+        end
         open_level(state.controller, argument, "listen")
         role = "host"
         expected_map = argument
@@ -381,6 +388,9 @@ local function run_command(fields, state, current_phase)
     elseif command == "native-dream-power-fixture" then
         if #fields ~= 2 then error("Expected isolated Exchange power fixture", 0) end
         return native_dream.power_fixture(state, current_phase)
+    elseif command == "native-host-save-capture" then
+        if #fields ~= 3 or role ~= "host" then error("Expected an isolated host save generation", 0) end
+        return native_host_save.capture(state, current_phase, argument)
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -490,6 +500,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dream.rows(status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_save.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         if last_dream_route and last_dream_route.source == state.map then
             local route = last_dream_route
             rows[#rows + 1] = status_row("native-dream-route", route.source, route.destination, route.pawn,

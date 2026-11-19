@@ -34,6 +34,7 @@ options.add_argument("--native-blue", action="store_true", help="exercise Blue C
 options.add_argument("--native-stardust", action="store_true", help="exercise the stock Stardust visit and timed return")
 options.add_argument("--dream-early", action="store_true", help="send the stock Exchange power signal during a Stardust visit")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
+options.add_argument("--native-host-save", action="store_true", help="verify the whole host-save generation and native inventory")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
@@ -81,6 +82,8 @@ if args.native_stardust and (not args.native_zones or args.authored_zone or args
     options.error("--native-stardust requires --native-zones and its own authored route")
 if args.dream_early and not args.native_stardust:
     options.error("--dream-early requires --native-stardust")
+if args.native_host_save and not args.native_stardust:
+    options.error("--native-host-save uses the Stardust stock inventory fixture")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -1176,10 +1179,18 @@ async def smoke():
         note("isolated_checkpoint", {"revision": saved["revision"],
                                      "character_location": saved_character["state"]["location"]})
         await stop(host, "--campaign", campaign)
-        if args.native_seed:
+        if args.native_seed or args.native_host_save:
             shutdown_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if args.native_seed:
             seed = shutdown_checkpoint["world"]["native_observation"]["native_scene"]["instance_seed"]
             assert type(seed) in (int, float) and -2147483648 <= seed <= 2147483647 and seed == int(seed), seed
+        if args.native_host_save:
+            frame = shutdown_checkpoint["world"]["native_host_save"]
+            assert frame["map"] == expected_map, frame
+            saved_path = run.parent / "game-user" / "Saved" / "SaveGames" / (frame["slot"] + ".sav")
+            contents = saved_path.read_bytes()
+            assert contents.startswith(b"GVAS") and len(contents) == frame["size"], frame
+            assert hashlib.sha256(contents).hexdigest() == frame["sha256"], frame
         host_restart = await start("host", "--campaign", campaign, "--port", str(port), "--headless", *fixtures)
         restored = await wait(run, lambda state: state.get("state") == "hosting" and
                               state.get("generation") != host_status["generation"])
@@ -1255,6 +1266,20 @@ async def smoke():
             assert campaign_party(resumed).get("last_stardust_visit") == stardust_receipt, resumed
             assert not campaign_party(resumed).get("stardust_visit"), resumed
             note("stardust_return_receipt_survives_restart", {"receipt": stardust_receipt})
+            if args.native_host_save:
+                events = await command("events", "--campaign", campaign, "--tail", "100")
+                proof = next(entry for entry in events["events"] if entry["event"] == "native_host_save_restored"
+                             and entry["generation"] == restored["generation"])
+                assert proof["slot"] == frame["slot"] and proof["map"] == expected_map, proof
+                assert proof["state"] == "restored" and proof["backpack_count"] >= 1, proof
+                inventory = await command("action", "--campaign", campaign, "native-stardust-inspect",
+                                          "--target", stardust_receipt["guid"])
+                stack = inventory["native_stardust"]
+                assert stack["state"] == "present" and stack["quantity"] == 1, stack
+                assert stack["payload"] == "stock-default-v1" and stack["guid"] == stardust_receipt["guid"], stack
+                note("stock_host_inventory_survives_restart_in_verified_native_save", {
+                    "frame": frame, "restored": proof, "stack": stack,
+                })
         await stop(client, "--profile", profile)
         await stop(host_restart, "--campaign", campaign)
         if original:

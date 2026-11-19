@@ -1,0 +1,71 @@
+"""Pair an immutable, isolated Unreal save generation with a co-op checkpoint."""
+
+from hashlib import file_digest
+import os
+from pathlib import Path
+import re
+import uuid
+
+from .campaign import CampaignFormatError
+
+
+SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def new_slot() -> str:
+    return "SFCoop_" + uuid.uuid4().hex
+
+
+def directory(profile: Path) -> Path:
+    root = profile.resolve()
+    saves = (root / "Saved" / "SaveGames").resolve()
+    if not saves.is_relative_to(root):
+        raise CampaignFormatError("The staged native save directory escapes its game profile")
+    return saves
+
+
+def slot_path(profile: Path, slot: str) -> Path:
+    if not isinstance(slot, str) or not SLOT.fullmatch(slot):
+        raise CampaignFormatError("Invalid co-op Unreal save slot")
+    saves = directory(profile)
+    path = saves / f"{slot}.sav"
+    if path.resolve() != path:
+        raise CampaignFormatError("The co-op Unreal save slot points outside its generation path")
+    return path
+
+
+def record(profile: Path, slot: str, map_name: str, *, flush: bool = False) -> dict:
+    path = slot_path(profile, slot)
+    try:
+        with path.open("r+b" if flush else "rb") as stream:
+            if flush:
+                os.fsync(stream.fileno())
+            size = os.fstat(stream.fileno()).st_size
+            if size < 16 or stream.read(4) != b"GVAS":
+                raise CampaignFormatError(f"The Unreal save generation {slot} has an invalid header")
+            stream.seek(0)
+            digest = file_digest(stream, "sha256").hexdigest()
+    except OSError as error:
+        raise CampaignFormatError(f"Cannot read the isolated Unreal save generation {slot}") from error
+    return {"slot": slot, "map": map_name, "size": size, "sha256": digest}
+
+
+def verify(profile: Path, world: dict) -> dict | None:
+    saved = world.get("native_host_save")
+    if saved is None:
+        return None
+    if (type(saved) is not dict or set(saved) != {"slot", "map", "size", "sha256"}
+            or not isinstance(saved["map"], str) or saved["map"] != world.get("map")
+            or type(saved["size"]) is not int or not isinstance(saved["sha256"], str)
+            or not SHA256.fullmatch(saved["sha256"])):
+        raise CampaignFormatError("The campaign's Unreal save reference is invalid")
+    if record(profile, saved["slot"], saved["map"]) != saved:
+        raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
+    return saved
+
+
+def prune(profile: Path, keep: set[str]) -> None:
+    for path in directory(profile).glob("SFCoop_*.sav"):
+        if SLOT.fullmatch(path.stem) and path.stem not in keep and path.resolve() == path:
+            path.unlink(missing_ok=True)

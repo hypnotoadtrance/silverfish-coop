@@ -134,12 +134,13 @@ class CampaignStore:
     state survive a host restart. Connection leases live only in memory.
     """
 
-    def __init__(self, directory, *, clock=time.monotonic):
+    def __init__(self, directory, *, clock=time.monotonic, verify_world=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "campaign.json"
         self.previous_path = self.directory / "campaign.previous.json"
         self._clock = clock
+        self._verify_world = verify_world
         self._mutex = threading.RLock()
         self._lease_by_id: dict[str, _Lease] = {}
         self._lease_by_guest: dict[str, _Lease] = {}
@@ -190,14 +191,14 @@ class CampaignStore:
     def _load_or_create(self):
         invalid_primary = None
         try:
-            return self._read(self.path)
+            return self._read_verified(self.path)
         except FileNotFoundError:
             pass
         except CampaignFormatError as exc:
             invalid_primary = exc
 
         try:
-            data = self._read(self.previous_path)
+            data = self._read_verified(self.previous_path)
         except FileNotFoundError:
             if invalid_primary is not None:
                 raise invalid_primary
@@ -213,6 +214,12 @@ class CampaignStore:
             self.recovered = True
 
         self._write(self.path, data)
+        return data
+
+    def _read_verified(self, path):
+        data = self._read(path)
+        if self._verify_world is not None:
+            self._verify_world(data["world"])
         return data
 
     @staticmethod
