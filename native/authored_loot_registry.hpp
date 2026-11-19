@@ -27,6 +27,11 @@ namespace silverfish::authored_loot
         STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:SendInteractionToActor"),
         STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:ExecuteUbergraph_LootCabnet_Small_BP"),
         0x438, 4};
+    inline constexpr StockClass office_desk{
+        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C"),
+        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:SendInteractionToActor"),
+        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:ExecuteUbergraph_LootCabinet_Desk_BP"),
+        0x449, 4};
 
     struct Profile
     {
@@ -840,5 +845,7 @@ namespace silverfish::authored_loot
                 STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P:PersistentLevel.LootCrate_Small_BP_C_2"), -1379009344, nullptr, true, 2},
         Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
                 STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5"), -595904512, nullptr, false, 2, &small_cabinet, {-34893800, -46555604, -43386008, -81274330}},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.LootCabinet_Desk_BP_C_3"), -205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}},
     };
 }

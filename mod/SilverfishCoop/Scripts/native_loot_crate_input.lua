@@ -92,7 +92,7 @@ local function observe_scene(current, box_state, box_address)
     local box_qualified = report.box
         or report.looted == true and (report.box_state == "retired" or report.box_state == "missing")
     report.qualified = report.door ~= nil and box_qualified
-    if report.qualified and current.profile.small_cabinet then
+    if report.qualified and (current.profile.small_cabinet or current.profile.office_desk) then
         local frame, second = crate.SM_Prop_Cabinet_Small_02, crate.SM_Prop_Cabinet_Small_Door_02
         if not exact_component(frame, "/Script/Engine.StaticMeshComponent", crate)
             or not exact_component(second, "/Script/Engine.StaticMeshComponent", crate) or same(door, second)

@@ -316,8 +316,9 @@ end
 function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     local docks_crate = profile.map == docks and profile.guarantee_spawn == true
     local lab_cabinet = profile.small_cabinet == true and profile.map == "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
-    local label = docks_crate and "native_loot_docks_fixture" or "native_loot_cabinet_fixture"
-    if (not docks_crate and not lab_cabinet)
+    local office_desk = profile.office_desk == true and profile.map == "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
+    local label = office_desk and "native_loot_desk_fixture" or docks_crate and "native_loot_docks_fixture" or "native_loot_cabinet_fixture"
+    if (not docks_crate and not lab_cabinet and not office_desk)
         or require("authored_loot_registry")[profile.index] ~= profile
         or not approach_scope(state, phase, pawn, actor, profile.map) or not actor:HasAuthority()
         or not same(StaticFindObject(profile.path), actor) or actor:GetFullName() ~= profile.name
@@ -327,7 +328,8 @@ function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     local forward = vector(box:GetForwardVector())
     local bearing = forward and math.deg(math.atan(forward.Y, forward.X)) or 0
     -- Match the exact center and edge rays used by the local crate F fixture.
-    approach_clear_sight(state, pawn, actor, box, label, {95, 125, 155, 195, 225}, bearing, true, false)
+    local distances = office_desk and {65, 85, 105, 135, 165, 205} or {95, 125, 155, 195, 225}
+    approach_clear_sight(state, pawn, actor, box, label, distances, office_desk and bearing + 90 or bearing, true, false)
 end
 
 local function restored(camera, original)

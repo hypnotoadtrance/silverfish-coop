@@ -1137,4 +1137,7 @@ return {
     { index = 379, map = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
       name = "LootCabnet_Small_BP_C /Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5",
       path = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5", salt = -595904512, replenish_mode = 2, small_cabinet = true },
+    { index = 380, map = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P",
+      name = "LootCabinet_Desk_BP_C /Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.LootCabinet_Desk_BP_C_3",
+      path = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.LootCabinet_Desk_BP_C_3", salt = -205206528, replenish_mode = 2, office_desk = true, guarantee_spawn = true },
 }

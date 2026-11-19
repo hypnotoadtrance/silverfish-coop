@@ -1,6 +1,6 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
-from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, RAIL_YARD
+from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
 PLACEMENTS = (
@@ -500,13 +500,17 @@ def full_name(area: str, actor: str) -> str:
 SMALL_CABINET_PROFILE = (LAB_E206, "LootCabnet_Small_BP_C_5", -595904512)
 SMALL_CABINET_CHILD_SALTS = (-34893800, -46555604, -43386008, -81274330)
 SMALL_CABINET = full_name(*SMALL_CABINET_PROFILE[:2])
+OFFICE_DESK_PROFILE = (LAKE, "LootCabinet_Desk_BP_C_3", -205206528)
+OFFICE_DESK_CHILD_SALTS = (-7851936, -32237128, -43421604, -7392800)
+OFFICE_DESK = full_name(*OFFICE_DESK_PROFILE[:2])
+FOUR_SLOT_CONTAINERS = frozenset({SMALL_CABINET, OFFICE_DESK})
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
-CRATES[SMALL_CABINET] = LAB_E206
-GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS)
+CRATES.update({SMALL_CABINET: LAB_E206, OFFICE_DESK: LAKE})
+GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS) | {OFFICE_DESK}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
 
 
 def loot_capacity(container: str) -> int:
-    if container == SMALL_CABINET:
+    if container in FOUR_SLOT_CONTAINERS:
         return 4
     return 2 if container in CRATES else 0

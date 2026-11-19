@@ -4,6 +4,7 @@ local registry = require("authored_loot_registry")
 
 local crate_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
 local cabinet_class = "/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"
+local desk_class = "/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C"
 local spawner_class = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local box_class = "/Script/Engine.BoxComponent"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -27,7 +28,7 @@ for _, profile in ipairs(registry) do
     table.insert(maps[profile.map], profile)
     names[profile.name] = profile
     profile.world = profile.path:match("^(.-):PersistentLevel%.")
-    profile.capacity = profile.small_cabinet and 4 or 2
+    profile.capacity = (profile.small_cabinet or profile.office_desk) and 4 or 2
 end
 
 function loot.profiles(map)
@@ -182,7 +183,7 @@ local function participant(state, name, host, world)
 end
 
 local function find_crate(world, profile)
-    local class = StaticFindObject(profile.small_cabinet and cabinet_class or crate_class)
+    local class = StaticFindObject(profile.office_desk and desk_class or profile.small_cabinet and cabinet_class or crate_class)
     local crate = StaticFindObject(profile.path)
     if not exact(crate, class) or crate:GetFullName() ~= profile.name or not authority(crate, world)
         or crate.SpawnSalt ~= profile.salt then
@@ -194,7 +195,7 @@ end
 local function child_spawners(crate, instance, profile)
     local class = StaticFindObject(spawner_class)
     local spawners = { crate.Loot_Spawner, crate.Loot_Spawner1 }
-    if profile.small_cabinet then
+    if profile.capacity == 4 then
         spawners[3], spawners[4] = crate.Loot_Spawner2, crate.Loot_Spawner3
     end
     for index = 1, profile.capacity do
@@ -302,7 +303,7 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
-    if scope.profile.small_cabinet or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
+    if scope.profile.capacity == 4 or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
         local input = require("native_authored_pickup_input_fixture")
         input.approach_exact_container(state, phase, scope.profile, pawn, scope.crate, scope.box)
         return loot.qualify(state, phase, pawn_name, requested_crate)

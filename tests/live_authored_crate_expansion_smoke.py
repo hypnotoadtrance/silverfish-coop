@@ -18,7 +18,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_loot
-from tools.silverfish.authored_loot import CRATES, GUARANTEED_REPLENISHMENT, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name
+from tools.silverfish.authored_loot import (CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK, OFFICE_DESK_PROFILE,
+                                           SMALL_CABINET, SMALL_CABINET_PROFILE, full_name)
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD
 
 
@@ -40,6 +41,8 @@ GUARANTEED_SCENES = {
 SCENES.update(GUARANTEED_SCENES)
 CABINET_SCENE = "lab-small-cabinet"
 SCENES[CABINET_SCENE] = (SMALL_CABINET_PROFILE[0], (SMALL_CABINET_PROFILE[1],))
+DESK_SCENE = "lake-office-desk"
+SCENES[DESK_SCENE] = (OFFICE_DESK_PROFILE[0], (OFFICE_DESK_PROFILE[1],))
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
     "/Game/Classes/Items/Item_DeadBeetle.Item_DeadBeetle_C",
@@ -98,13 +101,16 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     area, actors = SCENES[name]
     guaranteed = name in GUARANTEED_SCENES
     cabinet = name == CABINET_SCENE
-    permanent = guaranteed or cabinet
+    desk = name == DESK_SCENE
+    permanent = guaranteed or cabinet or desk
     targets = [full_name(area, actor) for actor in actors]
     assert all(CRATES.get(crate) == area for crate in targets)
     if guaranteed:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
     if cabinet:
         assert targets == [SMALL_CABINET]
+    if desk:
+        assert targets == [OFFICE_DESK]
     key = f"crate-{name}-{uuid.uuid4().hex[:8]}"
     campaign = work / "campaigns" / key
     run = campaign / "run"
@@ -120,6 +126,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     processes = []
     cash_requests = []
     exhaustion_flags = {crate: f"{actor}-{area.rsplit('/', 1)[1]}-" for crate, actor in zip(targets, actors)} if permanent else {}
+    desk_siblings = tuple(f"LootCabinet_Desk_BP_C_{index}" for index in (1, 2, 7, 8, 9)) if desk else ()
+    sibling_names = {full_name(area, actor) for actor in desk_siblings}
+    sibling_flags = {f"{actor}-Lake_01_P-" for actor in desk_siblings}
     print(run, flush=True)
 
     async def command(*arguments, expected=True):
@@ -155,6 +164,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def permanent_flags(saved):
         found = stock_flags(native_host_save.directory(campaign / "game-user"), saved["world"]["native_host_save"], area)
+        assert sibling_flags.isdisjoint(found), found
         return {flag: found.get(flag) for flag in exhaustion_flags.values()}
 
     async def typed_inventory_item(character, guid):
@@ -185,6 +195,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         await start("guest", guest, "join", *guest, "--headless", "--invite", invitation["invite_file"])
         ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
                            and all(status_of(state, crate) == "ready" for crate in targets))
+        assert sibling_names.isdisjoint(scene(opening)) and sibling_names.isdisjoint(scene(ready))
         pawn = ready["game"]["pawns"]["local"]["name"]
         bound = await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
@@ -222,7 +233,10 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             roll = public_roll(committed, crate)
             assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
             assert roll["lucky_looter"], roll
-            if guaranteed:
+            if desk:
+                assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
+                assert sibling_names.isdisjoint(scene(committed)) and sibling_names.isdisjoint(scene(replicated))
+            elif guaranteed:
                 assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
             elif cabinet:
                 assert roll["trait_calls"] == 5 and len(roll["items"]) <= 4, roll
@@ -360,7 +374,7 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
-    if any(area in GUARANTEED_SCENES or area == CABINET_SCENE for area in arguments.area or ()) and not arguments.vanilla_saved:
+    if any(area in GUARANTEED_SCENES or area in (CABINET_SCENE, DESK_SCENE) for area in arguments.area or ()) and not arguments.vanilla_saved:
         parser.error("Permanent stock loot scenes require --vanilla-saved")
     if arguments.force_stock_roll:
         if (arguments.area is not None and arguments.area != ["rail-yard"]) or not arguments.vanilla_saved:

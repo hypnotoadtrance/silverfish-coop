@@ -8,7 +8,7 @@ import re
 import uuid
 
 from .campaign import CampaignFormatError
-from .authored_loot import CRATES, SMALL_CABINET, loot_capacity
+from .authored_loot import CRATES, FOUR_SLOT_CONTAINERS, GUARANTEED_CRATES, loot_capacity
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_tape_profiles import BY_MAP as TAPE_PROFILES, STONE
@@ -142,13 +142,13 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         items = roll.get("items")
         if isinstance(items, list) and len(items) > (loot_capacity(container) or 2):
             raise CampaignFormatError("A stock container exceeds its exact escrow capacity")
-        if container != SMALL_CABINET:
+        if container not in FOUR_SLOT_CONTAINERS:
             continue
+        calls = roll.get("trait_calls")
         if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, CRATES[container])
                 or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != CRATES[container]
                 or not isinstance(roll.get("opener"), str) or roll["opener"] not in members
-                or type(roll.get("trait_calls")) is not int
-                or not 1 <= roll["trait_calls"] <= 1 + loot_capacity(container)
+                or type(calls) is not int or not (calls == 0 if container in GUARANTEED_CRATES else 1 <= calls <= 5)
                 or any(type(item) is not dict or not valid_guid(item.get("guid"))
                        or not isinstance(item.get("actor"), str) or not item["actor"]
                        or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")

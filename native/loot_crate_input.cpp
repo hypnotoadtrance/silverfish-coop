@@ -192,7 +192,7 @@ namespace
         auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
         if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate)
             return refuse("crate_first_door");
-        if (profile->stock_class == &silverfish::authored_loot::small_cabinet)
+        if (profile->stock_class->slots == silverfish::shared_loot::max_container_slots)
         {
             auto* second = object(crate, STR("SM_Prop_Cabinet_Small_Door_02"));
             if (!exact(second, STR("/Script/Engine.StaticMeshComponent")) ||
@@ -264,8 +264,9 @@ namespace
         static const U::FName open_name{STR("SendInteractionToActor")};
         static const U::FName crate_script{STR("ExecuteUbergraph_LootCrate_Small_BP")};
         static const U::FName cabinet_script{STR("ExecuteUbergraph_LootCabnet_Small_BP")};
+        static const U::FName desk_script{STR("ExecuteUbergraph_LootCabinet_Desk_BP")};
         const auto name = method->GetFName();
-        const bool script = name == crate_script || name == cabinet_script;
+        const bool script = name == crate_script || name == cabinet_script || name == desk_script;
         if (name != open_name && !script) return;
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
         if (!profile || method != find<U::UFunction>(script ? profile->stock_class->script : profile->stock_class->input)) return;

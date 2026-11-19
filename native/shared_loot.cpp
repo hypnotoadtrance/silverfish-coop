@@ -762,6 +762,8 @@ namespace
             scope.items[slot] = actor;
             scope.item_classes[slot] = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
         }
+        else if (scope.context.profile->stock_class == &silverfish::authored_loot::office_desk)
+            scope.problem = "stock_office_desk_item_class_unverified";
     }
 
     void capture(Iteration& iteration, Unreal::UObject* object, Unreal::FFrame& frame, void*)
@@ -1001,10 +1003,10 @@ namespace
         }
         return seed_result(lua, true, "seeded");
     }
-    using LabLootWeights = std::unordered_map<Unreal::UClass*, double>;
+    using StockLootWeights = std::unordered_map<Unreal::UClass*, double>;
 
-    bool read_lab_loot_weights(Unreal::FMapProperty* property, const void* container, Unreal::UClass* item_base,
-                               LabLootWeights& weights)
+    bool read_loot_weights(Unreal::FMapProperty* property, const void* container, Unreal::UClass* item_base,
+                           StockLootWeights& weights)
     {
         if (!property || !container || !item_base) return false;
         auto* key = Unreal::CastField<Unreal::FClassProperty>(property->GetKeyProp());
@@ -1033,12 +1035,36 @@ namespace
         return weights.size() == static_cast<std::size_t>(count);
     }
 
+    Unreal::UDataTable* stock_loot_table(Unreal::FMapProperty*& weights)
+    {
+        constexpr auto loot_table_path = STR("/Game/Classes/Libraries/DataTables/LootTables_DT.LootTables_DT");
+        auto* table_class = find<Unreal::UClass>(STR("/Script/Engine.DataTable"));
+        auto* loot = find<Unreal::UDataTable>(loot_table_path);
+        auto* row_type = find<Unreal::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/LootTable_Struct.LootTable_Struct"));
+        weights = field<Unreal::FMapProperty>(row_type, STR("LootMap_11_CA9A8DCF42896A52267711B3383A0F7A"));
+        return live(loot) && table_class && loot->GetClassPrivate() == table_class && row_type &&
+               loot->GetRowStruct().Get() == row_type && weights ? loot : nullptr;
+    }
+
+    bool add_stock_item_weights(const StockLootWeights& source, double multiplier, StockLootWeights& expected)
+    {
+        for (const auto& [type, weight] : source)
+        {
+            auto* defaults = type->GetClassDefaultObject().Get();
+            auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+            if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !category) return false;
+            const auto value = category->GetPropertyValueInContainer(defaults);
+            // The stock controller places weapons and body armor in separate maps.
+            if (value != 4 && value != 7) expected.insert_or_assign(type, weight * multiplier);
+        }
+        return true;
+    }
+
     std::string_view verify_lab_cabinet_loot(Unreal::UObject* cabinet, Unreal::FMapProperty* items)
     {
         constexpr auto controller_path = STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.DynaimicSpawnControler_BP_C_1");
         constexpr auto controller_type = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C");
         constexpr auto region_table_path = STR("/Game/Classes/Libraries/DataTables/Region_SpawnPool_DT.Region_SpawnPool_DT");
-        constexpr auto loot_table_path = STR("/Game/Classes/Libraries/DataTables/LootTables_DT.LootTables_DT");
         auto* controller = find<Unreal::AActor>(controller_path);
         auto* controller_class = find<Unreal::UClass>(controller_type);
         auto* world = static_cast<Unreal::AActor*>(cabinet)->GetWorld();
@@ -1064,39 +1090,66 @@ namespace
         auto* region_modifier = field<Unreal::FDoubleProperty>(cabinet, STR("RegionSpawnMod"));
         if (!read_bool(cabinet, STR("ForceOverride_MapLootTables"), false) || !region_modifier ||
             region_modifier->GetPropertyValueInContainer(cabinet) != 1.0) return "cabinet_lab_loot_mode_changed";
-        auto* loot = find<Unreal::UObject>(loot_table_path);
-        auto* row_type = find<Unreal::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/LootTable_Struct.LootTable_Struct"));
-        auto* loot_weights = field<Unreal::FMapProperty>(row_type, STR("LootMap_11_CA9A8DCF42896A52267711B3383A0F7A"));
+        Unreal::FMapProperty* loot_weights{};
+        auto* table = stock_loot_table(loot_weights);
         auto* item_base = find<Unreal::UClass>(item_class);
-        if (!live(loot) || loot->GetClassPrivate() != table_class || !row_type || !loot_weights || !item_base)
-            return "cabinet_lab_loot_table_schema";
-        auto* table = static_cast<Unreal::UDataTable*>(loot);
-        if (table->GetRowStruct().Get() != row_type) return "cabinet_lab_loot_table_schema";
+        if (!table || !item_base) return "cabinet_lab_loot_table_schema";
 
         struct WeightedRow { const Unreal::TCHAR* name; double multiplier; std::size_t count; };
         constexpr std::array rows{WeightedRow{STR("Security_Basic"), 0.5, 12}, WeightedRow{STR("LabSupplies"), 1.0, 47}};
-        LabLootWeights expected;
+        StockLootWeights expected;
         // Stock Configure_LootTables overwrites duplicate class weights with the later region row.
         for (const auto& row : rows)
         {
             const Unreal::FName name{row.name, Unreal::FNAME_Find};
             const auto* data = name.IsNone() ? nullptr : table->FindRowUnchecked(name);
-            LabLootWeights weights;
-            if (!read_lab_loot_weights(loot_weights, data, item_base, weights) || weights.size() != row.count)
+            StockLootWeights weights;
+            if (!read_loot_weights(loot_weights, data, item_base, weights) || weights.size() != row.count)
                 return "cabinet_lab_loot_table_row";
-            for (const auto& [type, weight] : weights)
-            {
-                auto* defaults = type->GetClassDefaultObject().Get();
-                auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
-                if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !category)
-                    return "cabinet_lab_loot_item_category";
-                const auto value = category->GetPropertyValueInContainer(defaults);
-                if (value != 4 && value != 7) expected.insert_or_assign(type, weight * row.multiplier);
-            }
+            if (!add_stock_item_weights(weights, row.multiplier, expected)) return "cabinet_lab_loot_item_category";
         }
-        LabLootWeights active;
-        if (!read_lab_loot_weights(items, cabinet, item_base, active)) return "cabinet_lab_loot_items_schema";
+        StockLootWeights active;
+        if (!read_loot_weights(items, cabinet, item_base, active)) return "cabinet_lab_loot_items_schema";
         return active == expected ? std::string_view{} : "cabinet_lab_loot_items_changed";
+    }
+
+    std::string_view verify_office_desk_loot(Unreal::UObject* desk, Unreal::FMapProperty* items)
+    {
+        Unreal::FMapProperty* loot_weights{};
+        auto* table = stock_loot_table(loot_weights);
+        auto* item_base = find<Unreal::UClass>(item_class);
+        if (!table || !item_base) return "desk_office_loot_schema";
+        if (!read_bool(desk, STR("ForceOverride_MapLootTables"), false)) return "desk_office_loot_mode";
+        const Unreal::FName row_name{STR("Office"), Unreal::FNAME_Find};
+        const auto* row = row_name.IsNone() ? nullptr : table->FindRowUnchecked(row_name);
+        StockLootWeights weights, expected, active;
+        if (!read_loot_weights(loot_weights, row, item_base, weights) || weights.size() != 38 ||
+            !add_stock_item_weights(weights, 1.0, expected)) return "desk_office_loot_row";
+        if (!read_loot_weights(items, desk, item_base, active)) return "desk_office_loot_items_schema";
+        return active == expected ? std::string_view{} : "desk_office_loot_items_changed";
+    }
+
+    bool verify_office_desk_scene(Unreal::UObject* desk)
+    {
+        auto* component_type = find<Unreal::UClass>(STR("/Script/Engine.StaticMeshComponent"));
+        auto* frame_mesh = find<Unreal::UObject>(STR("/Game/Assets/StaticMeshes/Mesh_Misc/SM_Loot_Desk.SM_Loot_Desk"));
+        auto* door_mesh = find<Unreal::UObject>(STR("/Game/Assets/StaticMeshes/Mesh_Misc/SM_Loot_Desk_Door_L.SM_Loot_Desk_Door_L"));
+        auto* frame = object_field(desk, STR("SM_Prop_Cabinet_Small_02"));
+        auto* first = object_field(desk, STR("SM_Prop_Cabinet_Small_Door_01"));
+        auto* second = object_field(desk, STR("SM_Prop_Cabinet_Small_Door_02"));
+        const auto mesh = [&](Unreal::UObject* component, Unreal::UObject* stock) {
+            return component_type && live(stock) && live(component) && component->GetClassPrivate() == component_type &&
+                   component->GetOuterPrivate() == desk && object_field(component, STR("StaticMesh")) == stock;
+        };
+        if (frame == first || frame == second || first == second || !mesh(frame, frame_mesh) ||
+            !mesh(first, door_mesh) || !mesh(second, door_mesh) ||
+            object_field(first, STR("AttachParent")) != frame || object_field(second, STR("AttachParent")) != frame)
+            return false;
+        if (read_bool(desk, STR("Looted"), true)) return true;
+        auto* box_type = find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"));
+        auto* box = object_field(desk, STR("Box"));
+        return box_type && live(box) && box->GetClassPrivate() == box_type && box->GetOuterPrivate() == desk &&
+               object_field(box, STR("AttachParent")) == frame;
     }
 }
 
@@ -1148,7 +1201,7 @@ namespace silverfish::shared_loot
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
         if (!read_bool(crate, STR("Ping_IfOpened"), false)) return refuse("crate_settings_ping");
-        if (profile->stock_class == &authored_loot::small_cabinet)
+        if (profile->stock_class->slots == max_container_slots)
         {
             auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
             auto* items = field<Unreal::FMapProperty>(crate, STR("Loot Table_Items"));
@@ -1158,7 +1211,11 @@ namespace silverfish::shared_loot
             if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
                 return refuse("cabinet_opened_delegate_bound");
             if (!items) return refuse("cabinet_default_items_schema");
-            if (const auto failure = verify_lab_cabinet_loot(crate, items); !failure.empty()) return refuse(failure);
+            const bool desk = profile->stock_class == &authored_loot::office_desk;
+            const auto failure = desk
+                ? verify_office_desk_loot(crate, items) : verify_lab_cabinet_loot(crate, items);
+            if (!failure.empty()) return refuse(failure);
+            if (desk && !verify_office_desk_scene(crate)) return refuse("desk_office_scene_changed");
             if (!rate) return refuse("cabinet_default_chance_schema");
             if (rate->GetPropertyValueInContainer(defaults) != 0.2 ||
                 rate->GetPropertyValueInContainer(crate) != rate->GetPropertyValueInContainer(defaults))
@@ -1219,7 +1276,7 @@ namespace silverfish::shared_loot
         if (!profile || !type || !instance) return refuse("crate_children_context");
         constexpr std::array fields{STR("Loot_Spawner"), STR("Loot_Spawner1"), STR("Loot_Spawner2"), STR("Loot_Spawner3")};
         constexpr std::array salt_reasons{"cabinet_child0_salt", "cabinet_child1_salt", "cabinet_child2_salt", "cabinet_child3_salt"};
-        const bool cabinet = profile->stock_class == &authored_loot::small_cabinet;
+        const bool cabinet = profile->stock_class->slots == max_container_slots;
         spawners = {};
         for (std::size_t index = 0; index < profile->stock_class->slots; ++index)
         {
@@ -1253,7 +1310,7 @@ namespace silverfish::shared_loot
         if (!address_value || !Unreal::IsInGameThreadRaw() || opening) return false;
         for (const auto& profile : authored_loot::profiles)
         {
-            if (profile.stock_class != &authored_loot::small_cabinet) continue;
+            if (profile.stock_class->slots != max_container_slots) continue;
             auto* crate = find<Unreal::UObject>(profile.actor);
             if (address(crate) != address_value) continue;
             auto* world = authored_crate_world(crate);

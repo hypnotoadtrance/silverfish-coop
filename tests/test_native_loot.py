@@ -6,10 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
-from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name
+from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
 
 
 OTHER_CRATE = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
@@ -45,6 +45,17 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
         self.assertEqual(len(placed), len(excluded) + 3)
         self.assertEqual(stock, {(CITY, "LootCrate_Small_BP_C_0"): (-17, None),
                                  (CITY, "LootCrate_Small_BP_C_20"): (-17, "Industrial")})
+
+    def test_office_desk_exact_generated_identity_keeps_its_stock_subclass(self):
+        self.assertEqual(CRATES[OFFICE_DESK], LAKE)
+        self.assertFalse(any(full_name(LAKE, f"LootCabinet_Desk_BP_C_{index}") in CRATES for index in (1, 2, 4, 7, 8, 9)))
+        self.assertFalse(any("LootCabinet_LowTable_BP_C" in crate for crate in CRATES))
+        generated = outputs()
+        native = generated["native/authored_loot_registry.hpp"]
+        lua = generated["mod/SilverfishCoop/Scripts/authored_loot_registry.lua"]
+        self.assertIn("0x449, 4};", native)
+        self.assertIn('-205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}', native)
+        self.assertIn("salt = -205206528, replenish_mode = 2, office_desk = true, guarantee_spawn = true", lua)
 
 
 class NativeLootTests(unittest.IsolatedAsyncioTestCase):
@@ -198,6 +209,40 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(CampaignFormatError, "small cabinet escrow has an invalid identity or item"):
                     native_host_save.references(saved)
 
+    async def test_office_desk_empty_and_nonempty_rolls_commit_once_without_stock_trait_queries(self):
+        for count, queries, accepted in ((0, 0, True), (4, 0, True), (4, 1, False), (5, 0, False)):
+            with self.subTest(count=count, queries=queries):
+                host = self.host(LAKE)
+                items = [dict(ITEM, actor=f"Office item {index}", guid=f"{index:032X}") for index in range(1, count + 1)]
+
+                async def open_desk(verb, pawn, crate, slot, *, timeout):
+                    self.assertEqual((verb, pawn, crate), ("native-loot-open", PAWN, OFFICE_DESK))
+                    self.frame(LAKE, slot)
+                    proof = {"action": "open", "map": LAKE, "pawn": pawn, "crate": crate, "escrow_slot": slot,
+                             "ok": True, "invoked": True, "looted": True, "trait_calls": queries, "items": items,
+                             "item_count": count, "lucky_looter": True, "trait_source": "canonical"}
+                    return self.game(LAKE, native_loot=proof)
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=open_desk))
+                if not accepted:
+                    with self.assertRaisesRegex(RuntimeError, "exact stock crate roll did not verify"):
+                        await native_loot.perform(host, bridge, "host", "open", OFFICE_DESK, OPERATION)
+                    host.checkpoint_native.assert_not_awaited()
+                    self.assertTrue(host.stopping)
+                    continue
+                result = await native_loot.perform(host, bridge, "host", "open", OFFICE_DESK, OPERATION)
+                self.assertEqual(result["native_loot_roll"]["items"], items)
+                repeated = await native_loot.perform(host, bridge, "host", "open", OFFICE_DESK, "e" * 32)
+                self.assertEqual(repeated, result)
+                bridge.command.assert_awaited_once()
+                host.checkpoint_native.assert_awaited_once()
+                saved = {"world": {"party": host.party}, "characters": {}}
+                persisted = host.party[native_loot.STATE_KEY][OFFICE_DESK]
+                self.assertEqual(native_host_save.references(saved), [persisted["escrow"]])
+                persisted["trait_calls"] = 1
+                with self.assertRaises(CampaignFormatError):
+                    native_host_save.references(saved)
+
     def test_bridge_bounds_container_receipt_before_collecting_items(self):
         slot = "SFCoop_" + "a" * 32
         for area, container, declared, count, accepted in (
@@ -205,6 +250,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             (LAB_E206, SMALL_CABINET, 4, 5, False),
             (CROSSROADS, OTHER_CRATE, 4, 4, False),
             (CROSSROADS, SMALL_CABINET, 2, 2, False),
+            (LAKE, OFFICE_DESK, 4, 4, True),
+            (LAKE, OFFICE_DESK, 5, 5, False),
         ):
             with self.subTest(container=container, declared=declared, count=count):
                 records = [

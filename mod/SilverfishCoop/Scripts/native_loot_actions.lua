@@ -45,7 +45,7 @@ local function capture(scope, slot, outputs, items)
     if index - 1 ~= #items then error("native_loot_escrow_item_identity_count_unverified", 0) end
     if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
     local restored = api:LoadGameFromSlot(slot, 0)
-    local source = scope.profile.small_cabinet and {scope.crate:GetAddress()} or {}
+    local source = scope.profile.capacity == 4 and {scope.crate:GetAddress()} or {}
     if not valid_object(restored) or not SilverfishVerifyNativeLootEscrow(
         pool:GetAddress(), restored:GetAddress(), table.unpack(source)) then
         error("native_loot_escrow_typed_roundtrip_unverified", 0)
@@ -97,7 +97,7 @@ function actions.command(fields, state, phase)
             return "stock loot escrow missing"
         end
         result.distance, result.escrow_slot = scope.distance, slot
-        local source = scope.profile.small_cabinet and {scope.crate:GetAddress()} or {}
+        local source = scope.profile.capacity == 4 and {scope.crate:GetAddress()} or {}
         local ok, status, amount, before, after = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
             scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid, table.unpack(source))
         result.ok, result.status = ok, status
