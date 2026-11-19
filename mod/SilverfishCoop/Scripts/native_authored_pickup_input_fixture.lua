@@ -346,7 +346,7 @@ function input.open_cabinet(state, phase, pawn, actor, box, source)
         error(label .. "_fixture_scope_unavailable", 0)
     end
     local origin, facing = approach_clear_sight(state, pawn, actor, box, label .. "_fixture",
-        precise_distances[source], cabinet_front[source], source == molasses)
+        precise_distances[source], approach_front[source], source == molasses)
     local ok, receipt = pcall(press_stock, state, pawn, box, true, label .. "_stock_input", function()
         local delivered, why, sequence = press(pawn:GetAddress(), false)
         if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
