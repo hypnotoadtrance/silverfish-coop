@@ -192,12 +192,17 @@ local function recipe(spec, row)
     return objective[1]
 end
 
-local function reputation(spec, context)
-    if #spec.factions == 0 then return {} end
+local function characters(spec)
     local library = StaticFindObject(characters_path)
     if not valid(library) or library:GetFullName() ~= "FL_Characters_C " .. characters_path then
         refuse(spec, "reputation_library_unavailable")
     end
+    return library
+end
+
+local function reputation(spec, context)
+    if #spec.factions == 0 then return {} end
+    local library = characters(spec)
     local values, seen = {}, {}
     for _, faction in ipairs(spec.factions) do
         local out = {}
@@ -221,9 +226,18 @@ local function progress(spec, context)
     if row then recipe(spec, row) end
     if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse(spec, "quest_step_unqualified") end
     local advantage = {}
-    for faction, key in pairs(spec.advantage_flags or {}) do
-        local amount, found = wire_check(spec, wire.stock_flag, context.instance, key)
-        advantage[faction] = {amount = amount, found = found}
+    if spec.advantage_flags then
+        local library = characters(spec)
+        for faction, expected in pairs(spec.advantage_flags) do
+            local out = {}
+            library:Compose_FactionAdvantage_FlagName(faction, context.host, out)
+            local key = out.Name
+            if type(key) ~= "userdata" or key:GetComparisonIndex() == 0 or key:ToString() ~= expected then
+                refuse(spec, "advantage_flag_unqualified")
+            end
+            local amount, found = wire_check(spec, wire.stock_flag, context.instance, key)
+            advantage[faction] = {amount = amount, found = found}
+        end
     end
     return {step = step, cash = wire_check(spec, wire.stock_flag, context.instance, "Player_Cash"),
         xp = wire_check(spec, wire.stock_flag, context.instance, "Player_Xp"),
