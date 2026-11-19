@@ -170,6 +170,30 @@ namespace
         STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C:SendInteractionToActor");
     constexpr auto trench_savlo_locker =
         STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P:PersistentLevel.LootLocker_Secure_BP_C_16");
+    struct CabinetInput
+    {
+        std::string_view source;
+        const U::TCHAR* actor;
+        const U::TCHAR* actor_class;
+        const U::TCHAR* callback;
+        int salt;
+    };
+    constexpr std::array cabinet_inputs{
+        CabinetInput{
+            "railyard-dust-filter",
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCabnet_Small_BP_C_36"),
+            STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"),
+            STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:SendInteractionToActor"),
+            -1540208128,
+        },
+        CabinetInput{
+            "northeast-rail-molasses",
+            STR("/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P.NorthEast_Rail_P:PersistentLevel.LootCabnet_Large_BP_C_4"),
+            STR("/Game/Classes/Actors/Lootables/LootCabnet_Large_BP.LootCabnet_Large_BP_C"),
+            STR("/Game/Classes/Actors/Lootables/LootCabnet_Large_BP.LootCabnet_Large_BP_C:SendInteractionToActor"),
+            -1439313920,
+        },
+    };
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto pawn_script = STR("/Game/Classes/Player/Player_FP.Player_FP_C:ExecuteUbergraph_Player_FP");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
@@ -482,6 +506,41 @@ namespace
             boolean(pawn, STR("Dead"), false) && in_range(pawn, scope.actor.Get());
     }
 
+    U::UObject* cabinet_client_pawn(U::UObject* actor, U::UFunction* function, const void* args)
+    {
+        if (!args || !live(actor)) return nullptr;
+        const auto path = actor->GetPathName();
+        const auto entry = std::ranges::find_if(cabinet_inputs, [&](const CabinetInput& value) {
+            return path == value.actor;
+        });
+        if (entry == cabinet_inputs.end() || !env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT") || !exact(actor, entry->actor_class) ||
+            function != find<U::UFunction>(entry->callback) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+            !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bReplicates"), false) ||
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return nullptr;
+
+        auto* salt = field<U::FIntProperty>(actor, STR("SpawnSalt"));
+        auto* player = parameter<U::FObjectProperty>(function, STR("Player"), 0);
+        auto* hit = parameter<U::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        auto* box = object(actor, STR("Box"));
+        if (!salt || salt->GetPropertyValueInContainer(actor) != entry->salt || !player || !hit ||
+            player->GetPropertyClass().Get() != find<U::UClass>(pawn_path) ||
+            hit->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/Engine.SceneComponent")) ||
+            !exact(box, STR("/Script/Engine.BoxComponent")) || box->GetOuterPrivate() != actor ||
+            read(hit, args) != box) return nullptr;
+        auto* pawn = read(player, args);
+        auto* placed = static_cast<U::AActor*>(actor);
+        for (const auto& scope : scopes)
+        {
+            auto* world = scope.world.Get();
+            if (scope.profile && scope.profile->source == entry->source && !scope.host && scope.pawn.Get() == pawn &&
+                local_scope(scope) && placed->GetWorld() == world && placed->GetLevel() == object(world, STR("PersistentLevel")))
+                return pawn;
+        }
+        return nullptr;
+    }
+
     void intercept(Iteration& call, U::UObject* context, U::UFunction* function, const void* args, U::FFrame* frame)
     {
         if (!ready() || !context || !function || call.OriginalFunctionCallPrevented()) return;
@@ -491,6 +550,15 @@ namespace
         static const U::FName add_name{STR("AddItemToInventory")};
         const auto name = function->GetFName();
         if (name != interact_name && name != put_name && name != pickup_name && name != add_name) return;
+        if (name == interact_name)
+        {
+            if (auto* pawn = cabinet_client_pawn(context, function, args))
+            {
+                call.PreventOriginalFunctionCall();
+                if (call.OriginalFunctionCallPrevented()) silverfish::native_interaction_input::consume_current_press(pawn);
+                return;
+            }
+        }
         if (name == interact_name && function == find<U::UFunction>(secure_locker_input) &&
             exact(context, secure_locker_class) && context->GetPathName() == trench_savlo_locker)
         {
@@ -854,7 +922,7 @@ namespace
         };
         const std::unique_ptr<std::byte, decltype(release)> lifetime(storage, release);
         input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), previous);
-        delta->SetPropertyValue_InContainer(storage, difference);
+        delta->SetPropertyValueInContainer(storage, difference);
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), pawn);
         library->ProcessEvent(fn, storage);
         return rows.identical(output->ContainerPtrToValuePtr<void>(storage), expected);
