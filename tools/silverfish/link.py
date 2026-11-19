@@ -50,6 +50,7 @@ _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
 _MAX_QUEUED_FRAMES = 256
 _MAX_CACHED_GUESTS = 16
+_MAX_CATALOG_LINKS = 16
 _MAX_HOST_TASKS = 32
 _APP_ERROR = 0x100
 _LOG = logging.getLogger(__name__)
@@ -470,7 +471,7 @@ class _HostProtocol(_LinkProtocol):
 
 
 class HostLink:
-    """One admitted link at a time, with stable UDP endpoints for game play."""
+    """Authenticated guest links with separate Unreal-facing UDP endpoints."""
 
     def __init__(
         self,
@@ -478,13 +479,18 @@ class HostLink:
         admit: Admit,
         on_disconnect: OnDisconnect | None,
         on_request: OnRequest | None = None,
+        *,
+        max_game_guests: int = 1,
     ) -> None:
+        if type(max_game_guests) is not int or not 1 <= max_game_guests <= _MAX_CACHED_GUESTS:
+            raise ValueError(f"Allow between 1 and {_MAX_CACHED_GUESTS} concurrent game guests")
         self._game_address = game_address
+        self._max_game_guests = max_game_guests
         self._admit_callback = admit
         self._disconnect_callback = on_disconnect
         self._request_callback = on_request
         self._guest_sockets: dict[str, asyncio.DatagramTransport] = {}
-        self._current: _HostProtocol | None = None
+        self._protocols: dict[str, _HostProtocol] = {}
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
@@ -500,13 +506,14 @@ class HostLink:
 
     def connected(self, guest_id: str) -> bool:
         """Return whether the guest currently has an admitted game link."""
-        protocol = self._current
-        return bool(protocol and protocol.guest_id == guest_id and protocol.authorized and protocol.game_access)
+        protocol = self._protocols.get(guest_id)
+        return bool(protocol and protocol.authorized and protocol.game_access)
 
     async def release_guest(self, guest_id: str) -> bool:
         """Retire a disconnected guest's cached UDP endpoint after its grace period."""
         async with self._lock:
-            if self._current and self._current.guest_id == guest_id and self._current.game_access:
+            protocol = self._protocols.get(guest_id)
+            if protocol and protocol.game_access:
                 return False
             transport = self._guest_sockets.pop(guest_id, None)
             if transport is None:
@@ -538,20 +545,21 @@ class HostLink:
             if self._closed:
                 raise LinkError("host link is closed")
             refreshed: dict[str, asyncio.DatagramTransport] = {}
-            protocol = self._current
-            if protocol and protocol.authorized and protocol.game_access and protocol.guest_id is not None:
-                guest_id = protocol.guest_id
-                try:
-                    route = await self._create_game_route(guest_id)
-                except OSError:
-                    raise LinkError("could not refresh the Unreal relay route") from None
+            try:
+                for guest_id in self._protocols:
+                    if self.connected(guest_id):
+                        refreshed[guest_id] = await self._create_game_route(guest_id)
                 if self._closed:
-                    route.close()
                     raise LinkError("host link is closed")
-                if protocol.authorized:
-                    refreshed[guest_id] = route
-                else:
+                for guest_id in tuple(refreshed):
+                    if not self.connected(guest_id):
+                        refreshed.pop(guest_id).close()
+            except BaseException as error:
+                for route in refreshed.values():
                     route.close()
+                if isinstance(error, OSError) and not isinstance(error, LinkError):
+                    raise LinkError("could not refresh the Unreal relay route") from None
+                raise
 
             old_routes, self._guest_sockets = self._guest_sockets, refreshed
             for route in old_routes.values():
@@ -559,7 +567,7 @@ class HostLink:
 
     def _spawn(self, callback: Callable[..., Coroutine[Any, Any, None]], *args: Any) -> None:
         # aioquic can deliver termination events after the server has closed.
-        # HostLink.close already releases the active guest and drains its tasks.
+        # HostLink.close releases the active guests and drains its tasks.
         if self._closed:
             return
         task = asyncio.create_task(callback(*args))
@@ -573,11 +581,19 @@ class HostLink:
 
     async def _admit(self, protocol: _HostProtocol, request: Admission) -> bytes:
         guest_id = request["guest_id"]
+        catalog = request.get("catalog") is True
         async with self._lock:
             if self._closed or protocol.terminated:
                 return _encode(_rejection("host_unavailable"))
-            if self._current is not None:
+            if guest_id in self._protocols:
                 return _encode(_rejection("guest_already_connected"))
+            games = sum(current.game_access for current in self._protocols.values())
+            catalogs = len(self._protocols) - games
+            if catalog and catalogs >= _MAX_CATALOG_LINKS:
+                return _encode(_rejection("catalog_capacity"))
+            if not catalog and games >= self._max_game_guests:
+                reason = "guest_already_connected" if self._max_game_guests == 1 else "party_full"
+                return _encode(_rejection(reason))
 
             transport = None
             try:
@@ -590,11 +606,15 @@ class HostLink:
                     # result or opening a relay. Failures below release it.
                     protocol.guest_id = guest_id
                     protocol.game_access = response.get("game_access") is not False
-                    self._current = protocol
+                    self._protocols[guest_id] = protocol
                 _validate_response(response)
                 payload = _encode(response)
                 if not response["accepted"]:
                     return payload
+                if catalog and protocol.game_access:
+                    raise LinkError("catalog admission cannot grant Unreal access")
+                if not protocol.game_access and catalogs >= _MAX_CATALOG_LINKS:
+                    return _encode(_rejection("catalog_capacity"))
                 if protocol.terminated or self._closed:
                     return _encode(_rejection("host_unavailable"))
 
@@ -612,13 +632,14 @@ class HostLink:
                 _LOG.warning("Host link admission failed")
                 return _encode(_rejection("admission_failed"))
             finally:
-                if not protocol.authorized and self._current is protocol:
+                if not protocol.authorized and self._protocols.get(guest_id) is protocol:
                     if transport is not None:
                         transport.close()
                     await self._release_locked(protocol)
 
     async def _run_action(self, protocol: _HostProtocol, body: bytes) -> bytes:
-        if self._closed or self._current is not protocol or protocol.guest_id is None:
+        guest_id = protocol.guest_id
+        if self._closed or not protocol.authorized or guest_id is None or self._protocols.get(guest_id) is not protocol:
             return _encode_action({"error": "failed"})
         if self._request_callback is None:
             return _encode_action({"error": "disabled"})
@@ -628,7 +649,7 @@ class HostLink:
             return _encode_action({"error": "invalid"})
         try:
             async with asyncio.timeout(_ACTION_TIMEOUT):
-                result = self._request_callback(protocol.guest_id, payload)
+                result = self._request_callback(guest_id, payload)
                 if inspect.isawaitable(result):
                     result = await result
                 if not isinstance(result, dict):
@@ -646,9 +667,10 @@ class HostLink:
             await self._release_locked(protocol)
 
     async def _release_locked(self, protocol: _HostProtocol) -> None:
-        if self._current is not protocol:
+        guest_id = protocol.guest_id
+        if guest_id is None or self._protocols.get(guest_id) is not protocol:
             return
-        self._current = None
+        del self._protocols[guest_id]
         protocol.authorized = False
         was_game_link = protocol.game_access
         protocol.game_access = False
@@ -656,21 +678,24 @@ class HostLink:
             return
         try:
             async with asyncio.timeout(_ADMISSION_TIMEOUT):
-                result = self._disconnect_callback(protocol.guest_id)
+                result = self._disconnect_callback(guest_id)
                 if inspect.isawaitable(result):
                     await result
         except Exception:
             _LOG.warning("Host link disconnect callback failed")
 
     def _to_game(self, protocol: _HostProtocol, data: bytes) -> None:
-        if self._current is protocol and protocol.authorized and protocol.game_access:
-            transport = self._guest_sockets.get(protocol.guest_id)
+        guest_id = protocol.guest_id
+        if guest_id is None or self._protocols.get(guest_id) is not protocol:
+            return
+        if protocol.authorized and protocol.game_access:
+            transport = self._guest_sockets.get(guest_id)
             if transport is not None:
                 transport.sendto(data)
 
     def _from_game(self, guest_id: str, data: bytes) -> None:
-        protocol = self._current
-        if protocol is not None and protocol.guest_id == guest_id:
+        protocol = self._protocols.get(guest_id)
+        if protocol is not None:
             protocol.forward_game_packet(data)
 
     async def close(self) -> None:
@@ -678,8 +703,8 @@ class HostLink:
             return
         self._closed = True
         async with self._lock:
-            if self._current is not None:
-                await self._release_locked(self._current)
+            for protocol in tuple(self._protocols.values()):
+                await self._release_locked(protocol)
             self._server.close()
             for transport in self._guest_sockets.values():
                 transport.close()
@@ -703,11 +728,12 @@ async def start_host(
     on_disconnect: OnDisconnect | None = None,
     *,
     on_request: OnRequest | None = None,
+    max_game_guests: int = 1,
 ) -> HostLink:
     """Open a private game relay and optionally serve admitted application requests."""
     if not _is_loopback(game_host):
         raise ValueError("Unreal relay endpoint must be a loopback address")
-    link = HostLink((game_host, game_port), admit, on_disconnect, on_request)
+    link = HostLink((game_host, game_port), admit, on_disconnect, on_request, max_game_guests=max_game_guests)
     configuration = _configuration(is_client=False)
     configuration.certificate = identity.certificate
     configuration.private_key = identity.private_key

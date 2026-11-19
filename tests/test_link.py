@@ -1,6 +1,7 @@
 import asyncio
 import secrets
 import unittest
+from unittest.mock import patch
 
 from aioquic.quic.events import ConnectionTerminated
 from cryptography.hazmat.primitives import serialization
@@ -77,7 +78,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
 
     async def wait_for_host_release(self):
         async with asyncio.timeout(3):
-            while self.host._current is not None:
+            while self.request["guest_id"] in self.host._protocols:
                 await asyncio.sleep(0.01)
 
     async def exchange(self, size):
@@ -172,6 +173,132 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertFalse(duplicate.connected)
         self.assertTrue(self.client.connected)
+        self.assertTrue(self.disconnected.empty())
+
+    async def host_for_guests(self, *requests, max_game_guests=2):
+        credentials = {request["guest_id"]: request for request in requests}
+
+        def admit(request):
+            expected = credentials.get(request["guest_id"])
+            if request == expected:
+                return {"accepted": True, "character_id": request["character_id"]}
+            if expected and request == dict(expected, catalog=True):
+                return {"accepted": True, "game_access": False, "catalog_version": 1}
+            return {"accepted": False, "reason": "unexpected_guest"}
+
+        async def identify(guest_id, payload):
+            return {"authenticated_guest": guest_id, "claimed_guest": payload["guest_id"]}
+
+        self.host = await start_host(
+            "127.0.0.1", 0, *self.game_host.get_extra_info("sockname"),
+            self.identity, admit, self.disconnected.put_nowait, on_request=identify,
+            max_game_guests=max_game_guests,
+        )
+        self.addAsyncCleanup(self.host.close)
+
+    def guest_request(self, guest_id):
+        return dict(self.request, guest_id=guest_id, character_id=f"{guest_id}-character",
+                    credential=secrets.token_urlsafe(24))
+
+    async def test_opt_in_guests_have_independent_routes_actions_and_reconnect(self):
+        second_request, third_request = self.guest_request("second"), self.guest_request("third")
+        first, second, third = (request["guest_id"] for request in (self.request, second_request, third_request))
+        await self.host_for_guests(self.request, second_request, third_request)
+        second_client, third_client = await start_client(), await start_client()
+        self.addAsyncCleanup(second_client.close)
+        self.addAsyncCleanup(third_client.close)
+        second_socket, second_inbox = await self.udp()
+
+        responses = await asyncio.gather(self.connect_guest(), self.connect_guest(second_request, client=second_client))
+        self.assertTrue(all(response["accepted"] for response in responses))
+        self.assertEqual(await self.connect_guest(client=third_client), {
+            "accepted": False, "reason": "guest_already_connected",
+        })
+        self.assertEqual(await self.connect_guest(third_request, client=third_client), {
+            "accepted": False, "reason": "party_full",
+        })
+        self.assertIsNone(self.host.guest_endpoint(third))
+
+        async def exchange_both():
+            self.game_client.sendto(b"first-to-host", self.client.address)
+            second_socket.sendto(b"second-to-host", second_client.address)
+            self.assertEqual(dict([await self.host_inbox.next(), await self.host_inbox.next()]), {
+                b"first-to-host": self.host.guest_endpoint(first),
+                b"second-to-host": self.host.guest_endpoint(second),
+            })
+            self.game_host.sendto(b"host-to-first", self.host.guest_endpoint(first))
+            self.game_host.sendto(b"host-to-second", self.host.guest_endpoint(second))
+            self.assertEqual(await self.client_inbox.next(), (b"host-to-first", self.client.address))
+            self.assertEqual(await second_inbox.next(), (b"host-to-second", second_client.address))
+
+        await exchange_both()
+        self.assertNotEqual(self.host.guest_endpoint(first), self.host.guest_endpoint(second))
+        self.assertEqual(await asyncio.gather(self.client.request({"guest_id": second}),
+                                              second_client.request({"guest_id": first})), [
+            {"authenticated_guest": first, "claimed_guest": second},
+            {"authenticated_guest": second, "claimed_guest": first},
+        ])
+
+        previous_routes = {guest: self.host.guest_endpoint(guest) for guest in (first, second)}
+        create_route = self.host._create_game_route
+        attempted_routes = []
+
+        async def fail_after_one(guest):
+            if attempted_routes:
+                raise OSError("fixture could not allocate a second relay")
+            route = await create_route(guest)
+            attempted_routes.append(route)
+            return route
+
+        with patch.object(self.host, "_create_game_route", new=fail_after_one):
+            with self.assertRaisesRegex(LinkError, "could not refresh the Unreal relay route"):
+                await self.host.refresh_game_routes()
+        self.assertEqual(len(attempted_routes), 1)
+        self.assertTrue(attempted_routes[0].is_closing())
+        self.assertEqual({guest: self.host.guest_endpoint(guest) for guest in (first, second)}, previous_routes)
+        await exchange_both()
+
+        await self.host.refresh_game_routes()
+        refreshed_routes = {guest: self.host.guest_endpoint(guest) for guest in (first, second)}
+        self.assertFalse(set(refreshed_routes.values()) & set(previous_routes.values()))
+        await exchange_both()
+        await self.client.disconnect()
+        self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), first)
+        self.assertTrue(self.host.connected(second))
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertEqual(self.host.guest_endpoint(first), refreshed_routes[first])
+        await exchange_both()
+
+        await self.client.disconnect()
+        self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), first)
+        self.assertTrue(await self.host.release_guest(first))
+        self.assertTrue((await self.connect_guest(third_request, client=third_client))["accepted"])
+        self.assertTrue(self.host.connected(second))
+        self.assertTrue(self.host.connected(third))
+        self.assertEqual(self.host.guest_endpoint(second), refreshed_routes[second])
+        self.assertTrue(self.disconnected.empty())
+
+    async def test_catalog_capacity_is_separate_from_default_game_capacity(self):
+        second_request, third_request = self.guest_request("second"), self.guest_request("third")
+        await self.host_for_guests(self.request, second_request, third_request, max_game_guests=1)
+        second_client, third_client = await start_client(), await start_client()
+        self.addAsyncCleanup(second_client.close)
+        self.addAsyncCleanup(third_client.close)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertEqual(await self.connect_guest(second_request, client=second_client), {
+            "accepted": False, "reason": "guest_already_connected",
+        })
+
+        with patch("tools.silverfish.link._MAX_CATALOG_LINKS", 1):
+            self.assertEqual(await self.connect_guest(dict(second_request, catalog=True), client=second_client), {
+                "accepted": True, "game_access": False, "catalog_version": 1,
+            })
+            self.assertEqual(await self.connect_guest(dict(third_request, catalog=True), client=third_client), {
+                "accepted": False, "reason": "catalog_capacity",
+            })
+        self.assertIsNone(self.host.guest_endpoint(second_request["guest_id"]))
+        self.assertIsNone(self.host.guest_endpoint(third_request["guest_id"]))
+        await self.exchange(1200)
         self.assertTrue(self.disconnected.empty())
 
     async def test_wrong_certificate_blocks_admission(self):
@@ -363,7 +490,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
     async def test_delayed_termination_does_not_spawn_work_after_host_close(self):
         guest_id = self.request["guest_id"]
         self.assertTrue((await self.connect_guest())["accepted"])
-        protocol = self.host._current
+        protocol = self.host._protocols[guest_id]
         self.assertIsNotNone(protocol)
 
         await self.host.close()
