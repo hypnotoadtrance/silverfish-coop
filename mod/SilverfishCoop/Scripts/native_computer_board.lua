@@ -6,8 +6,12 @@ local characters_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Defa
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local boards = {
     [1] = {map = black_market, actor = "BountyBoard_BP_C_0", global_contracts = true},
+    [2] = {map = shopkeep, actor = "BountyBoard_BP_C_1"},
+    [3] = {map = observatory, actor = "BountyBoard_BP_C_0", global_contracts = true},
     [4] = {map = scientist, actor = "BountyBoard_BP_C_2"},
     [5] = {map = wire.map, actor = "BountyBoard_BP_C_3"},
     [10] = {map = scav_bar, actor = "BountyBoard_BP_C_2", global_contracts = true},
@@ -73,6 +77,24 @@ local recipes = {
         reputation_flags = {[8] = "Rep_Freelancer", [3] = "Rep_Fae"}, advantage = {[8] = 70}, no_track_flag = true,
         redeem_map = black_market, wrong_board = "black_market_redemption_required",
         stage_objective = "SilverfishStagePumpRoomObjective",
+    },
+    ["native-molasses"] = {
+        id = "Clt_Molasis", title = "Get Molasses", fault = "molasses",
+        objective_path = "/Game/Classes/Items/Item_Molasis.Item_Molasis_C",
+        cash = 30, difficulty = 0, fail_on_death = false, redeem = 2,
+        offered_boards = {2}, factions = {}, reputation = {}, advantage = {}, no_track_flag = true,
+        redeem_map = shopkeep, wrong_board = "shopkeep_redemption_required",
+        stage_objective = "SilverfishStageMolassesObjective",
+    },
+    ["native-savlo-keycard"] = {
+        id = "Clct_SavloKey", title = "Hall Pass", fault = "savlo_keycard",
+        objective_path = "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C",
+        cash = 50000, difficulty = 14, fail_on_death = false, redeem = 3, fixture_xp = 14,
+        offered_boards = {3, 1}, scoped_boards = {3}, factions = {8}, reputation = {[8] = 100},
+        reputation_flags = {[8] = "Rep_Freelancer"}, advantage = {[8] = 300},
+        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true,
+        redeem_map = observatory, wrong_board = "observatory_redemption_required",
+        stage_objective = "SilverfishStageSavloKeycardObjective",
     },
 }
 local operations = {}
@@ -198,8 +220,14 @@ local function progress(spec, context)
     local step = row and row[keys.step] or "-"
     if row then recipe(spec, row) end
     if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse(spec, "quest_step_unqualified") end
+    local advantage = {}
+    for faction, key in pairs(spec.advantage_flags or {}) do
+        local amount, found = wire_check(spec, wire.stock_flag, context.instance, key)
+        advantage[faction] = {amount = amount, found = found}
+    end
     return {step = step, cash = wire_check(spec, wire.stock_flag, context.instance, "Player_Cash"),
-        xp = wire_check(spec, wire.stock_flag, context.instance, "Player_Xp"), rep = reputation(spec, context)}
+        xp = wire_check(spec, wire.stock_flag, context.instance, "Player_Xp"),
+        rep = reputation(spec, context), advantage = advantage}
 end
 
 local function unchanged(context)
@@ -213,6 +241,13 @@ local function valid_transition(spec, before, after, step, cash, xp, expected_re
         local observed = after.rep[faction]
         if (expected_rep and (observed.amount ~= expected_rep[faction] or not observed.found))
             or (not expected_rep and (observed.amount ~= before.rep[faction].amount or observed.found ~= before.rep[faction].found)) then
+            return false
+        end
+    end
+    for faction, previous in pairs(before.advantage) do
+        local observed = after.advantage[faction]
+        local delta = expected_rep and spec.advantage[faction] or 0
+        if observed.amount ~= previous.amount + delta or observed.found ~= (previous.found or delta ~= 0) then
             return false
         end
     end
@@ -255,6 +290,9 @@ local function redeem(spec, context, before, objective, identity, owner)
             expected_rep[faction] = prior.amount + spec.reputation[faction] * (prior.found and 1 + trait.Instances or 1)
             if not int32(expected_rep[faction]) then refuse(spec, "reputation_range") end
         end
+    end
+    for faction, previous in pairs(before.advantage) do
+        if not int32(previous.amount + spec.advantage[faction]) then refuse(spec, "advantage_range") end
     end
     if not int32(before.cash + spec.cash) or not int32(before.xp + 1) then refuse(spec, "reward_range") end
 

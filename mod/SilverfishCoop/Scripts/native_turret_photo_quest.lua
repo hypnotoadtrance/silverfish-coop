@@ -10,6 +10,10 @@ local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local scav_world = scav_bar .. ".Shop_ScavBar_P"
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local black_market_world = black_market .. ".Shop_BlackMarket_01"
+local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+local shopkeep_world = shopkeep .. ".Shop_ShopKeep_P"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local observatory_world = observatory .. ".Observitory_P"
 local bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local world_names = { [borough] = borough .. ".Borough", [scientist] = scientist .. ".Shop_Scientist_01",
     [bridge] = bridge .. ".DeadBridge_P" }
@@ -19,6 +23,9 @@ local boards = {
     [scav_bar] = {path = scav_world .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 10, display_global = true, world = scav_world},
     [black_market] = {path = black_market_world .. ":PersistentLevel.BountyBoard_BP_C_0", kind = 1,
         display_global = true, world = black_market_world},
+    [shopkeep] = {path = shopkeep_world .. ":PersistentLevel.BountyBoard_BP_C_1", kind = 2, world = shopkeep_world},
+    [observatory] = {path = observatory_world .. ":PersistentLevel.BountyBoard_BP_C_0", kind = 3,
+        display_global = true, world = observatory_world},
 }
 local turret_prefix = world_names[bridge] .. ":PersistentLevel.Turret_MechGun_01_BP_C_"
 local targets = { ["turret-13"] = turret_prefix .. "13", ["turret-15"] = turret_prefix .. "15" }

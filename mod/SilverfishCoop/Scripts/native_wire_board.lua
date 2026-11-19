@@ -8,6 +8,9 @@ local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local molasses, keycard = "Clt_Molasis", "Clct_SavloKey"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
 local pocket_watch = "Clt_Watch"
@@ -23,12 +26,14 @@ local function board_profile(area, level, suffix, id, quests, display_global)
         id = id, quests = quests, display_global = display_global == true}
 end
 local profiles = {
+    [shopkeep] = board_profile(shopkeep, "Shop_ShopKeep_P", "1", 2, {molasses}),
+    [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard}, true),
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny}, true),
 }
-local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
+local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake", [lenny] = "Lenny's House"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
@@ -48,6 +53,16 @@ local prompt = {
     elsewhere = "Deliver one Computer Board to the Scientist bounty board.",
 }
 local contract_prompt = {
+    [molasses] = {
+        offer = "Find a can of molasses for Shop Keep.\nInteract again to accept the contract.",
+        missing = "Bring a can of molasses in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the molasses for 30 shared cash.\nInteract again to turn it in.",
+    },
+    [keycard] = {
+        offer = "Retrieve the Savlo keycard for Simmi.\nInteract again to accept the contract.",
+        missing = "Bring the Savlo keycard in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the keycard for 50,000 shared cash.\nInteract again to turn it in.",
+    },
     [wire] = {
         offer = "Bring Copper Wire to this board.\nInteract again to accept the contract.",
         missing = "Bring one Copper Wire to this board.\nInteract to check the contract again.",

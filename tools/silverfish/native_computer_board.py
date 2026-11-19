@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .native_tape_profiles import PUMP, TapeProfile
-from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
+from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
 
 QUEST_ID = "Clt_ComputerBoard"
@@ -17,6 +17,8 @@ TURN_IN = "native-computer-board-turn-in"
 BOARDS = {
     BLACK_MARKET: f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0",
     BOROUGH: native_wire_quest.BOARD,
+    OBSERVATORY: f"BountyBoard_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.BountyBoard_BP_C_0",
+    SHOPKEEP: f"BountyBoard_BP_C {SHOPKEEP}.Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_1",
     SCIENTIST_SHOP: f"BountyBoard_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2",
     SCAV_BAR: f"BountyBoard_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.BountyBoard_BP_C_2",
 }
@@ -68,8 +70,14 @@ SAVLO_RING = CollectionContract("Clct_EvilEye", "native-savlo-ring", "Savlo's Ri
 PUMP_ROOM = CollectionContract("Clt_EatherPumpTape", "native-pump-room", "Pump Room", BLACK_MARKET,
                                 "black_market_redemption_required", 3200, frozenset({"8", "3"}), "consumed_tape",
                                 board_maps=frozenset({BLACK_MARKET}), fixture_xp=8, exchange=PUMP)
+MOLASSES = CollectionContract("Clt_Molasis", "native-molasses", "Get Molasses", SHOPKEEP,
+                              "shopkeep_redemption_required", 30, frozenset(), "consumed_molasses",
+                              native_authored_pickup.MOLASSES, frozenset({SHOPKEEP}))
+SAVLO_KEYCARD = CollectionContract("Clct_SavloKey", "native-savlo-keycard", "Hall Pass", OBSERVATORY,
+                                   "observatory_redemption_required", 50000, frozenset({"8"}), "consumed_keycard",
+                                   native_authored_pickup.SAVLO_KEYCARD, frozenset({OBSERVATORY}), fixture_xp=14)
 CONTRACTS = {spec.quest_id: spec for spec in (
-    COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING, PUMP_ROOM,
+    COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}

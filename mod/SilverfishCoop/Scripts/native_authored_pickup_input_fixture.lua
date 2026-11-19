@@ -9,6 +9,8 @@ local sources = {
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["borough-mre"] = "/Game/Classes/Maps/Maps_SafeZones/Borough",
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
+    ["northeast-rail-molasses"] = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P",
+    ["trench-savlo-keycard"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"

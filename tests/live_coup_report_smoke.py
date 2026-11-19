@@ -35,6 +35,7 @@ class CollectionSmoke:
     accept_before_pickup: bool = False
     stock_pickup: bool = False
     stackable: bool = False
+    advantage: tuple[tuple[str, int], ...] = ()
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -124,7 +125,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         member = save["characters"][character]["state"]["native_guest_save"]
         assert owner["slot"] != member["slot"] and member["character_id"] == character, member
         directory = native_host_save.directory(root / "game-user")
-        wanted = ("Player_Cash", "Player_Xp", *(flag for flag, _ in plan.reputation.values()))
+        wanted = ("Player_Cash", "Player_Xp", *(flag for flag, _ in plan.reputation.values()),
+                  *(flag for flag, _ in plan.advantage))
         balances = {}
         for role, frame in (("host", owner), ("guest", member)):
             flags = stock_flags(directory, frame, redemption)
@@ -314,8 +316,9 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         after = await stock_balances()
         expected_reputation = {flag: reputation[faction]["before"] + delta
                                for faction, (flag, delta) in plan.reputation.items()}
+        expected_advantage = {flag: before["host"][flag] + delta for flag, delta in plan.advantage}
         assert after["host"] == dict(before["host"], Player_Cash=before["host"]["Player_Cash"] + spec.cash,
-                                     Player_Xp=before["host"]["Player_Xp"] + 1, **expected_reputation), after
+                                     Player_Xp=before["host"]["Player_Xp"] + 1, **expected_reputation, **expected_advantage), after
         assert after["guest"] == dict(before["guest"], Player_Xp=before["guest"]["Player_Xp"] + 1), after
         evidence.update(stock_turn_in=redeemed, stock_after=after)
         assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"

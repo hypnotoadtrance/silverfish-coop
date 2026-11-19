@@ -175,6 +175,8 @@ def parser() -> argparse.ArgumentParser:
         "native-brandy-preflight", "native-brandy-approach",
         "native-pocket-watch-preflight", "native-pocket-watch-approach",
         "native-savlo-ring-preflight", "native-savlo-ring-approach", "native-savlo-ring-xp-fixture",
+        "native-molasses-preflight", "native-molasses-approach",
+        "native-savlo-keycard-preflight", "native-savlo-keycard-approach", "native-savlo-keycard-xp-fixture",
         "native-meet-broker-preflight", "native-meet-broker-approach",
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-lake-jammer-preflight", "native-lake-jammer-approach", "native-lake-jammer-aim",

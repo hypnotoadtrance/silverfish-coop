@@ -5,7 +5,7 @@ import time
 
 from . import native_host_save, party
 from .native_gold import valid_guid
-from .travel import BOROUGH, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
+from .travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
 
 SOURCE = "observatory-comp-board"
@@ -22,6 +22,9 @@ SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
 BOROUGH_MRE = "borough-mre"
 DUST_FILTER = "railyard-dust-filter"
+MOLASSES = "northeast-rail-molasses"
+SAVLO_KEYCARD = "trench-savlo-keycard"
+TRENCH = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -42,6 +45,10 @@ SOURCES = {
                   "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
     DUST_FILTER: (RAIL_YARD, f"Helm_DustFilter_C {RAIL_YARD}.RailYard_P:PersistentLevel.Helm_DustFilter_C_1",
                   "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"),
+    MOLASSES: (NORTHEAST_RAIL, f"Item_Molasis_C {NORTHEAST_RAIL}.NorthEast_Rail_P:PersistentLevel.Item_Molasis_C_1",
+               "/Game/Classes/Items/Item_Molasis.Item_Molasis_C"),
+    SAVLO_KEYCARD: (TRENCH, f"KeyCard_Savlo_BP_C {TRENCH}.Trench_01_P:PersistentLevel.KeyCard_Savlo_BP_C_1",
+                    "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

@@ -32,6 +32,8 @@ namespace
     constexpr auto scientist_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01");
     constexpr auto black_market_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01");
     constexpr auto scav_bar_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P");
+    constexpr auto shopkeep_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P");
+    constexpr auto observatory_world_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -46,6 +48,8 @@ namespace
     constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
     constexpr auto pocket_watch_item_path = STR("/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C");
     constexpr auto savlo_ring_item_path = STR("/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C");
+    constexpr auto molasses_item_path = STR("/Game/Classes/Items/Item_Molasis.Item_Molasis_C");
+    constexpr auto savlo_keycard_item_path = STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C");
     constexpr auto pump_tape_item_path = STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
@@ -193,7 +197,7 @@ namespace
         return find<U::UWorld>(path.c_str()) == world ? world : nullptr;
     }
 
-    enum class PartyWorld { borough, scientist, black_market, scav_bar, current_campaign };
+    enum class PartyWorld { borough, scientist, black_market, scav_bar, shopkeep, observatory, current_campaign };
 
     struct Party
     {
@@ -217,6 +221,8 @@ namespace
             case PartyWorld::scientist: world = find<U::UWorld>(scientist_world_path); break;
             case PartyWorld::black_market: world = find<U::UWorld>(black_market_world_path); break;
             case PartyWorld::scav_bar: world = find<U::UWorld>(scav_bar_world_path); break;
+            case PartyWorld::shopkeep: world = find<U::UWorld>(shopkeep_world_path); break;
+            case PartyWorld::observatory: world = find<U::UWorld>(observatory_world_path); break;
             case PartyWorld::current_campaign: world = current_campaign_world(pawn_address, pawn_class); break;
             }
             if (!live(world)) return false;
@@ -680,6 +686,10 @@ namespace
         savlo_ring_item_path, 20000};
     constexpr ObjectiveQuest pump_room_objective{"pump_room", PartyWorld::black_market, STR("Clt_EatherPumpTape"),
         pump_tape_item_path, 3200};
+    constexpr ObjectiveQuest molasses_objective{"molasses", PartyWorld::shopkeep, STR("Clt_Molasis"),
+        molasses_item_path, 30};
+    constexpr ObjectiveQuest savlo_keycard_objective{"savlo_keycard", PartyWorld::observatory, STR("Clct_SavloKey"),
+        savlo_keycard_item_path, 50000};
     constexpr ObjectiveQuest stone_maze_objective{"stone_maze", PartyWorld::scientist, stone_maze_id,
         stone_maze_tape_path, 7500, stone_maze_armor_path, 3};
 
@@ -1165,6 +1175,8 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
+    lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);
+    lua.register_function("SilverfishStageSavloKeycardObjective", stage_objective<savlo_keycard_objective>);
     lua.register_function("SilverfishStagePumpRoomObjective", stage_objective<pump_room_objective>);
     lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);
     lua.register_function("SilverfishCaptureStoneMazeReward", capture_stone_maze_reward);

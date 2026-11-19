@@ -16,6 +16,8 @@ local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
+local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 local profiles = {
     {
         map = observatory,
@@ -95,6 +97,22 @@ local profiles = {
         path = depot .. ".RailYard_P:PersistentLevel.Helm_DustFilter_C_1",
         class = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C",
         name = "Helm_DustFilter_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = northeast_rail,
+        source = "northeast-rail-molasses",
+        path = northeast_rail .. ".NorthEast_Rail_P:PersistentLevel.Item_Molasis_C_1",
+        class = "/Game/Classes/Items/Item_Molasis.Item_Molasis_C",
+        name = "Item_Molasis_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = trench,
+        source = "trench-savlo-keycard",
+        path = trench .. ".Trench_01_P:PersistentLevel.KeyCard_Savlo_BP_C_1",
+        class = "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C",
+        name = "KeyCard_Savlo_BP_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

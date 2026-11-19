@@ -6,7 +6,7 @@ import uuid
 
 from . import native_computer_board, native_flood_jammer, native_mosby_tape, native_turret_photo, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
+from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
 HEARTBEAT = "native-wire-board-heartbeat"
 FIXTURE = "native-wire-board-fixture"
@@ -20,6 +20,8 @@ DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
 LENNY = native_flood_jammer.LENNY
 QUESTS = {
+    SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
+    OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id}),
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
