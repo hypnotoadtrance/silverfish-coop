@@ -80,7 +80,31 @@ class NativeHostLandmineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(host.native_checkpoint_unsafe)
         self.assertTrue(host.stopping)
 
+    async def test_failed_placement_retains_the_last_exact_projectile_frame(self):
+        host = self.host()
+        bridge = self.bridge(host)
+        await mine.perform(host, bridge, mine.PREPARE, None, PREPARE)
+        frames = iter((self.snapshot("primed"), self.snapshot("released", active_projectiles=1,
+                                                           projectile_position=[101, 102, 103])))
+
+        async def wait_for(condition, timeout):
+            packet = next(frames)
+            if not condition(packet):
+                raise TimeoutError("raw bridge timeout")
+            return packet
+
+        bridge.wait_for.side_effect = wait_for
+        with self.assertRaisesRegex(RuntimeError, r"stock_host_landmine_placement_timeout:.*\[101,102,103\]"):
+            await mine.perform(host, bridge, mine.DEPLOY, GUID, DEPLOY)
+        self.assertEqual(bridge.command.await_count, 3)
+        self.assertEqual(host.checkpoint_native.await_count, 3)
+        self.assertTrue(host.stopping)
+
     def test_tsv_decodes_distinct_placed_actor_and_saved_location(self):
         frame = mine.parse(("native-host-landmine", OBSERVATORY, PAWN, "persisted", GUID, "stock mine", "stock projectile",
                             "1", "1", "1", "1", "0", "0", "1", "5", "6", "7"))
         self.assertEqual(frame, self.snapshot("persisted")[mine.KEY])
+        extended = mine.parse(["native-host-landmine", OBSERVATORY, PAWN, "released", GUID, "-", "stock projectile",
+                              "1", "1", "0", "0", "0", "0", "0", "-", "-", "-", "1", "5", "6", "7", "0.999"])
+        self.assertEqual(extended["projectile_position"], [5, 6, 7])
+        self.assertEqual(extended["aim_dot"], .999)

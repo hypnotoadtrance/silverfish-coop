@@ -148,10 +148,16 @@ local function launched(ctx)
     return count, found
 end
 
-local function settled(actor)
-    local box = valid(actor) and actor.Box
-    local speed = valid(box) and same(box:GetOwner(), actor) and point(box:GetPhysicsLinearVelocity())
-    return speed and speed.X^2 + speed.Y^2 + speed.Z^2 <= 36
+local function retention(ctx, actor)
+    local here = valid(actor) and point(actor:K2_GetActorLocation())
+    if not here then return end
+    local now = age(ctx)
+    local identity = actor:GetFullName()
+    if run.retained_actor and identity ~= run.retained_actor then return end
+    if not run.retained_at or square(here, run.retained_at) > 4 then
+        run.retained_actor, run.retained_at, run.retained_since = identity, here, now
+    end
+    return now - run.retained_since
 end
 
 local function stored(ctx)
@@ -236,20 +242,63 @@ local function clear_lane(ctx, tool)
             and floor.Z < lens.Z - 65 and floor.Z > lens.Z - 245 and square(floor, guest) > 430^2 then
             local target = { X = x, Y = y, Z = floor.Z + 20 }
             if cast(lens, target, {}) == false then
-                local dx, dy, dz = x - lens.X, y - lens.Y, target.Z - lens.Z
-                selected = { Pitch = math.deg(math.atan(dz, math.sqrt(dx^2 + dy^2))),
-                    Yaw = math.deg(math.atan(dy, dx)), Roll = 0 }
+                selected = { floor = floor, surface = surface, trace = trace, color = color }
                 break
             end
         end
     end
     require_value(selected, "stock_floor_throw_lane_unavailable")
-    run.rotation = { Pitch = previous.Pitch, Yaw = previous.Yaw, Roll = previous.Roll }
-    run.origin = origin
-    ctx.controller:SetControlRotation(selected)
-    local rotation = ctx.controller:GetControlRotation()
-    require_value(rotation and math.abs((rotation.Pitch - selected.Pitch + 180) % 360 - 180) < .1
-        and math.abs((rotation.Yaw - selected.Yaw + 180) % 360 - 180) < .1, "stock_aim_readback", true)
+    run.lane, run.origin, run.arrow, run.camera = selected, origin, arrow, camera
+end
+
+local function at_stock_aim(ctx, tool, invoke)
+    local lane, arrow, camera = run.lane, run.arrow, run.camera
+    require_value(lane and valid(lane.surface) and same(ctx.pawn.Arrow_NadeThrow, arrow) and same(ctx.pawn.Camera, camera)
+        and same(arrow:GetOwner(), ctx.pawn) and same(camera:GetOwner(), ctx.pawn), "stock_throw_component_changed", true)
+    local function rotation(value)
+        if value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) then
+            return { Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll }
+        end
+    end
+    local before_control = rotation(ctx.controller:GetControlRotation())
+    local before_camera = rotation(camera:K2_GetComponentRotation())
+    local before_arrow = rotation(arrow:K2_GetComponentRotation())
+    require_value(before_control and before_camera and before_arrow, "stock_throw_rotation_unavailable", true)
+    local function aim(from)
+        local dx, dy, dz = lane.floor.X - from.X, lane.floor.Y - from.Y, lane.floor.Z - from.Z
+        return { Pitch = math.deg(math.atan(dz, math.sqrt(dx^2 + dy^2))), Yaw = math.deg(math.atan(dy, dx)), Roll = 0 }
+    end
+    local ok, result = pcall(function()
+        local eye = require_value(point(camera:K2_GetComponentLocation()), "stock_throw_eye_unavailable", true)
+        local view = aim(eye)
+        ctx.controller:SetControlRotation(view)
+        camera:K2_SetWorldRotation(view, false, {}, true)
+        local from = require_value(point(arrow:K2_GetComponentLocation()), "stock_throw_origin_unavailable", true)
+        arrow:K2_SetWorldRotation(aim(from), false, {}, true)
+        local forward = require_value(point(arrow:GetForwardVector()), "stock_throw_direction_unavailable", true)
+        local extent = math.sqrt(square(from, lane.floor))
+        local dot = ((lane.floor.X - from.X) * forward.X + (lane.floor.Y - from.Y) * forward.Y
+            + (lane.floor.Z - from.Z) * forward.Z) / extent
+        require_value(extent >= 225 and extent <= 680 and dot > .998 and forward.Z < -.06,
+            "stock_throw_arrow_unaligned", true)
+        local reach = extent + 30
+        local target = { X = from.X + reach * forward.X, Y = from.Y + reach * forward.Y, Z = from.Z + reach * forward.Z }
+        local hit = {}
+        local found = lane.trace:LineTraceSingle(ctx.pawn, from, target, 0, false, {ctx.pawn, ctx.guest, tool}, 0,
+            hit, true, lane.color, lane.color, 0)
+        hit = hit.OutHit or hit
+        local surface = hit.Component and hit.Component:Get()
+        local impact = point(hit.ImpactPoint)
+        require_value(found == true and same(surface, lane.surface) and impact and square(impact, lane.floor) <= 36^2,
+            "stock_throw_ray_did_not_reach_floor", true)
+        run.aim_dot = dot
+        return invoke(forward)
+    end)
+    ctx.controller:SetControlRotation(before_control)
+    camera:K2_SetWorldRotation(before_camera, false, {}, true)
+    arrow:K2_SetWorldRotation(before_arrow, false, {}, true)
+    if not ok then error(result, 0) end
+    return result
 end
 
 local function press(ctx)
@@ -270,16 +319,23 @@ local function release(ctx)
     local tool = require_value(held(ctx, run.class, run.guid), "release_item_unavailable", true)
     require_value(tool.Cooking == true and tool.Held_Primary == true and finite(tool.CookTime)
         and tool.CookTime >= 0 and tool.CookTime < 1.4 and age(ctx) - run.started <= 2.25, "stock_cook_window_elapsed", true)
-    run.state, run.releases = "released", 1
-    tool:Use_Item_Primary(false, 0.0)
-    local count, projectile = launched(ctx)
-    require_value(count == 1 and valid(projectile), "stock_projectile_readback", true)
-    run.projectile_name = projectile:GetFullName()
-    ctx.controller:SetControlRotation(run.rotation)
+    at_stock_aim(ctx, tool, function(forward)
+        run.state, run.releases = "released", 1
+        tool:Use_Item_Primary(false, 0.0)
+        local count, projectile = launched(ctx)
+        require_value(count == 1 and valid(projectile), "stock_projectile_readback", true)
+        run.projectile_name = projectile:GetFullName()
+        local movement = projectile.ProjectileMovement
+        local velocity = valid(movement) and point(movement.Velocity)
+        local speed = velocity and math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2)
+        require_value(speed and speed > 100 and (velocity.X * forward.X + velocity.Y * forward.Y
+            + velocity.Z * forward.Z) / speed > .998, "stock_projectile_velocity_readback", true)
+    end)
 end
 
 local function inspect(ctx, state)
     local count, actor = tagged(ctx)
+    local flight, projectile = launched(ctx)
     local saved, location = stored(ctx)
     local position = actor and point(actor:K2_GetActorLocation())
     local class = StaticFindObject(mine_class)
@@ -288,14 +344,17 @@ local function inspect(ctx, state)
         actor = actor and actor:GetFullName() or "-", position = position, saved = saved, remaining = owned,
         guest_remaining = guest_owned, same_transform = position and location and square(position, location) <= 4,
         presses = run and run.presses or 0, releases = run and run.releases or 0,
-        projectile = run and run.projectile_name or "-" }
+        projectile = run and run.projectile_name or "-", flights = flight,
+        flight_position = projectile and point(projectile:K2_GetActorLocation()),
+        aim_dot = run and run.aim_dot }
     return result, actor
 end
 
 local function persist(ctx)
     local snapshot, actor = inspect(ctx, "persisted")
     local guest_position = point(ctx.guest:K2_GetActorLocation())
-    require_value(owns_run(ctx) and run.state == "released" and snapshot.count == 1 and settled(actor)
+    local retained = owns_run(ctx) and retention(ctx, actor)
+    require_value(retained and retained >= .30 and run.state == "released" and snapshot.count == 1
         and snapshot.remaining == 0 and snapshot.guest_remaining == 0 and launched(ctx) == 0
         and snapshot.position and square(snapshot.position, run.origin) < 1800^2
         and guest_position and square(snapshot.position, guest_position) > 225^2
@@ -342,15 +401,22 @@ function mine.rows(state, phase, status_row)
             if valid(tool) and tool.Cooking == true and tool.Held_Primary == true then step = "primed" end
         elseif step == "released" and launched(ctx) == 0 then
             local count, actor = tagged(ctx)
-            if count == 1 and settled(actor) then step = "placed" end
+            local retained = count == 1 and retention(ctx, actor)
+            if retained and retained >= .30 then
+                step = "placed"
+            elseif (run.retained_actor and not retained) or count > 1 then
+                step = "retention_failed"
+            end
         end
         found = inspect(ctx, step)
     end
     if not found or found.pawn ~= ctx.name then return {} end
     local at = found.position or {}
+    local flight = found.flight_position or {}
     return { status_row("native-host-landmine", map, found.pawn, found.state, found.guid, found.actor, found.projectile,
         found.presses, found.releases, found.count, found.saved or "-", found.remaining or "-", found.guest_remaining or "-",
-        found.same_transform and 1 or 0, at.X or "-", at.Y or "-", at.Z or "-") }
+        found.same_transform and 1 or 0, at.X or "-", at.Y or "-", at.Z or "-", found.flights,
+        flight.X or "-", flight.Y or "-", flight.Z or "-", found.aim_dot or "-") }
 end
 
 return mine

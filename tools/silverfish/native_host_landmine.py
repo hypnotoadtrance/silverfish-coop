@@ -1,5 +1,6 @@
 """Verify one stock host-deployed LandMine in an isolated campaign."""
 
+import json
 import math
 import time
 
@@ -16,17 +17,28 @@ ACTIONS = (PREPARE, DEPLOY, INSPECT)
 
 
 def parse(fields: list[str]) -> dict | None:
-    if len(fields) != 17 or fields[0] != "native-host-landmine" or fields[13] not in ("0", "1"):
+    if len(fields) not in (17, 22) or fields[0] != "native-host-landmine" or fields[13] not in ("0", "1"):
         return None
-    location = None
-    if fields[14:] != ["-", "-", "-"]:
-        location = list(map(float, fields[14:]))
-        if not all(math.isfinite(value) and abs(value) < 1e8 for value in location):
+
+    def position(values):
+        if all(value == "-" for value in values):
             return None
-    return dict(zip(("map", "pawn", "state", "guid", "actor", "projectile"), fields[1:7]),
-                **{key: None if value == "-" else int(value) for key, value in zip(
-                    ("presses", "releases", "actors", "saved", "remaining", "guest_remaining"), fields[7:13])},
-                same_transform=fields[13] == "1", position=location)
+        location = list(map(float, values))
+        if not all(math.isfinite(value) and abs(value) < 1e8 for value in location):
+            raise ValueError("Invalid stock LandMine position")
+        return location
+
+    result = dict(zip(("map", "pawn", "state", "guid", "actor", "projectile"), fields[1:7]),
+                  **{key: None if value == "-" else int(value) for key, value in zip(
+                      ("presses", "releases", "actors", "saved", "remaining", "guest_remaining"), fields[7:13])},
+                  same_transform=fields[13] == "1", position=position(fields[14:17]))
+    if len(fields) == 22:
+        aim = None if fields[21] == "-" else float(fields[21])
+        if aim is not None and (not math.isfinite(aim) or abs(aim) > 1.001):
+            return None
+        result.update(active_projectiles=int(fields[17]), projectile_position=position(fields[18:21]),
+                      aim_dot=aim)
+    return result
 
 
 async def perform(host, bridge, action: str, target: str | None, operation_id: str) -> dict:
@@ -54,6 +66,31 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             return {}
         return row
 
+    def phase_error(phase, reason, last):
+        return RuntimeError(f"stock_host_landmine_{phase}_{reason}: {json.dumps(last, separators=(',', ':'))}")
+
+    async def wait_phase(phase, wanted, last, timeout):
+        def accept(snapshot):
+            nonlocal last
+            observed = frame(snapshot)
+            if not observed:
+                return False
+            last = observed
+            return last.get("state") in (wanted, "retention_failed")
+
+        try:
+            await bridge.wait_for(accept, timeout=timeout)
+        except TimeoutError as error:
+            raise phase_error(phase, "timeout", last) from error
+        if last.get("state") != wanted:
+            raise phase_error(phase, "unverified", last)
+
+    async def request_phase(verb, phase, timeout, last=None):
+        try:
+            return await bridge.command(verb, pawn, timeout=timeout)
+        except TimeoutError as error:
+            raise phase_error(phase, "ack_timeout", last or {}) from error
+
     if action == INSPECT:
         snapshot = await bridge.command(INSPECT, pawn, timeout=5)
         report = frame(snapshot, "inspected")
@@ -78,6 +115,8 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
         try:
             first_action = PREPARE if action == PREPARE else "native-host-landmine-press-fixture"
             snapshot = await bridge.command(first_action, pawn, timeout=3)
+        except TimeoutError as error:
+            raise phase_error("prepare" if action == PREPARE else "press", "ack_timeout", {}) from error
         except RuntimeError as error:
             if str(error).startswith("stock_host_landmine_"):
                 host.native_checkpoint_unsafe = False
@@ -93,14 +132,14 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             if proof.get("state") not in ("pressed", "primed") or proof.get("presses") != 1:
                 raise RuntimeError("The stock LandMine primary press did not verify")
             if proof["state"] != "primed":
-                await bridge.wait_for(lambda packet: bool(frame(packet, "primed")), timeout=1.75)
-            snapshot = await bridge.command("native-host-landmine-release-fixture", pawn, timeout=3)
+                await wait_phase("priming", "primed", proof, 1.75)
+            snapshot = await request_phase("native-host-landmine-release-fixture", "release", 3, proof)
             release = frame(snapshot)
             if release.get("state") not in ("released", "placed") or release.get("releases") != 1 or release.get("projectile") == "-":
                 raise RuntimeError("The stock LandMine primary release and exact projectile did not verify")
             if release["state"] != "placed":
-                await bridge.wait_for(lambda packet: bool(frame(packet, "placed")), timeout=6)
-            snapshot = await bridge.command("native-host-landmine-persist-fixture", pawn, timeout=5)
+                await wait_phase("placement", "placed", release, 6)
+            snapshot = await request_phase("native-host-landmine-persist-fixture", "persist", 5, release)
             report = frame(snapshot, "persisted")
             if not report or (report["presses"], report["releases"], report["actors"], report["saved"],
                               report["remaining"], report["guest_remaining"], report["same_transform"]) != (1, 1, 1, 1, 0, 0, True):
