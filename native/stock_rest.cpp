@@ -112,6 +112,7 @@ namespace
         bool pending{};
         Clock::time_point request_expires{};
         std::int32_t selection{};
+        bool insomnia{};
         std::string_view status{"unbound"};
     };
 
@@ -470,15 +471,10 @@ namespace
             return;
         }
         auto* caller = frame ? frame->PreviousFrame() : nullptr;
-        if (guard.profile->faction == 0 && owner_pawn == guard.pawn.Get() && caller &&
-            caller->Object() == context && caller->Node() == guard.bed_script)
-        {
-            guard.status = "neutral_insomnia_veto";
-            if (scope.generation == epoch) scope.status = guard.status;
-            return;
-        }
-        auto* screen = frame ? qualified_screen(*frame, context) : nullptr;
-        if (scope.generation != epoch || !screen || !live_scope(scope) || owner_pawn != scope.pawn.Get())
+        const bool insomnia = guard.profile->faction == 0 && caller &&
+            caller->Object() == context && caller->Node() == guard.bed_script;
+        auto* screen = !insomnia && frame ? qualified_screen(*frame, context) : nullptr;
+        if (scope.generation != epoch || (!screen && !insomnia) || !live_scope(scope) || owner_pawn != scope.pawn.Get())
         {
             guard.status = "unqualified_native_rest_veto";
             return;
@@ -492,8 +488,9 @@ namespace
         auto* count = field<Unreal::FIntProperty>(screen, STR("Count"));
         auto* maximum = field<Unreal::FIntProperty>(screen, STR("Max"));
         const auto hours = locals ? scope.hours->GetPropertyValueInContainer(locals) : -1;
-        if (!count || !maximum || maximum->GetPropertyValueInContainer(screen) != max_hours ||
-            hours < 0 || hours > max_hours || count->GetPropertyValueInContainer(screen) != hours)
+        if (hours < (insomnia ? 1 : 0) || hours > max_hours ||
+            (!insomnia && (!count || !maximum || maximum->GetPropertyValueInContainer(screen) != max_hours ||
+                           count->GetPropertyValueInContainer(screen) != hours)))
         {
             scope.status = "unqualified_selection_veto";
             return;
@@ -505,8 +502,9 @@ namespace
         }
         scope.pending = true;
         scope.selection = hours;
+        scope.insomnia = insomnia;
         scope.request_expires = now + request_lease;
-        scope.status = "selected";
+        scope.status = insomnia ? "selected_insomnia" : "selected";
     }
 
     void intercept_script(Iteration& iteration, Unreal::UObject* context, Unreal::FFrame& frame, void*)
@@ -577,7 +575,8 @@ namespace
         lua.set_integer(accepted ? static_cast<std::int64_t>(address(scope.pawn.Get())) : 0);
         lua.set_integer(accepted ? static_cast<std::int64_t>(address(scope.bed.Get())) : 0);
         lua.set_integer(accepted ? scope.selection : 0);
-        return 4;
+        lua.set_bool(accepted && scope.insomnia);
+        return 5;
     }
 
     int lua_read_status(const Lua& lua)

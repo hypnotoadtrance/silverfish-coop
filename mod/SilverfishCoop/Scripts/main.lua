@@ -704,11 +704,12 @@ local function run_command(fields, state, current_phase)
         return "stock world checkpoint flush inspected"
     elseif command == "native-rest-inspect" or command == "native-rest" then
         local apply = command == "native-rest"
-        if #fields ~= (apply and 5 or 4) or role ~= "host" or current_phase ~= "hosting" then
+        local insomnia = apply and fields[6] == "insomnia"
+        if #fields ~= (apply and (insomnia and 6 or 5) or 4) or role ~= "host" or current_phase ~= "hosting" then
             error("Stock rest requires the exact active host and bed", 0)
         end
         if apply then
-            last_rest = native_rest.apply(state, current_phase, argument, fields[4], tonumber(fields[5]))
+            last_rest = native_rest.apply(state, current_phase, argument, fields[4], tonumber(fields[5]), insomnia)
         else
             last_rest = native_rest.inspect(state, current_phase, argument, fields[4])
         end
@@ -718,6 +719,11 @@ local function run_command(fields, state, current_phase)
             error("Stock sleep confirmation requires the exact host", 0)
         end
         return native_rest.ui_fixture(state, current_phase, argument, tonumber(fields[4]))
+    elseif command == "native-rest-insomnia-fixture" then
+        if #fields ~= 3 or role ~= "host" or current_phase ~= "hosting" then
+            error("Stock Insomnia fixture requires the exact host", 0)
+        end
+        return native_rest.insomnia_fixture(state, current_phase, argument)
     elseif command == "native-rest-guest-interaction-fixture" then
         if #fields ~= 3 or (current_phase ~= "hosting" and current_phase ~= "connected") then
             error("Stock rest denial requires the exact enrolled guest", 0)

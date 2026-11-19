@@ -758,7 +758,7 @@ class Bridge:
                              fields[4].decode("utf-8", errors="replace") if len(fields) == 5 else None))
         return requests
 
-    def native_rest_requests(self) -> list[tuple[str, str, str, str, int]]:
+    def native_rest_requests(self) -> list[tuple[str, str, str, str, int, bool]]:
         try:
             with (self.directory / "native-rest-events").open("rb") as stream:
                 stream.seek(self.rest_offset)
@@ -770,13 +770,17 @@ class Bridge:
         requests = []
         for line in batch[:end].splitlines():
             fields = line.split(b"\t")
-            if (len(fields) != 6 or fields[0] != b"rest" or not fields[1].isdigit() or len(fields[1]) > 12
+            if (len(fields) not in (6, 7) or fields[0] != b"rest" or not fields[1].isdigit() or len(fields[1]) > 12
                     or not fields[5].isdigit() or len(fields[5]) > 2 or not 0 <= int(fields[5]) <= 10
+                    or len(fields) == 7 and fields[6] not in (b"insomnia", b"screen")
                     or not all(0 < len(field) <= 512 for field in fields[2:5])):
+                continue
+            insomnia = len(fields) == 7 and fields[6] == b"insomnia"
+            if insomnia and int(fields[5]) == 0:
                 continue
             operation_id = uuid.uuid5(self.input_namespace, "rest" + fields[1].decode("ascii")).hex
             source, pawn, bed = (field.decode("utf-8", errors="replace") for field in fields[2:5])
-            requests.append((operation_id, source, pawn, bed, int(fields[5])))
+            requests.append((operation_id, source, pawn, bed, int(fields[5]), insomnia))
         return requests
 
     def native_cube_requests(self, cube: str) -> list[GoldRequest]:

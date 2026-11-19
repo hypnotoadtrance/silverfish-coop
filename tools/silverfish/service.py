@@ -2672,6 +2672,10 @@ class Host:
                         raise ValueError("The exact stock bed and sleep hours are required")
                     snapshot = await bridge.command(action, proof["pawn"], str(hours), timeout=6)
                     result = {"native_rest_hook": snapshot.get("native_rest_hook", {})}
+                elif action == "native-rest-insomnia-fixture" and self.fixtures:
+                    proof = await native_rest.checked(self, bridge, "native-rest-inspect")
+                    snapshot = await bridge.command(action, proof["pawn"], timeout=6)
+                    result = {"native_rest_hook": snapshot.get("native_rest_hook", {})}
                 elif action == "native-rest-guest-interaction-fixture" and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     owner = self.native_recipients().get(character)
@@ -2771,13 +2775,13 @@ class Host:
                 write_text(bridge.directory / "native-zone-roster", "\n".join(listing) + "\n")
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
-        for operation_id, source, pawn, bed, hours in bridge.native_rest_requests():
+        for operation_id, source, pawn, bed, hours, insomnia in bridge.native_rest_requests():
             local = self.last_game.get("pawns", {}).get("local", {}).get("name")
             site = native_rest.site(source)
             if source != self.last_game.get("map") or not site or pawn != local or bed != site[2]:
                 continue
             try:
-                await native_rest.perform(self, bridge, operation_id, hours)
+                await native_rest.perform(self, bridge, operation_id, hours, insomnia=insomnia)
             except (OSError, RuntimeError, ValueError) as error:
                 self.control.event("native_rest_input_denied", operation_id=operation_id, reason=str(error))
                 if self.stopping:

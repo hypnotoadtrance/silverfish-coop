@@ -41,7 +41,7 @@ def select_routes(selectors):
     return routes
 
 
-async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False):
+async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -107,12 +107,18 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             assert refusal["status"] == "guest_interaction_denied", refusal
             approach = (await act("native-rest-approach"))["native_rest"]
             assert (approach["bed"], approach["actor"], approach["eligible"]) == (bed, actor, True), approach
-            selection = (await act("native-rest-ui-fixture", amount=1))["native_rest_hook"]
-            assert selection["status"] == "selected", selection
+            if insomnia:
+                selection = (await act("native-rest-insomnia-fixture"))["native_rest_hook"]
+                assert selection["status"] == "selected_insomnia", selection
+            else:
+                selection = (await act("native-rest-ui-fixture", amount=1))["native_rest_hook"]
+                assert selection["status"] == "selected", selection
             await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("native_rest", {}).get("bed") == bed)
             sleep, = events("native_rest_checkpoint", current["generation"])
-            assert sleep["bed"] == bed and abs(sleep["after"] - sleep["before"] - 3600) < .25, sleep
-            evidence["stock_rest"] = {"guest_refusal": refusal, "sleep": sleep}
+            hours = sleep["hours"]
+            assert (1 <= hours <= 10 and sleep["insomnia"] is True) if insomnia else hours == 1, sleep
+            assert sleep["bed"] == bed and abs(sleep["after"] - sleep["before"] - hours * 3600) < .25, sleep
+            evidence["stock_rest"] = {"guest_refusal": refusal, "selection": selection, "sleep": sleep}
         for route in routes:
             door = route.kind == "door"
             options = {"entrance": route.entrance}
@@ -214,12 +220,15 @@ if __name__ == "__main__":
     parser.add_argument("--verify-regroup-message", action="store_true")
     parser.add_argument("--sleep-and-wipe", action="store_true",
                         help="sleep at the starting map's stock bed and return there after a wipe")
+    parser.add_argument("--stock-insomnia", action="store_true", help="verify the stock Insomnia roll at a neutral bed")
     config = parser.parse_args()
     try:
         selected = select_routes(config.route)
         if config.sleep_and_wipe and (site(selected[0].source) is None or selected[-1].destination == selected[0].source):
             raise ValueError("Choose a starting map with a stock bed and finish in a different map")
+        if config.stock_insomnia and not config.sleep_and_wipe:
+            raise ValueError("--stock-insomnia requires --sleep-and-wipe at a neutral bed")
     except ValueError as error:
         parser.error(str(error))
     asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
-                       config.verify_regroup_message, config.sleep_and_wipe))
+                       config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia))

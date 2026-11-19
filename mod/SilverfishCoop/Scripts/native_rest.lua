@@ -21,6 +21,7 @@ local day_path = "/Game/Classes/Actors/DayCycle_SunControler_BP." .. day_class
 local antfarm_class = "AntfarmController_C"
 local antfarm_path = "/Game/Classes/AntFarm/AntfarmController." .. antfarm_class
 local code_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
+local permanent_effects = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
 
 rest.map, rest.actor = map, actor_name
 local stock_scope
@@ -120,6 +121,8 @@ local function close_to_bed(pawn, box)
     return math.sqrt(x * x + y * y + z * z), range, second
 end
 
+local insomnia_selection
+
 local function inspect_bed(state, phase, pawn_name, requested_actor)
     local profile = native_bed.profile(state.map)
     if not profile or requested_actor ~= profile.actor_full_name then error("native_rest_actor_unqualified", 0) end
@@ -170,20 +173,22 @@ function rest.inspect(state, phase, pawn_name, requested_actor)
     return report
 end
 
-function rest.interaction(state, phase, actor, interactor)
+function rest.interaction(state, phase, actor, interactor, insomnia)
     local host = state.local_pawn
     local profile = native_bed.profile(state.map)
     if not profile or not host or not valid(interactor) or not same(interactor, host.pawn)
         or not valid(actor) or actor:GetFullName() ~= profile.actor_full_name then return end
     local report, context = inspect_bed(state, phase, interactor:GetFullName(), profile.actor_full_name)
-    if report.eligible and same(actor, context.actor) then return report end
+    local eligible = insomnia and report.reason == "insomnia_requires_stock_sleep_selection"
+        or not insomnia and report.eligible
+    if eligible and same(actor, context.actor) then return report end
 end
 
 -- For a qualified pre-dispatch hook on SavePoint_BP_C:GoToSleep. The
 -- stock interaction caches the interactor before the SleepScreen opens.
-function rest.selection(state, phase, actor, hours)
+function rest.selection(state, phase, actor, hours, insomnia)
     if not valid(actor) or not valid(actor.Player) then return end
-    local report = rest.interaction(state, phase, actor, actor.Player)
+    local report = rest.interaction(state, phase, actor, actor.Player, insomnia)
     if report then
         report.hours = hours_selected(hours)
         return report
@@ -210,10 +215,21 @@ local function sleep_receiver(context)
     return actor
 end
 
-function rest.apply(state, phase, pawn_name, requested_actor, hours)
+function rest.apply(state, phase, pawn_name, requested_actor, hours, insomnia)
     hours = hours_selected(hours)
     local report, context = inspect_bed(state, phase, pawn_name, requested_actor)
-    if not report.eligible then error("native_rest_" .. report.reason, 0) end
+    if insomnia then
+        local selection = insomnia_selection
+        if not selection or os.time() > selection.expires or selection.hours ~= hours or selection.pawn ~= pawn_name
+            or selection.actor ~= requested_actor or not same(context.actor, selection.bed)
+            or report.reason ~= "insomnia_requires_stock_sleep_selection" then
+            error("native_rest_insomnia_selection_unavailable", 0)
+        end
+        insomnia_selection = nil
+        report.eligible, report.reason = true, nil
+    elseif not report.eligible then
+        error("native_rest_" .. report.reason, 0)
+    end
     local day = world_actor(day_class, day_path, context.world)
     local day_name = day_class .. " " .. report.map .. "." .. report.level .. ":PersistentLevel." .. day_class .. "_0"
     local clock = StaticFindObject(math_path)
@@ -268,6 +284,7 @@ function rest.clear_hook()
     if not stock_scope and not stock_guard then return end
     stock_scope = nil
     stock_guard = nil
+    insomnia_selection = nil
     if type(SilverfishClearNativeStockRestScope) == "function" then SilverfishClearNativeStockRestScope() end
 end
 
@@ -307,16 +324,20 @@ function rest.sync_hook(state, phase)
     if not valid(bed) or not SilverfishSetNativeStockRestScope(pawn:GetAddress(), bed:GetAddress()) then return end
     stock_scope = { bed = bed }
 
-    local took, owner, receiver, hours = SilverfishTakeNativeStockRestRequest()
+    local took, owner, receiver, hours, insomnia = SilverfishTakeNativeStockRestRequest()
     if not took or owner ~= pawn:GetAddress() or receiver ~= bed:GetAddress() then return end
-    local checked, selection = pcall(rest.selection, state, phase, bed, hours)
+    if insomnia == true and insomnia_selection and os.time() <= insomnia_selection.expires then return end
+    local checked, selection = pcall(rest.selection, state, phase, bed, hours, insomnia == true)
     if not checked or not selection then return end
     local file = io.open(bridge .. "/native-rest-events", "ab")
     if not file then return end
     request_sequence = request_sequence + 1
-    file:write(table.concat({ "rest", request_sequence, selection.map, selection.pawn,
-        selection.actor, selection.hours }, "\t"), "\n")
-    file:close()
+    local written = file:write(table.concat({ "rest", request_sequence, selection.map, selection.pawn,
+        selection.actor, selection.hours, insomnia == true and "insomnia" or "screen" }, "\t"), "\n")
+    if file:close() and written and insomnia == true then
+        selection.bed, selection.expires = bed, os.time() + 20
+        insomnia_selection = selection
+    end
 end
 
 function rest.hook_rows(status_row)
@@ -364,6 +385,42 @@ function rest.ui_fixture(state, phase, pawn_name, hours)
     guard(false)
     if not opened then error(problem, 0) end
     return "verified stock sleep screen selection"
+end
+
+function rest.insomnia_fixture(state, phase, pawn_name)
+    local menu_guard = SilverfishSetNativeStockRestTestMenuGuard
+    local profile = native_bed.profile(state.map)
+    if not headless_fixture or type(menu_guard) ~= "function" or not stock_scope or not profile or profile.faction ~= 0 then
+        error("The Insomnia fixture requires a neutral bed in an isolated headless host", 0)
+    end
+    local report, context = inspect_bed(state, phase, pawn_name, profile.actor_full_name)
+    local effects = context.save.Character[permanent_effects]
+    local stack = context.controller.MenuStack
+    if not report.eligible or report.insomnia or not effects or effects:GetArrayNum() ~= 0
+        or not stack or stack:GetArrayNum() ~= 0 or not menu_guard(true) then
+        error("The Insomnia fixture requires a fresh host at the exact stock bed", 0)
+    end
+    local selected, failure = pcall(function()
+        effects[1] = FName("Insomnia", EFindName.FNAME_Find)
+        context.instance:Compile_PassiveEffects()
+        local seeded = inspect_bed(state, phase, pawn_name, profile.actor_full_name)
+        if effects:GetArrayNum() ~= 1 or text(effects[1]) ~= "Insomnia"
+            or seeded.reason ~= "insomnia_requires_stock_sleep_selection" then
+            error("The Insomnia fixture could not establish the exact stock effect", 0)
+        end
+        context.actor:SendInteractionToActor(context.pawn, context.actor.Box)
+        local _, armed, _, decision = SilverfishReadNativeStockRestStatus()
+        if not armed or decision ~= "selected_insomnia" or stack:GetArrayNum() ~= 0 then
+            error("The stock neutral rest did not emit an Insomnia roll (" .. tostring(decision) .. ")", 0)
+        end
+    end)
+    menu_guard(false)
+    if not selected then
+        effects:Empty()
+        context.instance:Compile_PassiveEffects()
+        error(failure, 0)
+    end
+    return "verified stock neutral Insomnia sleep selection"
 end
 
 function rest.guest_fixture(state, phase, pawn_name)

@@ -40,7 +40,7 @@ async def checked(host, bridge, action: str, *arguments: str) -> dict:
     return proof
 
 
-async def perform(host, bridge, operation_id: str, hours: int) -> dict:
+async def perform(host, bridge, operation_id: str, hours: int, *, insomnia: bool = False) -> dict:
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
     if type(hours) is not int or not 0 <= hours <= 10:
@@ -53,21 +53,26 @@ async def perform(host, bridge, operation_id: str, hours: int) -> dict:
     if not checkpoint:
         raise party.RuleError("native_rest_unavailable")
     fingerprint = ["native-rest", checkpoint[2], hours]
+    if insomnia:
+        fingerprint.append("insomnia")
     for receipt in host.party["receipts"].get("host", []):
         if receipt["id"] == operation_id:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     inspected = await checked(host, bridge, "native-rest-inspect")
-    if not inspected["eligible"]:
+    if insomnia and (hours == 0 or inspected["reason"] != "insomnia_requires_stock_sleep_selection"):
+        raise party.RuleError("native_rest_insomnia_selection_unavailable")
+    if not insomnia and not inspected["eligible"]:
         raise party.RuleError(inspected["reason"] or "native_rest_denied")
 
     await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
-        proof = await checked(host, bridge, "native-rest", str(hours))
+        selection = (str(hours), "insomnia") if insomnia else (str(hours),)
+        proof = await checked(host, bridge, "native-rest", *selection)
         before, after = proof.get("before"), proof.get("after")
-        if (proof.get("hours") != hours or before is None or after is None
+        if (proof.get("hours") != hours or before is None or after is None or insomnia and proof.get("insomnia") is not True
                 or not math.isclose(after - before, hours * 3600, rel_tol=0, abs_tol=.25)):
             raise RuntimeError("The rest did not advance the exact stock game clock")
         if host.world_flush_supported:
