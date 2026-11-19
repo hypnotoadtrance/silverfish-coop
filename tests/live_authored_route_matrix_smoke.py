@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
+from tools.silverfish.native_rest import site
 from tools.silverfish.travel import GOLD_NEXUS
 
 
@@ -39,7 +41,7 @@ def select_routes(selectors):
     return routes
 
 
-async def verify(work, vanilla, routes, check_regroup=False):
+async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -75,6 +77,11 @@ async def verify(work, vanilla, routes, check_regroup=False):
             raise RuntimeError(f"{action} refused with {result.get('error')}")
         return result
 
+    def events(event, generation):
+        journal = (run / "events.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
+        return [entry for line in journal if line.endswith("\n") and
+                (entry := json.loads(line)).get("event") == event and entry.get("generation") == generation]
+
     async def paired(area, previous_epoch=None):
         joined = await wait(run, lambda state: state.get("state") == "hosting"
                             and state.get("game", {}).get("map") == area
@@ -93,6 +100,19 @@ async def verify(work, vanilla, routes, check_regroup=False):
         invite = await call("invite", *campaign, "--name", "Stock route observer", "--character", "Pathfinder")
         await launch(client_run, "client", "join", *profile, "--headless", "--invite", invite["invite_file"])
         current = await paired(routes[0].source)
+        if sleep_and_wipe:
+            _, bed, actor = site(routes[0].source)
+            await wait(run, lambda state: state.get("game", {}).get("native_rest_hook", {}).get("fresh") is True)
+            refusal = (await act("native-rest-guest-interaction-fixture", target="guest"))["native_rest_guard"]
+            assert refusal["status"] == "guest_interaction_denied", refusal
+            approach = (await act("native-rest-approach"))["native_rest"]
+            assert (approach["bed"], approach["actor"], approach["eligible"]) == (bed, actor, True), approach
+            selection = (await act("native-rest-ui-fixture", amount=1))["native_rest_hook"]
+            assert selection["status"] == "selected", selection
+            await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("native_rest", {}).get("bed") == bed)
+            sleep, = events("native_rest_checkpoint", current["generation"])
+            assert sleep["bed"] == bed and abs(sleep["after"] - sleep["before"] - 3600) < .25, sleep
+            evidence["stock_rest"] = {"guest_refusal": refusal, "sleep": sleep}
         for route in routes:
             door = route.kind == "door"
             options = {"entrance": route.entrance}
@@ -146,16 +166,27 @@ async def verify(work, vanilla, routes, check_regroup=False):
             await near_probe("host", "group_probe", ("host_opening", "travel_requested") if door else ("clear",),
                              host_lane, group=True)
             current = await paired(route.destination, current["zone_epoch"])
-            journal = (run / "events.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
-            event, = [entry for line in journal if line.endswith("\n") and
-                      (entry := json.loads(line)).get("event") == "zone_travel_ready"
-                      and entry.get("generation") == current["generation"] and entry.get("epoch") == current["zone_epoch"]]
+            event, = (entry for entry in events("zone_travel_ready", current["generation"])
+                      if entry.get("epoch") == current["zone_epoch"])
             arrival = event["authored_arrival"]
             assert arrival.get("actor", "").endswith("." + route.arrival_actor) or (
                 arrival.get("actor", "").endswith(":" + route.arrival_actor)
             ), arrival
             leg["arrival"] = arrival
             leg["destination_epoch"] = current["zone_epoch"]
+        if sleep_and_wipe:
+            await act("native-guest-damage", target="guest")
+            await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed"))
+            await act("native-host-damage", target="host")
+            returned = await paired(routes[0].source, current["zone_epoch"])
+            healthy = await wait(run, lambda state: state.get("zone_epoch") == returned["zone_epoch"]
+                                 and not state.get("gameplay", {}).get("wipe") and not state["gameplay"]["pending_spawns"]
+                                 and all(state["game"]["pawns"].get(role, {}).get("health") == 250.0
+                                         for role in ("local", "guest")), timeout=55)
+            respawn, = events("party_respawn_committed", returned["generation"])
+            assert respawn["stock_rest"] and math.dist(respawn["location"], sleep["location"]) < 400, respawn
+            assert healthy["gameplay"]["players"]["guest"]["character_id"] == invite["character_id"], healthy
+            evidence["stock_rest"]["respawn"] = respawn
         evidence["verified"] = True
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
@@ -181,9 +212,14 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
     parser.add_argument("--verify-regroup-message", action="store_true")
+    parser.add_argument("--sleep-and-wipe", action="store_true",
+                        help="sleep at the starting map's stock bed and return there after a wipe")
     config = parser.parse_args()
     try:
         selected = select_routes(config.route)
+        if config.sleep_and_wipe and (site(selected[0].source) is None or selected[-1].destination == selected[0].source):
+            raise ValueError("Choose a starting map with a stock bed and finish in a different map")
     except ValueError as error:
         parser.error(str(error))
-    asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected, config.verify_regroup_message))
+    asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
+                       config.verify_regroup_message, config.sleep_and_wipe))
