@@ -28,6 +28,9 @@ FIXTURE_KEY = KEY + "_fixture"
 PENDING = KEY + "_rewards"
 INPUT = "subway-valve"
 FACTIONS = {"2", "4", "5"}
+AUDIO_CHECKS = {"actor_absent", "receipt_unavailable", "actor_replaced", "actor_visible", "actor_collision_enabled",
+                "actor_tick_enabled", "mute_unverified", "component_absent_after_mute", "component_replaced",
+                "volume_nonzero", "component_muted"}
 
 
 def valid_epoch(value) -> bool:
@@ -78,16 +81,16 @@ def parse_objective(fields, phase, area):
 
 
 def parse_scene(fields, phase, area):
-    if len(fields) not in (4, 5, 9) or area != SUBWAY or fields[1] != SUBWAY or fields[2] not in ("present", "settling", "closed"):
+    if len(fields) not in (4, 5, 9, 10) or area != SUBWAY or fields[1] != SUBWAY or fields[2] not in ("present", "settling", "closed"):
         raise ValueError("Invalid Flood Control scene")
     state, owner = fields[2:4]
     epoch = fields[4] if len(fields) >= 5 else "-"
     status = dict(map=area, state=state, pawn=None, epoch=None if epoch == "-" else epoch)
-    if phase == "connected" and len(fields) in (5, 9) and _pawn_name(owner, area) and (epoch == "-" or valid_epoch(epoch)):
+    if phase == "connected" and len(fields) in (5, 9, 10) and _pawn_name(owner, area) and (epoch == "-" or valid_epoch(epoch)):
         status["pawn"] = owner
-    elif phase != "hosting" or len(fields) not in (4, 9) or owner != "host" or epoch != "-":
+    elif phase != "hosting" or len(fields) not in (4, 9, 10) or owner != "host" or epoch != "-":
         raise ValueError("Invalid Flood Control local scene scope")
-    if len(fields) == 9:
+    if len(fields) >= 9:
         box, sludge, audio, powered = fields[5:9]
         actors = ("present", "retired", "absent")
         derived = ("present" if box == sludge == audio == "present" else
@@ -95,6 +98,10 @@ def parse_scene(fields, phase, area):
         if box not in ("present", "absent") or sludge not in actors or audio not in actors or powered not in ("0", "1") or derived != state:
             raise ValueError("Invalid Flood Control presentation proof")
         status.update(box=box, sludge=sludge, audio=audio, powered=powered == "1")
+    if len(fields) == 10:
+        if fields[9] not in AUDIO_CHECKS:
+            raise ValueError("Invalid Flood Control audio diagnostic")
+        status["audio_check"] = fields[9]
     return status
 
 
@@ -225,7 +232,7 @@ async def activate(host, bridge, character, epoch):
             except (party.RuleError, TimeoutError) as error:
                 latest = bridge.snapshot() or host.last_game
                 scene = latest.get(SCENE, {})
-                proof = ", ".join(f"{key}={scene.get(key, 'unknown')}" for key in ("state", "box", "sludge", "audio"))
+                proof = ", ".join(f"{key}={scene.get(key, 'unknown')}" for key in ("state", "box", "sludge", "audio", "audio_check"))
                 raise RuntimeError(f"mutation_unverified_stock_subway_valve_scene: {error} ({proof})") from error
         host.last_game, host.last_seen = closed, time.monotonic()
         candidate = party.load_party(host.party)

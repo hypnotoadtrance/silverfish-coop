@@ -75,13 +75,14 @@ local env = setmetatable({require = require_fake, os = {getenv = function() retu
     StaticFindObject = function(path) return objects[path] end}, {__index = _G})
 local flood = assert(loadfile("mod/SilverfishCoop/Scripts/native_subway_valve.lua", "t", env))()
 local function scene() return flood.rows(state, "connected", table.pack)[1] end
-assert(scene()[3] == "present")
+assert(scene()[3] == "present" and scene()[10] == "receipt_unavailable")
 local input = {"nonce", "native-subway-valve-project", epoch, pawn:GetFullName()}
 assert(flood.command(input, state, "connected"))
 local result = scene()
 assert(result[3] == "closed" and result[5] == epoch and result[6] == "absent" and result[7] == "retired" and result[8] == "retired")
+assert(result[10] == "component_muted")
 assert(original.stopped and original.VolumeMultiplier == 0 and original:IsPlaying() and sound.destroy_calls == 1 and sludge.destroy_calls == 1)
 sound.AudioComponent = nil
-assert(scene()[3] == "closed" and scene()[8] == "retired")
+assert(scene()[3] == "closed" and scene()[8] == "retired" and scene()[10] == "component_absent_after_mute")
 sound.AudioComponent = foreign
-assert(scene()[3] == "settling" and scene()[8] == "present")
+assert(scene()[3] == "settling" and scene()[8] == "present" and scene()[10] == "component_replaced")

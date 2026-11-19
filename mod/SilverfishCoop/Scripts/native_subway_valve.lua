@@ -210,12 +210,19 @@ local function dormant(actor)
 end
 
 local function retired(world, actor, kind)
-    if not actor or not retirement or not same(retirement.world, world) or not same(retirement[kind], actor) or not dormant(actor) then
-        return false
-    end
+    if not actor then return false, "actor_absent" end
+    if not retirement or not same(retirement.world, world) then return false, "receipt_unavailable" end
+    if not same(retirement[kind], actor) then return false, "actor_replaced" end
+    if actor.bHidden ~= true then return false, "actor_visible" end
+    if actor:GetActorEnableCollision() ~= false then return false, "actor_collision_enabled" end
+    if actor:IsActorTickEnabled() ~= false then return false, "actor_tick_enabled" end
     if kind == "sludge" then return true end
+    if retirement.audio_muted ~= true then return false, "mute_unverified" end
     local audio, status = owned_audio(actor)
-    return retirement.audio_muted == true and (status == "absent" or same(retirement.component, audio) and audio.VolumeMultiplier == 0)
+    if status == "absent" then return true, "component_absent_after_mute" end
+    if not same(retirement.component, audio) then return false, "component_replaced" end
+    if audio.VolumeMultiplier ~= 0 then return false, "volume_nonzero" end
+    return true, "component_muted"
 end
 
 local function subway_scene(state)
@@ -242,9 +249,10 @@ local function subway_scene(state)
     local audio, audio_state = placed(world, audio_path, audio_class)
     if sludge_state == "foreign" or audio_state == "foreign" then return end
     if retired(world, sludge, "sludge") then sludge, sludge_state = nil, "retired" end
-    if retired(world, audio, "audio") then audio, audio_state = nil, "retired" end
+    local audio_retired, audio_check = retired(world, audio, "audio")
+    if audio_retired then audio, audio_state = nil, "retired" end
     return {world = world, control = control, box = box, sludge = sludge, audio = audio,
-        sludge_state = sludge_state, audio_state = audio_state,
+        sludge_state = sludge_state, audio_state = audio_state, audio_check = audio_check,
         closed = count == 0 and not sludge and not audio, present = count == 1 and sludge ~= nil and audio ~= nil}
 end
 
@@ -671,7 +679,8 @@ function valve.rows(state, phase, row)
         local scene = subway_scene(state)
         local side = scene and (scene.closed and "closed" or scene.present and "present" or "settling")
         if side then rows[#rows+1] = row("native-subway-valve-scene", area, side, "host", "-",
-            scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0) end
+            scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0,
+            scene.audio_check) end
         if fixture_reply and scene and same(scene.world, fixture_reply.world) then
             rows[#rows+1] = row("native-subway-valve-fixture", area, fixture_reply.pawn, fixture_reply.operation)
         end
@@ -704,7 +713,8 @@ function valve.rows(state, phase, row)
                 and same(scene.connection, projected.connection)
             local surface = scene.closed and "closed" or scene.present and "present" or "settling"
             rows[#rows+1] = row("native-subway-valve-scene", area, surface, scene.pawn:GetFullName(), current and projected.epoch or "-",
-                scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0)
+                scene.box and "present" or "absent", scene.sludge_state, scene.audio_state, scene.control.Powered and 1 or 0,
+                scene.audio_check)
         end
     end
     return rows

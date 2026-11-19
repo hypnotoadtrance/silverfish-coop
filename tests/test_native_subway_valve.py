@@ -81,6 +81,7 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         fields = ["native-subway-valve-scene", valve.SUBWAY, "settling", "host", "-", "absent", "present", "retired", "1"]
         proof = valve.parse_scene(fields, "hosting", valve.SUBWAY)
         self.assertEqual((proof["box"], proof["sludge"], proof["audio"], proof["powered"]), ("absent", "present", "retired", True))
+        self.assertEqual(valve.parse_scene([*fields, "component_muted"], "hosting", valve.SUBWAY)["audio_check"], "component_muted")
         with self.assertRaises(ValueError):
             valve.parse_scene([*fields[:2], "closed", *fields[3:]], "hosting", valve.SUBWAY)
 
