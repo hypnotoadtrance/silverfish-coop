@@ -11,10 +11,13 @@ local pending_gold
 local last_gold
 local artifacts = {
     stardust = "Art_DreamDust",
+    ["fruiting-stardust"] = "Art_FruitingDreamDust",
     green = "Art_Tesseract_Green",
     blue = "Art_Tesseract_Blue",
     red = "Art_Tesseract_Red",
     gold = "Art_Tesseract_Gold",
+    purple = "Art_Tesseract_Purple",
+    ["teleport-cube"] = "Art_TeleportCube",
 }
 local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
 local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C"

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <span>
@@ -39,6 +40,7 @@ namespace
     constexpr auto activate_path = STR("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C:ActivateLevel");
     constexpr auto prep_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Prep_OpenNextLevel");
     constexpr auto load_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:LoadNextLevel");
+    constexpr auto load_save_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Load_GameState");
     constexpr auto door_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:SendInteractionToActor");
     constexpr auto door_power_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:Send_PowerSignal");
     constexpr auto exit_power_path = STR("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C:Send_PowerSignal");
@@ -51,15 +53,68 @@ namespace
     constexpr auto city_world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P");
     constexpr auto lake_world = STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P");
     constexpr auto exchange_world = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P");
-    constexpr auto exchange_actor = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P:PersistentLevel.Dream_CountDown_BP_C_1");
+    constexpr auto rook_world = STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P");
+    constexpr auto pyroclast_world = STR("/Game/Classes/Maps/Dreams/Pyroclast_P.Pyroclast_P");
+    constexpr auto slate_world = STR("/Game/Classes/Maps/Dreams/Slate_P.Slate_P");
+    constexpr auto black_ocean_world = STR("/Game/Classes/Maps/Dreams/BlackOcean_P.BlackOcean_P");
+    constexpr auto slate_trigger_path = STR("/Game/Classes/Maps/Dreams/Slate_P.Slate_P:PersistentLevel.TriggerBox_1");
+    constexpr auto slate_overlap_path = STR("/Game/Classes/Maps/Dreams/Slate_P.Slate_P_C:BndEvt__Slate_P_TriggerBox_1_K2Node_ActorBoundEvent_0_ActorBeginOverlapSignature__DelegateSignature");
+    constexpr auto black_stone_path = STR("/Game/Classes/Maps/Dreams/BlackOcean_P.BlackOcean_P:PersistentLevel.Art_BlackStone_C_1");
+    constexpr auto black_stone_reference = STR("Art_BlackStone_C_1_ExecuteUbergraph_BlackOcean_P_RefProperty");
+    constexpr auto actor_overlap_path = STR("/Script/Engine.Actor:IsOverlappingActor");
     constexpr auto dream_power_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:Send_PowerSignal");
     constexpr auto dream_script_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:ExecuteUbergraph_Dream_CountDown_BP");
-    constexpr int exchange_timed_return = 588;
-    constexpr int exchange_signal_return = 15;
+    constexpr int countdown_timed_return = 588;
+    constexpr int countdown_signal_return = 15;
     constexpr auto ttl = std::chrono::seconds(2);
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
     constexpr std::size_t max_remote_players = 4;
+
+    struct CountdownRoute
+    {
+        RC::StringViewType world;
+        const RC::CharType* actor;
+        bool accepts_world_power;
+        bool accepts_host_power;
+    };
+
+    constexpr auto countdown_routes = std::array{
+        CountdownRoute{exchange_world,
+            STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P:PersistentLevel.Dream_CountDown_BP_C_1"), true, true},
+        CountdownRoute{rook_world, STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P:PersistentLevel.Dream_CountDown_BP_C_1"),
+            false, true},
+        CountdownRoute{pyroclast_world, STR("/Game/Classes/Maps/Dreams/Pyroclast_P.Pyroclast_P:PersistentLevel.Dream_CountDown_BP_C_1"),
+            false, false},
+    };
+
+    struct ScriptedDreamRoute
+    {
+        RC::StringViewType world;
+        const RC::CharType* actor;
+        const RC::CharType* script;
+        const RC::CharType* early_event;
+        std::span<const int> blocked_entries;
+    };
+
+    constexpr std::array slate_return_entries{15, 923};
+    constexpr std::array black_ocean_return_entries{70, 715, 992};
+    constexpr std::array scripted_dream_routes{
+        ScriptedDreamRoute{slate_world,
+            STR("/Game/Classes/Maps/Dreams/Slate_P.Slate_P:PersistentLevel.Slate_P_C_0"),
+            STR("/Game/Classes/Maps/Dreams/Slate_P.Slate_P_C:ExecuteUbergraph_Slate_P"),
+            slate_overlap_path, slate_return_entries},
+        ScriptedDreamRoute{black_ocean_world,
+            STR("/Game/Classes/Maps/Dreams/BlackOcean_P.BlackOcean_P:PersistentLevel.BlackOcean_P_C_0"),
+            STR("/Game/Classes/Maps/Dreams/BlackOcean_P.BlackOcean_P_C:ExecuteUbergraph_BlackOcean_P"),
+            STR("/Game/Classes/Maps/Dreams/BlackOcean_P.BlackOcean_P_C:PickedUpStone"), black_ocean_return_entries},
+    };
+
+    struct ActorOverlapParams
+    {
+        Unreal::UObject* other{};
+        bool overlapping{};
+    };
 
     struct DoorRoute
     {
@@ -97,6 +152,10 @@ namespace
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Level_Exit_BP_C_1"),
               crossroads_world, STR("Obsv_Etr")},
         Route{exchange_world, {}, {}, {}},
+        Route{rook_world, {}, {}, {}},
+        Route{pyroclast_world, {}, {}, {}},
+        Route{slate_world, {}, {}, {}},
+        Route{black_ocean_world, {}, {}, {}},
         Route{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"), {}, {}, {},
               {STR("Dungeon_TransitionDoor_BP_C_1"), railway_world, STR("RY_Lab206")}},
         Route{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P.Lab_EastWing_P"), {}, {}, {},
@@ -131,6 +190,12 @@ namespace
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"), STR("Level_Exit_BP_C_1"),
               crossroads_world, STR("CR_Forest")},
         Route{lake_world, STR("Level_Exit_BP_C_2"), crossroads_world, STR("Lake_Cave")},
+        Route{STR("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P.Beach_01_P"), STR("Level_Exit_BP_C_0"),
+              ruins_world, STR("Flood_Beach")},
+        Route{STR("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P.Docks_01_P"), STR("Level_Exit_BP_C_2"),
+              city_world, STR("Metro_Dock")},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P.Refinery_01_P"), STR("Level_Exit_BP_C_242"),
+              slums_world, STR("Slum_Refine")},
     };
 
     std::atomic<std::uint64_t> generation{};
@@ -173,17 +238,21 @@ namespace
         Unreal::FWeakObjectPtr world;
         Unreal::FWeakObjectPtr instance;
         Unreal::FWeakObjectPtr dream;
+        Unreal::FWeakObjectPtr dream_trigger;
         Unreal::UClass* pawn_class{};
         Unreal::UClass* exit_class{};
         Unreal::UFunction* overlap{};
         Unreal::UFunction* activate{};
         Unreal::UFunction* prep{};
         Unreal::UFunction* load{};
+        Unreal::UFunction* load_save{};
         Unreal::UFunction* door{};
         Unreal::UFunction* door_power{};
         Unreal::UFunction* exit_power{};
         Unreal::UFunction* dream_power{};
         Unreal::UFunction* dream_script{};
+        Unreal::UFunction* dream_early_event{};
+        Unreal::UFunction* actor_overlap{};
         Unreal::FObjectProperty* door_player{};
         Unreal::FObjectProperty* door_hit{};
         Unreal::FObjectProperty* door_instigator{};
@@ -192,6 +261,8 @@ namespace
         Unreal::FBoolProperty* dream_powered{};
         Unreal::FObjectProperty* dream_instigator{};
         Unreal::FIntProperty* dream_entry{};
+        Unreal::FObjectProperty* dream_overlapped_actor{};
+        Unreal::FObjectProperty* dream_other_actor{};
         Unreal::FObjectProperty* overlap_actor{};
         Unreal::FObjectProperty* overlap_component{};
         Unreal::FObjectProperty* fixture_box{};
@@ -199,6 +270,8 @@ namespace
         Unreal::FStrProperty* entrance_tag{};
         Unreal::FByteProperty* role{};
         const Route* route{};
+        const CountdownRoute* countdown{};
+        const ScriptedDreamRoute* scripted_dream{};
         std::string_view event;
         std::string_view door_event;
         Unreal::FWeakObjectPtr pending_door;
@@ -417,13 +490,88 @@ namespace
         return false;
     }
 
-    bool configure(Address local_address, Address remote_address, Address exit_address, bool host, bool accepting)
+    bool bind_scripted_dream(Scope& next, const ScriptedDreamRoute& route, Unreal::UWorld* world)
     {
-        const auto current_generation = generation.load(std::memory_order_acquire);
-        if (!local_address || local_address == remote_address || (!host && remote_address)) return false;
-        if (scope.generation == current_generation && address(scope.local.Get()) == local_address &&
-            address(scope.remote.Get()) == remote_address && address(scope.fixture.Get()) == exit_address && scope.host == host)
+        auto* dream = find<Unreal::UObject>(route.actor);
+        auto* level = read_object(field<Unreal::FObjectProperty>(world, STR("PersistentLevel")), world);
+        auto* level_script_class = find<Unreal::UClass>(STR("/Script/Engine.LevelScriptActor"));
+        if (!live_object(dream) || !level_script_class || !dream->IsA(level_script_class) ||
+            read_object(field<Unreal::FObjectProperty>(level, STR("LevelScriptActor")), level) != dream ||
+            actor_world(dream) != world || !in_persistent_level(dream, world)) return false;
+
+        next.load_save = find<Unreal::UFunction>(load_save_path);
+        next.dream_script = find<Unreal::UFunction>(route.script);
+        next.dream_entry = field<Unreal::FIntProperty>(next.dream_script, STR("EntryPoint"));
+        next.dream_early_event = find<Unreal::UFunction>(route.early_event);
+        if (!next.load_save || !next.dream_script || !next.dream_entry || !next.dream_early_event ||
+            next.load_save->GetOuterPrivate() != next.instance.Get()->GetClassPrivate() ||
+            next.dream_script->GetOuterPrivate() != dream->GetClassPrivate() ||
+            next.dream_script->GetNumParms() != 1 || next.dream_script->GetReturnProperty() ||
+            next.dream_entry->GetOffset_Internal() != 0 || next.dream_script->GetParmsSize() != sizeof(int) ||
+            next.dream_early_event->GetOuterPrivate() != dream->GetClassPrivate() ||
+            next.dream_early_event->GetNumParms() != 2 || next.dream_early_event->GetReturnProperty()) return false;
+
+        if (route.world == slate_world)
         {
+            auto* trigger = find<Unreal::UObject>(slate_trigger_path);
+            auto* trigger_class = find<Unreal::UClass>(STR("/Script/Engine.TriggerBox"));
+            next.dream_overlapped_actor = field<Unreal::FObjectProperty>(next.dream_early_event, STR("OverlappedActor"));
+            next.dream_other_actor = field<Unreal::FObjectProperty>(next.dream_early_event, STR("OtherActor"));
+            next.actor_overlap = find<Unreal::UFunction>(actor_overlap_path);
+            auto* overlap_other = field<Unreal::FObjectProperty>(next.actor_overlap, STR("Other"));
+            auto* overlap_result = field<Unreal::FBoolProperty>(next.actor_overlap, STR("ReturnValue"));
+            if (!live_object(trigger) || trigger->GetClassPrivate() != trigger_class ||
+                actor_world(trigger) != world || !in_persistent_level(trigger, world) ||
+                !next.dream_overlapped_actor || !next.dream_other_actor || !next.actor_overlap ||
+                !overlap_other || !overlap_result || next.actor_overlap->GetNumParms() != 2 ||
+                !next.actor_overlap->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+                next.actor_overlap->GetReturnProperty() != overlap_result ||
+                overlap_other->GetOffset_Internal() != offsetof(ActorOverlapParams, other) ||
+                overlap_result->GetOffset_Internal() != offsetof(ActorOverlapParams, overlapping) ||
+                next.actor_overlap->GetParmsSize() < offsetof(ActorOverlapParams, overlapping) + sizeof(bool) ||
+                next.actor_overlap->GetParmsSize() > sizeof(ActorOverlapParams)) return false;
+            next.dream_trigger = trigger;
+        }
+        else
+        {
+            auto* source = field<Unreal::FObjectProperty>(dream, black_stone_reference);
+            auto* stone = read_object(source, dream);
+            auto* stone_class = find<Unreal::UClass>(STR("/Game/Classes/Items/Artifacts/Art_BlackStone.Art_BlackStone_C"));
+            if (!source || !field<Unreal::FObjectProperty>(next.dream_early_event, STR("Actor")) ||
+                (stone && (stone->GetClassPrivate() != stone_class || stone->GetPathName() != black_stone_path ||
+                           (live_object(stone) && (actor_world(stone) != world || !in_persistent_level(stone, world))))))
+                return false;
+            // The placed stone can disappear on pickup. The timer guard must survive that destruction.
+            next.dream_trigger = stone;
+        }
+
+        next.scripted_dream = &route;
+        next.dream = dream;
+        return true;
+    }
+
+    bool configure(Address local_address, Address exit_address, bool host, bool accepting, std::span<const Address> remote_addresses)
+    {
+        if (!local_address || remote_addresses.size() > max_remote_players || (!host && !remote_addresses.empty())) return false;
+        std::array<Address, max_remote_players> sorted{};
+        std::copy(remote_addresses.begin(), remote_addresses.end(), sorted.begin());
+        const auto roster = std::span{sorted}.first(remote_addresses.size());
+        std::sort(roster.begin(), roster.end());
+        if (std::find(roster.begin(), roster.end(), Address{}) != roster.end() ||
+            std::find(roster.begin(), roster.end(), local_address) != roster.end() ||
+            std::adjacent_find(roster.begin(), roster.end()) != roster.end()) return false;
+
+        const auto current_generation = generation.load(std::memory_order_acquire);
+        if (scope.generation == current_generation && address(scope.local.Get()) == local_address &&
+            address(scope.fixture.Get()) == exit_address && scope.host == host &&
+            std::ranges::equal(scope.roster.players(), roster,
+                [](const RemotePlayer& remote, Address expected) { return address(remote.pawn.Get()) == expected; }))
+        {
+            if (!live_game_roster(scope) || !is_local_pawn(scope.local.Get()))
+            {
+                scope.accepting = false;
+                return false;
+            }
             scope.expires = Clock::now() + ttl;
             scope.accepting = accepting;
             return true;
@@ -432,20 +580,26 @@ namespace
         Scope next;
         next.pawn_class = find<Unreal::UClass>(pawn_path);
         next.exit_class = find<Unreal::UClass>(exit_path);
+        next.roster.count = roster.size();
         if (!next.pawn_class || (exit_address && !next.exit_class)) return false;
+        std::size_t found_remotes{};
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
-            if (object->HasAnyFlags(Unreal::RF_ClassDefaultObject)) return RC::LoopAction::Continue;
-            if (address(object) == local_address && object->GetClassPrivate() == next.pawn_class) next.local = object;
-            if (address(object) == remote_address && object->GetClassPrivate() == next.pawn_class) next.remote = object;
-            if (address(object) == exit_address && object->GetClassPrivate() == next.exit_class) next.fixture = object;
-            return next.local.Get() && (!remote_address || next.remote.Get()) && (!exit_address || next.fixture.Get())
+            const auto candidate = address(object);
+            if (candidate == local_address && object->GetClassPrivate() == next.pawn_class && live_object(object)) next.local = object;
+            if (candidate == exit_address && object->GetClassPrivate() == next.exit_class && live_object(object)) next.fixture = object;
+            const auto remote = std::find(roster.begin(), roster.end(), candidate);
+            if (remote != roster.end() && object->GetClassPrivate() == next.pawn_class && live_object(object))
+            {
+                next.roster.remotes[static_cast<std::size_t>(remote - roster.begin())].pawn = object;
+                ++found_remotes;
+            }
+            return next.local.Get() && found_remotes == roster.size() && (!exit_address || next.fixture.Get())
                 ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
         auto* local = next.local.Get();
-        auto* remote = next.remote.Get();
         auto* fixture = next.fixture.Get();
         auto* world = actor_world(local);
-        if (!world || !is_local_pawn(local) || (remote_address && actor_world(remote) != world) ||
+        if (!world || !is_local_pawn(local) || found_remotes != roster.size() ||
             (exit_address && actor_world(fixture) != world)) return false;
         const auto map = world->GetPathName();
         for (const auto& route : routes)
@@ -479,24 +633,39 @@ namespace
         next.fixture_box = field<Unreal::FObjectProperty>(fixture, STR("Box"));
         next.next_level = field<Unreal::FSoftObjectProperty>(fixture, STR("NextLevel"));
         next.entrance_tag = field<Unreal::FStrProperty>(fixture, STR("Entrance Tag"));
-        if (!next.instance.Get() || !next.role || !next.prep || !next.load || !live_game_roster(next)) return false;
-        if (map == exchange_world)
+        if (!next.instance.Get() || !next.role || !next.prep || !next.load || !bind_game_roster(next)) return false;
+        const auto countdown = std::find_if(countdown_routes.begin(), countdown_routes.end(),
+            [&](const CountdownRoute& candidate) { return map == candidate.world; });
+        if (countdown != countdown_routes.end())
         {
-            auto* dream = find<Unreal::UObject>(exchange_actor);
+            auto* dream = find<Unreal::UObject>(countdown->actor);
+            next.countdown = &*countdown;
+            next.load_save = find<Unreal::UFunction>(load_save_path);
             next.dream_power = find<Unreal::UFunction>(dream_power_path);
             next.dream_script = find<Unreal::UFunction>(dream_script_path);
             next.dream_powered = field<Unreal::FBoolProperty>(next.dream_power, STR("Powered"));
             next.dream_instigator = field<Unreal::FObjectProperty>(next.dream_power, STR("Instigator"));
             next.dream_entry = field<Unreal::FIntProperty>(next.dream_script, STR("EntryPoint"));
-            if (!dream || !next.dream_power || !next.dream_script || !next.dream_powered || !next.dream_instigator ||
+            if (!dream || !next.load_save || !next.dream_power || !next.dream_script || !next.dream_powered || !next.dream_instigator ||
                 !next.dream_entry || dream->GetClassPrivate() != next.dream_power->GetOuterPrivate() ||
                 dream->GetClassPrivate() != next.dream_script->GetOuterPrivate() || actor_world(dream) != world ||
                 !in_persistent_level(dream, world)) return false;
             next.dream = dream;
             next.dream_return_requested = scope.dream.Get() == dream && scope.dream_return_requested;
         }
-        else if (!next.exit_class || !next.overlap_actor || !next.overlap_component || (fixture && !next.fixture_box) ||
-                 !next.activate || !next.exit_power) return false;
+        else
+        {
+            const auto scripted = std::find_if(scripted_dream_routes.begin(), scripted_dream_routes.end(),
+                [&](const ScriptedDreamRoute& candidate) { return map == candidate.world; });
+            if (scripted != scripted_dream_routes.end())
+            {
+                if (!bind_scripted_dream(next, *scripted, world)) return false;
+                next.dream_return_requested = scope.generation == current_generation && scope.local.Get() == local &&
+                    scope.dream.Get() == next.dream.Get() && scope.dream_return_requested;
+            }
+            else if (!next.exit_class || !next.overlap_actor || !next.overlap_component || (fixture && !next.fixture_box) ||
+                     !next.activate || !next.exit_power) return false;
+        }
         next.generation = current_generation;
         next.expires = Clock::now() + ttl;
         next.accepting = accepting;
@@ -592,11 +761,43 @@ namespace
         scope.door_event = "travel_requested";
     }
 
+    void handle_scripted_dream(Iteration& iteration, Unreal::UFunction* callee, void* locals)
+    {
+        if (callee == scope.dream_script)
+        {
+            if (locals && std::ranges::find(scope.scripted_dream->blocked_entries,
+                                           scope.dream_entry->GetPropertyValueInContainer(locals)) !=
+                          scope.scripted_dream->blocked_entries.end())
+                iteration.PreventOriginalFunctionCall();
+            return;
+        }
+
+        iteration.PreventOriginalFunctionCall();
+        // Black Ocean's OnEndPlay callback supplies a stone, not a verified collector.
+        if (!iteration.OriginalFunctionCallPrevented() || !scope.actor_overlap || !locals) return;
+        auto* local = scope.local.Get();
+        auto* trigger = scope.dream_trigger.Get();
+        if (!live_object(trigger) || actor_world(trigger) != scope.world.Get() ||
+            read_object(scope.dream_overlapped_actor, locals) != trigger ||
+            read_object(scope.dream_other_actor, locals) != local || !host_is_ready(local)) return;
+
+        ActorOverlapParams params{local};
+        trigger->ProcessEvent(scope.actor_overlap, &params);
+        if (params.overlapping) scope.dream_return_requested = true;
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee, void* locals)
     {
         if (!Unreal::IsInGameThreadRaw() || !context || !callee || !installed.load(std::memory_order_acquire) ||
             scope.generation != generation.load(std::memory_order_acquire)) return;
-        if (scope.dream.Get() == context && (callee == scope.dream_power || callee == scope.dream_script) && locals &&
+        if (scope.scripted_dream && scope.dream.Get() == context &&
+            (callee == scope.dream_script || callee == scope.dream_early_event))
+        {
+            if (!iteration.OriginalFunctionCallPrevented()) handle_scripted_dream(iteration, callee, locals);
+            return;
+        }
+        if (scope.countdown && scope.dream.Get() == context &&
+            (callee == scope.dream_power || callee == scope.dream_script) && locals &&
             !iteration.OriginalFunctionCallPrevented())
         {
             if (callee == scope.dream_power)
@@ -605,9 +806,12 @@ namespace
                 auto* instigator = read_object(scope.dream_instigator, locals);
                 auto* local = scope.local.Get();
                 iteration.PreventOriginalFunctionCall();
+                const bool host_power = scope.countdown->accepts_host_power && instigator == local;
+                const bool world_power = scope.countdown->accepts_world_power &&
+                    (!instigator || (instigator->GetClassPrivate() != scope.pawn_class &&
+                                    actor_world(instigator) == scope.world.Get()));
                 if (powered && iteration.OriginalFunctionCallPrevented() && host_is_ready(local) &&
-                    (!instigator || instigator == local || (instigator->GetClassPrivate() != scope.pawn_class &&
-                                                            actor_world(instigator) == scope.world.Get())))
+                    (host_power || world_power))
                 {
                     scope.dream_return_requested = true;
                 }
@@ -615,12 +819,12 @@ namespace
             else
             {
                 const auto entry = scope.dream_entry->GetPropertyValueInContainer(locals);
-                if (entry == exchange_timed_return || entry == exchange_signal_return) iteration.PreventOriginalFunctionCall();
+                if (entry == countdown_timed_return || entry == countdown_signal_return) iteration.PreventOriginalFunctionCall();
             }
             return;
         }
         const bool is_overlap = callee == scope.overlap;
-        const bool is_instance = callee == scope.prep || callee == scope.load;
+        const bool is_instance = callee == scope.prep || callee == scope.load || callee == scope.load_save;
         if (!is_overlap && !is_instance && callee != scope.activate && callee != scope.door &&
             callee != scope.exit_power && callee != scope.door_power) return;
         auto* world = scope.world.Get();
@@ -697,8 +901,45 @@ namespace
             const auto fixture = lua.get_integer();
             const auto host = lua.get_bool();
             const auto accepting = lua.get_bool();
+            const auto remote_address = static_cast<Address>(remote);
+            const auto roster = remote > 0 ? std::span<const Address>{&remote_address, 1} : std::span<const Address>{};
             accepted = local > 0 && remote >= 0 && fixture >= 0 &&
-                       configure(static_cast<Address>(local), static_cast<Address>(remote), static_cast<Address>(fixture), host, accepting);
+                       configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, roster);
+        }
+        lua.set_bool(accepted);
+        return 1;
+    }
+
+    int lua_set_roster(const Lua& lua)
+    {
+        const auto count = lua.get_stack_size();
+        bool accepted = false;
+        if (Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
+            count >= 4 && count <= 4 + static_cast<int>(max_remote_players) &&
+            lua.is_integer(1) && lua.is_integer(2) && lua.is_bool(3) && lua.is_bool(4))
+        {
+            bool valid = true;
+            for (int index = 5; index <= count; ++index)
+            {
+                if (!lua.is_integer(index)) valid = false;
+            }
+            if (valid)
+            {
+                const auto local = lua.get_integer();
+                const auto fixture = lua.get_integer();
+                const auto host = lua.get_bool();
+                const auto accepting = lua.get_bool();
+                std::array<Address, max_remote_players> addresses{};
+                const auto remotes = std::span{addresses}.first(static_cast<std::size_t>(count - 4));
+                for (auto& remote : remotes)
+                {
+                    const auto value = lua.get_integer();
+                    if (value <= 0) valid = false;
+                    remote = static_cast<Address>(value);
+                }
+                accepted = valid && local > 0 && fixture >= 0 &&
+                    configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, remotes);
+            }
         }
         lua.set_bool(accepted);
         return 1;
@@ -755,7 +996,8 @@ namespace
     int lua_inspect_exchange(const Lua& lua)
     {
         const bool match = Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
-            scope.generation == generation.load(std::memory_order_acquire) && scope.dream.Get() &&
+            scope.generation == generation.load(std::memory_order_acquire) && live_object(scope.dream.Get()) &&
+            (!scope.actor_overlap || live_object(scope.dream_trigger.Get())) &&
             lua.get_stack_size() == 1 && lua.is_integer(1) &&
             address(scope.dream.Get()) == static_cast<Address>(lua.get_integer()) && Clock::now() < scope.expires;
         lua.set_bool(match);
@@ -807,6 +1049,7 @@ namespace silverfish::native_zone
         if (!enabled()) return;
         clear_scope();
         lua.register_function("SilverfishSetNativeZoneScope", lua_set_scope);
+        lua.register_function("SilverfishSetNativeZoneRoster", lua_set_roster);
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);

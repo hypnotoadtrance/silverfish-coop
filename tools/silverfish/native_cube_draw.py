@@ -2,10 +2,10 @@
 
 from . import party
 from .native_gold import valid_guid
-from .travel import AUTHORED_MAPS, EXCHANGE
+from .travel import AUTHORED_MAPS, DREAM_MAPS
 
 
-SOURCES = AUTHORED_MAPS - {EXCHANGE}
+SOURCES = AUTHORED_MAPS - DREAM_MAPS
 
 
 class CubeDraw:

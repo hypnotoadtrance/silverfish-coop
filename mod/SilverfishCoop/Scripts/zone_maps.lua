@@ -66,6 +66,10 @@ return {
         probe_arrival = "LevelExit_Spawn_BP_C_1", probe_approach = -1,
     },
     [exchange] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    ["/Game/Classes/Maps/Dreams/TheRook_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    ["/Game/Classes/Maps/Dreams/Pyroclast_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    ["/Game/Classes/Maps/Dreams/Slate_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    ["/Game/Classes/Maps/Dreams/BlackOcean_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
     [lab_e206] = {
         entrance = "RY_Lab206",
         door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = rail_yard, entrance = "RY_Lab206" },
@@ -113,6 +117,7 @@ return {
     [ruin_fields] = {
         fixture = "Level_Exit_BP_C_1", destination = crossroads, entrance = "CR_RF",
         door_arrivals = { RgEast_Flood = "Dungeon_TransitionDoor_BP_C_1", Market_Flood = "Dungeon_TransitionDoor_BP_C_2" },
+        other_arrivals = { Flood_Beach = "LevelExit_Spawn_BP_C_198" },
     },
     [northeast_rail] = {
         fixture = "Level_Exit_BP_C_269", destination = crossroads, entrance = "Cross_NE",
@@ -122,11 +127,12 @@ return {
     [slums] = {
         fixture = "Level_Exit_BP_C_0", destination = rail_yard, entrance = "Slum_Depot",
         door_arrivals = { Slums_GreenLine = "Dungeon_TransitionDoor_BP_C_1", Bar_Slums = "Dungeon_TransitionDoor_BP_C_2" },
+        other_arrivals = { Slum_Refine = "LevelExit_Spawn_BP_C_1" },
     },
     [city] = {
         fixture = "Level_Exit_BP_C_1", destination = rail_yard, entrance = "Rail_City",
         door_arrivals = { Subway = "Dungeon_TransitionDoor_BP_C_2" },
-        other_arrivals = { City_Borough = "LevelExit_Spawn_BP_C_388" },
+        other_arrivals = { City_Borough = "LevelExit_Spawn_BP_C_388", Metro_Dock = "LevelExit_Spawn_BP_C_391" },
     },
     [scav_bar] = {
         entrance = "Bar_Slums",
@@ -153,5 +159,14 @@ return {
     [lake] = {
         fixture = "Level_Exit_BP_C_2", destination = crossroads, entrance = "Lake_Cave",
         door_arrivals = { BlackMarket = "Dungeon_TransitionDoor_BP_C_1" },
+    },
+    ["/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"] = {
+        fixture = "Level_Exit_BP_C_0", destination = ruin_fields, entrance = "Flood_Beach",
+    },
+    ["/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"] = {
+        fixture = "Level_Exit_BP_C_2", destination = city, entrance = "Metro_Dock",
+    },
+    ["/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"] = {
+        fixture = "Level_Exit_BP_C_242", destination = slums, entrance = "Slum_Refine",
     },
 }

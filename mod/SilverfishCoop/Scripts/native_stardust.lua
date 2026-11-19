@@ -3,18 +3,16 @@ local transport = require("native_transport")
 
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
-local event_path = bridge and bridge .. "/native-stardust-events"
-local stardust_path = "/Game/Classes/Items/Artifacts/Art_DreamDust.Art_DreamDust_C"
+local kinds = {
+    stardust = { label = "Stardust", asset = "Art_DreamDust", payload = "stock-default-v1", sequence = 0 },
+    ["fruiting-stardust"] = {
+        label = "FruitingStardust", asset = "Art_FruitingDreamDust", payload = "stock-fruiting-default-v1", sequence = 0,
+    },
+}
 local entries = { action_use = true, quick_move = true, use_held_item = true }
 local actions = {
-    ["native-stardust-inspect"] = { "inspect", 4 },
-    ["native-stardust-debit"] = { "debit", 5 },
-    ["native-stardust-restore"] = { "restore", 6 },
-    ["native-stardust-seed"] = { "seed", 5 },
-    ["native-stardust-use-probe"] = { "use-probe", 4 },
+    inspect = 4, debit = 5, restore = 6, seed = 5, ["use-probe"] = 4,
 }
-local sequence = 0
-local pending
 local report
 
 local function identity(state, host)
@@ -26,44 +24,56 @@ local function matches(record, state, host)
         and record.address == host.pawn:GetAddress() and record.world == state.world:GetAddress()
 end
 
-local function emit()
-    local file = event_path and io.open(event_path, "ab")
+local function emit(kind, pending)
+    local file = bridge and io.open(bridge .. "/native-" .. kind .. "-events", "ab")
     if not file then return false end
     local written = file:write(pending.line)
     local closed = file:close()
     return written and closed
 end
 
-function stardust.sync(state, phase)
-    if type(SilverfishTakeNativeStardustTransportRequest) ~= "function" then return end
-    local host, fresh = transport.scoped_host(state, phase)
-    if not matches(report, state, host) then report = nil end
+local function transfer_requests(kind, spec, state, host, fresh)
+    local take = _G["SilverfishTakeNative" .. spec.label .. "TransportRequest"]
+    if type(take) ~= "function" then return end
     if not host then
-        pending = nil
+        spec.pending = nil
         return
     end
+    local pending = spec.pending
     if pending then
-        if not fresh or not matches(pending, state, host) or os.time() > pending.expires or emit() then
-            pending = nil
+        if not fresh or not matches(pending, state, host) or os.time() > pending.expires or emit(kind, pending) then
+            spec.pending = nil
         else
             return
         end
     end
-    local ok, guid, entry = SilverfishTakeNativeStardustTransportRequest(host.pawn:GetAddress())
+    local ok, guid, entry = take(host.pawn:GetAddress())
     if not ok or not fresh or not transport.valid_guid(guid) or not entries[entry] then return end
-    sequence = sequence + 1
+    spec.sequence = spec.sequence + 1
     pending = identity(state, host)
     pending.expires = os.time() + 2
-    pending.line = table.concat({ "stardust-request", tostring(sequence), state.map, host.name, guid, entry,
+    pending.line = table.concat({ kind .. "-request", tostring(spec.sequence), state.map, host.name, guid, entry,
         string.format("%.17g", host.x), string.format("%.17g", host.y), string.format("%.17g", host.z) }, "\t") .. "\n"
-    if emit() then pending = nil end
+    if not emit(kind, pending) then spec.pending = pending end
+end
+
+function stardust.sync(state, phase)
+    local host, fresh = transport.scoped_host(state, phase)
+    if not matches(report, state, host) then report = nil end
+    for kind, spec in pairs(kinds) do transfer_requests(kind, spec, state, host, fresh) end
 end
 
 function stardust.command(fields, state, phase)
-    local spec = actions[fields[2]]
-    if not spec then return end
+    local action = fields[2]:match("^native%-stardust%-(.+)$")
+    local kind = "stardust"
+    if not action then
+        action = fields[2]:match("^native%-fruiting%-stardust%-(.+)$")
+        kind = "fruiting-stardust"
+    end
+    local count = actions[action]
+    if not count then return end
+    local spec = kinds[kind]
     report = nil
-    local action, count = spec[1], spec[2]
     local host, fresh = transport.scoped_host(state, phase)
     local guid = fields[4]
     if #fields ~= count or not host or not fresh or host.name ~= fields[3] or not transport.valid_guid(guid) then
@@ -77,36 +87,36 @@ function stardust.command(fields, state, phase)
         units = math.tointeger(tonumber(fields[5]))
         if not units or units < 1 or units > 2147483647 then error("Invalid Stardust stack quantity", 0) end
     end
-    transport.load_class(stardust_path)
+    local api_name = ({ inspect = "Inspect", debit = "Commit", restore = "Restore", seed = "Seed",
+        ["use-probe"] = "Probe" })[action]
+    local operate = _G["Silverfish" .. api_name .. "Native" .. spec.label .. "Transport"]
+    if type(operate) ~= "function" then error("The qualified native Stardust bridge is unavailable", 0) end
+    transport.load_class("/Game/Classes/Items/Artifacts/" .. spec.asset .. "." .. spec.asset .. "_C")
     local address = host.pawn:GetAddress()
     local ok, result, quantity, payload
-    if action == "inspect" and type(SilverfishInspectNativeStardustTransport) == "function" then
-        ok, result, quantity, payload = SilverfishInspectNativeStardustTransport(address, guid)
-    elseif action == "debit" and type(SilverfishCommitNativeStardustTransport) == "function" then
-        ok, result, quantity = SilverfishCommitNativeStardustTransport(address, guid, units)
-    elseif action == "restore" and type(SilverfishRestoreNativeStardustTransport) == "function" then
-        ok, result, quantity = SilverfishRestoreNativeStardustTransport(address, guid, units, fields[6])
-    elseif action == "seed" and type(SilverfishSeedNativeStardustTransport) == "function" then
-        ok, result, quantity = SilverfishSeedNativeStardustTransport(address, guid, units)
-    elseif action == "use-probe" and type(SilverfishProbeNativeStardustTransport) == "function" then
+    if action == "inspect" then
+        ok, result, quantity, payload = operate(address, guid)
+    elseif action == "restore" then
+        ok, result, quantity = operate(address, guid, units, fields[6])
+    elseif action == "use-probe" then
         local manager = transport.scratch_manager(state)
-        ok, result = SilverfishProbeNativeStardustTransport(address, manager:GetAddress(), guid)
+        ok, result = operate(address, manager:GetAddress(), guid)
         if ok then result, quantity = "requested", 0 end
     else
-        error("The qualified native Stardust bridge is unavailable", 0)
+        ok, result, quantity = operate(address, guid, units)
     end
     if not ok or type(result) ~= "string" or type(quantity) ~= "number" or quantity < 0 then
         error("Stardust " .. action .. " failed (" .. tostring(result) .. ")", 0)
     end
     report = identity(state, host)
-    report.action, report.result, report.guid, report.quantity = action, result, guid, quantity
-    report.payload = payload == "stock-default-v1" and payload or ""
-    return "stardust " .. action .. " " .. result
+    report.kind, report.action, report.result, report.guid, report.quantity = kind, action, result, guid, quantity
+    report.payload = payload == spec.payload and payload or ""
+    return kind .. " " .. action .. " " .. result
 end
 
-function stardust.authorize_travel(guid, state, phase)
+function stardust.authorize_travel(kind, guid, state, phase)
     local host, fresh = transport.scoped_host(state, phase)
-    if not fresh or not matches(report, state, host) or report.action ~= "debit" or report.guid ~= guid
+    if not fresh or not matches(report, state, host) or report.kind ~= kind or report.action ~= "debit" or report.guid ~= guid
         or (report.result ~= "removed" and report.result ~= "decremented" and report.result ~= "already_debited") then
         return false
     end
@@ -118,7 +128,7 @@ function stardust.rows(state, phase, status_row)
     if not report then return {} end
     local host = transport.scoped_host(state, phase)
     if not matches(report, state, host) then return {} end
-    return { status_row("native-stardust", report.action, report.result, report.map, report.pawn, report.guid,
+    return { status_row("native-" .. report.kind, report.action, report.result, report.map, report.pawn, report.guid,
         report.quantity, report.payload) }
 end
 

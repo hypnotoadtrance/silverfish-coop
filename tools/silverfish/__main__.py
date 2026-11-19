@@ -104,14 +104,20 @@ def parser() -> argparse.ArgumentParser:
         "native-blue-seed", "native-blue-inspect", "native-blue-use-probe", "native-blue-rest-fixture",
         "native-red-seed", "native-red-inspect", "native-red-use-probe",
         "native-green-seed", "native-green-inspect", "native-green-use-probe",
+        "native-purple-seed", "native-purple-inspect", "native-purple-use-probe",
         "native-stardust-seed", "native-stardust-inspect", "native-stardust-use-probe", "native-dream-power-fixture",
+        "native-fruiting-stardust-seed", "native-fruiting-stardust-inspect", "native-fruiting-stardust-use-probe",
+        "native-dream-tarot-fixture",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
+        "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
+        "native-broker-grant-manifest",
         "native-weapon-roundtrip",
         "native-shop-approach", "native-shop-buy",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
         "native-fall-position", "native-fall-return",
         "native-door-position", "native-door-probe",
         "native-transport-probe",
+        "native-matrix-inspect", "native-matrix-seed", "native-matrix-equip", "native-matrix-fuel", "native-matrix-probe",
     ])
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
@@ -122,6 +128,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
+    action.add_argument("--item-guid", help="exact secondary item GUID for a fixture")
     return cli
 
 
@@ -183,7 +190,7 @@ async def execute(opts):
     return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
                         amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
                         retained=retained if opts.action == "keep" else None,
-                        exit_position=opts.exit_position, entrance=opts.entrance)
+                        exit_position=opts.exit_position, entrance=opts.entrance, item_guid=opts.item_guid)
 
 
 def main() -> int:

@@ -143,28 +143,27 @@ function zone.sync(state, phase)
         return
     end
     local local_pawn = state.local_pawn and state.local_pawn.pawn
-    local remote
+    local remote = {}
     if host then
-        for _, details in ipairs(state.pawns) do
-            if details.kind == "guest" and valid(details.pawn) then
-                if remote then
-                    wait_for_scope("Multiple guest pawns in a two-player lab")
-                    return
-                end
-                remote = details.pawn
-            end
+        for _, details in ipairs(state.guests) do
+            if valid(details.pawn) then remote[#remote + 1] = details.pawn:GetAddress() end
         end
     end
-    if not valid(local_pawn) or (host and state.clients ~= (remote and 1 or 0)) then
+    if not valid(local_pawn) or #remote > 4 or (host and state.clients ~= #remote) then
         wait_for_scope("Waiting for the native player roster")
         return
+    end
+    local function qualify(exit_address, accepting)
+        local address = local_pawn:GetAddress()
+        if type(SilverfishSetNativeZoneRoster) == "function" then
+            return SilverfishSetNativeZoneRoster(address, exit_address, host, accepting, table.unpack(remote))
+        end
+        return #remote <= 1 and SilverfishSetNativeZoneScope(address, remote[1] or 0, exit_address, host, accepting)
     end
     local exit = find_fixture(local_pawn, route)
     if route.fixture and not valid(exit) then
         wall.clear()
-        if SilverfishSetNativeZoneScope(local_pawn:GetAddress(), remote and remote:GetAddress() or 0, 0, host, false) then
-            armed = state.map
-        end
+        if qualify(0, false) then armed = state.map end
         wait_for_scope("Waiting for the placed " .. route.fixture)
         return
     end
@@ -177,8 +176,7 @@ function zone.sync(state, phase)
         secondary_fixture = placed_actor("Level_Exit_BP_C", route.secondary.fixture, world)
     end
     wall.sync(state, phase, exit, accepting, secondary_fixture)
-    local refreshed = SilverfishSetNativeZoneScope(local_pawn:GetAddress(), remote and remote:GetAddress() or 0,
-        valid(exit) and exit:GetAddress() or 0, host, accepting)
+    local refreshed = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
     if not refreshed then
         wait_for_scope("Native zone hooks declined the scope")
         return

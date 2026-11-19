@@ -1,6 +1,6 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
-from . import party
+from . import native_broker, party
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -39,6 +39,8 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
+    if target == native_broker.QUEST_ID:
+        return await native_broker.action(host, bridge, actor, verb)
     roles = host.roles()
     player = host.party["players"].get(actor)
     if (not host.fixtures or not player or actor not in host.authoritative_pawns(roles)

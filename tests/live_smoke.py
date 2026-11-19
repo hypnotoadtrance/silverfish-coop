@@ -34,8 +34,11 @@ options.add_argument("--native-gold", action="store_true", help="exercise a Gold
 options.add_argument("--native-blue", action="store_true", help="exercise Blue Cube fallback and same-map stock rest travel")
 options.add_argument("--native-red", action="store_true", help="exercise Red Cube party travel and its durable random destination")
 options.add_argument("--native-green", action="store_true", help="exercise Green Cube reputation, party arrival and restart")
+options.add_argument("--native-purple", action="store_true", help="exercise a stock Purple Cube draw and party restart")
 options.add_argument("--native-stardust", action="store_true", help="exercise the stock Stardust visit and timed return")
-options.add_argument("--dream-early", action="store_true", help="send the stock Exchange power signal during a Stardust visit")
+options.add_argument("--dream-early", action="store_true", help="send the stock power signal during a Stardust visit")
+options.add_argument("--dream-tarot", choices=("rook", "obelisk", "night", "black-stag"), help="stage a stock Tarot route")
+options.add_argument("--fruiting-stardust", action="store_true", help="use the stock Fruiting Dream Dust stack")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
 options.add_argument("--native-host-save", action="store_true", help="verify the whole host-save generation and native inventory")
 options.add_argument("--native-guest-save", action="store_true", help="verify a distinct guest stock save and native inventory")
@@ -43,6 +46,8 @@ options.add_argument("--native-roster", action="store_true", help="verify the ho
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
+options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
+options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
 options.add_argument("--native-shop", action="store_true", help="buy a stock merchant item with the party wallet")
 options.add_argument("--native-wipe", action="store_true", help="wipe both native pawns and recover a native item")
 options.add_argument("--native-backend", choices=("cpp", "cpp-scoped", "overlay"),
@@ -65,6 +70,10 @@ if args.native_weapon and not args.native_guest:
     options.error("--native-weapon requires --native-guest")
 if args.native_shop and not (args.native_guest and args.native_quest_flow):
     options.error("--native-shop requires --native-guest and --native-quest-flow")
+if args.native_broker and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
+                                                       args.native_gold, args.native_blue, args.native_red,
+                                                       args.native_green, args.native_purple, args.native_stardust))):
+    options.error("--native-broker requires --native-zones and its own stock merchant map")
 if args.native_wipe and not (args.native_pair and args.native_pickup):
     options.error("--native-wipe requires --native-pair and --native-pickup")
 if args.native_zones and args.zones:
@@ -82,8 +91,9 @@ if args.native_gold and (not args.native_zones or args.authored_zone or args.nat
 if args.native_blue and (not args.native_zones or args.authored_zone or args.native_door
                          or args.observatory_zone or args.native_gold):
     options.error("--native-blue requires --native-zones and its own authored route")
-random_cube = "red" if args.native_red else "green" if args.native_green else None
-if random_cube and (not args.native_zones or args.native_red and args.native_green
+cubes = [name for name in ("red", "green", "purple") if getattr(args, f"native_{name}")]
+random_cube = next(iter(cubes), None)
+if random_cube and (not args.native_zones or len(cubes) != 1
                     or any((args.authored_zone, args.native_door, args.observatory_zone,
                             args.native_gold, args.native_blue, args.native_stardust))):
     options.error(f"--native-{random_cube} requires --native-zones and its own authored route")
@@ -94,6 +104,10 @@ if args.native_stardust and (not args.native_zones or args.authored_zone or args
     options.error("--native-stardust requires --native-zones and its own authored route")
 if args.dream_early and not args.native_stardust:
     options.error("--dream-early requires --native-stardust")
+if (args.dream_tarot or args.fruiting_stardust) and not args.native_stardust:
+    options.error("The Tarot and Fruiting Dream Dust fixtures require --native-stardust")
+if args.dream_early and args.dream_tarot not in (None, "rook"):
+    options.error("The current stock power fixture supports Exchange and Rook")
 if args.native_host_save and not args.native_stardust:
     options.error("--native-host-save uses the Stardust stock inventory fixture")
 if args.native_guest_save and not (args.native_guest and args.native_pickup):
@@ -108,10 +122,23 @@ records = []
 processes = []
 deadline = 40
 crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 observatory_bed = "SavePoint_BP_C_3-Observitory_P-"
 gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
-exchange = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
+dreaming = {
+    "rook": ("Tarot_Rook", "/Game/Classes/Maps/Dreams/TheRook_P", 2, 0, 3, "Dream_CountDown_BP_C_1"),
+    "obelisk": ("Tarot_Obelisk", "/Game/Classes/Maps/Dreams/Pyroclast_P", 3, 0, 3, "Dream_CountDown_BP_C_1"),
+    "night": ("Tarot_Night", "/Game/Classes/Maps/Dreams/Slate_P", 1, 0, 2, "Slate_P_C_0"),
+    "black-stag": ("Tarot_BlackStag", "/Game/Classes/Maps/Dreams/BlackOcean_P", 0, 160, 2, "BlackOcean_P_C_0"),
+}
+dream_flag, dream_map, dream_multiplier, dream_fixed, dream_fade, dream_actor = dreaming.get(
+    args.dream_tarot, ("", "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P", 1, 0, 3, "Dream_CountDown_BP_C_1"),
+)
+dream_kind = "fruiting-stardust" if args.fruiting_stardust else "stardust"
+dream_report = "native_" + dream_kind.replace("-", "_")
+dream_payload = "stock-fruiting-default-v1" if args.fruiting_stardust else "stock-default-v1"
+dream_time = dream_fixed + dream_multiplier * (180 if args.fruiting_stardust else 90)
 
 def note(label, summary):
     message = {"check": label, **summary}
@@ -374,6 +401,7 @@ def verify_green_arrival(proof, destination):
 async def random_cube_travel(cube, character_id, host_session):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tools.silverfish.travel import RED_DESTINATIONS, TRAVEL_RADIUS_UU
+    from tools.silverfish import native_purple
 
     def ready(status, map_name):
         return (party_in_zone(status, map_name)
@@ -402,7 +430,7 @@ async def random_cube_travel(cube, character_id, host_session):
             and {"id": character_id, "reason": "too_far"} in refusal["blockers"]), denied
     await random_cube_action(cube, "inspect", guid, crossroads, "present", pawn)
     untouched = await wait(run, lambda status: ready(status, crossroads)
-                           and (cube == "red" or status["game"].get("native_green_options")))
+                           and (cube != "green" or status["game"].get("native_green_options")))
     assert untouched["zone_epoch"] == distant["zone_epoch"], untouched
     assert random_cube_ledger(untouched, cube) == random_cube_ledger(initial, cube), untouched
     refusal_note = {"guid": guid, "blockers": refusal["blockers"]}
@@ -411,6 +439,8 @@ async def random_cube_travel(cube, character_id, host_session):
         options_proof = untouched["game"]["native_green_options"]
         destinations, arrival_tag = verify_green_options(options_proof, pawn), "Bed"
         refusal_note["options"] = options_proof
+    elif cube == "purple":
+        destinations, arrival_tag = native_purple.DESTINATIONS, native_purple.ARRIVAL
     note(f"{cube}_cube_rejection_preserves_stock_item", refusal_note)
 
     await position_for_native_exit("guest", "near", entrance=entrance)
@@ -423,11 +453,12 @@ async def random_cube_travel(cube, character_id, host_session):
     destination = result["map"]
     completed = await wait_campaign_event(f"{cube}_travel_completed", guid)
     assert (completed["ok"] and completed["map"] == destination and completed["entrance"] == arrival_tag
-            and completed["debit"] == "removed"
-            and completed["travel_epoch"] == result["travel_epoch"] != distant["zone_epoch"]), completed
+            and completed["debit"] == "removed" and completed["travel_epoch"] == result["travel_epoch"]), completed
+    assert (completed["travel_epoch"] == distant["zone_epoch"]) == (destination == crossroads), completed
+    assert completed.get("in_zone", False) == (destination == crossroads), completed
     settled = {"pending": None, "spent": {guid: "arrived"}}
     arrived = await wait(run, lambda status: ready(status, destination) and random_cube_ledger(status, cube) == settled
-                         and (cube == "red" or status["game"].get("native_green_arrival")))
+                         and (cube == "red" or status["game"].get(f"native_{cube}_arrival")))
     assert arrived["zone_epoch"] == result["travel_epoch"], arrived
     peer = await wait(client_run, lambda status: status.get("state") == "connected"
                       and status.get("game", {}).get("map") == destination)
@@ -440,6 +471,11 @@ async def random_cube_travel(cube, character_id, host_session):
     if cube == "green":
         arrival = arrived["game"]["native_green_arrival"]
         verify_green_arrival(arrival, destination)
+        arrival_note["arrival"] = arrival
+    elif cube == "purple":
+        arrival = arrived["game"]["native_purple_arrival"]
+        assert arrival["destination"] == destination and "PersistentLevel." in arrival["actor"], arrival
+        assert arrival["placement"] in ("start", "arrow", "alternate"), arrival
         arrival_note["arrival"] = arrival
     note(f"{cube}_cube_moves_party_to_rolled_stock_destination", arrival_note)
     return guid, destination
@@ -580,34 +616,34 @@ def campaign_party(status):
 
 
 async def stardust_visit(character_id, host_session):
-    actor = "Dream_CountDown_BP_C_1"
     guid = uuid.uuid4().hex.upper()
 
     def isolation_ready(status):
         isolation = status.get("game", {}).get("native_dream_isolation", {})
-        return isolation.get("state") == "ready" and isolation.get("map") == exchange and isolation.get("actor") == actor
+        return (isolation.get("state") == "ready" and isolation.get("map") == dream_map
+                and isolation.get("actor") == dream_actor)
 
     async def peer_in(map_name):
         return await wait(client_run, lambda status: status.get("state") == "connected"
                           and status.get("game", {}).get("map") == map_name
                           and status.get("character_id") == character_id and status.get("host_session") == host_session
-                          and (map_name != exchange or isolation_ready(status)))
+                          and (map_name != dream_map or isolation_ready(status)))
 
     async def dust(operation, map_name, pawn, state, quantity):
         amount = ["--amount", str(quantity)] if operation == "seed" else []
-        reply = await command("action", "--campaign", campaign, f"native-stardust-{operation}",
+        reply = await command("action", "--campaign", campaign, f"native-{dream_kind}-{operation}",
                               "--target", guid, *amount)
-        report = reply["native_stardust"]
+        report = reply[dream_report]
         assert report["operation"] == operation and report["guid"] == guid, report
         assert report["map"] == map_name and report["pawn"] == pawn, report
         assert report["state"] == state and report["quantity"] == quantity, report
         if operation == "inspect":
-            assert report["payload"] == "stock-default-v1", report
+            assert report["payload"] == dream_payload, report
         return report
 
     async def use(pawn, after=0):
         await dust("use-probe", crossroads, pawn, "requested", 0)
-        event = await wait_campaign_event("native_stardust_request", guid, after=after)
+        event = await wait_campaign_event(f"native_{dream_kind}_request", guid, after=after)
         assert event["source"] == crossroads and event["entry"] == "use_held_item", event
         return event
 
@@ -615,6 +651,10 @@ async def stardust_visit(character_id, host_session):
                          and status["game"].get("native_zone", {}).get("state") == "ready"
                          and status["game"].get("native_transport", {}).get("state") == "ready")
     host_pawn = initial["game"]["pawns"]["local"]["name"]
+    if dream_flag:
+        flag = await command("action", "--campaign", campaign, "native-dream-tarot-fixture",
+                             "--target", dream_flag, "--amount", "2")
+        assert flag["flag"] == dream_flag and flag["points"] == 2, flag
     await dust("seed", crossroads, host_pawn, "seeded", 2)
     await position_for_native_exit("host", "near", entrance="Obsv_Etr")
     await position_for_native_exit("guest", "far", entrance="Obsv_Etr")
@@ -638,26 +678,32 @@ async def stardust_visit(character_id, host_session):
     triggered = time.time()
     allowed = await use(host_pawn, after=denied["sequence"])
     result = allowed["result"]
-    assert result["ok"] and result["map"] == exchange and result["entrance"] == "PlayerStart_1", allowed
-    at_exchange = await wait(run, lambda status: party_in_zone(status, exchange) and isolation_ready(status)
+    assert result["ok"] and result["map"] == dream_map and result["entrance"] == "PlayerStart_1", allowed
+    at_dream = await wait(run, lambda status: party_in_zone(status, dream_map) and isolation_ready(status)
                              and (campaign_party(status).get("stardust_visit") or {}).get("phase") == "visiting")
-    assert at_exchange["zone_epoch"] == result["travel_epoch"] != distant["zone_epoch"], at_exchange
-    assert not at_exchange["game"]["native_dream_isolation"]["early_requested"], at_exchange
-    active = campaign_party(at_exchange)["stardust_visit"]
-    assert (active["guid"] == guid and active["before"] == 2 and active["payload"] == "stock-default-v1"
-            and active["source"] == crossroads and active["destination"] == exchange
+    assert at_dream["zone_epoch"] == result["travel_epoch"] != distant["zone_epoch"], at_dream
+    assert not at_dream["game"]["native_dream_isolation"]["early_requested"], at_dream
+    active = campaign_party(at_dream)["stardust_visit"]
+    assert (active["guid"] == guid and active["before"] == 2 and active["payload"] == dream_payload
+            and active["source"] == crossroads and active["destination"] == dream_map
+            and active["kind"] == dream_kind and active["tarot"] == dream_flag and active["effects"] == "applied"
             and active["return_map"] == observatory and active["return_bed"] == ""), active
     original_deadline = active["deadline"]
-    assert math.isfinite(original_deadline) and original_deadline >= triggered + 90, active
-    arrival = at_exchange["game"]["native_dream_arrival"]
-    assert arrival["destination"] == exchange and arrival["actor"] == "PlayerStart_1", arrival
-    pawns = at_exchange["game"]["pawns"]
+    assert math.isfinite(original_deadline) and original_deadline >= triggered + dream_time, active
+    arrival = at_dream["game"]["native_dream_arrival"]
+    assert arrival["destination"] == dream_map and arrival["actor"] == "PlayerStart_1", arrival
+    pawns = at_dream["game"]["pawns"]
     assert math.dist(pawns["local"]["location"], arrival["location"]) <= 250, pawns
     assert math.dist(pawns["local"]["location"], pawns["guest"]["location"]) <= 250, pawns
-    await peer_in(exchange)
-    await dust("inspect", exchange, pawns["local"]["name"], "present", 1)
-    note("stardust_opens_isolated_exchange_and_consumes_one", {
+    await peer_in(dream_map)
+    await dust("inspect", dream_map, pawns["local"]["name"], "present", 1)
+    effects = await wait_campaign_event("native_dream_effects_committed", guid)
+    assert (effects["kind"] == dream_kind and effects["tarot"] == dream_flag
+            and effects["destination"] == dream_map and effects["after"] - effects["before"] ==
+            (20 if args.fruiting_stardust else 10)), effects
+    note("stardust_opens_isolated_dream_and_consumes_one", {
         "guid": guid, "quantity": 1, "arrival": arrival, "deadline": original_deadline, "return_map": observatory,
+        "effects": effects,
     })
 
     return_deadline = original_deadline
@@ -668,12 +714,12 @@ async def stardust_visit(character_id, host_session):
 
         def shortened(status):
             visit = campaign_party(status).get("stardust_visit") or {}
-            return (status.get("game", {}).get("map") == exchange and visit.get("id") == active["id"]
+            return (status.get("game", {}).get("map") == dream_map and visit.get("id") == active["id"]
                     and visit.get("deadline", original_deadline) < original_deadline)
 
         accelerated = await wait(run, shortened, timeout=8)
         return_deadline = campaign_party(accelerated)["stardust_visit"]["deadline"]
-        note("stock_exchange_power_shortens_durable_countdown", {
+        note("stock_dream_power_shortens_durable_countdown", {
             "visit_id": active["id"], "before": original_deadline, "after": return_deadline,
         })
 
@@ -681,11 +727,19 @@ async def stardust_visit(character_id, host_session):
     returned = await wait(run, lambda status: party_in_zone(status, observatory)
                           and campaign_party(status).get("last_stardust_visit") == receipt
                           and not campaign_party(status).get("stardust_visit"),
-                          timeout=30 if args.dream_early else 110)
-    assert time.time() >= return_deadline + 3, returned
+                          timeout=30 if args.dream_early else dream_time + 30)
+    return_mode = "power" if args.dream_early else "timer"
+    if args.dream_tarot == "night":
+        records = await command("events", "--campaign", campaign, "--tail", "100")
+        early = next((event for event in records["events"] if event["event"] == "stardust_early_return_requested"
+                      and event["id"] == active["id"]), None)
+        if early:
+            assert float(early["deadline"]) < original_deadline, early
+            return_deadline, return_mode = early["deadline"], "stock_overlap"
+    assert time.time() >= return_deadline + dream_fade, returned
     if args.dream_early:
         assert time.time() < original_deadline, returned
-    assert returned["zone_epoch"] != at_exchange["zone_epoch"], returned
+    assert returned["zone_epoch"] != at_dream["zone_epoch"], returned
     completed = await wait_campaign_event("stardust_return_completed", guid)
     assert (completed["ok"] and completed["id"] == receipt["id"] and completed["map"] == observatory
             and completed["entrance"] == "Bed" and completed["travel_epoch"] == returned["zone_epoch"]), completed
@@ -694,7 +748,7 @@ async def stardust_visit(character_id, host_session):
     verify_observatory_rest(proof, returned["game"]["pawns"])
     await peer_in(observatory)
     await dust("inspect", observatory, returned["game"]["pawns"]["local"]["name"], "present", 1)
-    note("stardust_returns_same_party_to_stock_rest", {"mode": "power" if args.dream_early else "timer",
+    note("stardust_returns_same_party_to_stock_rest", {"mode": return_mode,
                                                       "receipt": receipt, "arrival": proof, "character_id": character_id})
     return receipt
 
@@ -847,7 +901,7 @@ async def smoke():
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
         authored_route = any((args.authored_zone, args.native_door, args.native_gold,
                               args.native_blue, random_cube, args.native_stardust, args.observatory_zone))
-        initial_zone = ["--start-zone", crossroads] if authored_route else []
+        initial_zone = ["--start-zone", black_market if args.native_broker else crossroads] if authored_route or args.native_broker else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
@@ -898,7 +952,7 @@ async def smoke():
             for role, arguments, directory, reason in role_cases:
                 await wait(directory, lambda state: state.get("game", {}).get("native_transport", {}).get("state") == "ready")
                 rows = []
-                for item in ("stardust", "green", "blue", "red", "gold"):
+                for item in ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube"):
                     reply = await command("action", *arguments, "native-transport-probe", "--target", item)
                     row = reply["native_transport"]
                     assert row["role"] == role and row["reason"] == reason and row["item"] == item, row
@@ -910,6 +964,45 @@ async def smoke():
                              "host_pawn": host_status["game"]["pawns"]["local"],
                              "guest_pawn": host_status["game"]["pawns"]["guest"],
                              "character_id": chosen})
+        if args.native_quest_catalog:
+            report = await command("action", "--campaign", campaign, "native-quest-catalog")
+            catalog = report["native_quest_catalog"]
+            stock = catalog["stock"]
+            assert catalog["active"]["state"] == "ready" and stock["state"] == "ready", catalog
+            assert stock["total"] == stock["emitted"] == len(stock["entries"]) == 82, stock
+            assert stock["entries"]["Jmr_CrossRoads"] == {
+                "state": "template", "step": 1, "final_step": 2, "cash": 200, "xp": 1, "item_count": 0, "items": [],
+            }, stock["entries"]["Jmr_CrossRoads"]
+            assert stock["entries"]["Clct_EManifest"]["cash"] == 10_000, stock
+            note("stock_quest_catalog_reads_exact_ids_and_rewards", {
+                "sequence": catalog["sequence"], "stock_rows": stock["total"], "active_rows": catalog["active"]["total"],
+            })
+        if args.native_broker:
+            quest_id = "Clct_EManifest"
+            assert party_in_zone(host_status, black_market)
+            await wait(run, lambda state: party_in_zone(state, black_market)
+                       and state.get("gameplay", {}).get("players", {}).get("guest", {}).get("character_id") == chosen)
+            issue_at = await command("action", "--campaign", campaign, "native-broker-position-fixture",
+                                     "--target", "guest", "--entrance", "issue")
+            assert issue_at["native_broker_position"]["target"].endswith("NPC_Broker_C_1"), issue_at
+            issued_quest = await command("action", "--campaign", campaign, "native-broker-issue-fixture", "--target", chosen)
+            assert issued_quest["quest_id"] == quest_id and issued_quest["step"] == 1 and issued_quest["actor"] == chosen
+            report = await command("action", "--campaign", campaign, "native-quest-catalog")
+            assert report["native_quest_catalog"]["active"]["entries"][quest_id]["step"] == 1, report
+            guid = uuid.uuid4().hex.upper()
+            granted = await command("action", "--campaign", campaign, "native-broker-grant-manifest", "--target", guid)
+            assert granted["native_broker"]["manifest_guid"] == guid and granted["native_broker"]["changed"] is True, granted
+            turn_in_at = await command("action", "--campaign", campaign, "native-broker-position-fixture",
+                                       "--target", "guest", "--entrance", "redeem")
+            assert turn_in_at["native_broker_position"]["target"].endswith("ItemRequest_TradeStation_BP_C_1"), turn_in_at
+            redeem = ("action", "--profile", profile, "native-quest-turnin", "--target", quest_id)
+            turned = await command(*redeem)
+            assert (turned["step"] == -10 and turned["consumed_guid"] == guid and turned["wallet"] == 10_000
+                    and set(turned["recipients"]) == {"host", chosen} and turned["xp"] == 1), turned
+            repeat = await command(*redeem)
+            assert repeat["effect"] == "native_quest_already_settled" and repeat["wallet"] == turned["wallet"], repeat
+            note("stock_broker_manifest_awards_party_once", {"id": quest_id, "manifest": guid, "recipients": turned["recipients"],
+                                                           "cash": turned["wallet"], "xp": turned["xp"]})
         if args.native_roster:
             census = await wait(run, lambda status: status.get("game", {}).get("native_roster", {}).get("state")
                                 == "qualified" and status["game"]["native_roster"]["count"] == 1
@@ -1249,7 +1342,7 @@ async def smoke():
                        and not state.get("awaiting_zone_guest") and len(state["game"]["pawns"]) == 2)
             await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == expected_map)
             note("stock_transition_door_returns_party", {"map": expected_map, "entrance": "CR_Cstrn"})
-        elif args.zones or args.native_zones:
+        elif (args.zones or args.native_zones) and not args.native_broker:
             destination = ("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P" if args.authored_zone
                            else "/Game/Classes/Maps/PlaytestMap_02")
             forbidden = await command("action", "--profile", profile, "travel", "--target", destination, check=False)
@@ -1477,11 +1570,11 @@ async def smoke():
                              and entry["generation"] == restored["generation"])
                 assert proof["slot"] == frame["slot"] and proof["map"] == expected_map, proof
                 assert proof["state"] == "restored" and proof["backpack_count"] >= 1, proof
-                inventory = await command("action", "--campaign", campaign, "native-stardust-inspect",
+                inventory = await command("action", "--campaign", campaign, f"native-{dream_kind}-inspect",
                                           "--target", stardust_receipt["guid"])
-                stack = inventory["native_stardust"]
+                stack = inventory[dream_report]
                 assert stack["state"] == "present" and stack["quantity"] == 1, stack
-                assert stack["payload"] == "stock-default-v1" and stack["guid"] == stardust_receipt["guid"], stack
+                assert stack["payload"] == dream_payload and stack["guid"] == stardust_receipt["guid"], stack
                 note("stock_host_inventory_survives_restart_in_verified_native_save", {
                     "frame": frame, "restored": proof, "stack": stack,
                 })

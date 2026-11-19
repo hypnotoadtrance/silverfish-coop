@@ -103,8 +103,9 @@ async def submit(run: Path, action: str, **arguments) -> dict:
         "generation": current["generation"], "action": action, **arguments,
     })
     output = run / "responses" / name
+    limit = 1_048_576 if action == "native-quest-catalog" else 8192
     for _ in range(200):
         if output.is_file():
-            return read_json(output, limit=8192)
+            return read_json(output, limit=limit)
         await asyncio.sleep(0.2)
     raise TimeoutError(f"Command response timed out (id {request_id})")

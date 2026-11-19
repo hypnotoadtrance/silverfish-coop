@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -68,15 +69,22 @@ namespace
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Blue.Art_Tesseract_Blue_C"), "blue"},
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Red.Art_Tesseract_Red_C"), "red"},
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Gold.Art_Tesseract_Gold_C"), "gold"},
+        Artifact{STR("/Game/Classes/Items/Artifacts/Art_FruitingDreamDust.Art_FruitingDreamDust_C"), "fruiting-stardust"},
+        Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Purple.Art_Tesseract_Purple_C"), "purple"},
+        Artifact{STR("/Game/Classes/Items/Artifacts/Art_TeleportCube.Art_TeleportCube_C"), "teleport-cube"},
     };
     constexpr const auto& green = artifacts[1];
     constexpr const auto& blue = artifacts[2];
     constexpr const auto& red = artifacts[3];
-    constexpr const auto& gold = artifacts.back();
+    constexpr const auto& gold = artifacts[4];
     constexpr const auto& stardust = artifacts.front();
+    constexpr const auto& fruiting_stardust = artifacts[5];
+    constexpr const auto& purple = artifacts[6];
+    constexpr const auto& teleport_cube = artifacts.back();
 
-    enum class TransportKind { Gold, Blue, Stardust, Red, Green };
-    constexpr std::array transport_artifacts{&gold, &blue, &stardust, &red, &green};
+    enum class TransportKind { Gold, Blue, Stardust, Red, Green, FruitingStardust, Purple, Matrix };
+    // Equipment input uses the Matrix-specific path and never enters the ItemManager consumable queue.
+    constexpr std::array transport_artifacts{&gold, &blue, &stardust, &red, &green, &fruiting_stardust, &purple};
 
     [[nodiscard]] constexpr const Artifact& transport_artifact(TransportKind kind)
     {
@@ -85,20 +93,34 @@ namespace
 
     [[nodiscard]] constexpr std::string_view transport_status(TransportKind kind, std::string_view gold_status,
                                                                std::string_view blue_status, std::string_view stardust_status,
-                                                               std::string_view red_status, std::string_view green_status)
+                                                               std::string_view red_status, std::string_view green_status,
+                                                               std::string_view fruiting_status, std::string_view purple_status)
     {
-        return std::array{gold_status, blue_status, stardust_status, red_status, green_status}[static_cast<std::size_t>(kind)];
+        return std::array{gold_status, blue_status, stardust_status, red_status, green_status, fruiting_status,
+                          purple_status}[static_cast<std::size_t>(kind)];
+    }
+
+    [[nodiscard]] constexpr bool stackable_transport(TransportKind kind)
+    {
+        return kind == TransportKind::Stardust || kind == TransportKind::FruitingStardust;
+    }
+
+    [[nodiscard]] constexpr std::string_view stack_status(TransportKind kind, std::string_view stardust_status,
+                                                          std::string_view fruiting_status)
+    {
+        return kind == TransportKind::FruitingStardust ? fruiting_status : stardust_status;
     }
 
     [[nodiscard]] constexpr std::string_view queued_status(TransportKind kind)
     {
         return transport_status(kind, "gold_request_queued", "blue_request_queued", "stardust_request_queued",
-                                "red_request_queued", "green_request_queued");
+                                "red_request_queued", "green_request_queued", "fruiting_stardust_request_queued", "purple_request_queued");
     }
 
     [[nodiscard]] constexpr std::string_view owned_backpack_required(TransportKind kind)
     {
-        return kind == TransportKind::Stardust ? "owned_backpack_stardust_required" : "owned_backpack_cube_required";
+        return stackable_transport(kind) ? stack_status(kind, "owned_backpack_stardust_required", "owned_backpack_fruiting_stardust_required") :
+                                           "owned_backpack_cube_required";
     }
 
     struct Entries
@@ -108,6 +130,9 @@ namespace
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
         Unreal::FName use_primary{STR("Use_Item_Primary")};
+        Unreal::FName use_secondary{STR("Use_Item_Secondary")};
+        Unreal::FName teleport{STR("Teleport")};
+        Unreal::FName matrix_script{STR("ExecuteUbergraph_Art_TeleportCube")};
         Unreal::FName apply_effects{STR("ApplyItemEffects")};
     };
 
@@ -152,6 +177,14 @@ namespace
         Unreal::FWeakObjectPtr pawn;
         Unreal::FWeakObjectPtr save;
         std::string_view entry;
+        Clock::time_point ready_after{};
+        Unreal::FWeakObjectPtr equipped_actor{};
+    };
+
+    struct MatrixInput
+    {
+        std::uint64_t generation{};
+        Unreal::FWeakObjectPtr equipment;
     };
 
     std::optional<Entries> entries;
@@ -161,6 +194,7 @@ namespace
     thread_local Scope scope;
     thread_local Receipt receipt;
     thread_local std::optional<TransportRequest> transport_request;
+    thread_local std::array<MatrixInput, 2> matrix_inputs;
 
     [[nodiscard]] bool enabled()
     {
@@ -256,6 +290,12 @@ namespace
                object_value(current.server_connection, driver) == server && only_local_player(current, instance) == local;
     }
 
+    void clear_matrix_input()
+    {
+        matrix_inputs = {};
+        if (transport_request && transport_request->kind == TransportKind::Matrix) transport_request.reset();
+    }
+
     [[nodiscard]] bool enroll(std::uintptr_t address, bool host)
     {
         const auto now = Clock::now();
@@ -266,6 +306,7 @@ namespace
             {
                 return false;
             }
+            if (now >= scope.expires) clear_matrix_input();
             scope.expires = now + scope_lease;
             return true;
         }
@@ -317,6 +358,7 @@ namespace
         {
             return false;
         }
+        clear_matrix_input();
         scope = next;
         return true;
     }
@@ -483,7 +525,8 @@ namespace
         {
             return false;
         }
-        if (object_field(pawn, STR("EquipedItem")) == actor || object_field(pawn, STR("HeldObject")) == actor)
+        if (object_field(pawn, STR("EquipedItem")) == actor || object_field(pawn, STR("HeldObject")) == actor ||
+            object_field(pawn, STR("OffhandEquipment")) == actor)
         {
             return true;
         }
@@ -558,12 +601,13 @@ namespace
         auto* stacks = field<Unreal::FBoolProperty>(match.defaults, STR("Stacks"));
         auto* expected_ammo = field<Unreal::FIntProperty>(match.defaults, STR("Ammo"));
         auto* item_base = match.item_class ? match.item_class->GetMetaClass().Get() : nullptr;
-        const bool stackable = kind == TransportKind::Stardust;
+        const bool stackable = stackable_transport(kind);
         if (!fields.valid() || !item_base || !match.ammo || !stacks || !expected_ammo || !match.transport_class->IsChildOf(item_base) ||
             stacks->GetPropertyValueInContainer(match.defaults) != stackable ||
             expected_ammo->GetPropertyValueInContainer(match.defaults) != (stackable ? 1 : -1))
         {
-            return stackable ? "stock_stardust_stack_schema_unavailable" : "stock_single_cube_schema_unavailable";
+            return stackable ? stack_status(kind, "stock_stardust_stack_schema_unavailable", "stock_fruiting_stardust_stack_schema_unavailable") :
+                               "stock_single_cube_schema_unavailable";
         }
         Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(save));
         Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
@@ -598,6 +642,97 @@ namespace
                fields.read(armor->ContainerPtrToValuePtr<void>(save)) == guid ? "host_equipment_guid_conflict" : "";
     }
 
+    struct MatrixInventory
+    {
+        Unreal::UClass* type{};
+        Unreal::UScriptStruct* row_type{};
+        Unreal::FArrayProperty* backpack{};
+        Unreal::FArrayProperty* equipment{};
+        const void* row{};
+        int backpack_index{-1};
+        int equipped_index{-1};
+    };
+
+    [[nodiscard]] std::string_view bind_matrix_inventory(Unreal::UObject* save, MatrixInventory& inventory)
+    {
+        if (!save) return "canonical_host_save_required";
+        auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
+        auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
+        auto* structure = backpack ? Unreal::CastField<Unreal::FStructProperty>(backpack->GetInner()) : nullptr;
+        auto* row_type = structure ? structure->GetStruct().Get() : nullptr;
+        auto* matrix_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, teleport_cube.class_path);
+        if (!row_type || row_type->GetPathName() != item_path || structure->GetArrayDim() != 1 ||
+            !equipment || !item_struct(equipment->GetInner(), row_type) || !matrix_class)
+            return "stock_matrix_inventory_schema_unavailable";
+
+        inventory.type = matrix_class;
+        inventory.row_type = row_type;
+        inventory.backpack = backpack;
+        inventory.equipment = equipment;
+        return {};
+    }
+
+    [[nodiscard]] std::string_view locate_matrix(Unreal::UObject* save, const Guid& guid, MatrixInventory& inventory)
+    {
+        if (const auto error = bind_matrix_inventory(save, inventory); !error.empty()) return error;
+        auto* helmet = field<Unreal::FStructProperty>(save, STR("PlayerHelmet"));
+        auto* armor = field<Unreal::FStructProperty>(save, STR("PlayerArmor"));
+        auto* item_class = field<Unreal::FClassProperty>(inventory.row_type, item_class_name);
+        const GuidFields fields(inventory.row_type);
+        if (!item_class || !item_struct(helmet, inventory.row_type) || !item_struct(armor, inventory.row_type) || !fields.valid())
+            return "stock_matrix_inventory_schema_unavailable";
+
+        for (auto* property : {inventory.backpack, inventory.equipment})
+        {
+            Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(save));
+            if (rows.Num() > inventory_limit) return "stock_inventory_size_out_of_range";
+            for (int index = 0; index < rows.Num(); ++index)
+            {
+                const auto* row = rows.GetRawPtr(index);
+                if (fields.read(row) != guid) continue;
+                if (inventory.row || object_value(item_class, row) != inventory.type) return "host_matrix_guid_conflict";
+
+                inventory.row = row;
+                if (property == inventory.equipment) inventory.equipped_index = index;
+                else inventory.backpack_index = index;
+            }
+        }
+        if (fields.read(helmet->ContainerPtrToValuePtr<void>(save)) == guid ||
+            fields.read(armor->ContainerPtrToValuePtr<void>(save)) == guid)
+            return "host_matrix_guid_conflict";
+        return {};
+    }
+
+    [[nodiscard]] std::string_view equipped_matrix_guid(Unreal::UObject* save, Unreal::UObject* actor, Guid& guid)
+    {
+        auto* pawn = scope.pawn.Get();
+        if (!live(actor) || !exact_class(actor, teleport_cube.class_path) ||
+            object_field(pawn, STR("EquipedItem")) != actor || object_field(actor, STR("Player_Ref")) != pawn ||
+            object_field(actor, STR("Owner")) != pawn || object_field(actor, STR("Instigator")) != pawn ||
+            static_cast<Unreal::AActor*>(actor)->GetWorld() != scope.world.Get())
+            return "stock_equipped_matrix_required";
+
+        MatrixInventory inventory;
+        if (const auto error = bind_matrix_inventory(save, inventory); !error.empty()) return error;
+        auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+        const auto index = selected ? selected->GetPropertyValueInContainer(save) : -1;
+        Unreal::FScriptArrayHelper equipment(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
+        if (index < 0 || index >= equipment.Num() || equipment.Num() > inventory_limit)
+            return "stock_equipped_matrix_required";
+
+        const GuidFields fields(inventory.row_type);
+        auto* item_class = field<Unreal::FClassProperty>(inventory.row_type, item_class_name);
+        const auto* row = equipment.GetRawPtr(index);
+        if (!fields.valid() || !item_class || object_value(item_class, row) != actor->GetClassPrivate())
+            return "stock_equipped_matrix_required";
+        guid = fields.read(row);
+        if (guid == Guid{}) return "owned_equipped_matrix_guid_required";
+
+        MatrixInventory unique;
+        if (const auto error = locate_matrix(save, guid, unique); !error.empty()) return error;
+        return unique.row == row && unique.equipped_index == index ? "" : "owned_equipped_matrix_guid_required";
+    }
+
     [[nodiscard]] bool exact_backpack_panel(Unreal::UObject* panel, Unreal::UObject* manager)
     {
         auto* index = exact_class(panel, panel_path) ? field<Unreal::FIntProperty>(panel, STR("InventoryIndex")) : nullptr;
@@ -615,11 +750,19 @@ namespace
     {
         if (pending.kind != kind)
         {
-            return pending.kind == TransportKind::Stardust || kind == TransportKind::Stardust ?
+            return stackable_transport(pending.kind) || stackable_transport(kind) ?
                 "another_transport_request_pending" : "another_cube_request_pending";
         }
         return transport_status(kind, "another_gold_request_pending", "another_blue_request_pending",
-                                "another_stardust_request_pending", "another_red_request_pending", "another_green_request_pending");
+                                "another_stardust_request_pending", "another_red_request_pending", "another_green_request_pending",
+                                "another_fruiting_stardust_request_pending", "another_purple_request_pending");
+    }
+
+    [[nodiscard]] bool transport_use_eligible(Unreal::UObject* pawn)
+    {
+        auto* submerged = field<Unreal::FBoolProperty>(pawn, STR("HeadUnderWater"));
+        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
+        return submerged && dead && !submerged->GetPropertyValueInContainer(pawn) && !dead->GetPropertyValueInContainer(pawn);
     }
 
     [[nodiscard]] std::string_view queue_transport(TransportKind kind, const ItemView& candidate, std::string_view entry,
@@ -637,9 +780,7 @@ namespace
             return "coordinated_route_required";
         }
         auto* pawn = scope.pawn.Get();
-        auto* submerged = field<Unreal::FBoolProperty>(pawn, STR("HeadUnderWater"));
-        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
-        if (!submerged || !dead || submerged->GetPropertyValueInContainer(pawn) || dead->GetPropertyValueInContainer(pawn))
+        if (!transport_use_eligible(pawn))
         {
             return "stock_transport_use_ineligible";
         }
@@ -657,14 +798,49 @@ namespace
         {
             return transport_request->kind == kind && transport_request->guid == guid ?
                 transport_status(kind, "gold_request_pending", "blue_request_pending", "stardust_request_pending",
-                                 "red_request_pending", "green_request_pending") :
+                                 "red_request_pending", "green_request_pending", "fruiting_stardust_request_pending",
+                                 "purple_request_pending") :
                 pending_conflict(*transport_request, kind);
         }
         transport_request = TransportRequest{kind, guid, scope.generation, Clock::now() + request_lease, pawn, save, entry};
         return queued_status(kind);
     }
 
-    void record(const Artifact& item, const ItemView& candidate, std::string_view entry, Unreal::UObject* context, bool widget)
+    [[nodiscard]] std::string_view queue_matrix(Unreal::UObject* actor, bool record_anchor, std::optional<bool> held)
+    {
+        if (!held) return "stock_matrix_input_unavailable";
+        auto& input = matrix_inputs[record_anchor ? 1 : 0];
+        const std::string_view action = record_anchor ? "record" : "activate";
+        const auto now = Clock::now();
+        const bool same_press = input.generation == scope.generation && input.equipment.Get() == actor;
+        if (!*held)
+        {
+            if (same_press) input = {};
+            if (transport_request && transport_request->kind == TransportKind::Matrix &&
+                transport_request->generation == scope.generation && transport_request->equipped_actor.Get() == actor &&
+                transport_request->entry == action && now < transport_request->ready_after)
+                transport_request.reset();
+            return "matrix_input_released";
+        }
+        if (same_press) return "matrix_input_already_held";
+
+        auto* pawn = scope.pawn.Get();
+        if (!transport_use_eligible(pawn)) return "stock_transport_use_ineligible";
+
+        auto* save = canonical_host_save();
+        Guid guid{};
+        if (const auto error = equipped_matrix_guid(save, actor, guid); !error.empty()) return error;
+        input = {scope.generation, actor};
+        if (transport_request && request_current(*transport_request, save)) return "another_transport_request_pending";
+
+        const auto ready_after = now + (record_anchor ? std::chrono::seconds(1) : std::chrono::milliseconds(300));
+        transport_request = TransportRequest{TransportKind::Matrix, guid, scope.generation, ready_after + request_lease,
+                                             pawn, save, action, ready_after, actor};
+        return record_anchor ? "matrix_record_queued" : "matrix_activate_queued";
+    }
+
+    void record(const Artifact& item, const ItemView& candidate, std::string_view entry, Unreal::UObject* context,
+                bool widget, std::optional<bool> held)
     {
         const bool qualified = active_scope() &&
                                (widget ? same_widget_player(context) : same_actor_player(context));
@@ -680,6 +856,11 @@ namespace
                 reason = queue_transport(kind, candidate, entry, context);
             }
         }
+        if (qualified && scope.host && &item == &teleport_cube && !widget &&
+            (entry == "use_item_primary" || entry == "use_item_secondary"))
+        {
+            reason = queue_matrix(context, entry == "use_item_secondary", held);
+        }
         if (receipt.role != role || receipt.item != item.name || receipt.entry != entry || receipt.reason != reason)
         {
             RC::Output::send<RC::LogLevel::Verbose>(STR("[SilverfishCoopNative] Transport item denied for {}: {} via {} ({})\n"),
@@ -688,7 +869,7 @@ namespace
         receipt = {receipt.count + 1, role, item.name, entry, reason};
     }
 
-    void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function)
+    void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, const void* parameters)
     {
         if (!context || !function || !entries || iteration.OriginalFunctionCallPrevented())
         {
@@ -698,9 +879,12 @@ namespace
         const bool manager = name == entries->action_use || name == entries->quick_move ||
                              name == entries->use_held || name == entries->confirm_use;
         const bool primary = name == entries->use_primary;
+        const bool secondary = name == entries->use_secondary;
+        const bool teleport = name == entries->teleport;
+        const bool matrix_script = name == entries->matrix_script;
         const bool effects = name == entries->apply_effects;
-        if (!(manager || primary || effects) || function->GetReturnProperty() ||
-            function->GetNumParms() != (primary ? 2 : 0) ||
+        if (!(manager || primary || secondary || teleport || matrix_script || effects) || function->GetReturnProperty() ||
+            function->GetNumParms() != (primary ? 2 : (secondary || matrix_script) ? 1 : 0) ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native) || function->HasAnyFunctionFlags(Unreal::FUNC_Net))
         {
             return;
@@ -709,6 +893,7 @@ namespace
         const Artifact* artifact;
         ItemView candidate;
         std::string_view entry;
+        std::optional<bool> held;
         if (manager)
         {
             if (!exact_class(context, manager_path) || function->GetOuterPrivate() != context->GetClassPrivate())
@@ -727,13 +912,33 @@ namespace
             {
                 return;
             }
+            if ((secondary || teleport || matrix_script) && artifact != &teleport_cube)
+            {
+                return;
+            }
             auto* owner = function->GetOuterPrivate();
-            const bool inherited = primary && artifact == &stardust && owner && owner->GetPathName() == consumable_path;
+            const bool inherited = primary && (artifact == &stardust || artifact == &fruiting_stardust) &&
+                                   owner && owner->GetPathName() == consumable_path;
             if (!inherited && owner != context->GetClassPrivate())
             {
                 return;
             }
-            entry = primary ? "use_item_primary" : "apply_item_effects";
+            if (matrix_script)
+            {
+                auto* script_entry = field<Unreal::FIntProperty>(function, STR("EntryPoint"));
+                if (!parameters || !script_entry || script_entry->GetOffset_Internal() != 0) return;
+                constexpr std::array blocked_entries{901, 2077, 2842, 4456, 4637};
+                const auto number = script_entry->GetPropertyValueInContainer(parameters);
+                if (std::ranges::find(blocked_entries, number) == blocked_entries.end()) return;
+            }
+            if (artifact == &teleport_cube && (primary || secondary))
+            {
+                auto* held_parameter = field<Unreal::FBoolProperty>(function, STR("Held"));
+                if (parameters && held_parameter && held_parameter->GetOffset_Internal() == 0)
+                    held = held_parameter->GetPropertyValueInContainer(parameters);
+            }
+            entry = primary ? "use_item_primary" : secondary ? "use_item_secondary" : teleport ? "teleport" :
+                matrix_script ? "matrix_stock_script" : "apply_item_effects";
         }
         if (!artifact)
         {
@@ -742,7 +947,7 @@ namespace
         iteration.PreventOriginalFunctionCall();
         if (iteration.OriginalFunctionCallPrevented())
         {
-            record(*artifact, candidate, entry, context, manager);
+            record(*artifact, candidate, entry, context, manager, held);
         }
     }
 
@@ -750,7 +955,7 @@ namespace
     {
         if (Unreal::IsInGameThreadRaw())
         {
-            intercept(iteration, context, frame.Node());
+            intercept(iteration, context, frame.Node(), frame.Locals());
         }
     }
 
@@ -769,6 +974,7 @@ namespace
             {
                 scope = {};
                 transport_request.reset();
+                matrix_inputs = {};
             }
         }
         lua.set_bool(accepted);
@@ -809,6 +1015,52 @@ namespace
         return 3;
     }
 
+    int lua_take_matrix_request(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            !current_host_argument(lua.get_integer(1)))
+            return report_transport_request(lua, false, "current_transport_host_required");
+        if (!transport_request || transport_request->kind != TransportKind::Matrix)
+            return report_transport_request(lua, false, "no_matrix_request");
+
+        const auto request = *transport_request;
+        auto* save = canonical_host_save();
+        if (!request_current(request, save))
+        {
+            transport_request.reset();
+            return report_transport_request(lua, false, "stale_matrix_request");
+        }
+        if (Clock::now() < request.ready_after)
+            return report_transport_request(lua, false, "matrix_input_waiting");
+
+        transport_request.reset();
+        if (!transport_use_eligible(scope.pawn.Get()))
+            return report_transport_request(lua, false, "stock_transport_use_ineligible");
+        Guid current_guid{};
+        const auto error = equipped_matrix_guid(save, request.equipped_actor.Get(), current_guid);
+        if (!error.empty()) return report_transport_request(lua, false, error);
+        if (current_guid != request.guid)
+            return report_transport_request(lua, false, "equipped_matrix_guid_changed");
+
+        const auto guid = format_guid(request.guid);
+        return report_transport_request(lua, true, {guid.data(), guid.size()}, request.entry);
+    }
+
+    int lua_inspect_matrix(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
+            return probe_result(lua, false, "host_and_matrix_guid_required_on_game_thread");
+        const auto address = lua.get_integer(1);
+        Guid guid{};
+        if (!parse_guid(lua.get_string(2), guid)) return probe_result(lua, false, "invalid_matrix_guid");
+        if (!current_host_argument(address)) return probe_result(lua, false, "current_transport_host_required");
+
+        MatrixInventory inventory;
+        const auto error = locate_matrix(canonical_host_save(), guid, inventory);
+        if (!error.empty()) return probe_result(lua, false, error);
+        return inventory.row ? probe_result(lua, true, "present") : probe_result(lua, false, "owned_matrix_guid_required");
+    }
+
     template <TransportKind kind>
     int lua_take_transport_request(const Lua& lua)
     {
@@ -820,7 +1072,8 @@ namespace
         if (!transport_request || transport_request->kind != kind)
         {
             return report_transport_request(lua, false, transport_status(kind, "no_gold_request", "no_blue_request",
-                                                                         "no_stardust_request", "no_red_request", "no_green_request"));
+                                                                         "no_stardust_request", "no_red_request", "no_green_request",
+                                                                         "no_fruiting_stardust_request", "no_purple_request"));
         }
         const auto request = *transport_request;
         transport_request.reset();
@@ -828,7 +1081,8 @@ namespace
         if (!request_current(request, save))
         {
             return report_transport_request(lua, false, transport_status(kind, "stale_gold_request", "stale_blue_request",
-                                                                         "stale_stardust_request", "stale_red_request", "stale_green_request"));
+                                                                         "stale_stardust_request", "stale_red_request", "stale_green_request",
+                                                                         "stale_fruiting_stardust_request", "stale_purple_request"));
         }
         TransportInventory match;
         if (const auto error = locate_transport(save, kind, request.guid, match); !error.empty())
@@ -849,12 +1103,13 @@ namespace
         {
             return transport_status(kind, "host_and_gold_guid_required_on_game_thread", "host_and_blue_guid_required_on_game_thread",
                                     "host_and_stardust_guid_required_on_game_thread", "host_and_red_guid_required_on_game_thread",
-                                    "host_and_green_guid_required_on_game_thread");
+                                    "host_and_green_guid_required_on_game_thread", "host_and_fruiting_stardust_guid_required_on_game_thread",
+                                    "host_and_purple_guid_required_on_game_thread");
         }
         if (!parse_guid(lua.get_string(2), guid))
         {
             return transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid",
-                                    "invalid_red_guid", "invalid_green_guid");
+                                    "invalid_red_guid", "invalid_green_guid", "invalid_fruiting_stardust_guid", "invalid_purple_guid");
         }
         if (!current_host_argument(lua.get_integer(1)))
         {
@@ -942,6 +1197,18 @@ namespace
 
     constexpr auto max_stack_quantity = std::numeric_limits<std::int32_t>::max();
     constexpr std::string_view stock_stardust_payload = "stock-default-v1";
+    constexpr std::string_view stock_fruiting_payload = "stock-fruiting-default-v1";
+
+    [[nodiscard]] constexpr std::string_view stack_recovery_payload(TransportKind kind)
+    {
+        return stack_status(kind, stock_stardust_payload, stock_fruiting_payload);
+    }
+
+    [[nodiscard]] constexpr std::string_view quantity_required(TransportKind kind)
+    {
+        return stack_status(kind, "positive_stardust_quantity_required_on_game_thread",
+                            "positive_fruiting_stardust_quantity_required_on_game_thread");
+    }
 
     struct StackTotals
     {
@@ -983,7 +1250,7 @@ namespace
         return true;
     }
 
-    int stardust_result(const Lua& lua, bool ok, std::string_view detail, std::int32_t quantity = 0)
+    int stack_result(const Lua& lua, bool ok, std::string_view detail, std::int32_t quantity = 0)
     {
         lua.set_bool(ok);
         lua.set_string(detail);
@@ -991,7 +1258,7 @@ namespace
         return 3;
     }
 
-    [[nodiscard]] std::optional<std::int32_t> stardust_quantity_argument(const Lua& lua)
+    [[nodiscard]] std::optional<std::int32_t> stack_quantity_argument(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(3))
         {
@@ -1005,28 +1272,32 @@ namespace
         return static_cast<std::int32_t>(quantity);
     }
 
-    int lua_commit_stardust(const Lua& lua)
+    template <TransportKind kind>
+    int lua_commit_stack(const Lua& lua)
     {
-        const auto before = stardust_quantity_argument(lua);
+        const auto before = stack_quantity_argument(lua);
         if (!before)
         {
-            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+            return stack_result(lua, false, quantity_required(kind));
         }
         Guid guid{};
         TransportInventory match;
-        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
-            return stardust_result(lua, false, error);
+            return stack_result(lua, false, error);
         }
 
         const auto remaining = *before - 1;
         if (match.quantity == remaining)
         {
-            return stardust_result(lua, true, "already_debited", remaining);
+            return stack_result(lua, true, "already_debited", remaining);
         }
         if (match.quantity != *before)
         {
-            return stardust_result(lua, false, match.record ? "stardust_stack_quantity_mismatch" : "stardust_stack_missing", match.quantity);
+            const auto error = match.record ?
+                stack_status(kind, "stardust_stack_quantity_mismatch", "fruiting_stardust_stack_quantity_mismatch") :
+                stack_status(kind, "stardust_stack_missing", "fruiting_stardust_stack_missing");
+            return stack_result(lua, false, error, match.quantity);
         }
 
         auto* instance = scope.instance.Get();
@@ -1034,7 +1305,7 @@ namespace
         auto* recalculate = stock_no_args(instance, carry_name);
         if (!recalculate)
         {
-            return stardust_result(lua, false, "stock_carry_weight_function_unavailable", match.quantity);
+            return stack_result(lua, false, "stock_carry_weight_function_unavailable", match.quantity);
         }
         if (remaining == 0)
         {
@@ -1046,13 +1317,14 @@ namespace
             StackTotals totals;
             if (!calculate_totals(match, remaining, totals))
             {
-                return stardust_result(lua, false, "stock_stardust_stack_totals_unavailable", match.quantity);
+                return stack_result(lua, false, stack_status(kind, "stock_stardust_stack_totals_unavailable",
+                                                             "stock_fruiting_stardust_stack_totals_unavailable"), match.quantity);
             }
             match.ammo->SetPropertyValueInContainer(match.record, remaining);
             totals.write(match.record);
         }
         instance->ProcessEvent(recalculate, nullptr);
-        return stardust_result(lua, true, remaining > 0 ? "decremented" : "removed", remaining);
+        return stack_result(lua, true, remaining > 0 ? "decremented" : "removed", remaining);
     }
 
     struct StockItemMetadata
@@ -1095,7 +1367,7 @@ namespace
         }
     };
 
-    [[nodiscard]] bool stock_stardust(const TransportInventory& match)
+    [[nodiscard]] bool stock_stack(const TransportInventory& match)
     {
         const StockItemMetadata metadata(match);
         StackTotals totals;
@@ -1109,15 +1381,19 @@ namespace
         const StockItemMetadata metadata(match);
         if (!metadata.available())
         {
-            return transport_status(kind, "stock_gold_defaults_unavailable", "stock_blue_defaults_unavailable",
-                                    "stock_stardust_defaults_unavailable", "stock_red_defaults_unavailable",
-                                    "stock_green_defaults_unavailable");
+            return kind == TransportKind::Matrix ? "stock_matrix_defaults_unavailable" :
+                transport_status(kind, "stock_gold_defaults_unavailable", "stock_blue_defaults_unavailable",
+                                 "stock_stardust_defaults_unavailable", "stock_red_defaults_unavailable",
+                                 "stock_green_defaults_unavailable", "stock_fruiting_stardust_defaults_unavailable",
+                                 "stock_purple_defaults_unavailable");
         }
         StackTotals totals;
-        if (!calculate_totals(match, ammo > 0 ? ammo : 1, totals))
+        if (!calculate_totals(match, stackable_transport(kind) ? ammo : 1, totals))
         {
-            return transport_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults",
-                                    "invalid_stock_stardust_defaults", "invalid_stock_red_defaults", "invalid_stock_green_defaults");
+            return kind == TransportKind::Matrix ? "invalid_stock_matrix_defaults" :
+                transport_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults",
+                                 "invalid_stock_stardust_defaults", "invalid_stock_red_defaults", "invalid_stock_green_defaults",
+                                 "invalid_stock_fruiting_stardust_defaults", "invalid_stock_purple_defaults");
         }
         auto* instance = scope.instance.Get();
         const Unreal::FName carry_name{STR("Calc_CarryWeight")};
@@ -1142,6 +1418,168 @@ namespace
         return {};
     }
 
+    [[nodiscard]] std::string_view matrix_fixture_arguments(const Lua& lua, int arguments, Guid& guid)
+    {
+        if (!fixtures_enabled()) return "native_matrix_fixtures_disabled";
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != arguments || !lua.is_integer(1) || !lua.is_string(2))
+            return "matrix_fixture_pawn_and_guid_required";
+        if (!current_host_argument(lua.get_integer(1))) return "current_transport_host_required";
+        return parse_guid(lua.get_string(2), guid) ? "" : "invalid_matrix_guid";
+    }
+
+    int lua_seed_matrix(const Lua& lua)
+    {
+        Guid guid{};
+        if (const auto error = matrix_fixture_arguments(lua, 2, guid); !error.empty()) return probe_result(lua, false, error);
+
+        auto* save = canonical_host_save();
+        MatrixInventory inventory;
+        if (const auto error = locate_matrix(save, guid, inventory); !error.empty()) return probe_result(lua, false, error);
+        if (inventory.row) return probe_result(lua, true, "present");
+
+        TransportInventory stock;
+        stock.save = save;
+        stock.backpack = inventory.backpack;
+        stock.item = inventory.row_type;
+        stock.item_class = field<Unreal::FClassProperty>(stock.item, item_class_name);
+        stock.ammo = field<Unreal::FIntProperty>(stock.item, item_ammo_name);
+        stock.transport_class = inventory.type;
+        stock.defaults = stock.transport_class->GetClassDefaultObject().Get();
+        auto* default_ammo = field<Unreal::FIntProperty>(stock.defaults, STR("Ammo"));
+        auto* stacks = field<Unreal::FBoolProperty>(stock.defaults, STR("Stacks"));
+        if (!stock.item_class || !stock.ammo || !default_ammo || !stacks || stacks->GetPropertyValueInContainer(stock.defaults))
+            return probe_result(lua, false, "stock_matrix_defaults_unavailable");
+
+        const auto ammo = default_ammo->GetPropertyValueInContainer(stock.defaults);
+        if (const auto error = append_stock_transport(TransportKind::Matrix, stock, guid, ammo); !error.empty())
+            return probe_result(lua, false, error);
+
+        MatrixInventory check;
+        const StockItemMetadata metadata(stock);
+        StackTotals totals;
+        const bool intact = canonical_host_save() == save && locate_matrix(save, guid, check).empty() &&
+                            check.backpack_index >= 0 && check.row && metadata.matches(check.row) &&
+                            stock.ammo->GetPropertyValueInContainer(check.row) == ammo &&
+                            calculate_totals(stock, 1, totals) && totals.matches(check.row);
+        return probe_result(lua, intact, intact ? "seeded" : "stock_matrix_fixture_seed_unverified");
+    }
+
+    int lua_equip_matrix(const Lua& lua)
+    {
+        Guid guid{};
+        if (const auto error = matrix_fixture_arguments(lua, 2, guid); !error.empty()) return probe_result(lua, false, error);
+
+        auto* save = canonical_host_save();
+        auto* pawn = scope.pawn.Get();
+        auto* equipped = object_field(pawn, STR("EquipedItem"));
+        Guid actual{};
+        if (equipped_matrix_guid(save, equipped, actual).empty() && actual == guid)
+            return probe_result(lua, true, "equipped");
+
+        MatrixInventory inventory;
+        if (const auto error = locate_matrix(save, guid, inventory); !error.empty()) return probe_result(lua, false, error);
+        if (!inventory.row || !transport_use_eligible(pawn)) return probe_result(lua, false, "stock_matrix_fixture_equip_ineligible");
+
+        const Unreal::FName equip_name{STR("Equip_NextItem")};
+        auto* equip = pawn->GetFunctionByNameInChain(equip_name);
+        auto* index = field<Unreal::FIntProperty>(equip, STR("Index"));
+        auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
+        auto* instance = scope.instance.Get();
+        auto* recalculate = stock_no_args(instance, carry_name);
+        if (!index || !selected || !recalculate || equip->GetOuterPrivate() != pawn->GetClassPrivate() ||
+            equip->GetNumParms() != 1 || equip->GetReturnProperty() || index->GetOffset_Internal() != 0 ||
+            equip->GetParmsSize() != sizeof(std::int32_t))
+            return probe_result(lua, false, "stock_matrix_fixture_equip_schema_unavailable");
+
+        const auto old_slot = selected->GetPropertyValueInContainer(save);
+        auto new_slot = inventory.equipped_index;
+        if (new_slot < 0)
+        {
+            auto* item = Unreal::CastField<Unreal::FStructProperty>(inventory.equipment->GetInner());
+            auto* item_class = field<Unreal::FClassProperty>(inventory.row_type, item_class_name);
+            const GuidFields fields(inventory.row_type);
+            if (!item || !item_class || !fields.valid()) return probe_result(lua, false, "stock_matrix_inventory_schema_unavailable");
+
+            Unreal::FScriptArrayHelper equipment(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
+            for (int slot = 0; slot < equipment.Num(); ++slot)
+            {
+                const auto* row = equipment.GetRawPtr(slot);
+                if (slot != old_slot && !object_value(item_class, row) && fields.read(row) == Guid{})
+                {
+                    new_slot = slot;
+                    break;
+                }
+            }
+            if (new_slot < 0) return probe_result(lua, false, "stock_matrix_fixture_empty_slot_required");
+
+            Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(save));
+            item->CopyCompleteValue(equipment.GetRawPtr(new_slot), inventory.row);
+            backpack.RemoveValues(inventory.backpack_index, 1);
+        }
+        else if (new_slot == old_slot && live(equipped))
+        {
+            return probe_result(lua, false, "stock_matrix_fixture_equipped_slot_conflict");
+        }
+
+        std::int32_t stock_index = new_slot;
+        pawn->ProcessEvent(equip, &stock_index);
+        instance->ProcessEvent(recalculate, nullptr);
+        const bool verified = canonical_host_save() == save &&
+            equipped_matrix_guid(save, object_field(pawn, STR("EquipedItem")), actual).empty() && actual == guid;
+        return probe_result(lua, verified, verified ? "equipped" : "stock_matrix_fixture_equip_unverified");
+    }
+
+    int lua_probe_matrix(const Lua& lua)
+    {
+        Guid guid{};
+        if (const auto error = matrix_fixture_arguments(lua, 3, guid); !error.empty()) return probe_result(lua, false, error);
+        if (!lua.is_string(3)) return probe_result(lua, false, "matrix_fixture_action_required");
+        const auto action = lua.get_string(3);
+        const bool record_anchor = action == "record";
+        if (!record_anchor && action != "activate") return probe_result(lua, false, "matrix_fixture_action_required");
+
+        auto* save = canonical_host_save();
+        auto* actor = object_field(scope.pawn.Get(), STR("EquipedItem"));
+        Guid exact{};
+        if (const auto error = equipped_matrix_guid(save, actor, exact); !error.empty()) return probe_result(lua, false, error);
+        if (exact != guid) return probe_result(lua, false, "owned_equipped_matrix_guid_required");
+        if (transport_request && request_current(*transport_request, save))
+            return probe_result(lua, false, "another_transport_request_pending");
+
+        auto* use = actor->GetFunctionByNameInChain(record_anchor ? entries->use_secondary : entries->use_primary);
+        auto* held = field<Unreal::FBoolProperty>(use, STR("Held"));
+        auto* variance = field<Unreal::FDoubleProperty>(use, STR("VarianceScaler"));
+        struct UseParameters
+        {
+            bool held{};
+            double variance{};
+        } parameters;
+        if (!held || use->GetOuterPrivate() != actor->GetClassPrivate() || use->GetReturnProperty() ||
+            held->GetOffset_Internal() != offsetof(UseParameters, held) ||
+            (record_anchor ? use->GetNumParms() != 1 || use->GetParmsSize() != sizeof(bool) :
+                             use->GetNumParms() != 2 || use->GetParmsSize() != sizeof(UseParameters) ||
+                                 !variance || variance->GetOffset_Internal() != offsetof(UseParameters, variance)))
+            return probe_result(lua, false, "stock_matrix_fixture_use_schema_unavailable");
+
+        // A prior completed probe may still own this input's pressed state.
+        actor->ProcessEvent(use, &parameters);
+        const auto count = receipt.count;
+        held->SetPropertyValueInContainer(&parameters, true);
+        actor->ProcessEvent(use, &parameters);
+        const std::string_view queued = record_anchor ? "matrix_record_queued" : "matrix_activate_queued";
+        const bool verified = receipt.count == count + 1 && receipt.role == "host" && receipt.item == teleport_cube.name &&
+            receipt.reason == queued && transport_request && transport_request->kind == TransportKind::Matrix &&
+            transport_request->entry == action && transport_request->guid == guid && request_current(*transport_request, save) &&
+            transport_request->equipped_actor.Get() == actor && canonical_host_save() == save;
+        if (!verified)
+        {
+            clear_matrix_input();
+            return probe_result(lua, false, "stock_matrix_fixture_use_did_not_queue");
+        }
+        return probe_result(lua, true, queued);
+    }
+
     template <TransportKind kind>
     int lua_seed_cube(const Lua& lua)
     {
@@ -1149,7 +1587,8 @@ namespace
         {
             return probe_result(lua, false, transport_status(kind, "native_gold_fixtures_disabled", "native_blue_fixtures_disabled",
                                                              "native_stardust_fixtures_disabled", "native_red_fixtures_disabled",
-                                                             "native_green_fixtures_disabled"));
+                                                             "native_green_fixtures_disabled", "native_fruiting_stardust_fixtures_disabled",
+                                                             "native_purple_fixtures_disabled"));
         }
         Guid guid{};
         TransportInventory match;
@@ -1165,75 +1604,82 @@ namespace
         return error.empty() ? probe_result(lua, true, "seeded") : probe_result(lua, false, error);
     }
 
-    int lua_inspect_stardust(const Lua& lua)
+    template <TransportKind kind>
+    int lua_inspect_stack(const Lua& lua)
     {
         Guid guid{};
         TransportInventory match;
-        const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match);
+        const auto error = transport_inventory_argument(lua, kind, guid, match);
         if (!error.empty())
         {
-            stardust_result(lua, false, error);
+            stack_result(lua, false, error);
             lua.set_string("");
             return 4;
         }
-        stardust_result(lua, true, match.record ? "present" : "absent", match.quantity);
-        lua.set_string(stock_stardust(match) ? stock_stardust_payload : std::string_view{});
+        stack_result(lua, true, match.record ? "present" : "absent", match.quantity);
+        lua.set_string(stock_stack(match) ? stack_recovery_payload(kind) : std::string_view{});
         return 4;
     }
 
-    int lua_seed_stardust(const Lua& lua)
+    template <TransportKind kind>
+    int lua_seed_stack(const Lua& lua)
     {
         if (!fixtures_enabled())
         {
-            return stardust_result(lua, false, "native_stardust_fixtures_disabled");
+            return stack_result(lua, false, stack_status(kind, "native_stardust_fixtures_disabled",
+                                                         "native_fruiting_stardust_fixtures_disabled"));
         }
-        const auto quantity = stardust_quantity_argument(lua);
+        const auto quantity = stack_quantity_argument(lua);
         if (!quantity)
         {
-            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+            return stack_result(lua, false, quantity_required(kind));
         }
         Guid guid{};
         TransportInventory match;
-        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
-            return stardust_result(lua, false, error);
+            return stack_result(lua, false, error);
         }
         if (match.record)
         {
-            return match.quantity == *quantity ? stardust_result(lua, true, "present", match.quantity) :
-                stardust_result(lua, false, "stardust_seed_quantity_mismatch", match.quantity);
+            return match.quantity == *quantity ? stack_result(lua, true, "present", match.quantity) :
+                stack_result(lua, false, stack_status(kind, "stardust_seed_quantity_mismatch", "fruiting_stardust_seed_quantity_mismatch"),
+                             match.quantity);
         }
-        const auto error = append_stock_transport(TransportKind::Stardust, match, guid, *quantity);
-        return error.empty() ? stardust_result(lua, true, "seeded", *quantity) : stardust_result(lua, false, error);
+        const auto error = append_stock_transport(kind, match, guid, *quantity);
+        return error.empty() ? stack_result(lua, true, "seeded", *quantity) : stack_result(lua, false, error);
     }
 
-    int lua_restore_stardust(const Lua& lua)
+    template <TransportKind kind>
+    int lua_restore_stack(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 || !lua.is_string(4) ||
-            lua.get_string(4) != stock_stardust_payload)
+            lua.get_string(4) != stack_recovery_payload(kind))
         {
-            return stardust_result(lua, false, "stock_stardust_recovery_payload_required_on_game_thread");
+            return stack_result(lua, false, stack_status(kind, "stock_stardust_recovery_payload_required_on_game_thread",
+                                                         "stock_fruiting_stardust_recovery_payload_required_on_game_thread"));
         }
-        const auto quantity = stardust_quantity_argument(lua);
+        const auto quantity = stack_quantity_argument(lua);
         if (!quantity)
         {
-            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+            return stack_result(lua, false, quantity_required(kind));
         }
         Guid guid{};
         TransportInventory match;
-        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
-            return stardust_result(lua, false, error);
+            return stack_result(lua, false, error);
         }
         if (match.record)
         {
-            return match.quantity == *quantity && stock_stardust(match) ? stardust_result(lua, true, "present", match.quantity) :
-                stardust_result(lua, false, "stardust_recovery_item_conflict", match.quantity);
+            return match.quantity == *quantity && stock_stack(match) ? stack_result(lua, true, "present", match.quantity) :
+                stack_result(lua, false, stack_status(kind, "stardust_recovery_item_conflict", "fruiting_stardust_recovery_item_conflict"),
+                             match.quantity);
         }
 
         // The Lua bridge supplies this only for the persisted residual of a committed debit.
-        const auto error = append_stock_transport(TransportKind::Stardust, match, guid, *quantity);
-        return error.empty() ? stardust_result(lua, true, "restored", *quantity) : stardust_result(lua, false, error);
+        const auto error = append_stock_transport(kind, match, guid, *quantity);
+        return error.empty() ? stack_result(lua, true, "restored", *quantity) : stack_result(lua, false, error);
     }
 
     template <TransportKind kind>
@@ -1246,13 +1692,16 @@ namespace
                                                               "blue_probe_fixture_required_on_game_thread",
                                                               "stardust_probe_fixture_required_on_game_thread",
                                                               "red_probe_fixture_required_on_game_thread",
-                                                              "green_probe_fixture_required_on_game_thread"));
+                                                              "green_probe_fixture_required_on_game_thread",
+                                                              "fruiting_stardust_probe_fixture_required_on_game_thread",
+                                                              "purple_probe_fixture_required_on_game_thread"));
         }
         Guid guid{};
         if (!parse_guid(lua.get_string(3), guid))
         {
             return probe_result(lua, false, transport_status(kind, "invalid_gold_guid", "invalid_blue_guid",
-                                                             "invalid_stardust_guid", "invalid_red_guid", "invalid_green_guid"));
+                                                             "invalid_stardust_guid", "invalid_red_guid", "invalid_green_guid",
+                                                             "invalid_fruiting_stardust_guid", "invalid_purple_guid"));
         }
         const auto manager_address = lua.get_integer(2);
         if (manager_address <= 0 || !current_host_argument(lua.get_integer(1)))
@@ -1313,11 +1762,13 @@ namespace
             transport_request.reset();
             return probe_result(lua, false, intact ? transport_status(kind, "stock_gold_use_did_not_queue", "stock_blue_use_did_not_queue",
                                                                       "stock_stardust_use_did_not_queue", "stock_red_use_did_not_queue",
-                                                                      "stock_green_use_did_not_queue") :
+                                                                      "stock_green_use_did_not_queue", "stock_fruiting_stardust_use_did_not_queue",
+                                                                      "stock_purple_use_did_not_queue") :
                                                     "stock_backpack_item_was_changed");
         }
         return probe_result(lua, true, transport_status(kind, "stock_gold_use_queued", "stock_blue_use_queued",
-                                                        "stock_stardust_use_queued", "stock_red_use_queued", "stock_green_use_queued"));
+                                                        "stock_stardust_use_queued", "stock_red_use_queued", "stock_green_use_queued",
+                                                        "stock_fruiting_stardust_use_queued", "stock_purple_use_queued"));
     }
 
     int lua_probe_gold_action(const Lua& lua)
@@ -1541,10 +1992,10 @@ void silverfish::native_transport::install_hooks()
     }
     entries.emplace();
     hooks[0] = Hook::RegisterProcessEventPreCallback(
-        [](Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, void*) {
+        [](Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, void* parameters) {
             if (Unreal::IsInGameThreadRaw())
             {
-                intercept(iteration, context, function);
+                intercept(iteration, context, function, parameters);
             }
         }, {false, false, mod_name, STR("Guard reflected transport use")});
     hooks[1] = Hook::RegisterProcessInternalPreCallback(
@@ -1566,6 +2017,7 @@ void silverfish::native_transport::clear_scope()
     {
         scope = {};
         transport_request.reset();
+        matrix_inputs = {};
     }
 }
 
@@ -1597,15 +2049,24 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishInspectNativeBlueTransport", lua_inspect_cube<TransportKind::Blue>);
         lua.register_function("SilverfishCommitNativeBlueTransport", lua_commit_cube<TransportKind::Blue>);
         lua.register_function("SilverfishTakeNativeStardustTransportRequest", lua_take_transport_request<TransportKind::Stardust>);
-        lua.register_function("SilverfishInspectNativeStardustTransport", lua_inspect_stardust);
-        lua.register_function("SilverfishCommitNativeStardustTransport", lua_commit_stardust);
-        lua.register_function("SilverfishRestoreNativeStardustTransport", lua_restore_stardust);
+        lua.register_function("SilverfishInspectNativeStardustTransport", lua_inspect_stack<TransportKind::Stardust>);
+        lua.register_function("SilverfishCommitNativeStardustTransport", lua_commit_stack<TransportKind::Stardust>);
+        lua.register_function("SilverfishRestoreNativeStardustTransport", lua_restore_stack<TransportKind::Stardust>);
+        lua.register_function("SilverfishTakeNativeFruitingStardustTransportRequest", lua_take_transport_request<TransportKind::FruitingStardust>);
+        lua.register_function("SilverfishInspectNativeFruitingStardustTransport", lua_inspect_stack<TransportKind::FruitingStardust>);
+        lua.register_function("SilverfishCommitNativeFruitingStardustTransport", lua_commit_stack<TransportKind::FruitingStardust>);
+        lua.register_function("SilverfishRestoreNativeFruitingStardustTransport", lua_restore_stack<TransportKind::FruitingStardust>);
         lua.register_function("SilverfishTakeNativeRedTransportRequest", lua_take_transport_request<TransportKind::Red>);
         lua.register_function("SilverfishInspectNativeRedTransport", lua_inspect_cube<TransportKind::Red>);
         lua.register_function("SilverfishCommitNativeRedTransport", lua_commit_cube<TransportKind::Red>);
         lua.register_function("SilverfishTakeNativeGreenTransportRequest", lua_take_transport_request<TransportKind::Green>);
         lua.register_function("SilverfishInspectNativeGreenTransport", lua_inspect_cube<TransportKind::Green>);
         lua.register_function("SilverfishCommitNativeGreenTransport", lua_commit_cube<TransportKind::Green>);
+        lua.register_function("SilverfishTakeNativePurpleTransportRequest", lua_take_transport_request<TransportKind::Purple>);
+        lua.register_function("SilverfishInspectNativePurpleTransport", lua_inspect_cube<TransportKind::Purple>);
+        lua.register_function("SilverfishCommitNativePurpleTransport", lua_commit_cube<TransportKind::Purple>);
+        lua.register_function("SilverfishTakeNativeMatrixTransportRequest", lua_take_matrix_request);
+        lua.register_function("SilverfishInspectNativeMatrixTransport", lua_inspect_matrix);
         if (fixtures_enabled())
         {
             lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_cube<TransportKind::Gold>);
@@ -1613,12 +2074,19 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
             lua.register_function("SilverfishProbeNativeGoldActionUse", lua_probe_gold_action);
             lua.register_function("SilverfishSeedNativeBlueTransport", lua_seed_cube<TransportKind::Blue>);
             lua.register_function("SilverfishProbeNativeBlueTransport", lua_probe_transport<TransportKind::Blue>);
-            lua.register_function("SilverfishSeedNativeStardustTransport", lua_seed_stardust);
+            lua.register_function("SilverfishSeedNativeStardustTransport", lua_seed_stack<TransportKind::Stardust>);
             lua.register_function("SilverfishProbeNativeStardustTransport", lua_probe_transport<TransportKind::Stardust>);
+            lua.register_function("SilverfishSeedNativeFruitingStardustTransport", lua_seed_stack<TransportKind::FruitingStardust>);
+            lua.register_function("SilverfishProbeNativeFruitingStardustTransport", lua_probe_transport<TransportKind::FruitingStardust>);
             lua.register_function("SilverfishSeedNativeRedTransport", lua_seed_cube<TransportKind::Red>);
             lua.register_function("SilverfishProbeNativeRedTransport", lua_probe_transport<TransportKind::Red>);
             lua.register_function("SilverfishSeedNativeGreenTransport", lua_seed_cube<TransportKind::Green>);
             lua.register_function("SilverfishProbeNativeGreenTransport", lua_probe_transport<TransportKind::Green>);
+            lua.register_function("SilverfishSeedNativePurpleTransport", lua_seed_cube<TransportKind::Purple>);
+            lua.register_function("SilverfishProbeNativePurpleTransport", lua_probe_transport<TransportKind::Purple>);
+            lua.register_function("SilverfishSeedNativeMatrixTransport", lua_seed_matrix);
+            lua.register_function("SilverfishEquipNativeMatrixTransport", lua_equip_matrix);
+            lua.register_function("SilverfishProbeNativeMatrixTransport", lua_probe_matrix);
         }
     }
 }

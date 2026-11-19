@@ -16,6 +16,8 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
+from .native_quest_catalog import parse as parse_quest_catalog
 
 REPO = Path(__file__).resolve().parents[2]
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
@@ -321,7 +323,8 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
-        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0, "red": 0, "green": 0}
+        self.transport_offsets = dict.fromkeys(("gold", "blue", "stardust", "fruiting-stardust", "red", "green", "purple"), 0)
+        self.matrix_offset = 0
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -405,10 +408,24 @@ class Bridge:
                 requests.append(GoldRequest(int(fields[1]), source, pawn, guid, entry, location))
         return requests
 
+    def native_matrix_requests(self) -> list[MatrixRequest]:
+        try:
+            with (self.directory / "native-matrix-events").open("rb") as stream:
+                stream.seek(self.matrix_offset)
+                batch = stream.read(8192)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.matrix_offset += end or (len(batch) if len(batch) == 8192 else 0)
+        return [request for line in batch[:end].splitlines()
+                if (request := parse_matrix_request(line.decode("utf-8", errors="replace").split("\t")))]
+
     def snapshot(self) -> dict | None:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
+            quest_rows = []
+            matrix_rows = []
             for line in text.splitlines():
                 fields = line.split("\t")
                 if fields[0] == "schema" and fields[1:] == ["1"]:
@@ -459,7 +476,7 @@ class Bridge:
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],
                         "item": fields[4], "entry": fields[5], "reason": fields[6],
                     }
-                elif fields[0] in ("native-gold", "native-blue", "native-red", "native-green") and len(fields) == 6:
+                elif fields[0] in ("native-gold", "native-blue", "native-red", "native-green", "native-purple") and len(fields) == 6:
                     data[fields[0].replace("-", "_")] = {
                         "operation": fields[1], "state": fields[2], "map": fields[3],
                         "pawn": fields[4], "guid": fields[5],
@@ -474,8 +491,8 @@ class Bridge:
                         "reputation": {int(group): int(rank) for group, rank in
                                        (entry.split(":") for entry in fields[4].split("|"))},
                     }
-                elif fields[0] == "native-green-arrival" and len(fields) == 7:
-                    data["native_green_arrival"] = {
+                elif fields[0] in ("native-green-arrival", "native-purple-arrival") and len(fields) == 7:
+                    data[fields[0].replace("-", "_")] = {
                         "destination": fields[1], "actor": fields[2], "placement": fields[3],
                         "location": [_finite(value) for value in fields[4:7]],
                     }
@@ -485,16 +502,21 @@ class Bridge:
                         "location": [_finite(value) for value in fields[5:8]], "points": int(fields[8]),
                         "min_safe_rep": int(fields[9]),
                     }
-                elif fields[0] == "native-stardust" and len(fields) == 8:
-                    data["native_stardust"] = {
+                elif fields[0] in ("native-stardust", "native-fruiting-stardust") and len(fields) == 8:
+                    data[fields[0].replace("-", "_")] = {
                         "operation": fields[1], "state": fields[2], "map": fields[3], "pawn": fields[4],
                         "guid": fields[5], "quantity": int(fields[6]), "payload": fields[7],
                     }
-                elif fields[0] == "native-dream-route" and len(fields) == 10:
+                elif fields[0] == "native-dream-route" and len(fields) == 12:
                     data["native_dream_route"] = {
                         "source": fields[1], "destination": fields[2], "pawn": fields[3], "arrival": fields[4],
                         "visit_seconds": int(fields[5]), "startup_seconds": int(fields[6]), "fade_seconds": int(fields[7]),
-                        "return_map": fields[8], "return_bed": fields[9],
+                        "return_map": fields[8], "return_bed": fields[9], "kind": fields[10], "tarot": fields[11],
+                    }
+                elif fields[0] == "native-dream-effects" and len(fields) == 8:
+                    data["native_dream_effects"] = {
+                        "source": fields[1], "pawn": fields[2], "kind": fields[3], "destination": fields[4],
+                        "tarot": fields[5], "before": int(fields[6]), "after": int(fields[7]),
                     }
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
@@ -505,6 +527,8 @@ class Bridge:
                         "state": fields[1], "map": fields[2], "actor": fields[3], "detail": fields[4],
                         "early_requested": fields[5] == "1",
                     }
+                elif fields[0] == "native-dream-formation" and len(fields) == 3:
+                    data["native_dream_formation"] = {"map": fields[1], "adjustments": int(fields[2])}
                 elif fields[0] == "native-pickup" and len(fields) == 9:
                     data["native_pickup"] = {
                         "state": fields[1], "guid": fields[2], "class_path": fields[3],
@@ -574,11 +598,13 @@ class Bridge:
                         "observed": int(fields[5]) if fields[5] != "-" else None,
                         "stock_stream": int(fields[6]) if fields[6] != "-" else None, "reason": fields[7],
                     }
-                elif fields[0] == "native-host-save" and len(fields) == 8:
+                elif fields[0] == "native-host-save" and len(fields) in (8, 9):
                     data["native_host_save"] = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
                         "seed": int(fields[5]), "backpack_count": int(fields[6]), "equipment_count": int(fields[7]),
                     }
+                    if len(fields) == 9 and fields[8] != "-":
+                        data["native_host_save"]["eather_remainder"] = _finite(fields[8])
                 elif fields[0] == "native-guest-save-frame" and len(fields) == 7:
                     data["native_guest_save_frame"] = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
@@ -597,11 +623,26 @@ class Bridge:
                     data.setdefault("native_rules", {})[fields[1]] = int(fields[2])
                 elif fields[0] == "native-reputation" and len(fields) == 3:
                     data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
+                elif fields[0] in ("native-quest-catalog", "native-quest-entry", "native-quest-reward-item"):
+                    quest_rows.append(fields)
+                elif fields[0] == "native-matrix" or fields[0].startswith("native-matrix-"):
+                    matrix_rows.append(fields)
                 elif fields[0] == "native-quest" and len(fields) == 7:
                     data["native_quest"] = {
                         "id": fields[1], "state": fields[2], "step": fields[3], "final_step": fields[4],
                         "reward_cash": fields[5], "message": fields[6],
                     }
+                elif fields[0] == "native-broker" and len(fields) == 15:
+                    data["native_broker"] = {
+                        "operation": fields[1], "map": fields[2], "pawn": fields[3], "id": fields[4], "state": fields[5],
+                        "step": None if fields[6] == "-" else int(fields[6]), "final_step": int(fields[7]),
+                        "cash": int(fields[8]), "xp": int(fields[9]), "manifest_guid": fields[10],
+                        "native_cash": int(fields[11]), "native_xp": int(fields[12]), "changed": fields[13] == "1",
+                        "consumed_guid": fields[14],
+                    }
+                elif fields[0] == "native-broker-position" and len(fields) == 8:
+                    data["native_broker_position"] = {"map": fields[1], "pawn": fields[2], "target": fields[3],
+                                                     "point": fields[4], "location": [_finite(axis) for axis in fields[5:]]}
                 elif fields[0] == "native-shop" and len(fields) == 9:
                     data.setdefault("native_shops", []).append({
                         "id": fields[1], "actor": fields[2], "location": [_finite(v) for v in fields[3:6]],
@@ -631,6 +672,16 @@ class Bridge:
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
             if data.get("schema") == 1 and "state" in data:
+                if quest_rows:
+                    try:
+                        data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))
+                    except ValueError:
+                        data["native_quest_catalog_error"] = "invalid_stock_report"
+                if matrix_rows:
+                    try:
+                        data["native_matrix"] = parse_matrix_report(matrix_rows)
+                    except ValueError:
+                        data["native_matrix_error"] = "invalid_stock_report"
                 return data
         except (OSError, UnicodeError, ValueError):
             return None

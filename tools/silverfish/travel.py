@@ -16,6 +16,11 @@ CISTERN = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 GOLD_NEXUS = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 EXCHANGE = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
+THE_ROOK = "/Game/Classes/Maps/Dreams/TheRook_P"
+PYROCLAST = "/Game/Classes/Maps/Dreams/Pyroclast_P"
+SLATE = "/Game/Classes/Maps/Dreams/Slate_P"
+BLACK_OCEAN = "/Game/Classes/Maps/Dreams/BlackOcean_P"
+DREAM_MAPS = frozenset({EXCHANGE, THE_ROOK, PYROCLAST, SLATE, BLACK_OCEAN})
 LAB_E206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
 EAST_WING = "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"
 OLD_PIPES = "/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P"
@@ -36,6 +41,9 @@ BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 SCIENTIST_SHOP = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 FOREST = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"
 LAKE = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
+BEACH = "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"
+DOCKS = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
+REFINERY = "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P"
 RED_DESTINATIONS = (CISTERN, LAB_E206, EAST_WING, OLD_PIPES, SLUMS_TUNNEL, SCI_TUNNEL, SUBWAY,
                     UTILITY_TUNNELS, TRASH_PIT)
 AUTHORED_EXITS = {
@@ -66,8 +74,11 @@ AUTHORED_EXITS = {
     (LAKE, CROSSROADS): "Lake_Cave",
     (SCIENTIST_SHOP, RUIN_FIELDS): "Market_Flood",
     (FOREST, CROSSROADS): "CR_Forest",
+    (BEACH, RUIN_FIELDS): "Flood_Beach",
+    (DOCKS, CITY): "Metro_Dock",
+    (REFINERY, SLUMS): "Slum_Refine",
 }
-AUTHORED_MAPS = frozenset({EXCHANGE} | {map_name for pair in AUTHORED_EXITS for map_name in pair})
+AUTHORED_MAPS = DREAM_MAPS | {map_name for pair in AUTHORED_EXITS for map_name in pair}
 TRAVEL_RADIUS_UU = 1500
 
 

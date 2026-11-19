@@ -64,6 +64,11 @@ local function summary(save)
     return { seed = seed, backpack = backpack_count, equipment = equipment_count }
 end
 
+local function eather_remainder(instance)
+    local carry = instance.EatherRemainder
+    if type(carry) == "number" and carry == carry and carry >= 0 and carry < 1 then return carry end
+end
+
 function host_save.capture(state, phase, slot)
     if not generation_slot(slot) then error("An exact co-op save generation slot is required", 0) end
     local instance, pawn, statics = canonical_host(state, phase)
@@ -83,11 +88,11 @@ function host_save.capture(state, phase, slot)
         error("The co-op save generation summary did not survive stock serialization", 0)
     end
     receipt = { kind = "captured", slot = slot, map = state.map, pawn = pawn:GetFullName(),
-        instance = instance:GetAddress(), save = save:GetAddress(), summary = readback }
+        instance = instance:GetAddress(), save = save:GetAddress(), summary = readback, carry = eather_remainder(instance) }
     return "canonical stock host save captured"
 end
 
-function host_save.prepare(state, phase, slot)
+function host_save.prepare(state, phase, slot, carry_text)
     if not generation_slot(slot) then error("An exact co-op save generation slot is required", 0) end
     if phase ~= "ready" or state.map ~= main_menu or state.listening then
         error("Load the co-op save generation before leaving the staged title menu", 0)
@@ -95,6 +100,10 @@ function host_save.prepare(state, phase, slot)
     local instance, statics = owner(state)
     if not instance then error("The staged title menu does not have a canonical stock save", 0) end
     local previous = instance.SaveSlot_Ref
+    local old_carry, carry = eather_remainder(instance), tonumber(carry_text)
+    if carry_text and (not carry or carry ~= carry or carry < 0 or carry >= 1 or old_carry == nil) then
+        error("The stock Eather carry from the co-op save is invalid", 0)
+    end
     local loaded = statics:LoadGameFromSlot(slot, 0)
     if not exact(loaded, save_path) or same(loaded, previous) then error("Stock co-op save generation could not be loaded", 0) end
     local observed = summary(loaded)
@@ -103,7 +112,16 @@ function host_save.prepare(state, phase, slot)
         instance.SaveSlot_Ref = previous
         error("Stock GameInstance did not retain the loaded co-op save", 0)
     end
-    receipt = { kind = "prepared", slot = slot, instance = instance:GetAddress(), save = loaded:GetAddress(), summary = observed }
+    if carry ~= nil then
+        instance.EatherRemainder = carry
+        if eather_remainder(instance) ~= carry then
+            instance.EatherRemainder = old_carry
+            instance.SaveSlot_Ref = previous
+            error("The stock Eather carry did not survive restore", 0)
+        end
+    end
+    receipt = { kind = "prepared", slot = slot, instance = instance:GetAddress(), save = loaded:GetAddress(),
+        summary = observed, carry = carry }
     return "canonical stock host save prepared before travel"
 end
 
@@ -120,7 +138,8 @@ function host_save.rows(state, phase, status_row)
             local instance = owner(state)
             local _, pawn = canonical_host(state, phase)
             receipt.arrival_seen = receipt.arrival_seen or os.time()
-            if instance and (receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()) then
+            if instance and (receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()
+                or (receipt.carry ~= nil and eather_remainder(instance) ~= receipt.carry)) then
                 kind = "changed"
             elseif pawn then
                 kind, pawn_name = "restored", pawn:GetFullName()
@@ -141,7 +160,8 @@ function host_save.rows(state, phase, status_row)
     end
     local observed = receipt.summary
     return { status_row("native-host-save", kind, receipt.slot, state.map, pawn_name,
-        observed.seed, observed.backpack, observed.equipment) }
+        observed.seed, observed.backpack, observed.equipment,
+        receipt.carry and string.format("%.17g", receipt.carry) or "-") }
 end
 
 return host_save

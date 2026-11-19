@@ -62,12 +62,17 @@ def verify(profile: Path, world: dict) -> dict | None:
 
 
 def verify_record(profile: Path, saved: dict) -> None:
-    if (type(saved) is not dict or set(saved) != {"slot", "map", "size", "sha256"}
+    core_keys = {"slot", "map", "size", "sha256"}
+    if (type(saved) is not dict or set(saved) - {"eather_remainder"} != core_keys
             or not isinstance(saved["map"], str) or not saved["map"].startswith("/Game/Classes/Maps/")
             or type(saved["size"]) is not int or not isinstance(saved["sha256"], str)
             or not SHA256.fullmatch(saved["sha256"])):
         raise CampaignFormatError("The campaign's Unreal save reference is invalid")
-    if record(profile, saved["slot"], saved["map"]) != saved:
+    if "eather_remainder" in saved:
+        carry = saved["eather_remainder"]
+        if type(carry) not in (int, float) or not 0 <= carry < 1:
+            raise CampaignFormatError("The campaign's stock Eather carry is invalid")
+    if record(profile, saved["slot"], saved["map"]) != {key: saved[key] for key in core_keys}:
         raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
 
 

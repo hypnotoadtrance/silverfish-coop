@@ -3,7 +3,7 @@ local transport = require("native_transport")
 
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
-local class_suffixes = { blue = "Blue", red = "Red", green = "Green" }
+local class_suffixes = { blue = "Blue", red = "Red", green = "Green", purple = "Purple" }
 local entries = { action_use = true, quick_move = true, use_held_item = true }
 local accepted_results = {
     inspect = { present = true, absent = true },
