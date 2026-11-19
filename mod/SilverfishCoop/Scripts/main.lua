@@ -78,6 +78,7 @@ local native_guest_primary_input = require("native_guest_primary_input")
 local native_guest_clock = require("native_guest_clock")
 local native_host_camera = require("native_host_camera")
 local native_host_landmine = require("native_host_landmine")
+local native_host_dig = require("native_host_dig")
 local native_guest_consumable = require("native_guest_consumable")
 local native_guest_mre = require("native_guest_mre")
 local native_guest_regen = require("native_guest_regen")
@@ -429,6 +430,7 @@ local function run_command(fields, state, current_phase)
         if command == "native-guest-clear" then native_enemy_loot.clear_fixture() else native_enemy_loot.clear() end
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
+    if command == "travel" or command == "leave" then native_host_dig.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_mosby_station.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
@@ -847,6 +849,7 @@ local function run_command(fields, state, current_phase)
         or native_guest_clock.command(fields, state, current_phase)
         or native_host_camera.command(fields, state, current_phase)
         or native_host_landmine.command(fields, state, current_phase)
+        or native_host_dig.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -993,6 +996,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_clock.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_landmine.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_dig.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_mre.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

@@ -28,6 +28,7 @@
 #include "guest_armor.hpp"
 #include "guest_melee.hpp"
 #include "host_landmine.hpp"
+#include "host_dig.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "inventory_view.hpp"
@@ -1242,6 +1243,7 @@ namespace
             silverfish::native_lenny_quest::uninstall_hooks();
             silverfish::native_guest_clock::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
+            silverfish::native_host_dig::uninstall_hooks();
             silverfish::native_guest_sickness::uninstall_hooks();
             silverfish::native_guest_melee::uninstall_hooks();
             silverfish::native_guest_consumable::uninstall_hooks();
@@ -1282,6 +1284,7 @@ namespace
             silverfish::native_lenny_quest::install_hooks();
             silverfish::native_guest_clock::install_hooks();
             silverfish::native_guest_primary_input::install_hooks();
+            silverfish::native_host_dig::install_hooks();
             silverfish::native_guest_sickness::install_hooks();
             silverfish::native_guest_consumable::install_hooks();
             silverfish::native_loot_crate_input::install_hooks();
@@ -1346,6 +1349,7 @@ namespace
             silverfish::native_guest_armor::register_lua(lua);
             silverfish::native_guest_melee::register_lua(lua);
             silverfish::native_host_landmine::register_lua(lua);
+            silverfish::native_host_dig::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);
@@ -1419,6 +1423,7 @@ namespace
                 silverfish::campaign_npc::clear_scope();
                 silverfish::native_guest_clock::clear_scope();
                 silverfish::native_guest_primary_input::clear_scope();
+                silverfish::native_host_dig::clear_scope();
                 silverfish::native_guest_sickness::clear_scope();
                 silverfish::native_loot_crate_input::clear_scope();
                 silverfish::native_enemy_loot::clear_scope();

@@ -26,7 +26,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_melee
-from . import native_host_landmine
+from . import native_host_dig, native_host_landmine
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
@@ -2463,6 +2463,9 @@ class Host:
                     ) or not 0 < proof.get("sequence", 0) < 2**53:
                         raise RuntimeError("The host stock shutter input did not verify")
                     result = {"native_host_camera_fixture": proof}
+                elif action in native_host_dig.ACTIONS and self.fixtures:
+                    result = await native_host_dig.perform(
+                        self, bridge, action, request.get("target"), request.get("operation_id", path.stem))
                 elif action in native_host_landmine.ACTIONS and self.fixtures:
                     result = await native_host_landmine.perform(self, bridge, action, request.get("target"),
                                                                  request.get("operation_id") or path.stem)

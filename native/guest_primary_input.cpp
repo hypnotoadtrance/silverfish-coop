@@ -1151,6 +1151,27 @@ namespace
 
 namespace silverfish::native_guest_primary_input
 {
+    bool dispatch_crossroads_spade_fixture(RC::Unreal::UObject* pawn, RC::Unreal::UObject* spade, bool down)
+    {
+        if (!U::IsInGameThreadRaw() || !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") ||
+            !env("SILVERFISH_COOP_NATIVE_ZONE") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") || !env("SILVERFISH_COOP_HEADLESS") ||
+            !live(pawn) || !live(spade) || pawn->GetClassPrivate() != find<U::UClass>(pawn_path) ||
+            spade->GetClassPrivate() != find<U::UClass>(STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C")) ||
+            object_field(pawn, STR("EquipedItem")) != spade) return false;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        auto* role = field<U::FByteProperty>(pawn, STR("Role"));
+        if (!live(world) || world->GetPathName() != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P") ||
+            !role || role->GetPropertyValueInContainer(pawn) != 3) return false;
+        auto* action = find<U::UObject>(action_path);
+        auto* type = find<U::UClass>(STR("/Script/EnhancedInput.InputAction"));
+        if (!live(action) || !type || action->GetClassPrivate() != type) return false;
+        const auto wrapper = bind_wrapper(pawn->GetClassPrivate(), action, down ? started_path : completed_path, down ? 2 : 16);
+        ValueFactory factory;
+        if (!wrapper.function.Get() || !factory.bind(action, wrapper.value->GetStruct().Get())) return false;
+        factory.dispatch(pawn, action, wrapper, down);
+        return true;
+    }
+
     void install_hooks()
     {
         if (!enabled() || installed.load(std::memory_order_acquire)) return;
