@@ -93,6 +93,8 @@ local function sync_native_interact(phase)
         if not source then break end
         write_interaction(pawn, source)
     end
+    local valve = SilverfishTakeNativeSubwayValvePress
+    if type(valve) == "function" and valve(address) then write_interaction(pawn, "subway-valve") end
     local target
     for _ = 1, 8 do
         local sequence, matched = SilverfishTakeNativeInteractPress(address)

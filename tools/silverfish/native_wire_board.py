@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import native_computer_board, native_flood_jammer, native_mosby_tape, native_turret_photo, native_wire_quest, party
+from . import native_computer_board, native_flood_jammer, native_mosby_tape, native_subway_valve, native_turret_photo, native_wire_quest, party
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
@@ -22,13 +22,15 @@ LENNY = native_flood_jammer.LENNY
 QUESTS = {
     SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
     OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id}),
-    BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
+    BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id,
+                        native_subway_valve.QUEST}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
                          native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id, LAKE_JAMMER.quest, LENNY.quest}),
 }
 PREFLIGHTS = {
+    native_subway_valve.QUEST: (native_subway_valve.PREFLIGHT, native_subway_valve.BOARD_KEY),
     LAKE_JAMMER.quest: (LAKE_JAMMER.command("preflight"), LAKE_JAMMER.key),
     LENNY.quest: (LENNY.command("preflight"), LENNY.key),
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
@@ -37,6 +39,7 @@ PREFLIGHTS = {
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
+                 "stock_subway_valve_quest_not_offered",
                  *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
 
 
@@ -161,7 +164,7 @@ class WireBoardView:
             return "offer"
         if step == -10:
             return "completed"
-        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, LENNY.quest):
+        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, LENNY.quest, native_subway_valve.QUEST):
             return "ready" if step == last else "missing"
         spec = native_computer_board.CONTRACTS[quest]
         if proof.get("can_turn_in") is not (area == spec.redeem_map):

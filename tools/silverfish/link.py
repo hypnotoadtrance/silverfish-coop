@@ -53,13 +53,14 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-guest-armor-equip": 20.0,
     "native-guest-helmet-equip": 20.0,
     "native-inventory-split": 20.0,
+    "native-subway-valve-activate": 24.0,
     "native-quest-interact": 15.0,
     "native-quest-list": 15.0,
     "native-turret-photo-capture": 20.0,
     "native-turret-photo-shutter": 20.0,
 }
 _QUEST_ACTIONS = {"native-quest-start", "native-quest-objective", "native-quest-turnin"}
-_CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Clt_CoupReport_01", "Clt_Brandy", "DepotDocs", "Jmr_FloodPlains", "Jmr_Lake", "Asn_Lenny_01", "Clt_Molasis", "Clct_SavloKey"}
+_CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Clt_CoupReport_01", "Clt_Brandy", "DepotDocs", "Jmr_FloodPlains", "Jmr_Lake", "Asn_Lenny_01", "Clt_Molasis", "Clct_SavloKey", "Sub_Valve"}
 _MAX_CERTIFICATE = 8192
 _ADMISSION_TIMEOUT = 8.0
 _IDLE_TIMEOUT = 12.0
@@ -98,7 +99,7 @@ def checkpoint_action_timeout(payload: Action) -> float | None:
     action, target = payload["action"], payload["target"]
     if action == "native-quest-turnin" and target == "Clt_Wire":
         return 22.0
-    if action == "native-quest-turnin" and target == "Clt_Tape_StoneMaze_01":
+    if action == "native-quest-turnin" and target in ("Clt_Tape_StoneMaze_01", "Sub_Valve"):
         return 28.0
     if action in _QUEST_ACTIONS and isinstance(target, str) and target in _CHECKPOINT_QUESTS:
         return 20.0

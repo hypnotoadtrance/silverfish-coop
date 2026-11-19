@@ -21,6 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
+from . import native_subway_valve
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -1111,6 +1112,23 @@ class Bridge:
                     mosby_reputation.append(fields)
                 elif fields[0] == "native-mosby-reward":
                     data["native_mosby_reward"] = native_mosby_tape.parse_reward(fields)
+                elif fields[0] == "native-subway-valve-board":
+                    if native_subway_valve.BOARD_KEY in data:
+                        raise ValueError("Duplicate Flood Control board report")
+                    data[native_subway_valve.BOARD_KEY] = native_subway_valve.parse_board(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-subway-valve-rep":
+                    report = data.get(native_subway_valve.BOARD_KEY)
+                    if len(fields) != 4 or not report or fields[1] not in native_subway_valve.FACTIONS or fields[1] in report["reputation"]:
+                        raise ValueError("Invalid Flood Control reputation row")
+                    report["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                elif fields[0] == "native-subway-valve-objective":
+                    data[native_subway_valve.OBJECTIVE] = native_subway_valve.parse_objective(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-subway-valve-scene":
+                    data[native_subway_valve.SCENE] = native_subway_valve.parse_scene(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-subway-valve-reward":
+                    data[native_subway_valve.REWARD] = native_subway_valve.parse_reward(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-subway-valve-fixture":
+                    data[native_subway_valve.FIXTURE_KEY] = native_subway_valve.parse_fixture(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-dialogue-line":
                     dialogue_lines.append(fields)
                 elif fields[0] == "native-dialogue-choice":

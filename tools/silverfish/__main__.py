@@ -163,6 +163,8 @@ def parser() -> argparse.ArgumentParser:
         "native-pump-tape-preflight", "native-pump-tape-convert", "native-pump-tape-approach",
         "native-pump-room-preflight", "native-pump-room-approach", "native-pump-room-xp-fixture",
         "native-mosby-station-fixture",
+        "native-subway-valve-preflight", "native-subway-valve-approach", "native-subway-valve-activate",
+        "native-subway-valve-xp-fixture", "native-subway-valve-position-fixture", "native-subway-valve-input-fixture",
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture", "native-rest-insomnia-fixture",

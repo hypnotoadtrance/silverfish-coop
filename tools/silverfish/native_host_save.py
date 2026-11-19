@@ -216,6 +216,20 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("A pending Stone Maze reward has an invalid recipient or armor identity")
             used.add(armor)
         quests.append(mosby["escrow"])
+    valve = party.get("native_subway_valve_rewards")
+    if valve is not None:
+        if (type(valve) is not dict or type(valve.get("escrow")) is not dict or valve["escrow"].get("map") != BOROUGH
+                or type(valve.get("template")) is not list or len(valve["template"]) != 2
+                or any(not valid_guid(guid) for guid in valve["template"]) or len(set(valve["template"])) != 2
+                or type(valve.get("pending")) is not dict or not valve["pending"]):
+            raise CampaignFormatError("The campaign's Flood Control reward bundle is invalid")
+        used = set(valve["template"])
+        for character, bundle in valve["pending"].items():
+            if (character not in checkpoint["characters"] or type(bundle) is not list or len(bundle) != 2
+                    or any(not valid_guid(guid) or guid in used for guid in bundle) or bundle[0] == bundle[1]):
+                raise CampaignFormatError("A pending Flood Control bundle has an invalid owner or item GUID")
+            used.update(bundle)
+        quests.append(valve["escrow"])
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
             + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]

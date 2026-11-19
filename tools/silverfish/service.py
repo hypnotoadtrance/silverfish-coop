@@ -29,7 +29,7 @@ from . import native_guest_melee
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_savlo_locker
+from . import native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -47,6 +47,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
+                        native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1563,6 +1564,10 @@ class Host:
                 result = await native_meet_broker.preflight(self, bridge, character)
             elif action in native_flood_jammer.PREFLIGHTS and target is None:
                 result = await native_flood_jammer.preflight(self, bridge, character, native_flood_jammer.COMMANDS[action])
+            elif action == native_subway_valve.PREFLIGHT:
+                result = await native_subway_valve.preflight(self, bridge, character, target)
+            elif action == native_subway_valve.ACTIVATE:
+                result = await native_subway_valve.activate(self, bridge, character, target)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1607,6 +1612,7 @@ class Host:
             await native_wire_quest.settle(self, bridge)
             await native_wire_quest.settle(self, bridge, native_meet_broker.REWARDS)
             await native_mosby_tape.settle(self, bridge)
+            await native_subway_valve.settle(self, bridge)
             if not self.fixtures:
                 return
             await native_quest.project(self, bridge)
@@ -2354,6 +2360,15 @@ class Host:
                         "native_quest_page": native_quest_catalog.page(catalog, request.get("target"))}
                 elif action in ("native-quest-start", "native-quest-objective", "native-quest-turnin"):
                     result = await native_quest.action(self, bridge, "host", action, request.get("target"))
+                elif action == native_subway_valve.PREFLIGHT:
+                    result = await native_subway_valve.preflight(self, bridge, "host", request.get("target"))
+                elif action == native_subway_valve.ACTIVATE:
+                    result = await native_subway_valve.activate(self, bridge, "host", request.get("target"))
+                elif action == native_subway_valve.XP_FIXTURE and self.fixtures:
+                    result = await native_subway_valve.board_action(self, bridge, "host", action)
+                elif action in (native_subway_valve.APPROACH, native_subway_valve.POSITION, native_subway_valve.PRESS) and self.fixtures:
+                    character = self.roles().get(request.get("target") or "host")
+                    result = await native_subway_valve.fixture(self, bridge, character, action)
                 elif action == native_wire_quest.PREFLIGHT:
                     if request.get("target") is not None:
                         raise party.RuleError("native_wire_quest_has_fixed_board")
@@ -3012,6 +3027,8 @@ class Host:
                 try:
                     if target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
+                    elif target == native_subway_valve.INPUT:
+                        await native_subway_valve.activate(self, bridge, "host", self.zone_epoch)
                     elif native_enemy_shells.target_parts(target):
                         await native_enemy_loot.claim(self, bridge, "host", target, operation_id)
                     elif target:
@@ -3882,6 +3899,7 @@ class Client:
                     await native_dust_cabinet.project_client(self)
                     await native_savlo_locker.project_client(self)
                     await native_flood_jammer.project_client(self)
+                    await native_subway_valve.project_client(self)
                     await native_enemy_loot.project_client(self)
                     if self.invite.get("native_loot_input"):
                         self.last_game = await native_loot.project_opened(
@@ -4172,8 +4190,11 @@ class Client:
                 for operation_id, target in interactions:
                     try:
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
+                                  else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
                                   else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
                                   else "native-wipe-recover" if target else "interact")
+                        if action == native_subway_valve.ACTIVATE:
+                            target = self.zone_epoch
                         result = await self.gameplay_action(action, operation_id, target)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                     except (ValueError, OSError, RuntimeError) as error:

@@ -326,7 +326,7 @@ namespace
         auto* cash = field<U::FIntProperty>(type, STR("Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"));
         const U::FName id{quest, U::FNAME_Find};
         if (!type || !key || !row || row->GetStruct().Get() != type || key->GetOffset_Internal() != 0 ||
-            !step || !final_step || !objective || (!wanted && expected_final_step != 1) || !consumed || !item || !xp || !cash ||
+            !step || !final_step || !objective || !consumed || !item || !xp || !cash ||
             id.IsNone() || id.ToString() != quest) return false;
         const auto layout = U::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
@@ -1163,6 +1163,207 @@ namespace
         guard.committed = true;
         return reply(lua, true, "granted");
     }
+    constexpr std::array valve_reward_paths{
+        STR("/Game/Classes/Items/Artifacts/Art_AcidResist.Art_AcidResist_C"),
+        STR("/Game/Classes/Armor_Items/Helm_HazOp.Helm_HazOp_C"),
+    };
+    using ValveGuids = std::array<Guid, valve_reward_paths.size()>;
+    using ValveRows = std::array<const void*, valve_reward_paths.size()>;
+
+    bool valve_completed(const Party& party)
+    {
+        auto* artifact = find<U::UClass>(valve_reward_paths[0]);
+        auto* mask = find<U::UClass>(valve_reward_paths[1]);
+        return artifact && mask && objective_recipe(party.stock, STR("Sub_Valve"), nullptr, 0,
+            artifact, mask, WirePhase::complete);
+    }
+
+    bool valve_reward_row(const Inventory& inventory, const void* row, std::size_t index)
+    {
+        auto* kind = find<U::UClass>(valve_reward_paths[index]);
+        auto* defaults = kind ? kind->GetClassDefaultObject().Get() : nullptr;
+        if (!row || !kind || inventory.klass(row) != kind || inventory.identity(row) == Guid{} ||
+            !kind->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            !bool_value(defaults, STR("Stacks"), false)) return false;
+        auto* category = field<U::FByteProperty>(defaults, STR("ItemType"));
+        auto* ammo = field<U::FIntProperty>(defaults, STR("Ammo"));
+        auto* weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+        auto* value = field<U::FIntProperty>(defaults, STR("Value"));
+        auto* tag = field<U::FNameProperty>(defaults, STR("DataTag"));
+        auto* payload = field<U::FStructProperty>(defaults, STR("DataStruct"));
+        auto* never_drop = field<U::FBoolProperty>(defaults, STR("NeverDrop"));
+        return category && category->GetPropertyValueInContainer(defaults) == (index == 0 ? 0 : 6) &&
+            ammo && inventory.ammo->GetPropertyValueInContainer(row) == ammo->GetPropertyValueInContainer(defaults) &&
+            weight && inventory.weight->GetPropertyValueInContainer(row) == weight->GetPropertyValueInContainer(defaults) &&
+            value && value->GetPropertyValueInContainer(defaults) == (index == 0 ? 3000 : 400) &&
+            inventory.value->GetPropertyValueInContainer(row) == value->GetPropertyValueInContainer(defaults) &&
+            tag && inventory.tag->GetPropertyValueInContainer(row) == tag->GetPropertyValueInContainer(defaults) &&
+            never_drop && inventory.never_drop->GetPropertyValueInContainer(row) == never_drop->GetPropertyValueInContainer(defaults) &&
+            payload && payload->GetStruct().Get() == inventory.data->GetStruct().Get() &&
+            inventory.data->Identical(inventory.data->ContainerPtrToValuePtr<void>(row), payload->ContainerPtrToValuePtr<void>(defaults));
+    }
+
+    bool read_valve_guids(const Lua& lua, int first, ValveGuids& result)
+    {
+        if (!lua.is_string(first) || !lua.is_string(first + 1)) return false;
+        for (auto& guid : result) guid = read_guid(lua.get_string());
+        return result[0] != Guid{} && result[1] != Guid{} && result[0] != result[1];
+    }
+
+    bool valve_template(const Inventory& inventory, Address target, const ValveGuids& ids, ValveRows& result)
+    {
+        auto* escrow = isolated_save(target, inventory);
+        if (!escrow || !inventory.same_as_defaults(escrow)) return false;
+        U::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
+        if (rows.Num() != static_cast<int>(ids.size())) return false;
+        for (std::size_t index = 0; index < ids.size(); ++index)
+        {
+            result[index] = rows.GetRawPtr(static_cast<int>(index));
+            if (!valve_reward_row(inventory, result[index], index) || inventory.identity(result[index]) != ids[index]) return false;
+        }
+        return true;
+    }
+
+    bool append_valve_rows(const Inventory& inventory, void* value, const ValveRows& items)
+    {
+        U::FScriptArrayHelper rows(inventory.backpack, value);
+        const int before = rows.Num(), added_count = static_cast<int>(items.size());
+        if (before < 0 || before > max_inventory - added_count ||
+            rows.AddValues(added_count) != before || rows.Num() != before + added_count) return false;
+        for (std::size_t index = 0; index < items.size(); ++index)
+        {
+            auto* appended = rows.GetRawPtr(before + static_cast<int>(index));
+            inventory.row->CopyCompleteValue(appended, items[index]);
+            if (!inventory.identical(appended, items[index]) || !valve_reward_row(inventory, appended, index)) return false;
+        }
+        return true;
+    }
+
+    int capture_valve_rewards(const Lua& lua)
+    {
+        std::array<Address, 3> args{};
+        ValveGuids ids{};
+        Inventory inventory;
+        Party party;
+        if (!available(lua, 5) || !read_addresses(lua, args) || !read_valve_guids(lua, 4, ids) ||
+            !inventory.bind(false) || !party.read(args[0], args[1], args[1], false, PartyWorld::borough) || !valve_completed(party))
+            return reply(lua, false, "subway_valve_reward_exact_host_required");
+        auto* escrow = isolated_save(args[2], inventory);
+        if (!escrow || !inventory.same_as_defaults(escrow)) return reply(lua, false, "subway_valve_reward_exact_template_required");
+        auto* target = inventory.backpack->ContainerPtrToValuePtr<void>(escrow);
+        U::FScriptArrayHelper before(inventory.backpack, target);
+        ValveRows source{};
+        for (std::size_t index = 0; index < ids.size(); ++index)
+        {
+            Inventory::Match item;
+            if (!inventory.locate(party.stock, ids[index], item) || item.count != 1 || item.backpack_index < 0 ||
+                !valve_reward_row(inventory, item.row, index)) return reply(lua, false, "subway_valve_reward_stock_row_unqualified");
+            source[index] = item.row;
+        }
+        auto prepared = copy(inventory.backpack, target);
+        if (before.Num() != 0 || !prepared || !append_valve_rows(inventory, prepared.get(), source))
+            return reply(lua, false, "subway_valve_reward_template_stage_failed");
+        inventory.backpack->CopyCompleteValue(target, prepared.get());
+        ValveRows copied{};
+        if (!valve_template(inventory, args[2], ids, copied) || !inventory.backpack->Identical(target, prepared.get()))
+            return reply(lua, false, "subway_valve_reward_capture_unverified");
+        return reply(lua, true, "captured");
+    }
+
+    int verify_valve_rewards(const Lua& lua)
+    {
+        const bool compare = lua.get_stack_size() == 4;
+        std::array<Address, 1> args{};
+        ValveGuids ids{};
+        ValveRows stored{}, original{};
+        Inventory inventory;
+        if (!available(lua, compare ? 4 : 3) || !read_addresses(lua, args) || !read_valve_guids(lua, 2, ids) ||
+            !inventory.bind(false) || !valve_template(inventory, args[0], ids, stored))
+            return reply(lua, false, "subway_valve_reward_saved_template_unverified");
+        if (compare)
+        {
+            if (!lua.is_integer(4)) return reply(lua, false, "subway_valve_reward_template_source_unqualified");
+            const auto source = static_cast<Address>(lua.get_integer());
+            if (!source || source == args[0] || !valve_template(inventory, source, ids, original))
+                return reply(lua, false, "subway_valve_reward_template_source_unqualified");
+            for (std::size_t index = 0; index < ids.size(); ++index)
+                if (!inventory.identical(original[index], stored[index]))
+                    return reply(lua, false, "subway_valve_reward_template_payload_changed");
+        }
+        return reply(lua, true, "verified");
+    }
+
+    int grant_valve_rewards(const Lua& lua)
+    {
+        std::array<Address, 4> args{};
+        ValveGuids ids{}, assigned{};
+        ValveRows stored{};
+        Party party;
+        Inventory inventory;
+        if (!available(lua, 8) || !read_addresses(lua, args) || !read_valve_guids(lua, 5, ids) ||
+            !read_valve_guids(lua, 7, assigned) || assigned[0] == ids[0] || assigned[0] == ids[1] ||
+            assigned[1] == ids[0] || assigned[1] == ids[1] || !inventory.bind(false) ||
+            !party.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) || !valve_completed(party) ||
+            !valve_template(inventory, args[3], ids, stored))
+            return reply(lua, false, "subway_valve_reward_exact_detached_guest_required");
+        std::array<Value, valve_reward_paths.size()> prepared;
+        ValveRows new_rows{};
+        int present = 0;
+        std::array<U::UObject*, max_guests + 2> owners{party.detached, party.stock};
+        std::ranges::copy(party.other, owners.begin() + 2);
+        for (std::size_t index = 0; index < ids.size(); ++index)
+        {
+            prepared[index] = copy(inventory.row, stored[index]);
+            if (!prepared[index]) return reply(lua, false, "subway_valve_reward_copy_failed");
+            inventory.set_identity(prepared[index].get(), assigned[index]);
+            new_rows[index] = prepared[index].get();
+            for (auto* owner : owners)
+            {
+                if (!owner) continue;
+                Inventory::Match found;
+                if (!inventory.locate(owner, assigned[index], found) || found.count > 1)
+                    return reply(lua, false, "subway_valve_reward_guid_conflict");
+                if (!found.count) continue;
+                if (owner != party.detached || found.backpack_index < 0 || !inventory.identical(found.row, new_rows[index]))
+                    return reply(lua, false, "subway_valve_reward_guid_conflict");
+                ++present;
+            }
+        }
+        if (present == static_cast<int>(ids.size())) return reply(lua, true, "already_granted");
+        if (present) return reply(lua, false, "subway_valve_reward_partial_bundle");
+
+        auto* target = inventory.backpack->ContainerPtrToValuePtr<void>(party.detached);
+        U::FScriptArrayHelper live_rows(inventory.backpack, target);
+        const auto* buffer = live_rows.Num() ? live_rows.GetRawPtr() : nullptr;
+        std::array<ProtectedInventory, max_guests + 2> snapshots;
+        for (std::size_t index = 0; index < owners.size() && owners[index]; ++index)
+        {
+            if (!snapshots[index].capture(inventory, owners[index])) return reply(lua, false, "subway_valve_reward_snapshot_failed");
+            for (auto* property : {inventory.backpack, inventory.equipment})
+            {
+                if (index == 0 && property == inventory.backpack) continue;
+                auto* value = property->ContainerPtrToValuePtr<void>(owners[index]);
+                U::FScriptArrayHelper rows(property, value);
+                if (value == target || (buffer && rows.Num() && buffer == rows.GetRawPtr()))
+                    return reply(lua, false, "subway_valve_reward_inventory_alias");
+            }
+        }
+        auto proposal = copy(inventory.backpack, snapshots[0].before[0].get());
+        if (!proposal || !append_valve_rows(inventory, proposal.get(), new_rows))
+            return reply(lua, false, "subway_valve_reward_bundle_stage_failed");
+        inventory.backpack->CopyCompleteValue(target, proposal.get());
+        Party current;
+        bool verified = current.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) && party.same_identity(current) &&
+            inventory.backpack->Identical(target, proposal.get());
+        for (std::size_t index = 0; verified && index < owners.size() && owners[index]; ++index)
+            verified = snapshots[index].unchanged(index == 0 ? 1 : 0);
+        if (!verified)
+        {
+            inventory.backpack->CopyCompleteValue(target, snapshots[0].before[0].get());
+            return reply(lua, false, "mutation_unverified_subway_valve_reward_delivery");
+        }
+        return reply(lua, true, "granted");
+    }
 }
 
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
@@ -1182,6 +1383,9 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishCaptureStoneMazeReward", capture_stone_maze_reward);
     lua.register_function("SilverfishVerifyStoneMazeReward", verify_stone_maze_reward);
     lua.register_function("SilverfishGrantStoneMazeReward", grant_stone_maze_reward);
+    lua.register_function("SilverfishCaptureSubwayValveRewards", capture_valve_rewards);
+    lua.register_function("SilverfishVerifySubwayValveRewards", verify_valve_rewards);
+    lua.register_function("SilverfishGrantSubwayValveRewards", grant_valve_rewards);
     lua.register_function("SilverfishCaptureWireRewards", capture<false>);
     lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
     lua.register_function("SilverfishGrantWireRewards", grant<false>);

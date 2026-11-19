@@ -46,6 +46,10 @@ namespace
     constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
     constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
     constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
+    constexpr auto subway_world = STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P");
+    constexpr auto subway_valve = STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P:PersistentLevel.ValveSwitch_BP_C_1");
+    constexpr auto valve_class = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C");
+    constexpr auto valve_interaction = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C:SendInteractionToActor");
     constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
@@ -221,12 +225,13 @@ namespace
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
-    ScopedInteraction wire_board, dialogue_input;
+    ScopedInteraction wire_board, dialogue_input, valve_input;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
     std::uint64_t wire_sequence{};
-    std::uint64_t dialogue_sequence{};
+    std::uint64_t dialogue_sequence{}, valve_sequence{};
+    bool dispatching_valve = false;
     bool event_source_matches{}, event_consumed{};
 
     bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
@@ -523,10 +528,63 @@ namespace
         dialogue_input.pending = {++dialogue_sequence, Clock::now() + receipt_lifetime};
     }
 
+    bool exact_valve(Unreal::UObject* actor)
+    {
+        auto* world = scope.world.Get();
+        auto* dying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        auto* one_use = field<Unreal::FBoolProperty>(actor, STR("Lock_AfterUse"));
+        return live(world) && world->GetPathName() == subway_world && live(actor) &&
+            actor->GetClassPrivate() == find<Unreal::UClass>(valve_class) && actor->GetPathName() == subway_valve &&
+            dying && !dying->GetPropertyValueInContainer(actor) && one_use && one_use->GetPropertyValueInContainer(actor) &&
+            static_cast<Unreal::AActor*>(actor)->GetWorld() == world &&
+            (!scope.host || live_actor(actor, world, 3));
+    }
+
+    bool exact_valve_box(Unreal::UObject* actor, Unreal::UObject* box)
+    {
+        return live(box) && box == object_field(actor, STR("Box")) && box->GetOuterPrivate() == actor &&
+            box->GetClassPrivate() == find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"));
+    }
+
+    bool valve_signature(Unreal::UObject* actor, Unreal::UFunction* function)
+    {
+        const auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        const auto* component = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        return function && function == find<Unreal::UFunction>(valve_interaction) && function->GetOuterPrivate() == actor->GetClassPrivate() &&
+            function->GetNumParms() == 2 && function->GetParmsSize() == 2 * sizeof(void*) && !function->GetReturnProperty() &&
+            !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) && player && component &&
+            player->GetPropertyClass().Get() == find<Unreal::UClass>(pawn_path) &&
+            component->GetPropertyClass().Get() == find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"));
+    }
+
+    void intercept_valve(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        static const Unreal::FName interact{STR("SendInteractionToActor")};
+        if (dispatching_valve || !function || function->GetFName() != interact || !parameters ||
+            call.OriginalFunctionCallPrevented() || !exact_valve(actor) || !valve_signature(actor, function)) return;
+        call.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        if (!call.OriginalFunctionCallPrevented() || now >= scope.expires || !live_scope(scope)) return;
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        auto* component = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
+        auto* box = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
+        if (!pawn || pawn != scope.pawn.Get() || !exact_valve_box(actor, box) ||
+            object_field(pawn, STR("InteractionTarget_Component")) != box || valve_sequence == max_sequence ||
+            !interaction_in_reach(pawn, actor, box) || !silverfish::native_interaction_input::consume_current_press(pawn)) return;
+        valve_input.pawn = pawn;
+        valve_input.actor = actor;
+        valve_input.component = box;
+        valve_input.accepting = true;
+        valve_input.expires = now + receipt_lifetime;
+        valve_input.pending = {++valve_sequence, valve_input.expires};
+    }
+
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
+        intercept_valve(iteration, actor, function, parameters);
         silverfish::mosby_station_input::route(iteration, actor, function, parameters);
     }
 
@@ -714,6 +772,51 @@ namespace
     }
 
     int take_dialogue_press(const Lua& lua) { return take_interaction_press(lua, dialogue_input); }
+    int take_valve_press(const Lua& lua) { return take_interaction_press(lua, valve_input); }
+
+    int dispatch_valve(const Lua& lua)
+    {
+        const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
+        if (!available() || !scope.host || dispatching_valve || !live_scope(scope) || Clock::now() >= scope.expires ||
+            lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3)) return respond(false);
+        const auto pawn_address = lua.get_integer();
+        const auto valve_address = lua.get_integer();
+        const auto box_address = lua.get_integer();
+        auto* actor = find<Unreal::AActor>(subway_valve);
+        auto* box = object_field(actor, STR("Box"));
+        auto* callback = find<Unreal::UFunction>(valve_interaction);
+        if (address(actor) != valve_address || address(box) != box_address || !exact_valve(actor) ||
+            !exact_valve_box(actor, box) || !valve_signature(actor, callback)) return respond(false);
+        auto* pawn = scope.pawn.Get();
+        if (address(pawn) != pawn_address)
+        {
+            pawn = nullptr;
+            auto* player_type = find<Unreal::UClass>(pawn_path);
+            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
+                if (address(object) != pawn_address) return RC::LoopAction::Continue;
+                if (player_type && live(object) && object->GetClassPrivate() == player_type) pawn = object;
+                return RC::LoopAction::Break;
+            });
+            auto* controller = object_field(pawn, STR("Controller"));
+            auto* net_player = object_field(controller, STR("Player"));
+            auto* net_connection = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
+            auto* detached = object_field(pawn, STR("Save"));
+            if (!live_actor(controller, scope.world.Get(), 3) || controller->GetClassPrivate() != find<Unreal::UClass>(controller_path) ||
+                object_field(controller, STR("Pawn")) != pawn || !live(net_player) || !net_connection || !net_player->IsA(net_connection) ||
+                object_field(net_player, STR("Driver")) != scope.driver.Get() || object_field(net_player, STR("PlayerController")) != controller ||
+                !live(detached) || detached == object_field(scope.instance.Get(), STR("SaveSlot_Ref"))) return respond(false);
+        }
+        if (!live_actor(pawn, scope.world.Get(), 3) || !standing(pawn) || !interaction_in_reach(pawn, actor, box))
+            return respond(false);
+        struct Invocation
+        {
+            Invocation() { dispatching_valve = true; }
+            ~Invocation() { dispatching_valve = false; }
+        } guard;
+        std::array<Unreal::UObject*, 2> arguments{pawn, box};
+        actor->ProcessEvent(callback, arguments.data());
+        return respond(true);
+    }
 
     int clear_dialogue_scope(const Lua&)
     {
@@ -896,6 +999,8 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
+        lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
+        lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
@@ -907,6 +1012,7 @@ namespace silverfish::native_interaction_input
         scope = {};
         wire_board = {};
         dialogue_input = {};
+        valve_input = {};
         mosby_station_input::clear_scope();
         first = count = event_depth = 0;
         event_source_matches = event_consumed = false;

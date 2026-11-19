@@ -27,6 +27,7 @@ local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
 local native_lenny = require("native_lenny")
 local native_flood_jammer_projection = require("native_flood_jammer_projection")
+local native_subway_valve = require("native_subway_valve")
 local native_turret_photo_quest = require("native_turret_photo_quest")
 local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
@@ -431,6 +432,7 @@ local function run_command(fields, state, current_phase)
         native_bag_projection.clear()
         native_authored_pickup.clear()
         native_flood_jammer_projection.clear()
+        native_subway_valve.clear()
         native_shop_view.clear()
         native_campaign_npc.clear()
         native_guest_primary_input.reset()
@@ -854,6 +856,7 @@ local function run_command(fields, state, current_phase)
         or native_flood_jammer.command(fields, state, current_phase)
         or native_lenny.command(fields, state, current_phase)
         or native_flood_jammer_projection.command(fields, state, current_phase)
+        or native_subway_valve.command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
@@ -999,6 +1002,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_lenny.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_subway_valve.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_shell_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

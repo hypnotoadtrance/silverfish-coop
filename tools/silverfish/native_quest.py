@@ -1,7 +1,7 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
 from . import native_broker, native_computer_board, native_flood_jammer, native_meet_broker, native_wire_quest, native_rewards, native_turret_photo, party
-from . import native_mosby_tape
+from . import native_mosby_tape, native_subway_valve
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -42,6 +42,11 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
+    if target == native_subway_valve.QUEST:
+        if verb not in ("native-quest-start", "native-quest-turnin"):
+            raise party.RuleError("stock_subway_valve_requires_authored_objective")
+        operation = native_subway_valve.START if verb == "native-quest-start" else native_subway_valve.TURN_IN
+        return await native_subway_valve.board_action(host, bridge, actor, operation)
     if target == native_mosby_tape.MOSBY_QUEST:
         if verb != "native-quest-turnin":
             raise party.RuleError("native_mosby_readings_uses_authored_dialogue_and_station")
