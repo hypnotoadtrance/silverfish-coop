@@ -111,7 +111,7 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.Item_MRE_C_1"),
             STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"),
-            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 0, true,
+            73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 1, true,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
