@@ -164,6 +164,10 @@ async def exercise(work, vanilla_saved, *, board_input=False):
         else:
             accepted = await action(guest, "native-quest-start", "--target", QUEST)
         assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (QUEST, 1, character), accepted
+        active = (await action(guest, "native-coup-report-preflight"))["native_coup_report"]
+        assert (active["step_after"], active["objective_guid"], active["objective_owner"]) == (1, guid, "guest"), active
+        reputation = active["reputation"]
+        evidence["effective_stock_reputation_before"] = {faction: row["before"] for faction, row in reputation.items()}
         before = await stock_balances()
         evidence["stock_before"] = before
         if board_input:
@@ -178,8 +182,8 @@ async def exercise(work, vanilla_saved, *, board_input=False):
         assert guid not in await inventory(guest) and guid not in await inventory(host)
         after = await stock_balances()
         assert after["host"] == dict(before["host"], Player_Cash=before["host"]["Player_Cash"] + 1200,
-                                     Player_Xp=before["host"]["Player_Xp"] + 1, Rep_Commune=before["host"]["Rep_Commune"] + 60,
-                                     Rep_Coup=before["host"]["Rep_Coup"] - 100), after
+                                     Player_Xp=before["host"]["Player_Xp"] + 1, Rep_Commune=reputation["2"]["before"] + 60,
+                                     Rep_Coup=reputation["5"]["before"] - 100), after
         assert after["guest"] == dict(before["guest"], Player_Xp=before["guest"]["Player_Xp"] + 1), after
         evidence.update(stock_turn_in=redeemed, stock_after=after)
         assert (await action(guest, "native-quest-turnin", "--target", QUEST))["effect"] == "native_quest_already_settled"
