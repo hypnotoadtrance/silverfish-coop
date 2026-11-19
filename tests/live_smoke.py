@@ -6,9 +6,14 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from struct import unpack_from
 import sys
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.silverfish.native_host_save import slot_path
 
 options = argparse.ArgumentParser(description=__doc__)
 options.add_argument("--work", type=Path, required=True, help="root of a prepared stage workspace")
@@ -27,6 +32,7 @@ options.add_argument("--native-fall", action="store_true", help="exercise the st
 options.add_argument("--native-zones", action="store_true", help="exercise a stock overlap at the staged exit")
 options.add_argument("--native-walls", action="store_true", help="verify swept physical exit collision")
 options.add_argument("--authored-zone", action="store_true", help="start from CrossRoads and take the stock DeadBridge exit")
+options.add_argument("--expanded-zones", action="store_true", help="exercise the expanded stock exit catalog")
 options.add_argument("--native-door", action="store_true", help="exercise the stock CrossRoads to Cistern transition door")
 options.add_argument("--observatory-zone", action="store_true", help="exercise both stock CrossRoads and Observatory exits")
 options.add_argument("--native-transport", action="store_true", help="verify pre-consumption guards for Stardust and four cubes")
@@ -35,6 +41,7 @@ options.add_argument("--native-blue", action="store_true", help="exercise Blue C
 options.add_argument("--native-red", action="store_true", help="exercise Red Cube party travel and its durable random destination")
 options.add_argument("--native-green", action="store_true", help="exercise Green Cube reputation, party arrival and restart")
 options.add_argument("--native-purple", action="store_true", help="exercise a stock Purple Cube draw and party restart")
+options.add_argument("--native-matrix", action="store_true", help="exercise stock Matrix controls and reusable party anchors")
 options.add_argument("--native-stardust", action="store_true", help="exercise the stock Stardust visit and timed return")
 options.add_argument("--dream-early", action="store_true", help="send the stock power signal during a Stardust visit")
 options.add_argument("--dream-tarot", choices=("rook", "obelisk", "night", "black-stag"), help="stage a stock Tarot route")
@@ -45,6 +52,7 @@ options.add_argument("--native-guest-save", action="store_true", help="verify a 
 options.add_argument("--native-roster", action="store_true", help="verify the host's native connection and pawn identity")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
+options.add_argument("--native-weapon-use", action="store_true", help="exercise the exact guest's stock weapon and ammunition")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
 options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
@@ -68,12 +76,19 @@ if args.native_pickup and not args.native_guest:
     options.error("--native-pickup requires --native-guest")
 if args.native_weapon and not args.native_guest:
     options.error("--native-weapon requires --native-guest")
+if args.native_weapon_use and not (args.native_guest and args.native_roster and args.native_zones):
+    options.error("--native-weapon-use requires --native-guest, --native-roster and --native-zones")
 if args.native_shop and not (args.native_guest and args.native_quest_flow):
     options.error("--native-shop requires --native-guest and --native-quest-flow")
 if args.native_broker and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
                                                        args.native_gold, args.native_blue, args.native_red,
-                                                       args.native_green, args.native_purple, args.native_stardust))):
+                                                       args.native_green, args.native_purple, args.native_stardust,
+                                                       args.native_matrix))):
     options.error("--native-broker requires --native-zones and its own stock merchant map")
+if args.native_matrix and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
+                                                       args.native_gold, args.native_blue, args.native_red,
+                                                       args.native_green, args.native_purple, args.native_stardust))):
+    options.error("--native-matrix requires --native-zones and its own stock travel route")
 if args.native_wipe and not (args.native_pair and args.native_pickup):
     options.error("--native-wipe requires --native-pair and --native-pickup")
 if args.native_zones and args.zones:
@@ -82,6 +97,8 @@ if args.native_walls and not args.native_zones:
     options.error("--native-walls requires --native-zones")
 if args.authored_zone and not args.native_zones:
     options.error("--authored-zone requires --native-zones")
+if args.expanded_zones and not (args.native_zones and (args.authored_zone or args.native_door)):
+    options.error("--expanded-zones requires an authored exit or door fixture")
 if args.native_door and (not args.native_zones or args.authored_zone):
     options.error("--native-door requires --native-zones and its own run")
 if args.native_transport and not args.native_zones:
@@ -221,6 +238,70 @@ def party_in_zone(status, map_name):
     return (game.get("map") == map_name and game.get("remote_clients") == 1
             and set(game.get("pawns", {})) == {"local", "guest"}
             and not status.get("awaiting_zone_guest"))
+
+
+def broker_stock_flags(frame):
+    assert frame["map"] == black_market, frame
+    contents = slot_path(run.parent / "game-user", frame["slot"]).read_bytes()
+    assert len(contents) == frame["size"] and hashlib.sha256(contents).hexdigest() == frame["sha256"], frame
+    assert contents.startswith(b"GVAS\x03\0\0\0"), frame
+    # SaveGame v3 includes both package versions, followed by FEngineVersion.
+    cursor = 26
+
+    def integer():
+        nonlocal cursor
+        value = unpack_from("<i", contents, cursor)[0]
+        cursor += 4
+        return value
+
+    def text():
+        nonlocal cursor
+        units = integer()
+        if units == 0:
+            return ""
+        width = 1 if units > 0 else 2
+        end = cursor + abs(units) * width
+        assert end <= len(contents) and contents[end - width:end] == bytes(width), frame
+        value = contents[cursor:end - width].decode("utf-8" if width == 1 else "utf-16-le")
+        cursor = end
+        return value
+
+    assert text() == "++UE5+Release-5.4" and integer() == 3, frame
+    versions = integer()
+    assert 0 <= versions <= (len(contents) - cursor) // 20, frame
+    cursor += versions * 20  # custom version GUID and signed version
+    assert text() == "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C", frame
+    assert contents[cursor] == 0, frame  # no property serialization extension
+    cursor += 1
+    if text() != "Flags":
+        # Flags is the first cooked SaveGame_BP member and is omitted at its default value.
+        assert b"\x06\0\0\0Flags\0\x0c\0\0\0MapProperty\0" not in contents, frame
+        return {}
+    assert (text(), integer(), text(), integer(), text(), integer()) == (
+        "MapProperty", 2, "NameProperty", 0, "IntProperty", 0,
+    ), frame
+    length = integer()
+    assert contents[cursor] == 0, frame  # no extra tag payload
+    cursor += 1
+    end = cursor + length
+    assert length >= 8 and end <= len(contents) and integer() == 0, frame
+    count = integer()
+    assert 0 <= count <= (end - cursor) // 9, frame
+    flags = {text(): integer() for _ in range(count)}
+    assert len(flags) == count and cursor == end, frame
+    return flags
+
+
+def broker_stock_balances(character_id):
+    checkpoint = json.loads((run.parent / "save" / "campaign.json").read_text(encoding="utf-8"))
+    canonical = checkpoint["world"]["native_host_save"]
+    detached = checkpoint["characters"][character_id]["state"]["native_guest_save"]
+    assert canonical["slot"] != detached["slot"] and detached["character_id"] == character_id, detached
+    host_flags, guest_flags = broker_stock_flags(canonical), broker_stock_flags(detached)
+    return {
+        "host_xp": host_flags.get("Player_Xp", 0), "host_cash": host_flags.get("Player_Cash", 0),
+        "guest_xp": guest_flags.get("Player_Xp", 0), "guest_cash": guest_flags.get("Player_Cash", 0),
+    }
 
 
 def gold_ledger(status):
@@ -509,6 +590,70 @@ def verify_observatory_rest(proof, pawns):
         assert math.dist(proof["location"], (-5531.339, 7142.031, -755.404)) <= 350, proof
     host, guest = pawns["local"]["location"], pawns["guest"]["location"]
     assert math.dist(host, proof["location"]) <= 250 and math.dist(host, guest) <= 250, pawns
+
+
+async def native_matrix_travel(character_id, host_session):
+    guid, canister = uuid.uuid4().hex.upper(), uuid.uuid4().hex.upper()
+    authority = ("action", "--campaign", campaign)
+
+    async def matrix_action(operation, *extra):
+        return await command(*authority, f"native-matrix-{operation}", "--target", guid, *extra)
+
+    async def probe(action_name, after=0):
+        reply = await matrix_action("probe", "--entrance", action_name)
+        assert reply["native_matrix"]["result"] == f"matrix_{action_name}_queued", reply
+        return await wait_campaign_event("native_matrix_request", guid, after=after)
+
+    async def ammo():
+        observed = await matrix_action("inspect")
+        return observed["native_matrix"]["eather"]["current"]["canisters"][canister]["ammo"]
+
+    started = await wait(run, lambda status: party_in_zone(status, crossroads)
+                         and status["game"].get("native_transport", {}).get("state") == "ready")
+    assert (await matrix_action("seed"))["native_matrix"]["result"] == "seeded"
+    assert (await matrix_action("equip"))["native_matrix"]["result"] == "equipped"
+    assert (await matrix_action("fuel", "--item-guid", canister))["native_matrix"]["result"] == "fueled"
+    assert await ammo() == 1_000
+    recorded = await probe("record")
+    assert recorded["action"] == "record" and recorded["result"]["ok"], recorded
+    anchor = recorded["result"]["anchor"]
+    assert anchor["map"] == crossroads and anchor["revision"] == 1, anchor
+
+    entrance = "Obsv_Etr"
+    await position_for_native_exit("host", "near", entrance=entrance)
+    await position_for_native_exit("guest", "far", entrance=entrance)
+    await wait(run, lambda status: party_in_zone(status, crossroads)
+               and math.dist(status["game"]["pawns"]["local"]["location"],
+                             status["game"]["pawns"]["guest"]["location"]) > 1500)
+    denied = await probe("activate", after=recorded["sequence"])
+    assert denied["action"] == "activate" and denied["result"]["error"] == "travel_blocked", denied
+    assert await ammo() == 1_000
+
+    await position_for_native_exit("guest", "near", entrance=entrance)
+    await wait(run, lambda status: party_in_zone(status, crossroads)
+               and math.dist(status["game"]["pawns"]["local"]["location"],
+                             status["game"]["pawns"]["guest"]["location"]) <= 1500)
+    same = await probe("activate", after=denied["sequence"])
+    assert same["result"]["ok"] and same["result"]["in_zone"], same
+    assert same["result"]["travel_epoch"] == started["zone_epoch"] and await ammo() == 900, same
+    note("matrix_keeps_item_and_moves_same_native_party", {"guid": guid, "anchor": anchor, "remaining_eather": 900})
+
+    await position_for_native_exit("guest", "near", entrance=entrance)
+    await position_for_native_exit("host", "inside", entrance=entrance)
+    await wait(run, lambda status: party_in_zone(status, observatory))
+    assert (await matrix_action("equip"))["native_matrix"]["result"] == "equipped"
+    cross = await probe("activate", after=same["sequence"])
+    assert cross["source"] == observatory and cross["result"]["map"] == crossroads and cross["result"]["ok"], cross
+    arrived = await wait(run, lambda status: party_in_zone(status, crossroads)
+                         and status["zone_epoch"] == cross["result"]["travel_epoch"])
+    peer = await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == crossroads)
+    assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
+    assert await ammo() == 800
+    settled = campaign_party(arrived)["matrix_transport"]
+    assert settled["pending"] is None and len(settled["completed"]) == 2 and settled["anchors"][guid] == anchor, settled
+    note("matrix_carries_party_to_exact_cross_map_anchor", {"character_id": character_id, "anchor": anchor,
+                                                         "guid": guid, "remaining_eather": 800})
+    return guid, canister, anchor
 
 
 async def blue_cube_travel(character_id, host_session):
@@ -895,12 +1040,15 @@ async def smoke():
             fixtures += ["--native-guest"]
         if args.native_zones:
             fixtures += ["--native-zones"]
+        if args.expanded_zones:
+            fixtures += ["--native-expanded-zones"]
         if args.native_walls:
             fixtures += ["--native-zone-walls"]
         if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
         authored_route = any((args.authored_zone, args.native_door, args.native_gold,
-                              args.native_blue, random_cube, args.native_stardust, args.observatory_zone))
+                              args.native_blue, random_cube, args.native_stardust, args.observatory_zone,
+                              args.native_matrix, args.native_weapon_use))
         initial_zone = ["--start-zone", black_market if args.native_broker else crossroads] if authored_route or args.native_broker else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
@@ -995,12 +1143,29 @@ async def smoke():
             turn_in_at = await command("action", "--campaign", campaign, "native-broker-position-fixture",
                                        "--target", "guest", "--entrance", "redeem")
             assert turn_in_at["native_broker_position"]["target"].endswith("ItemRequest_TradeStation_BP_C_1"), turn_in_at
+            if args.native_guest:
+                await wait(run, lambda status: status.get("game", {}).get("native_guest_xp_ready")
+                           and status["game"].get("native_guest_save", {}).get("pawn") == original_guest)
+                await command("action", "--campaign", campaign, "checkpoint")
+                broker_before = broker_stock_balances(chosen)
             redeem = ("action", "--profile", profile, "native-quest-turnin", "--target", quest_id)
             turned = await command(*redeem)
             assert (turned["step"] == -10 and turned["consumed_guid"] == guid and turned["wallet"] == 10_000
                     and set(turned["recipients"]) == {"host", chosen} and turned["xp"] == 1), turned
+            if args.native_guest:
+                broker_paid = broker_stock_balances(chosen)
+                assert broker_paid == {"host_xp": broker_before["host_xp"] + turned["xp"],
+                                       "host_cash": turned["wallet"],
+                                       "guest_xp": broker_before["guest_xp"] + turned["xp"],
+                                       "guest_cash": broker_before["guest_cash"]}, (broker_before, broker_paid)
             repeat = await command(*redeem)
             assert repeat["effect"] == "native_quest_already_settled" and repeat["wallet"] == turned["wallet"], repeat
+            if args.native_guest:
+                await command("action", "--campaign", campaign, "checkpoint")
+                assert broker_stock_balances(chosen) == broker_paid
+                note("broker_stock_guest_xp_is_persisted_once_in_detached_save", {
+                    "character_id": chosen, "before": broker_before, "after": broker_paid,
+                })
             note("stock_broker_manifest_awards_party_once", {"id": quest_id, "manifest": guid, "recipients": turned["recipients"],
                                                            "cash": turned["wallet"], "xp": turned["xp"]})
         if args.native_roster:
@@ -1075,12 +1240,32 @@ async def smoke():
             before = (await enrolled())["game"]
             assert before["native_guest_save"]["pawn"] == original_guest
             assert before["native_death_hook"]["sequence"] == 0
+            native_health = before["pawns"]["guest"]["health"]
+        if args.native_guest and (not args.native_broker or args.native_pair):
             if args.native_weapon:
                 weapon = (await command("action", "--campaign", campaign, "native-weapon-roundtrip")
                           )["native_weapon_roundtrip"]
                 assert weapon["state"] == "verified" and weapon["payload_type"].endswith("WeaponData_Struct")
                 assert weapon["item_text_chars"] > weapon["payload_text_chars"] > 0
                 note("stock_weapon_typed_payload_round_trip", weapon)
+            if args.native_weapon_use:
+                seeded = (await command("action", "--campaign", campaign, "native-guest-weapon-seed")
+                          )["native_guest_weapon"]
+                weapon_guid = seeded["guid"]
+                assert seeded["status"] == "backpack" and seeded["stored_ammo"] == 7, seeded
+                guest_inspect = ("action", "--profile", profile, "native-guest-weapon-inspect", "--target", weapon_guid)
+                guest_fire = ("action", "--profile", profile, "native-guest-weapon-fire", "--target", weapon_guid)
+                replayable_shot = (*guest_fire, "--operation-id", uuid.uuid4().hex)
+                unavailable = await command(*guest_fire[:4], "--target", uuid.uuid4().hex.upper(), check=False)
+                assert unavailable["ok"] is False, unavailable
+                equipped = (await command("action", "--profile", profile, "native-guest-weapon-equip",
+                                          "--target", weapon_guid))["native_guest_weapon"]
+                assert equipped["status"] == "equipped" and equipped["actor_ammo"] == equipped["stored_ammo"] == 7
+                fired = (await command(*replayable_shot))["native_guest_weapon"]
+                assert fired["before"] == 7 and fired["after"] == fired["actor_ammo"] == fired["stored_ammo"] == 6, fired
+                assert (await command(*replayable_shot))["native_guest_weapon"] == fired
+                assert (await command(*guest_inspect))["native_guest_weapon"]["stored_ammo"] == 6
+                note("exact_guest_equips_and_fires_stock_weapon_once", fired)
             if args.native_pickup:
                 spawned = await command("action", "--campaign", campaign, "native-pickup-spawn")
                 source = spawned["native_pickup"]
@@ -1105,6 +1290,10 @@ async def smoke():
             assert down["game"]["native_dead_flags"]["guest"] is False
             assert down["game"]["pawns"]["guest"]["name"] == original_guest
             assert down["game"]["native_guest_save"]["pawn"] == original_guest
+            if args.native_weapon_use:
+                refused = await command(*guest_fire, check=False)
+                assert refused["ok"] is False and refused["error"] == "downed", refused
+                assert (await command(*guest_inspect))["native_guest_weapon"]["stored_ammo"] == 6
             note("resident_scope_catches_stock_lethal_damage", hit)
             revive = await command("action", "--campaign", campaign, "interact", "--target", chosen)
             assert revive["effect"] == "revive"
@@ -1304,6 +1493,8 @@ async def smoke():
             expected_map = observatory
         elif random_cube:
             cube_guid, expected_map = await random_cube_travel(random_cube, chosen, guest["host_session"])
+        elif args.native_matrix:
+            matrix_guid, matrix_fuel_guid, matrix_anchor = await native_matrix_travel(chosen, guest["host_session"])
         elif args.native_stardust:
             stardust_receipt = await stardust_visit(chosen, guest["host_session"])
             expected_map = observatory
@@ -1510,6 +1701,17 @@ async def smoke():
             note("native_guest_health_restored_after_host_restart", {
                 "guest_health": rebound["pawns"]["guest"]["health"], "same_character_id": chosen,
             })
+            if args.native_broker:
+                await command("action", "--campaign", campaign, "checkpoint")
+                assert broker_stock_balances(chosen) == broker_paid
+                replayed = await command(*redeem)
+                assert replayed["effect"] == "native_quest_already_settled" and replayed["wallet"] == turned["wallet"], replayed
+                note("broker_stock_guest_xp_survives_host_restart", {"character_id": chosen, **broker_paid})
+            if args.native_weapon_use:
+                weapon = (await command(*guest_inspect))["native_guest_weapon"]
+                assert weapon["stored_ammo"] == 6 and weapon["pawn"] == rebound["pawns"]["guest"]["name"], weapon
+                assert (await command(*replayable_shot))["native_guest_weapon"] == fired
+                note("exact_guest_weapon_ammo_and_fire_receipt_survive_restart", weapon)
         if args.native_pickup:
             restored_item = await wait(run, lambda state: awarded["guid"] in state.get("gameplay", {})
                                        .get("native_inventory_projected", []))
@@ -1546,6 +1748,13 @@ async def smoke():
             await golden_cube_return(gold_guid, chosen, restored["generation"])
         if random_cube:
             await verify_random_cube_restart(random_cube, cube_guid, expected_map, chosen, restored["generation"])
+        if args.native_matrix:
+            inventory = await command("action", "--campaign", campaign, "native-matrix-inspect", "--target", matrix_guid)
+            assert inventory["anchor"] == matrix_anchor, inventory
+            canister = inventory["native_matrix"]["eather"]["current"]["canisters"][matrix_fuel_guid]
+            assert canister["ammo"] == 800, canister
+            note("matrix_native_anchor_item_and_eather_survive_host_restart",
+                 {"guid": matrix_guid, "anchor": matrix_anchor, "remaining_eather": canister["ammo"]})
         if args.native_blue:
             resumed = await wait(run, lambda status: party_in_zone(status, observatory)
                                  and status["game"].get("native_transport", {}).get("state") == "ready")

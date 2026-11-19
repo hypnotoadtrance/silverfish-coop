@@ -2,7 +2,7 @@
 
 import time
 
-from . import party
+from . import native_rewards, party
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET
 
@@ -41,7 +41,8 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) 
     if player["downed"]:
         raise party.RuleError("actor_downed")
     slot = next(slot for slot, character in roles.items() if character == actor)
-    expected = host.last_game["pawns"].get("local" if slot == "host" else slot, {}).get("name")
+    alias, _ = host.role_pawn(slot)
+    expected = host.last_game["pawns"].get(alias, {}).get("name")
     if not expected:
         raise party.RuleError("stock_broker_interactor_unavailable")
 
@@ -90,6 +91,9 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) 
             for character in recipients:
                 recipient = candidate["players"][character]
                 recipient["quest_xp"] = recipient.get("quest_xp", 0) + XP
+                if character != "host":
+                    native_rewards.queue(recipient, XP)
+            await native_rewards.project(host, bridge, candidate, native_rewards.pending_recipients(host, candidate))
             candidate["economy"]["wallet"] = after["native_cash"]
             record = {"quest_id": QUEST_ID, "step": -10, "actor": actor, "recipients": recipients, "xp": XP,
                       "cash": CASH, "wallet": after["native_cash"], "consumed_guid": after["consumed_guid"]}

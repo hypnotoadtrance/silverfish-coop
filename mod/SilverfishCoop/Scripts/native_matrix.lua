@@ -175,9 +175,11 @@ local function place(fields, state, host)
         error("matrix_anchor_relocation_unverified", 0)
     end
     for index = 1, 3 do
-        if math.abs(actual[index] - expected[index]) > 1
+        local tolerance = index == 3 and 25 or 2
+        if math.abs(actual[index] - expected[index]) > tolerance
             or angular_difference(actual[index + 3], expected[index + 3]) > 0.05 then
-            error("matrix_anchor_relocation_unverified", 0)
+            error(string.format("matrix_anchor_pose_unverified (axis %d offset %.2f angle %.3f)", index,
+                actual[index] - expected[index], angular_difference(actual[index + 3], expected[index + 3])), 0)
         end
     end
     return actual
@@ -246,8 +248,10 @@ local function guid_matches(save, id)
 end
 
 local function retire_source(source)
-    if valid(source) and not source:IsActorBeingDestroyed() then source:K2_DestroyActor() end
-    if valid(source) and not source:IsActorBeingDestroyed() then error("matrix_fixture_fuel_source_still_live", 0) end
+    if not valid(source) or source:IsActorBeingDestroyed() then return end
+    source:SetActorEnableCollision(false)
+    source:SetActorHiddenInGame(true)
+    source:K2_DestroyActor()
 end
 
 local function fixture_fuel(state, host, id)

@@ -10,7 +10,7 @@ if(NOT TARGET UE4SS)
 endif()
 
 add_library(SilverfishCoopNative SHARED
-    native_death.cpp item_roundtrip.cpp pickup.cpp save_copy.cpp transport_items.cpp zone_exit.cpp)
+    native_death.cpp guest_item.cpp item_roundtrip.cpp pickup.cpp save_copy.cpp stock_rest.cpp transport_items.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)
 target_link_libraries(SilverfishCoopNative PRIVATE UE4SS)
 set_target_properties(SilverfishCoopNative PROPERTIES

@@ -26,28 +26,40 @@ class _Binding:
 
 @dataclass(frozen=True)
 class _Source:
-    binding: _Binding
+    zone: str
     guid: str
     actor: str | None = None
 
 
 def _bound(game: dict, pawn: str) -> bool:
-    saved = game.get("native_guest_save") or {}
+    members = game.get("native_guest_save_members")
+    saved = members.get(pawn, {}) if members else game.get("native_guest_save") or {}
     return saved.get("state") == "bound" and saved.get("pawn") == pawn
 
 
-def _binding(host) -> _Binding | None:
+def _bindings(host, *, connected: bool = False) -> dict[str, _Binding]:
     game = host.last_game
+    if (not host.native_guest or not host.fixtures or host.stopping or host.transitioning
+            or game.get("state") != "hosting"):
+        return {}
+    recipients = getattr(host, "native_recipients", None)
+    if recipients is not None:
+        bindings = {}
+        for character, member in recipients().items():
+            pawn = member.get("pawn")
+            if pawn and (member["connected"] or not connected) and _bound(game, pawn):
+                bindings[character] = _Binding(character, pawn, host.zone_epoch)
+        return bindings
+
+    # Paired host adapters expose one exact guest and the original save row.
     pawn = host.guest_pawn
     character = host.roles().get("guest")
-    if (not host.native_guest or not host.fixtures or host.stopping or host.transitioning or
-            not host.guest or not character or not pawn or game.get("state") != "hosting" or
+    if (not host.guest or not character or not pawn or
             game.get("remote_clients") != 1 or host.guest["character_id"] != character or
-            game.get("pawns", {}).get("guest", {}).get("name") != pawn):
-        return None
-    if not _bound(game, pawn):
-        return None
-    return _Binding(character, pawn, host.zone_epoch)
+            (connected and host.guest["disconnected"] is not None) or
+            game.get("pawns", {}).get("guest", {}).get("name") != pawn or not _bound(game, pawn)):
+        return {}
+    return {character: _Binding(character, pawn, host.zone_epoch)}
 
 
 def _source_name(value: object) -> bool:
@@ -59,6 +71,7 @@ def _row(snapshot: dict, state: str, binding: _Binding, guid: str, *, actor: str
     row = snapshot.get("native_pickup") or {}
     if (not _bound(snapshot, binding.pawn) or
             row.get("state") != state or row.get("guid") != guid or row.get("class_path") != CLASS_PATH or
+            row.get("pawn") != binding.pawn or
             (actor is not None and row.get("actor") != actor)):
         raise RuntimeError("Native pickup was not verified by the exact bound guest")
     return row
@@ -91,38 +104,44 @@ class NativePickup:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._source: _Source | None = None
-        self._pending: _Source | None = None
-        self._pending_shop: tuple[_Binding, str] | None = None
+        self._pending: tuple[_Binding, _Source] | None = None
+        self._pending_shop: dict[_Binding, str] = {}
         self._recheck_pending = False
-        self._projected_binding: _Binding | None = None
-        self._projected: set[str] = set()
+        self._projected: dict[_Binding, set[str]] = {}
+        self._restore_offset = 0
 
-    def projected(self) -> list[str]:
-        return sorted(self._projected)
+    def projected(self, character_id: str | None = None) -> list[str]:
+        return sorted({guid for binding, items in self._projected.items()
+                       if character_id is None or binding.character == character_id for guid in items})
 
-    def invalidate(self) -> None:
+    def invalidate(self, character_id: str | None = None) -> None:
         """Clear transient projection tracking before the exact pawn receives a new Save."""
-        self._projected_binding = None
-        self._projected.clear()
-        self._recheck_pending = self._pending is not None
-        self._pending_shop = None
+        for records in (self._projected, self._pending_shop):
+            for binding in tuple(records):
+                if character_id is None or binding.character == character_id:
+                    del records[binding]
+        if self._pending and (character_id is None or self._pending[0].character == character_id):
+            self._recheck_pending = True
 
-    def _track(self, binding: _Binding) -> None:
-        if binding != self._projected_binding:
-            self._projected_binding = binding
-            self._projected.clear()
-        if self._source and self._source.binding != binding:
+    def _track(self, host, bindings: dict[str, _Binding]) -> None:
+        exact = set(bindings.values())
+        for records in (self._projected, self._pending_shop):
+            for previous in records.keys() - exact:
+                del records[previous]
+        if self._source and self._source.zone != host.zone_epoch:
             self._source = None
-        if self._pending and self._pending.binding != binding:
-            self._pending = None
-            self._recheck_pending = False
-        if self._pending_shop and self._pending_shop[0] != binding:
-            self._pending_shop = None
+        if self._pending:
+            if self._pending[1].zone != host.zone_epoch:
+                self._pending = None
+                self._recheck_pending = False
+            elif self._pending[0] not in exact:
+                self._recheck_pending = True
 
     @staticmethod
     def _claimant(host, actor: str | None) -> tuple[_Binding, dict]:
-        binding = _binding(host)
-        if not binding or (actor is not None and binding.character != actor) or host.guest["disconnected"] is not None:
+        bindings = _bindings(host, connected=True)
+        binding = bindings.get(actor) if actor is not None else next(iter(bindings.values()), None)
+        if not binding:
             raise party.RuleError("native_guest_unavailable")
         player = host.party["players"].get(binding.character)
         if not player:
@@ -136,59 +155,62 @@ class NativePickup:
         if player["downed"]:
             raise party.RuleError("actor_downed")
 
-    async def spawn(self, host, bridge) -> dict:
+    async def spawn(self, host, bridge, character_id: str | None = None) -> dict:
         async with self._lock:
-            binding, player = self._claimant(host, None)
-            self._track(binding)
+            binding, player = self._claimant(host, character_id)
+            self._track(host, _bindings(host))
             self._require_standing(host, binding, player)
             if len(player.get("native_inventory", {})) >= MAX_NATIVE_ITEMS:
                 raise party.RuleError("native_inventory_full")
-            if self._pending:
+            if self._pending and self._pending[1].zone == binding.zone:
                 raise party.RuleError("native_pickup_pending")
             if not self._source:
-                self._source = _Source(binding, uuid.uuid4().hex.upper())
+                self._source = _Source(binding.zone, uuid.uuid4().hex.upper())
             guid = self._source.guid
             snapshot = await bridge.command("native-pickup-spawn", binding.pawn, guid, timeout=4)
             row = _row(snapshot, "spawned", binding, guid)
             if not _source_name(row.get("actor")):
                 raise RuntimeError("The native pickup did not expose a stock Bandage actor")
-            self._source = _Source(binding, guid, row["actor"])
+            self._source = _Source(binding.zone, guid, row["actor"])
             return {"native_pickup": dict(row)}
 
     async def _project(self, bridge, binding: _Binding, guid: str, record: dict) -> None:
-        if guid in self._projected:
+        projected = self._projected.setdefault(binding, set())
+        if guid in projected:
             return
         if not _GUID.fullmatch(guid) or guid == "0" * 32:
             raise ValueError("Invalid saved native pickup GUID")
         payload = _payload(record)
-        if self._pending_shop == (binding, guid):
+        if self._pending_shop.get(binding) == guid:
             snapshot = await bridge.command("native-shop-commit", binding.pawn, guid, timeout=4)
             committed = _shop_row(snapshot, "committed", binding, record["source_shop"], guid)
             if _payload(committed) != payload or committed["price"] != record["price"]:
                 raise RuntimeError("The applied merchant item differs from the durable purchase")
-            self._pending_shop = None
-            self._projected.add(guid)
+            del self._pending_shop[binding]
+            projected.add(guid)
             return
-        commit_pending = self._pending and self._pending.guid == guid
-        recheck = commit_pending and self._recheck_pending
-        if commit_pending:
-            source = self._pending
+        pending_owner, source = self._pending or (None, None)
+        owns_pending = pending_owner and pending_owner.character == binding.character and source.guid == guid
+        if owns_pending and pending_owner == binding and not self._recheck_pending:
             snapshot = await bridge.command("native-pickup-commit", binding.pawn, guid, timeout=4)
             row = _row(snapshot, "committed", binding, guid, actor=source.actor)
             if _payload(row) != payload:
                 raise RuntimeError("The applied native pickup does not match its saved item")
-            self._pending = None
-            self._source = None
-            self._recheck_pending = False
-        if not commit_pending or recheck:
+        else:
+            source_actor = (record["source_actor"],) if "source_actor" in record else ()
             snapshot = await bridge.command(
                 "native-pickup-restore", binding.pawn, guid, str(payload["ammo"]), str(payload["weight"]),
-                str(payload["value"]), "1" if payload["never_drop"] else "0", timeout=4,
+                str(payload["value"]), "1" if payload["never_drop"] else "0", *source_actor, timeout=4,
             )
             row = _row(snapshot, "restored", binding, guid)
             if _payload(row) != payload:
                 raise RuntimeError("The restored native pickup does not match its saved item")
-        self._projected.add(guid)
+        if owns_pending:
+            self._pending = None
+            if self._source == source:
+                self._source = None
+            self._recheck_pending = False
+        projected.add(guid)
 
     async def claim(self, host, bridge, actor_character_id: str, operation_id: str, actor_full_name: str) -> dict:
         if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
@@ -198,7 +220,7 @@ class NativePickup:
 
         async with self._lock:
             binding, player = self._claimant(host, actor_character_id)
-            self._track(binding)
+            self._track(host, _bindings(host))
             inventory = player.get("native_inventory", {})
             for guid, record in inventory.items():
                 if record.get("operation_id") == operation_id:
@@ -215,7 +237,7 @@ class NativePickup:
             source = self._source
             if not source or source.actor != actor_full_name:
                 raise party.RuleError("native_pickup_unavailable")
-            if self._pending or source.guid in inventory:
+            if self._pending and self._pending[1].guid == source.guid:
                 raise party.RuleError("native_pickup_already_claimed")
 
             try:
@@ -244,7 +266,8 @@ class NativePickup:
                 raise
 
             host.party = candidate
-            self._pending = source
+            self._pending = (binding, source)
+            self._recheck_pending = False
             with suppress(OSError):
                 host.control.event("native_pickup_saved", character_id=binding.character,
                                    operation_id=operation_id, revision=revision, **result)
@@ -258,7 +281,7 @@ class NativePickup:
             raise party.RuleError("unknown_native_shop")
         async with self._lock:
             binding, player = self._claimant(host, character)
-            self._track(binding)
+            self._track(host, _bindings(host))
             inventory = player.get("native_inventory", {})
             for guid, record in inventory.items():
                 if record.get("operation_id") != operation_id:
@@ -270,7 +293,7 @@ class NativePickup:
             self._require_standing(host, binding, player)
             if any(entry["id"] == operation_id for entry in host.party["receipts"].get(character, [])):
                 raise party.RuleError("operation_id_conflict")
-            if self._pending_shop:
+            if binding in self._pending_shop:
                 raise party.RuleError("native_purchase_pending")
             if len(inventory) >= MAX_NATIVE_ITEMS:
                 raise party.RuleError("native_inventory_full")
@@ -304,7 +327,7 @@ class NativePickup:
                 raise
 
             host.party = candidate
-            self._pending_shop = (binding, guid)
+            self._pending_shop[binding] = guid
             with suppress(OSError):
                 host.control.event("native_purchase_saved", character_id=character,
                                    operation_id=operation_id, revision=revision, **result)
@@ -314,37 +337,46 @@ class NativePickup:
     async def restore(self, host, bridge) -> None:
         """Project at most one missing native item per tick to keep the host responsive."""
         async with self._lock:
-            binding = _binding(host)
-            if not binding:
-                self.invalidate()
+            bindings = _bindings(host)
+            self._track(host, bindings)
+            members = list(bindings.values())
+            if not members:
                 return
-            self._track(binding)
-            player = host.party["players"].get(binding.character, {})
-            inventory = player.get("native_inventory", {})
-            pending = {self._pending.guid} if self._pending else set()
-            if self._pending_shop:
-                pending.add(self._pending_shop[1])
-            removed = (self._projected | pending) - inventory.keys()
-            if removed:
-                guid = min(removed)
-                snapshot = await bridge.command("native-pickup-remove", binding.pawn, guid, timeout=4)
-                _row(snapshot, "removed", binding, guid)
-                self._projected.discard(guid)
-                if self._pending and self._pending.guid == guid:
-                    with suppress(OSError, RuntimeError):
-                        await bridge.command("native-pickup-abort", binding.pawn, guid, timeout=2)
-                    self._pending = None
-                    self._source = None
-                if self._pending_shop and self._pending_shop[1] == guid:
-                    with suppress(OSError, RuntimeError):
-                        await bridge.command("native-shop-abort", binding.pawn, guid, timeout=2)
-                    self._pending_shop = None
-                return
-            if self._pending:
-                guid = self._pending.guid
-                await self._project(bridge, binding, guid, inventory[guid])
-                return
-            for guid, record in inventory.items():
-                if guid not in self._projected:
-                    await self._project(bridge, binding, guid, record)
+            start = self._restore_offset % len(members)
+            for offset in range(len(members)):
+                index = (start + offset) % len(members)
+                self._restore_offset = index + 1
+                if await self._restore_member(host, bridge, members[index]):
                     return
+
+    async def _restore_member(self, host, bridge, binding: _Binding) -> bool:
+        player = host.party["players"].get(binding.character, {})
+        inventory = player.get("native_inventory", {})
+        projected = self._projected.setdefault(binding, set())
+        pending_owner, source = self._pending or (None, None)
+        pickup_guid = source.guid if pending_owner and pending_owner.character == binding.character else None
+        shop_guid = self._pending_shop.get(binding)
+        pending = {guid for guid in (pickup_guid, shop_guid) if guid is not None}
+        removed = (projected | pending) - inventory.keys()
+        if removed:
+            guid = min(removed)
+            actor = (source.actor,) if guid == pickup_guid else ()
+            snapshot = await bridge.command("native-pickup-remove", binding.pawn, guid, *actor, timeout=4)
+            _row(snapshot, "removed", binding, guid)
+            projected.discard(guid)
+            if guid == pickup_guid:
+                self._pending = None
+                if self._source == source:
+                    self._source = None
+                self._recheck_pending = False
+            if guid == shop_guid:
+                with suppress(OSError, RuntimeError):
+                    await bridge.command("native-shop-abort", binding.pawn, guid, timeout=2)
+                del self._pending_shop[binding]
+            return True
+
+        guid = pickup_guid or shop_guid or next((item for item in inventory if item not in projected), None)
+        if guid is None:
+            return False
+        await self._project(bridge, binding, guid, inventory[guid])
+        return True

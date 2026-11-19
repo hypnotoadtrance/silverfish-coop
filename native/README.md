@@ -65,6 +65,10 @@ In CrossRoads, host Stardust use reaches Exchange when all Tarot flags are inact
 
 The host save smoke test checks the Unreal save file against its campaign reference, verifies the host pawn adopted the same canonical save generation at startup, and inspects the exact remaining inventory GUID. The generated slots live in the campaign's isolated game profile. Keep that profile with the campaign JSON and backup when moving a campaign.
 
-The Red Cube smoke test exercises a real stock use request, the distance gate, and the durable draw and debit. The `native_roster` status lists each native connection and its verified controller and pawn on the host. `--native-roster` checks the identity through relay reconnect. Live gameplay currently admits one guest.
+The Red Cube smoke test exercises a real stock use request, the distance gate, and the durable draw and debit. The `native_roster` status lists each native connection and its verified controller and pawn on the host. `--native-roster` checks the identity through relay reconnect. To exercise two concurrently enrolled guests, run:
+
+```powershell
+& $sfPython tests/live_multi_smoke.py --work $sfCppLab --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
+```
 
 `--native-green` checks the live eligible destinations and faction relationships, the stock placement for the rolled map, and the durable charge. The guest save test verifies that the separate character's hashed Unreal save is reattached to the correct pawn and still contains the claimed Bandage after host restart. `--native-fall` reports the measured authoritative duration and vertical speed from the stock landing callback.

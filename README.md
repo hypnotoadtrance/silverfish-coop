@@ -1,6 +1,6 @@
 # Project Silverfish Co-op
 
-An early Windows prototype for one host and one guest. See the [18 locked rules](docs/DESIGN.md) for the full design.
+A Windows Direct IP prototype with an optional native campaign lab. The native lab has been tested on loopback with one host and two guests. See the [18 locked rules](docs/DESIGN.md) for the full design.
 
 The launcher copies the stock game into a separate runtime, installs a small UE4SS bridge in the copy, and starts Unreal with a separate user-data directory. Players connect directly to the host's UDP port using an authenticated, encrypted QUIC connection. The launcher relays game packets to Unreal over loopback.
 
@@ -119,4 +119,4 @@ The staged host reports placed merchant stock, saved scene fields, and an allowl
 & $sfPython tests/live_smoke.py --work .work --gameplay --wipe --zones --native-probe --native-quest
 ```
 
-Full stock inventory and equipment routing, native purchases and quest turn-in, natural zone exits, stock combat, and Steam Invite are development work. Gameplay fixtures and the native labs run from the staged workspace.
+The staged labs cover selected stock exits, transport items, combat, Bandage purchases and pickups, and quest turn-ins. General campaign interactions, inventory controls, and wide-area networking remain in development. Steam Invite is deferred. See the [native integration status](docs/NATIVE-INTEGRATION.md).

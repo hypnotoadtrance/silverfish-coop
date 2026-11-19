@@ -1050,9 +1050,9 @@ namespace
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
             return probe_result(lua, false, "host_and_matrix_guid_required_on_game_thread");
-        const auto address = lua.get_integer(1);
+        const auto address = lua.get_integer();
         Guid guid{};
-        if (!parse_guid(lua.get_string(2), guid)) return probe_result(lua, false, "invalid_matrix_guid");
+        if (!parse_guid(lua.get_string(), guid)) return probe_result(lua, false, "invalid_matrix_guid");
         if (!current_host_argument(address)) return probe_result(lua, false, "current_transport_host_required");
 
         MatrixInventory inventory;
@@ -1418,19 +1418,30 @@ namespace
         return {};
     }
 
-    [[nodiscard]] std::string_view matrix_fixture_arguments(const Lua& lua, int arguments, Guid& guid)
+    [[nodiscard]] std::string_view matrix_fixture_arguments(const Lua& lua, Guid& guid, bool* record_anchor = nullptr)
     {
         if (!fixtures_enabled()) return "native_matrix_fixtures_disabled";
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != arguments || !lua.is_integer(1) || !lua.is_string(2))
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != (record_anchor ? 3 : 2) ||
+            !lua.is_integer(1) || !lua.is_string(2))
             return "matrix_fixture_pawn_and_guid_required";
-        if (!current_host_argument(lua.get_integer(1))) return "current_transport_host_required";
-        return parse_guid(lua.get_string(2), guid) ? "" : "invalid_matrix_guid";
+        if (record_anchor && !lua.is_string(3)) return "matrix_fixture_action_required";
+
+        // LuaMadeSimple removes each argument as it reads it, so consume from the front.
+        const auto address = lua.get_integer();
+        if (!parse_guid(lua.get_string(), guid)) return "invalid_matrix_guid";
+        if (record_anchor)
+        {
+            const auto action = lua.get_string();
+            if (action != "record" && action != "activate") return "matrix_fixture_action_required";
+            *record_anchor = action == "record";
+        }
+        return current_host_argument(address) ? "" : "current_transport_host_required";
     }
 
     int lua_seed_matrix(const Lua& lua)
     {
         Guid guid{};
-        if (const auto error = matrix_fixture_arguments(lua, 2, guid); !error.empty()) return probe_result(lua, false, error);
+        if (const auto error = matrix_fixture_arguments(lua, guid); !error.empty()) return probe_result(lua, false, error);
 
         auto* save = canonical_host_save();
         MatrixInventory inventory;
@@ -1467,7 +1478,7 @@ namespace
     int lua_equip_matrix(const Lua& lua)
     {
         Guid guid{};
-        if (const auto error = matrix_fixture_arguments(lua, 2, guid); !error.empty()) return probe_result(lua, false, error);
+        if (const auto error = matrix_fixture_arguments(lua, guid); !error.empty()) return probe_result(lua, false, error);
 
         auto* save = canonical_host_save();
         auto* pawn = scope.pawn.Get();
@@ -1482,15 +1493,32 @@ namespace
 
         const Unreal::FName equip_name{STR("Equip_NextItem")};
         auto* equip = pawn->GetFunctionByNameInChain(equip_name);
+        if (!equip || equip->GetOuterPrivate() != pawn->GetClassPrivate())
+            return probe_result(lua, false, "stock_matrix_fixture_equip_function_unavailable");
+
+        struct EquipParameters
+        {
+            std::int32_t index{};
+            bool prev{};
+        } parameters;
         auto* index = field<Unreal::FIntProperty>(equip, STR("Index"));
+        auto* prev = field<Unreal::FBoolProperty>(equip, STR("Prev"));
+        if (!index || !index->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            index->HasAnyPropertyFlags(Unreal::CPF_OutParm) || index->GetOffset_Internal() != offsetof(EquipParameters, index))
+            return probe_result(lua, false, "stock_matrix_fixture_equip_index_unavailable");
+        if (!prev || !prev->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            prev->HasAnyPropertyFlags(Unreal::CPF_OutParm) || prev->GetOffset_Internal() != offsetof(EquipParameters, prev))
+            return probe_result(lua, false, "stock_matrix_fixture_equip_prev_unavailable");
+        if (equip->GetNumParms() != 2 || equip->GetReturnProperty() ||
+            equip->GetParmsSize() < offsetof(EquipParameters, prev) + sizeof(bool) || equip->GetParmsSize() > sizeof(EquipParameters))
+            return probe_result(lua, false, "stock_matrix_fixture_equip_parameter_layout_unavailable");
+
         auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+        if (!selected) return probe_result(lua, false, "stock_matrix_fixture_selected_slot_unavailable");
         const Unreal::FName carry_name{STR("Calc_CarryWeight")};
         auto* instance = scope.instance.Get();
         auto* recalculate = stock_no_args(instance, carry_name);
-        if (!index || !selected || !recalculate || equip->GetOuterPrivate() != pawn->GetClassPrivate() ||
-            equip->GetNumParms() != 1 || equip->GetReturnProperty() || index->GetOffset_Internal() != 0 ||
-            equip->GetParmsSize() != sizeof(std::int32_t))
-            return probe_result(lua, false, "stock_matrix_fixture_equip_schema_unavailable");
+        if (!recalculate) return probe_result(lua, false, "stock_carry_weight_function_unavailable");
 
         const auto old_slot = selected->GetPropertyValueInContainer(save);
         auto new_slot = inventory.equipped_index;
@@ -1522,8 +1550,9 @@ namespace
             return probe_result(lua, false, "stock_matrix_fixture_equipped_slot_conflict");
         }
 
-        std::int32_t stock_index = new_slot;
-        pawn->ProcessEvent(equip, &stock_index);
+        index->SetPropertyValueInContainer(&parameters, new_slot);
+        prev->SetPropertyValueInContainer(&parameters, false);
+        pawn->ProcessEvent(equip, &parameters);
         instance->ProcessEvent(recalculate, nullptr);
         const bool verified = canonical_host_save() == save &&
             equipped_matrix_guid(save, object_field(pawn, STR("EquipedItem")), actual).empty() && actual == guid;
@@ -1533,11 +1562,10 @@ namespace
     int lua_probe_matrix(const Lua& lua)
     {
         Guid guid{};
-        if (const auto error = matrix_fixture_arguments(lua, 3, guid); !error.empty()) return probe_result(lua, false, error);
-        if (!lua.is_string(3)) return probe_result(lua, false, "matrix_fixture_action_required");
-        const auto action = lua.get_string(3);
-        const bool record_anchor = action == "record";
-        if (!record_anchor && action != "activate") return probe_result(lua, false, "matrix_fixture_action_required");
+        bool record_anchor = false;
+        if (const auto error = matrix_fixture_arguments(lua, guid, &record_anchor); !error.empty())
+            return probe_result(lua, false, error);
+        const std::string_view action = record_anchor ? "record" : "activate";
 
         auto* save = canonical_host_save();
         auto* actor = object_field(scope.pawn.Get(), STR("EquipedItem"));

@@ -1,6 +1,6 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
-from . import native_broker, party
+from . import native_broker, native_rewards, party
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -29,6 +29,8 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
         for character in recipients:
             player = candidate["players"][character]
             player["quest_xp"] = player.get("quest_xp", 0) + REWARD_XP
+            if character != "host":
+                native_rewards.queue(player, REWARD_XP)
         candidate["economy"]["wallet"] += REWARD_CASH
         record.update(recipients=recipients, xp=REWARD_XP, cash=REWARD_CASH,
                       wallet=candidate["economy"]["wallet"])

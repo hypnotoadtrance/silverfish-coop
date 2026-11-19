@@ -16,8 +16,10 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
+from .native_roster import Assignment
 
 REPO = Path(__file__).resolve().parents[2]
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
@@ -247,7 +249,8 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
-           native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False):
+           native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
+           expanded_zones: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -260,6 +263,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
+    env.pop("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES", None)
     env.pop("SILVERFISH_COOP_NATIVE_TRANSPORT", None)
     env.pop("SILVERFISH_COOP_NATIVE_FIXTURES", None)
     backend = native_death_backend(work)
@@ -284,6 +288,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
     if native_zone_walls:
         env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
+    if expanded_zones:
+        env["SILVERFISH_COOP_NATIVE_EXPANDED_ZONES"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -325,6 +331,8 @@ class Bridge:
         self.zone_offset = 0
         self.transport_offsets = dict.fromkeys(("gold", "blue", "stardust", "fruiting-stardust", "red", "green", "purple"), 0)
         self.matrix_offset = 0
+        self.authored_zone_offset = 0
+        self.rest_offset = 0
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -355,7 +363,8 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.split(b"\t")
-            if (len(fields) in (3, 4) and fields[0] == b"downed" and fields[1] in (b"local", b"guest")
+            if (len(fields) in (3, 4) and fields[0] == b"downed"
+                    and (fields[1] in (b"local", b"guest") or (len(fields) == 4 and fields[1] in (b"guest2", b"guest3", b"guest4")))
                     and fields[2].isdigit() and len(fields[2]) <= 12):
                 pawn = fields[3].decode("utf-8", errors="replace") if len(fields) == 4 else None
                 identifier = uuid.uuid5(self.input_namespace, "death" + fields[2].decode("ascii")).hex
@@ -379,6 +388,27 @@ class Bridge:
             requests.append((int(fields[1]), fields[2].decode("utf-8", errors="replace"),
                              fields[3].decode("utf-8", errors="replace"),
                              fields[4].decode("utf-8", errors="replace") if len(fields) == 5 else None))
+        return requests
+
+    def native_rest_requests(self) -> list[tuple[str, str, str, str, int]]:
+        try:
+            with (self.directory / "native-rest-events").open("rb") as stream:
+                stream.seek(self.rest_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.rest_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        requests = []
+        for line in batch[:end].splitlines():
+            fields = line.split(b"\t")
+            if (len(fields) != 6 or fields[0] != b"rest" or not fields[1].isdigit() or len(fields[1]) > 12
+                    or not fields[5].isdigit() or len(fields[5]) > 2 or not 0 <= int(fields[5]) <= 10
+                    or not all(0 < len(field) <= 512 for field in fields[2:5])):
+                continue
+            operation_id = uuid.uuid5(self.input_namespace, "rest" + fields[1].decode("ascii")).hex
+            source, pawn, bed = (field.decode("utf-8", errors="replace") for field in fields[2:5])
+            requests.append((operation_id, source, pawn, bed, int(fields[5])))
         return requests
 
     def native_cube_requests(self, cube: str) -> list[GoldRequest]:
@@ -420,6 +450,29 @@ class Bridge:
         return [request for line in batch[:end].splitlines()
                 if (request := parse_matrix_request(line.decode("utf-8", errors="replace").split("\t")))]
 
+    def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute]]:
+        try:
+            with (self.directory / "native-authored-exit-events").open("rb") as stream:
+                stream.seek(self.authored_zone_offset)
+                batch = stream.read(8192)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.authored_zone_offset += end or (len(batch) if len(batch) == 8192 else 0)
+        requests = []
+        for raw in batch[:end].splitlines():
+            fields = raw.decode("utf-8", errors="replace").split("\t")
+            if len(fields) != 8 or fields[0] != "authored-request" or not fields[1].isascii() \
+                    or not fields[1].isdigit() or len(fields[1]) > 12:
+                continue
+            source, destination, entrance, actor, kind, step = fields[2:]
+            match = next((route for route in AUTHORED_ROUTES if route.source == source and route.actor == actor), None)
+            if match and (match.destination, match.entrance, match.kind,
+                          "-" if match.travel_time_step is None else str(match.travel_time_step)) == (
+                          destination, entrance, kind, step):
+                requests.append((int(fields[1]), match))
+        return requests
+
     def snapshot(self) -> dict | None:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
@@ -457,6 +510,12 @@ class Bridge:
                     data["native_guest_save"] = {
                         "state": fields[1], "pawn": fields[2] if len(fields) == 3 else None,
                     }
+                elif fields[0] == "native-guest-save-member" and len(fields) == 3:
+                    data.setdefault("native_guest_save_members", {})[fields[2]] = {"state": fields[1], "pawn": fields[2]}
+                elif fields == ["native-guest-xp-capability", "1"]:
+                    data["native_guest_xp_ready"] = True
+                elif fields[0] == "native-guest-xp" and len(fields) == 5:
+                    data["native_guest_xp"] = {"map": fields[1], "pawn": fields[2], "before": int(fields[3]), "after": int(fields[4])}
                 elif fields[0] == "native-zone" and len(fields) == 7:
                     data["native_zone"] = {
                         "state": fields[1], "decision": fields[2], "requests": int(fields[3]),
@@ -491,7 +550,7 @@ class Bridge:
                         "reputation": {int(group): int(rank) for group, rank in
                                        (entry.split(":") for entry in fields[4].split("|"))},
                     }
-                elif fields[0] in ("native-green-arrival", "native-purple-arrival") and len(fields) == 7:
+                elif fields[0] in ("native-green-arrival", "native-purple-arrival", "native-authored-arrival") and len(fields) == 7:
                     data[fields[0].replace("-", "_")] = {
                         "destination": fields[1], "actor": fields[2], "placement": fields[3],
                         "location": [_finite(value) for value in fields[4:7]],
@@ -518,6 +577,26 @@ class Bridge:
                         "source": fields[1], "pawn": fields[2], "kind": fields[3], "destination": fields[4],
                         "tarot": fields[5], "before": int(fields[6]), "after": int(fields[7]),
                     }
+                elif fields[0] == "native-guest-weapon" and len(fields) == 12:
+                    data["native_guest_weapon"] = {
+                        "map": fields[1], "action": fields[2], "pawn": fields[3], "guid": fields[4],
+                        "ok": fields[5] == "1", "status": fields[6],
+                        **{key: (None if value == "-" else int(value))
+                           for key, value in zip(("before", "after", "actor_ammo", "stored_ammo", "projectiles"),
+                                                 fields[7:])},
+                    }
+                elif fields[0] == "native-rest" and len(fields) == 19:
+                    data["native_rest"] = {
+                        "map": fields[1], "pawn": fields[2], "actor": fields[3], "bed": fields[4], "level": fields[5],
+                        "eligible": fields[6] == "1", "reason": fields[7], "points": int(fields[8]),
+                        "distance": _finite(fields[9]), "range": _finite(fields[10]), "insomnia": fields[11] == "1",
+                        "location": [_finite(value) for value in fields[12:15]],
+                        "hours": None if fields[15] == "-" else int(fields[15]),
+                        "before": _finite(fields[16]), "after": _finite(fields[17]), "ping": fields[18],
+                    }
+                elif fields[0] == "native-rest-hook" and len(fields) == 5:
+                    data["native_rest_hook"] = {"installed": fields[1] == "1", "armed": fields[2] == "1",
+                                               "fresh": fields[3] == "1", "status": fields[4]}
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
                         "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],
@@ -527,15 +606,19 @@ class Bridge:
                         "state": fields[1], "map": fields[2], "actor": fields[3], "detail": fields[4],
                         "early_requested": fields[5] == "1",
                     }
-                elif fields[0] == "native-dream-formation" and len(fields) == 3:
+                elif fields[0] == "native-dream-formation" and len(fields) in (3, 5):
                     data["native_dream_formation"] = {"map": fields[1], "adjustments": int(fields[2])}
-                elif fields[0] == "native-pickup" and len(fields) == 9:
+                    if len(fields) == 5:
+                        data["native_dream_formation"].update(enrolled=int(fields[3]), detail=fields[4])
+                elif fields[0] == "native-pickup" and len(fields) in (9, 10):
                     data["native_pickup"] = {
                         "state": fields[1], "guid": fields[2], "class_path": fields[3],
                         "ammo": int(fields[4]) if fields[4] != "-" else None, "weight": _finite(fields[5]),
                         "value": int(fields[6]) if fields[6] != "-" else None,
                         "never_drop": fields[7] == "1", "actor": fields[8] if fields[8] != "-" else None,
                     }
+                    if len(fields) == 10:
+                        data["native_pickup"]["pawn"] = fields[9] if fields[9] != "-" else None
                 elif fields[0] == "native-weapon-roundtrip" and len(fields) == 8:
                     data["native_weapon_roundtrip"] = {
                         "state": fields[1], "class_path": fields[2], "payload_type": fields[3], "guid": fields[4],
@@ -573,12 +656,15 @@ class Bridge:
                         "scope": fields[5] if len(fields) >= 6 and fields[5] else None,
                     }
                 elif fields[0] == "native-fall" and len(fields) == 13:
-                    data["native_fall"] = {
+                    fall = {
                         "state": fields[1], "pawn": fields[2], "mode_changes": int(fields[3]), "starts": int(fields[4]),
                         "landings": int(fields[5]), "forwarded": int(fields[6]), "mode": int(fields[7]),
                         "elapsed": _finite(fields[8]), "vertical_speed": _finite(fields[9]),
                         "original_fall_time": _finite(fields[10]), "actor_tick": fields[11] == "1", "reason": fields[12],
                     }
+                    data.setdefault("native_fall_members", {})[fall["pawn"]] = fall
+                    if "native_fall" not in data:
+                        data["native_fall"] = fall
                 elif fields[0] == "native-scene" and len(fields) == 18:
                     keys = ("active_map", "saved_level", "entrance", "rest_level", "bed", "instance_seed",
                             "game_seconds", "weather_offset", "ongoing_storm", "artifact_area_count",
@@ -605,11 +691,18 @@ class Bridge:
                     }
                     if len(fields) == 9 and fields[8] != "-":
                         data["native_host_save"]["eather_remainder"] = _finite(fields[8])
-                elif fields[0] == "native-guest-save-frame" and len(fields) == 7:
-                    data["native_guest_save_frame"] = {
+                elif fields[0] == "native-world-flush" and len(fields) == 6:
+                    data["native_world_flush"] = {"map": fields[1], "state": fields[2], "antfarm": fields[3],
+                                                  "explosives": fields[4], "reason": fields[5]}
+                elif fields[0] in ("native-guest-save-frame", "native-guest-save-member-frame") and len(fields) == 7:
+                    frame = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
                         "backpack_count": int(fields[5]), "equipment_count": int(fields[6]),
                     }
+                    if fields[0] == "native-guest-save-frame":
+                        data["native_guest_save_frame"] = frame
+                    else:
+                        data.setdefault("native_guest_save_member_frames", {})[frame["pawn"]] = frame
                 elif fields[0] == "native-roster-state" and len(fields) == 5:
                     roster = data.setdefault("native_roster", {"connections": []})
                     roster.update(state=fields[1], driver=fields[2], count=int(fields[3]), reason=fields[4])
@@ -719,7 +812,8 @@ class Bridge:
             raise ValueError("Use a normalized planar direction and a duration of 50 to 1000 ms")
         await self.command("walk", str(x), str(y), str(milliseconds))
 
-    async def restore(self, role: str, pawn: dict) -> dict | None:
+    async def restore(self, role: str, pawn: dict, *, binding: Assignment | None = None,
+                      respawning: bool = False) -> dict | None:
         coordinates = pawn.get("location")
         if not isinstance(coordinates, list) or len(coordinates) != 3:
             return
@@ -727,4 +821,7 @@ class Bridge:
             return
         health = pawn.get("health")
         raw_health = str(health) if isinstance(health, (int, float)) and math.isfinite(health) else "-"
-        return await self.command("restore", role, raw_health, *(str(axis) for axis in coordinates))
+        arguments = (raw_health, *(str(axis) for axis in coordinates), *(("native-wipe",) if respawning else ()))
+        if binding is not None:
+            return await self.command("restore-exact", binding.pawn, binding.controller, binding.connection, *arguments)
+        return await self.command("restore", role, *arguments)

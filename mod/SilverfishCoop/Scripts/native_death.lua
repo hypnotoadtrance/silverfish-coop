@@ -11,6 +11,8 @@ local die_path = "/Game/Classes/Player/Player_FP.Player_FP_C:Die"
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local hook_status = "arming"
 local hook_failure = ""
+local guest_slots = { "guest", "guest2", "guest3", "guest4" }
+local allowed_guests = { guest = true, guest2 = true, guest3 = true, guest4 = true }
 local slots = {}
 local scope_records = {}
 local scope_token
@@ -23,7 +25,7 @@ local friendly_fire
 local host_revived_health
 
 local function valid(object)
-    return object ~= nil and object:IsValid()
+    return object ~= nil and object ~= false and object:IsValid()
 end
 
 local function same(first, second)
@@ -98,10 +100,23 @@ end
 local function publish_scope(eligible)
     if not next(eligible) then return clear_scope() end
     local host, guest = eligible["local"], eligible.guest
-    local refreshed, accepted, token = pcall(SilverfishSetNativeDeathScope, host and host.address or 0, guest.address)
-    if not refreshed or accepted ~= true or type(token) ~= "number" then
+    local refreshed, accepted, token
+    if eligible.guest2 then
+        if not host or type(SilverfishSetNativeDeathRoster) ~= "function" then
+            clear_scope(true)
+            return false, "Waiting for the C++ multi-guest death hook export"
+        end
+        local addresses = { host.address }
+        for _, slot in ipairs(guest_slots) do
+            if eligible[slot] then addresses[#addresses + 1] = eligible[slot].address end
+        end
+        refreshed, accepted, token = pcall(SilverfishSetNativeDeathRoster, table.unpack(addresses))
+    else
+        refreshed, accepted, token = pcall(SilverfishSetNativeDeathScope, host and host.address or 0, guest.address)
+    end
+    if not refreshed or accepted ~= true or type(token) ~= "number" or not math.tointeger(token) or token <= 0 then
         clear_scope(true)
-        return false
+        return false, "The C++ death hook declined the authority scope"
     end
     scope_records, scope_token = eligible, token
     return true
@@ -119,6 +134,31 @@ local function eligible_scope(current)
     if not valid(guest_save) or same(host_save, guest_save)
         or not finite(guest_save.PlayerHealth) then return {} end
     return { guest = guest }
+end
+
+local function enrolled_scope(current, count)
+    local host = current["local"]
+    local host_save = host and host.pawn.Save
+    if type(count) ~= "number" or not math.tointeger(count) or count < 1 or count > #guest_slots
+        or not valid(host_save) or not finite(host_save.PlayerHealth) then
+        return {}
+    end
+
+    local eligible = { ["local"] = host }
+    local used_saves = { [host_save:GetAddress()] = true }
+    for index, slot in ipairs(guest_slots) do
+        local record = current[slot]
+        if index <= count then
+            if not record or not guest_save.matches(record.pawn) then return {} end
+            local save = record.pawn.Save
+            if not valid(save) or not finite(save.PlayerHealth) or used_saves[save:GetAddress()] then return {} end
+            used_saves[save:GetAddress()] = true
+            eligible[slot] = record
+        elseif record then
+            return {}
+        end
+    end
+    return eligible
 end
 
 local function drain_scope()
@@ -149,19 +189,28 @@ function native_death.sync(state, phase)
     local current = {}
     local ambiguous = false
     if session_active then
+        local world_address = valid(state.world) and state.world:GetAddress()
+        local previous_by_address, addresses, names = {}, {}, {}
+        for _, record in pairs(slots) do previous_by_address[record.address] = record end
         for _, details in ipairs(state.pawns) do
-            local slot, pawn = details.kind, details.pawn
-            if (slot == "local" or slot == "guest") and valid(pawn) and pawn:HasAuthority() then
-                if scoped and current[slot] then
+            local slot, pawn = details.slot or details.kind, details.pawn
+            local accepted = (slot == "local" and details.kind == "local")
+                or (details.kind == "guest" and (slot == "guest" or (scoped and allowed_guests[slot])))
+            if accepted and valid(pawn) and pawn:HasAuthority() and (not scoped or same(pawn:GetWorld(), state.world)) then
+                local address, name = pawn:GetAddress(), details.name
+                if current[slot] or addresses[address] or type(name) ~= "string" or #name == 0 or #name > 512
+                    or name:find("[%c]") or name ~= pawn:GetFullName() or names[name] then
                     ambiguous = true
                     break
                 end
-                local previous = slots[slot]
-                if previous and same(previous.pawn, pawn) and previous.map == state.map then
+                addresses[address], names[name] = true, true
+                local previous = previous_by_address[address]
+                if previous and previous.name == name and previous.map == state.map
+                    and previous.world == world_address and same(previous.pawn, pawn) then
                     current[slot] = previous
                 else
-                    current[slot] = { pawn = pawn, address = pawn:GetAddress(), name = details.name,
-                        map = state.map, emitted = false }
+                    current[slot] = { pawn = pawn, address = address, name = name,
+                        map = state.map, world = world_address, emitted = false }
                 end
             end
         end
@@ -191,10 +240,12 @@ function native_death.sync(state, phase)
         clear_scope()
         hook_status, hook_failure = "arming", "Waiting for a fresh host heartbeat"
     else
-        local eligible = current.guest and guest_save.matches(current.guest.pawn) and eligible_scope(current) or {}
-        if eligible.guest then eligible["local"] = current["local"] end
-        if not publish_scope(eligible) then
-            hook_status, hook_failure = "error", "The C++ death hook declined the authority scope"
+        local eligible = enrolled_scope(current, state.clients)
+        local published, failure = publish_scope(eligible)
+        if not published then
+            hook_status, hook_failure = "error", failure or "Could not clear the C++ death scope"
+        elseif type(state.clients) == "number" and state.clients > 1 and not eligible.guest then
+            hook_status, hook_failure = "arming", "Waiting for all observed guests to own independent native saves"
         end
     end
 end
@@ -337,8 +388,8 @@ local function direct_damage_probe(state, phase, record)
 end
 
 local function ambient_damage_probe(slot, record)
-    local other = slots[slot == "guest" and "local" or "guest"]
-    local guest = slots.guest
+    local guest = slot == "local" and scope_records.guest or scope_records[slot]
+    local other = slot == "local" and guest or scope_records["local"]
     if not scoped or not heartbeat_fresh() or scope_records[slot] ~= record or not other
         or not guest or not guest_save.matches(guest.pawn) then
         error("The requested pawn does not have a supervised native scope", 0)
@@ -366,7 +417,8 @@ function native_death.command(fields, state, phase)
     local command = fields[2]
     if command == "native-friendly-fire" then
         local host, guest = scope_records["local"], scope_records.guest
-        if #fields ~= 2 or not active(state, phase) or not host or not guest
+        if #fields ~= 2 or not active(state, phase) or not host or not guest or hook_status ~= "ready"
+            or not heartbeat_fresh() or not guest_save.matches(guest.pawn)
             or type(SilverfishFriendlyFireBlockedCount) ~= "function" then
             error("The paired native damage scope is unavailable", 0)
         end
@@ -386,11 +438,15 @@ function native_death.command(fields, state, phase)
     if command ~= "native-death-probe" and command ~= "native-damage-probe"
         and command ~= "native-guest-damage" and command ~= "native-host-damage" then return end
     local slot = fields[3]
-    if #fields ~= 3 or (slot ~= "local" and slot ~= "guest") then
-        error("Expected one pawn slot, local or guest", 0)
+    local ambient_guest = command == "native-guest-damage" and allowed_guests[slot]
+    if #fields ~= 3 or (slot ~= "local" and slot ~= "guest" and not ambient_guest) then
+        error("Expected an exact local or guest pawn slot", 0)
     end
-    if (command == "native-damage-probe" or command == "native-guest-damage") and slot ~= "guest" then
+    if command == "native-damage-probe" and slot ~= "guest" then
         error("Native direct damage probing is limited to the isolated guest", 0)
+    end
+    if scoped and state.clients ~= 1 and (command == "native-death-probe" or command == "native-damage-probe") then
+        error("Temporary native death probes require one exact guest", 0)
     end
     if not active(state, phase) or hook_status ~= "ready" then
         error("Native death probing requires an active playtest host with a ready death hook", 0)
@@ -428,13 +484,18 @@ function native_death.rows(state, phase, status_row)
             last_damage.before, last_damage.after, last_damage.host_before, last_damage.host_after,
             last_damage.binding_restored and 1 or 0, last_damage.sequence)
     end
-    local guest = scope_records.guest
-    if guest and valid(guest.pawn) and type(SilverfishReadNativeFallStatus) == "function" then
-        local ready, _, address, changes, starts, landings, forwarded, mode, elapsed, speed, original, ticks, reason =
-            SilverfishReadNativeFallStatus()
-        if address == guest.pawn:GetAddress() then
-            rows[#rows + 1] = status_row("native-fall", ready and "ready" or "arming", guest.pawn:GetFullName(),
-                changes, starts, landings, forwarded, mode, elapsed, speed, original, ticks and 1 or 0, reason)
+    if type(SilverfishReadNativeFallStatus) == "function" then
+        for _, slot in ipairs(guest_slots) do
+            local guest = scope_records[slot]
+            if guest and valid(guest.pawn) then
+                local args = scope_records.guest2 and { guest.address } or {}
+                local observed, ready, _, address, changes, starts, landings, forwarded, mode, elapsed, speed,
+                    original, ticks, reason = pcall(SilverfishReadNativeFallStatus, table.unpack(args))
+                if observed and address == guest.address then
+                    rows[#rows + 1] = status_row("native-fall", ready and "ready" or "arming", guest.name,
+                        changes, starts, landings, forwarded, mode, elapsed, speed, original, ticks and 1 or 0, reason)
+                end
+            end
         end
     end
     for slot, record in pairs(slots) do

@@ -1,4 +1,5 @@
 #include "zone_exit.hpp"
+#include "authored_exit_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <span>
 #include <string_view>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -28,6 +30,7 @@ namespace
 {
     namespace Unreal = RC::Unreal;
     namespace Hook = Unreal::Hook;
+    namespace Authored = silverfish::authored_exits;
     using Iteration = Hook::TCallbackIterationData<void>;
     using Lua = RC::LuaMadeSimple::Lua;
     using Clock = std::chrono::steady_clock;
@@ -270,6 +273,8 @@ namespace
         Unreal::FStrProperty* entrance_tag{};
         Unreal::FByteProperty* role{};
         const Route* route{};
+        RC::StringViewType authored_world;
+        const Authored::Route* authored_request{};
         const CountdownRoute* countdown{};
         const ScriptedDreamRoute* scripted_dream{};
         std::string_view event;
@@ -282,10 +287,24 @@ namespace
 
     thread_local Scope scope;
 
+    bool env_flag(const char* name)
+    {
+        const auto* value = std::getenv(name);
+        return value && std::string_view{value} == "1";
+    }
+
     bool enabled()
     {
-        const auto* value = std::getenv("SILVERFISH_COOP_NATIVE_ZONE");
-        return value && std::string_view{value} == "1";
+        return env_flag("SILVERFISH_COOP_NATIVE_ZONE");
+    }
+
+    RC::StringViewType expanded_world(RC::StringViewType map)
+    {
+        if (!env_flag("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES")) return {};
+        const auto outgoing = Authored::for_world(map);
+        if (!outgoing.empty()) return outgoing.front().source_world;
+        const auto incoming = std::ranges::find(Authored::routes, map, &Authored::Route::destination_world);
+        return incoming != Authored::routes.end() ? incoming->destination_world : RC::StringViewType{};
     }
 
     template <typename Property>
@@ -472,6 +491,29 @@ namespace
         return level && static_cast<Unreal::AActor*>(actor)->GetLevel() == level;
     }
 
+    const Authored::Route* expanded_route(const Scope& current, Unreal::UObject* actor)
+    {
+        return !current.authored_world.empty() && actor ? Authored::find(current.authored_world, actor->GetName()) : nullptr;
+    }
+
+    bool is_expanded_exit(const Scope& current, Unreal::UObject* actor, Unreal::UWorld* world, const Authored::Route& route)
+    {
+        return route.mode == Authored::Mode::overlap && live_object(actor) && actor->GetClassPrivate() == current.exit_class &&
+               in_persistent_level(actor, world);
+    }
+
+    bool matches_expanded_exit(Unreal::UObject* actor, const Authored::Route& route)
+    {
+        if (!matches_target(actor, field<Unreal::FSoftObjectProperty>(actor, STR("NextLevel")),
+                            field<Unreal::FStrProperty>(actor, STR("Entrance Tag")), route.destination_world, route.entrance))
+        {
+            return false;
+        }
+        if (!route.travel_time_step) return true;
+        auto* time_step = field<Unreal::FDoubleProperty>(actor, STR("Travel_TimeStep"));
+        return time_step && time_step->GetPropertyValueInContainer(actor) == *route.travel_time_step;
+    }
+
     bool is_route_exit(const Scope& current, Unreal::UObject* actor, Unreal::UWorld* world)
     {
         if (!current.route || actor->GetClassPrivate() != current.exit_class || !in_persistent_level(actor, world))
@@ -563,7 +605,7 @@ namespace
 
         const auto current_generation = generation.load(std::memory_order_acquire);
         if (scope.generation == current_generation && address(scope.local.Get()) == local_address &&
-            address(scope.fixture.Get()) == exit_address && scope.host == host &&
+            address(scope.fixture.Get()) == exit_address && scope.host == host && actor_world(scope.local.Get()) == scope.world.Get() &&
             std::ranges::equal(scope.roster.players(), roster,
                 [](const RemotePlayer& remote, Address expected) { return address(remote.pawn.Get()) == expected; }))
         {
@@ -610,7 +652,13 @@ namespace
                 break;
             }
         }
-        if (!next.route || (fixture && !is_route_exit(next, fixture, world))) return false;
+        next.authored_world = expanded_world(map);
+        if (!next.route && next.authored_world.empty()) return false;
+        if (fixture)
+        {
+            const auto* authored = expanded_route(next, fixture);
+            if (authored ? !is_expanded_exit(next, fixture, world, *authored) : !is_route_exit(next, fixture, world)) return false;
+        }
 
         next.world = world;
         next.instance = read_object(field<Unreal::FObjectProperty>(world, STR("OwningGameInstance")), world);
@@ -673,30 +721,47 @@ namespace
         return true;
     }
 
-    bool host_is_ready(Unreal::UObject* local)
+    bool active_host(Unreal::UObject* local)
     {
-        return local && scope.host && scope.accepting && !scope.request_latched && Clock::now() < scope.expires &&
+        return live_object(local) && scope.host && scope.accepting && Clock::now() < scope.expires &&
                actor_world(local) == scope.world.Get() && live_game_roster(scope) && is_local_pawn(local) &&
                scope.role->GetPropertyValueInContainer(local) == 3;
     }
 
-    Unreal::UObject* matching_door_child(Unreal::UObject* door)
+    bool host_is_ready(Unreal::UObject* local)
     {
-        const auto& route = scope.route->door;
+        return !scope.request_latched && active_host(local);
+    }
+
+    Unreal::UObject* matching_door_child(Unreal::UObject* door, const Authored::Route* authored)
+    {
+        if (!live_object(door) || (authored && authored->mode != Authored::Mode::door)) return nullptr;
+        const auto route = authored ? DoorRoute{authored->source_actor, authored->destination_world, authored->entrance}
+                                    : scope.route ? scope.route->door : DoorRoute{};
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-        if (!door || route.actor.empty() || door->GetName() != route.actor ||
+        if (route.actor.empty() || door->GetName() != route.actor || !scope.door ||
             door->GetClassPrivate() != scope.door->GetOuterPrivate() || actor_world(door) != world ||
             !in_persistent_level(door, world)) return nullptr;
 
         auto* component = read_object(field<Unreal::FObjectProperty>(door, STR("Level_Exit_BP")), door);
+        if (authored && (!live_object(component) || component->GetOuterPrivate() != door ||
+            component->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.ChildActorComponent")))) return nullptr;
         auto* child = read_object(field<Unreal::FObjectProperty>(component, STR("ChildActor")), component);
-        if (!child || child->GetClassPrivate() != scope.exit_class || actor_world(child) != world ||
+        if (!live_object(child) || child->GetClassPrivate() != scope.exit_class || actor_world(child) != world ||
+            (authored && !in_persistent_level(child, world)) ||
             child != read_object(field<Unreal::FObjectProperty>(door, STR("As Level Exit BP")), door)) return nullptr;
         if (!matches_target(door, field<Unreal::FSoftObjectProperty>(door, STR("Next Level")),
                             field<Unreal::FStrProperty>(door, STR("Entrance Tag")), route.destination, route.entrance) ||
             !matches_target(child, field<Unreal::FSoftObjectProperty>(child, STR("NextLevel")),
                             field<Unreal::FStrProperty>(child, STR("Entrance Tag")), route.destination, route.entrance)) return nullptr;
         return child;
+    }
+
+    void queue_request(const Authored::Route* authored, std::string_view legacy_event)
+    {
+        scope.request_latched = true;
+        scope.authored_request = authored;
+        scope.event = authored ? std::string_view{} : legacy_event;
     }
 
     void handle_door_interaction(Iteration& iteration, Unreal::UObject* door, void* locals)
@@ -709,7 +774,7 @@ namespace
             scope.door_event = "guest_denied";
             return;
         }
-        auto* child = matching_door_child(door);
+        auto* child = matching_door_child(door, expanded_route(scope, door));
         auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
         auto* hit = read_object(scope.door_hit, locals);
         if (!child || !locked || !hit || (hit != read_object(field<Unreal::FObjectProperty>(door, STR("Box")), door) &&
@@ -746,18 +811,18 @@ namespace
         auto* door = scope.pending_door.Get();
         auto* local = scope.local.Get();
         auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
+        const auto* authored = expanded_route(scope, door);
         scope.pending_door.Reset();
         scope.pending_child.Reset();
         if (!door || !locked || !locals || !scope.exit_powered || !scope.exit_instigator ||
             !scope.exit_powered->GetPropertyValueInContainer(locals) || read_object(scope.exit_instigator, locals) ||
-            locked->GetPropertyValueInContainer(door) || matching_door_child(door) != context ||
+            locked->GetPropertyValueInContainer(door) || matching_door_child(door, authored) != context ||
             Clock::now() >= scope.pending_expires || !host_is_ready(local) || !allows_distance(scope, local))
         {
             scope.door_event = "handoff_denied";
             return;
         }
-        scope.request_latched = true;
-        scope.event = "door_request";
+        queue_request(authored, "door_request");
         scope.door_event = "travel_requested";
     }
 
@@ -863,9 +928,15 @@ namespace
             scope.event = "guest_denied";
             return;
         }
+        const auto* authored = expanded_route(scope, context);
+        auto* exit_world = static_cast<Unreal::UWorld*>(world);
+        const bool qualified = authored ? is_expanded_exit(scope, context, exit_world, *authored)
+                                       : scope.fixture.Get() && is_route_exit(scope, context, exit_world);
         auto* component = read_object(scope.overlap_component, locals);
-        if (!scope.fixture.Get() || !is_route_exit(scope, context, static_cast<Unreal::UWorld*>(world)) ||
-            !component || component != read_object(scope.fixture_box, context))
+        auto* box = authored ? field<Unreal::FObjectProperty>(context, STR("Box")) : scope.fixture_box;
+        if (!qualified || !component || component != read_object(box, context) ||
+            (authored && (!live_object(component) || component->GetOuterPrivate() != context ||
+                component->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")))))
         {
             scope.event = "unsupported_exit";
             return;
@@ -880,14 +951,13 @@ namespace
             scope.event = "too_far";
             return;
         }
-        const bool secondary = is_secondary_exit(scope, context);
-        if (!matches_authored_route(scope, context, secondary))
+        const bool secondary = !authored && is_secondary_exit(scope, context);
+        if (authored ? !matches_expanded_exit(context, *authored) : !matches_authored_route(scope, context, secondary))
         {
             scope.event = "destination_mismatch";
             return;
         }
-        scope.request_latched = true;
-        scope.event = secondary ? "secondary_request" : "request";
+        queue_request(authored, secondary ? "secondary_request" : "request");
     }
 
     int lua_set_scope(const Lua& lua)
@@ -972,6 +1042,30 @@ namespace
         return 1;
     }
 
+    int lua_take_authored_route(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) ||
+            !scope.authored_request) return 0;
+        const auto* route = scope.authored_request;
+        scope.authored_request = nullptr;
+        auto* local = scope.local.Get();
+        if (!active_host(local) || !allows_distance(scope, local))
+        {
+            scope.request_latched = false;
+            scope.event = "request_unavailable";
+            return 0;
+        }
+        const auto source_package = route->source_world.substr(0, route->source_world.rfind(STR('.')));
+        lua.set_string(RC::to_string(source_package));
+        lua.set_string(RC::to_string(route->destination_package));
+        lua.set_string(RC::to_string(route->entrance));
+        lua.set_string(RC::to_string(route->source_actor));
+        lua.set_string(route->mode == Authored::Mode::door ? "door" : "overlap");
+        if (route->travel_time_step) lua.set_integer(*route->travel_time_step);
+        else lua.set_nil();
+        return 6;
+    }
+
     int lua_take_door_event(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || scope.generation != generation.load(std::memory_order_acquire) || scope.door_event.empty())
@@ -989,6 +1083,7 @@ namespace
         if (Unreal::IsInGameThreadRaw() && scope.generation == generation.load(std::memory_order_acquire))
         {
             scope.request_latched = false;
+            scope.authored_request = nullptr;
         }
         return 0;
     }
@@ -1053,6 +1148,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
+        lua.register_function("SilverfishTakeNativeAuthoredRoute", lua_take_authored_route);
         lua.register_function("SilverfishTakeNativeDoorEvent", lua_take_door_event);
         lua.register_function("SilverfishReleaseNativeZoneRequest", lua_release_request);
         lua.register_function("SilverfishInspectNativeExchangeCountdown", lua_inspect_exchange);

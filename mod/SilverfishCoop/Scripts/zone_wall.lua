@@ -2,7 +2,11 @@ local wall = {}
 local zones = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE_WALLS") == "1"
+local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
+local authored_routes = enabled and expanded and require("authored_wall_routes") or {}
 local trigger_class = "/Script/Engine.TriggerBox"
+local exit_class = "Level_Exit_BP_C"
+local door_class = "Dungeon_TransitionDoor_BP_C"
 local no_collision, query_only = 0, 1
 local world_static, pawn_channel = 0, 2
 local ignore, block = 0, 2
@@ -10,7 +14,11 @@ local range_squared = 1500 * 1500
 local records = {}
 local status, failure = "inactive", ""
 local observation
+local primary_key
 local retry_at = {}
+local scanned_world
+local scanned_actors = {}
+local scan_after = 0
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -54,24 +62,37 @@ local function clear_record(index)
 end
 
 function wall.clear()
-    clear_record(1)
-    clear_record(2)
+    for key in pairs(records) do clear_record(key) end
     retry_at = {}
     observation = nil
+    primary_key = nil
+    scanned_world, scanned_actors, scan_after = nil, {}, 0
     status, failure = "inactive", ""
+end
+
+local function same_rotation(first, second)
+    for _, key in ipairs({ "Pitch", "Yaw", "Roll" }) do
+        local delta = (first[key] - second[key] + 180) % 360 - 180
+        if not finite(delta) or math.abs(delta) > 0.1 then return false end
+    end
+    return true
 end
 
 local function create(world, fixture)
     local original = fixture.Box
     local class = StaticFindObject(trigger_class)
-    if not valid(original) or not valid(class) then error("Expected the stock Box and Engine.TriggerBox", 0) end
+    if not valid(original) or not same(original:GetOwner(), fixture) or not valid(class) then
+        error("Expected the authored actor's Box and Engine.TriggerBox", 0)
+    end
 
     local center = original:K2_GetComponentLocation()
     local rotation = original:K2_GetComponentRotation()
     local extent = original:GetScaledBoxExtent()
     if not finite(extent.X) or not finite(extent.Y) or not finite(extent.Z) or extent.X < 1 or extent.Y < 1 or extent.Z < 1
-        or extent.X > 10000 or extent.Y > 10000 or extent.Z > 10000 then
-        error("The staged exit Box has invalid dimensions", 0)
+        or extent.X > 10000 or extent.Y > 10000 or extent.Z > 10000
+        or not finite(center.X) or not finite(center.Y) or not finite(center.Z)
+        or not finite(rotation.Pitch) or not finite(rotation.Yaw) or not finite(rotation.Roll) then
+        error("The authored exit Box has invalid geometry", 0)
     end
     local actor = world:SpawnActor(class, { X = center.X, Y = center.Y, Z = center.Z },
         { Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll })
@@ -97,10 +118,11 @@ local function create(world, fixture)
         local cloned = component:GetScaledBoxExtent()
         if component:GetCollisionEnabled() ~= query_only or component:GetCollisionObjectType() ~= world_static
             or component:GetCollisionResponseToChannel(pawn_channel) ~= block or distance_squared(cloned, extent) > 0.01
-            or distance_squared(component:K2_GetComponentLocation(), center) > 0.01 then
+            or distance_squared(component:K2_GetComponentLocation(), center) > 0.01
+            or not same_rotation(component:K2_GetComponentRotation(), rotation) then
             error("The staged wall's collision geometry could not be verified", 0)
         end
-        return { actor = actor, component = component, fixture = fixture, world = world }
+        return { actor = actor, component = component, fixture = fixture, original = original, world = world }
     end)
     if not ok then
         pcall(function() actor:K2_DestroyActor() end)
@@ -110,26 +132,34 @@ local function create(world, fixture)
 end
 
 local function host_can_pass(state, local_pawn, world, accepting)
-    if not accepting or state.clients ~= 1 or not local_pawn:HasAuthority() then return false end
-    local remote
+    if not accepting or not local_pawn:HasAuthority() or type(state.clients) ~= "number"
+        or state.clients < 0 or state.clients > 4 then return false end
+    local count, positions = 0, {}
+    local host_position = local_pawn:K2_GetActorLocation()
     for _, details in ipairs(state.pawns) do
-        if details.kind == "guest" and valid(details.pawn) then
-            if remote then return false end
-            remote = details.pawn
+        if details.kind == "guest" then
+            local remote = details.pawn
+            if not valid(remote) or same(remote, local_pawn) or not same(remote:GetWorld(), world)
+                or not remote:HasAuthority() or remote:IsActorBeingDestroyed() then return false end
+            local address = remote:GetAddress()
+            if positions[address] then return false end
+            positions[address] = true
+            count = count + 1
+            local squared = distance_squared(host_position, remote:K2_GetActorLocation())
+            if not finite(squared) or squared > range_squared then return false end
         end
     end
-    if not valid(remote) or not same(remote:GetWorld(), world) or not remote:HasAuthority() then return false end
-    local squared = distance_squared(local_pawn:K2_GetActorLocation(), remote:K2_GetActorLocation())
-    return finite(squared) and squared <= range_squared
+    return count == state.clients
 end
 
 local function sync_shape(index, world, fixture, desired)
     local record = records[index]
     if not valid(fixture) then
         clear_record(index)
-        return true
+        return false
     end
-    if record and (not same(record.fixture, fixture) or not same(record.world, world) or not valid(record.actor)) then
+    if record and (not same(record.fixture, fixture) or not same(record.world, world) or not valid(record.actor)
+        or not same(record.original, fixture.Box)) then
         clear_record(index)
         record = nil
     end
@@ -140,7 +170,7 @@ local function sync_shape(index, world, fixture, desired)
             record = create(world, fixture)
             records[index] = record
         end
-        if not same(record.host_capsule, desired) then
+        if (record.host_capsule or desired) and not same(record.host_capsule, desired) then
             set_ignore(record.host_capsule, record.actor, false)
             set_ignore(desired, record.actor, true)
             record.host_capsule = desired
@@ -154,50 +184,154 @@ local function sync_shape(index, world, fixture, desired)
     return ready
 end
 
+local function in_world(actor, world)
+    return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+end
+
+local function entrance_name(actor)
+    local name = actor["Entrance Tag"]
+    if type(name) ~= "string" and name then name = name:ToString() end
+    return name
+end
+
+local function qualified_source(fixture, world, plan)
+    if fixture == false then return nil, "ambiguous placed actor" end
+    if not in_world(fixture, world) then return nil, "placed actor not observed" end
+    local entrance = entrance_name(fixture)
+    if entrance ~= plan.entrance then return nil, "stock tag " .. tostring(entrance) .. " differs" end
+    if plan.kind == "door" then
+        local component = fixture.Level_Exit_BP
+        local child = valid(component) and component.ChildActor
+        if not in_world(child, world) or not child:GetFullName():match("^Level_Exit_BP_C ")
+            or not same(component:GetOwner(), fixture) or not same(child:GetParentComponent(), component)
+            or not same(fixture["As Level Exit BP"], child) or entrance_name(child) ~= plan.entrance then
+            return nil, "stock door travel child not qualified"
+        end
+    end
+    return fixture
+end
+
+local function scan_authored(world, map, plans)
+    if not same(scanned_world, world) then
+        scanned_world, scanned_actors, scan_after = world, {}, 0
+    end
+    local now = os.time()
+    if now < scan_after then return end
+    local expected = {}
+    local level = map .. "." .. map:match("/([^/]+)$") .. ":PersistentLevel."
+    for _, plan in ipairs(plans) do
+        if not in_world(scanned_actors[plan.actor], world) then
+            local class = plan.kind == "door" and door_class or exit_class
+            expected[class] = expected[class] or {}
+            expected[class][class .. " " .. level .. plan.actor] = plan.actor
+            scanned_actors[plan.actor] = nil
+        end
+    end
+    for class, names in pairs(expected) do
+        for _, actor in ipairs(FindAllOf(class) or {}) do
+            if in_world(actor, world) then
+                local key = names[actor:GetFullName()]
+                if key then scanned_actors[key] = scanned_actors[key] == nil and actor or false end
+            end
+        end
+    end
+    scan_after = now + 1
+end
+
+local function wall_sources(world, map, route, fixture, secondary)
+    local sources = {}
+    if route.fixture then
+        sources[route.fixture] = { fixture = fixture, tag = route.entrance, approach = route }
+    end
+    if route.secondary then
+        sources[route.secondary.fixture] = { fixture = secondary, tag = route.secondary.entrance,
+            approach = route.secondary }
+    end
+    local plans = authored_routes[map]
+    if plans then
+        scan_authored(world, map, plans)
+        for _, plan in ipairs(plans) do
+            local source = sources[plan.actor] or {}
+            source.fixture, source.problem = qualified_source(scanned_actors[plan.actor], world, plan)
+            source.tag, source.kind = plan.entrance, plan.kind
+            sources[plan.actor] = source
+        end
+    end
+    return sources
+end
+
 function wall.sync(state, phase, fixture, accepting, secondary)
     if not enabled then return end
     local hosting = phase == "hosting"
     local local_pawn = state.local_pawn and state.local_pawn.pawn
-    if (not hosting and phase ~= "connected") or not zones[state.map] or not valid(local_pawn) or not valid(fixture) then
+    local route = zones[state.map]
+    if (not hosting and phase ~= "connected") or not route or not valid(local_pawn)
+        or (not route.fixture and not authored_routes[state.map]) then
         wall.clear()
         return
     end
     local world = local_pawn:GetWorld()
-    if not same(world, fixture:GetWorld()) or (valid(secondary) and not same(world, secondary:GetWorld()))
-        or not capsule(local_pawn) then
+    local local_capsule = capsule(local_pawn)
+    if not same(world, state.world) or not local_capsule then
         wall.clear()
         status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
         return
     end
-    local desired = hosting and host_can_pass(state, local_pawn, world, accepting) and capsule(local_pawn) or nil
-    local primary_ready, primary_error = sync_shape(1, world, fixture, desired)
-    local secondary_ready, secondary_error = sync_shape(2, world, secondary, desired)
-    local reason = primary_error or secondary_error
-    if reason then
-        status, failure = "error", reason
-    elseif primary_ready and secondary_ready then
-        status, failure = "ready", ""
-    else
-        status, failure = "arming", "Waiting for matching exit wall geometry"
+    local desired = hosting and host_can_pass(state, local_pawn, world, accepting) and local_capsule or nil
+    local sources = wall_sources(world, state.map, route, fixture, secondary)
+    for key in pairs(records) do
+        if not sources[key] then clear_record(key) end
     end
+    primary_key = route.fixture or (route.door and route.door.fixture)
+    local first_ready, diagnostics, had_error = nil, {}, false
+    for key, source in pairs(sources) do
+        local source_actor = in_world(source.fixture, world) and source.fixture or nil
+        local ready, problem = sync_shape(key, world, source_actor, desired)
+        if not ready then
+            had_error = had_error or problem ~= nil
+            diagnostics[#diagnostics + 1] = key .. " (" .. (problem or source.problem or "waiting for wall geometry") .. ")"
+        else
+            local record = records[key]
+            record.tag, record.approach, record.kind = source.tag, source.approach, source.kind
+            if not first_ready or key < first_ready then first_ready = key end
+        end
+    end
+    primary_key = primary_key or first_ready
+    status = primary_key and records[primary_key] and "ready" or had_error and "error" or "arming"
+    table.sort(diagnostics)
+    failure = table.concat(diagnostics, ", ")
 end
 
 function wall.command(fields, state, phase)
     if fields[2] ~= "native-exit-wall-probe" then return end
-    local slot = fields[3]
-    local route, tag = zones[state.map], fields[4]
-    local index = not tag and 1 or route and route.entrance == tag and 1
-        or route and route.secondary and route.secondary.entrance == tag and 2
-    local record = index and records[index]
-    if not enabled or phase ~= "hosting" or status ~= "ready" or not record or #fields > 4
-        or (slot ~= "local" and slot ~= "guest") then
-        error("Expected native-exit-wall-probe local|guest with an optional authored entrance tag", 0)
+    local selector = fields[3]
+    local exact = type(selector) == "string" and #selector <= 512 and selector:match("^Player_FP_C /Game/[^%c]+$")
+    local tag = fields[4]
+    local index = not tag and primary_key
+    if tag then
+        for key, candidate in pairs(records) do
+            if candidate.tag == tag then
+                if index then error("More than one wall matches the requested entrance", 0) end
+                index = key
+            end
+        end
     end
-    local pawn
+    local record = index and records[index]
+    if not enabled or phase ~= "hosting" or not record or not same(record.world, state.world)
+        or not valid(record.actor) or not valid(record.component) or #fields > 4
+        or type(selector) ~= "string"
+        or (not exact and selector ~= "local" and selector ~= "guest" and not selector:match("^guest[2-4]$")) then
+        error("Expected a local slot or exact guest pawn with an optional authored entrance tag", 0)
+    end
+    local pawn, slot
     for _, details in ipairs(state.pawns) do
-        if details.kind == slot and valid(details.pawn) and details.pawn:HasAuthority() then
+        local current = details.pawn
+        local alias = details.slot or details.kind
+        if in_world(current, record.world) and current:HasAuthority()
+            and ((not exact and alias == selector)
+                or (exact and details.kind == "guest" and details.name == selector and current:GetFullName() == selector)) then
             if pawn then error("More than one pawn occupies the requested slot", 0) end
-            pawn = details.pawn
+            pawn, slot = current, alias
         end
     end
     if not valid(pawn) or not same(pawn:GetWorld(), record.world) or not capsule(pawn) then
@@ -205,13 +339,15 @@ function wall.command(fields, state, phase)
     end
     local center = record.component:K2_GetComponentLocation()
     local start = pawn:K2_GetActorLocation()
-    local approach = index == 2 and route.secondary or route
+    local approach = record.approach
     -- Tall authored boxes are entered at terrain height, well below their center.
-    if approach.probe_arrival then
+    if (approach and approach.probe_arrival) or (not approach and record.kind) then
         local extent = record.component:GetScaledBoxExtent()
-        local forward = record.fixture:GetActorForwardVector()
-        local normal_distance = (start.X - center.X) * forward.X + (start.Y - center.Y) * forward.Y
-        center.X, center.Y = start.X - normal_distance * forward.X, start.Y - normal_distance * forward.Y
+        if approach and approach.probe_arrival then
+            local forward = record.fixture:GetActorForwardVector()
+            local normal_distance = (start.X - center.X) * forward.X + (start.Y - center.Y) * forward.Y
+            center.X, center.Y = start.X - normal_distance * forward.X, start.Y - normal_distance * forward.Y
+        end
         local clearance = math.max(0, extent.Z - 100)
         center.Z = math.max(center.Z - clearance, math.min(start.Z, center.Z + clearance))
     end
@@ -237,9 +373,8 @@ end
 
 function wall.rows(status_row)
     if not enabled then return {} end
-    local primary, secondary = records[1], records[2]
-    local host_open = status == "ready" and primary and valid(primary.host_capsule)
-        and (not secondary or valid(secondary.host_capsule))
+    local primary = records[primary_key]
+    local host_open = primary and valid(primary.host_capsule)
     return {status_row("native-zone-wall", status, host_open and 1 or 0,
         observation and observation.slot or "-", observation and observation.outcome or "-",
         observation and observation.remaining or "-", failure)}

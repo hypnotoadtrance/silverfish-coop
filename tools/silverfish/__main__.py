@@ -9,8 +9,9 @@ import json
 from pathlib import Path
 
 from .control import select_run, status, submit
+from .authored_routes import MAPS as EXPANDED_MAPS
 from .runtime import REPO, prepare_game
-from .travel import AUTHORED_MAPS, EXCHANGE, GOLD_NEXUS, PLAYTEST_MAPS
+from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
 
 def _workspace(value: str) -> Path:
     return Path(value).expanduser().resolve()
@@ -53,6 +54,8 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--campaign", required=True)
     host.add_argument("--bind", default="127.0.0.1", help="local IP to bind for authenticated Direct IP")
     host.add_argument("--port", type=_port, default=7777)
+    host.add_argument("--max-guests", type=int, choices=range(1, 5), default=1,
+                      help="maximum simultaneous guests in the staged session")
     host.add_argument("--headless", action="store_true")
     host.add_argument("--native-events", action="store_true",
                       help="enable supervised host-side native event scope in the C++ lab")
@@ -60,7 +63,8 @@ def parser() -> argparse.ArgumentParser:
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
-    host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | PLAYTEST_MAPS) - {GOLD_NEXUS, EXCHANGE}),
+    host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")
+    host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS) - DREAM_MAPS - {GOLD_NEXUS}),
                       help="start a new campaign in a qualified zone")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
@@ -112,6 +116,8 @@ def parser() -> argparse.ArgumentParser:
         "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
         "native-broker-grant-manifest",
         "native-weapon-roundtrip",
+        "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
+        "native-rest-inspect", "native-rest", "native-rest-approach",
         "native-shop-approach", "native-shop-buy",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
         "native-fall-position", "native-fall-return",
@@ -159,7 +165,8 @@ async def execute(opts):
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
                         opts.bind, opts.port, opts.headless, opts.fixtures, rules,
                         native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
-                        native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone)
+                        native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone, max_guests=opts.max_guests,
+                        expanded_zones=opts.native_expanded_zones)
         return {"ok": True, "state": "stopped"}
     if operation == "join":
         from .service import join_game

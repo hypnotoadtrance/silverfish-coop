@@ -183,6 +183,26 @@ function bed.arrival(state, phase, rest)
         x = location.X, y = location.Y, z = location.Z }
 end
 
+function bed.wipe_fallback(state, phase)
+    local pawn, controller, world, _, save = host_context(state, phase)
+    if state.map ~= observatory or text(save.RespawnLevel) ~= "" then
+        error("The default stock game-over arrival requires an empty rest selection", 0)
+    end
+    local expected = actor_name(observatory, profiles[observatory], "PlayerStart", "PlayerStart_4")
+    local marker
+    for _, actor in ipairs(FindAllOf("PlayerStart") or {}) do
+        if valid(actor) and same(actor:GetWorld(), world) and actor:GetFullName() == expected then
+            if marker then error("The default Observatory start is ambiguous", 0) end
+            marker = actor
+        end
+    end
+    if not marker then error("The default Observatory start is unavailable", 0) end
+    local location = bed.place_host(pawn, controller, world, marker:K2_GetActorLocation(),
+        marker:K2_GetActorRotation(), "player_start")
+    return { destination = observatory, bed_id = "", actor = expected, placement = "player_start",
+        points = 0, min_safe_rep = 0, x = location.X, y = location.Y, z = location.Z }
+end
+
 function bed.restore(state, phase, destination, id)
     local _, _, world, _, save = host_context(state, phase)
     local profile = profiles[destination]

@@ -22,18 +22,23 @@ local function exact_guid(value)
     return value
 end
 
-local function enrolled(state, phase, name)
-    if phase ~= "hosting" or state.clients ~= 1 or #state.pawns ~= 2
-        or not state.local_pawn or not valid(state.world) then
-        error("Native pickup requires an active two-player host", 0)
+function pickup.enrolled(state, phase, name)
+    local host = state.local_pawn and state.local_pawn.pawn
+    if phase ~= "hosting" or not valid(state.world) or not valid(host)
+        or not host:HasAuthority() or not same(host:GetWorld(), state.world) then
+        error("Native inventory requires the active playtest host", 0)
     end
+    local member
     for _, details in ipairs(state.pawns) do
         local pawn = details.pawn
-        if details.kind == "guest" and details.name == name and guest_save.matches(pawn) then
-            return pawn, state.local_pawn.pawn.Save
+        if details.kind == "guest" and details.name == name and valid(pawn)
+            and pawn:GetFullName() == name and same(pawn:GetWorld(), state.world) and guest_save.matches(pawn) then
+            if member then error("The exact guest inventory binding is ambiguous", 0) end
+            member = pawn
         end
     end
-    error("The exact guest does not own an independent native save", 0)
+    if not member then error("The exact guest does not own an independent native save", 0) end
+    return member, host.Save
 end
 
 local function live_source(world)
@@ -52,8 +57,20 @@ local function standing(pawn)
     return pawn.Dead == false and pawn.Save.PlayerHealth > 0
 end
 
-local function report(state, guid, record, source_name)
-    last = { state = state, guid = guid, item = record, actor = source_name }
+local function report(state, pawn, guid, record, source_name)
+    last = { state = state, pawn = pawn:GetFullName(), guid = guid, item = record, actor = source_name }
+end
+
+local function reserved_by(pawn)
+    return same(fixture.owner, pawn) and same(fixture.save, pawn.Save)
+end
+
+local function consume(world)
+    if live_source(world) then
+        fixture.actor:K2_DestroyActor()
+        if live_source(world) then error("The awarded native pickup actor could not be consumed", 0) end
+    end
+    fixture.state = "committed"
 end
 
 local function spawn(world, pawn, guid)
@@ -64,7 +81,7 @@ local function spawn(world, pawn, guid)
         if fixture.guid ~= guid or fixture.state ~= "spawned" then
             error("Another native pickup source is already active", 0)
         end
-        report("spawned", guid, nil, fixture.name)
+        report("spawned", pawn, guid, nil, fixture.name)
         return "native pickup source already exists"
     end
     if not standing(pawn) then error("Native pickup requires a standing guest", 0) end
@@ -107,22 +124,28 @@ local function spawn(world, pawn, guid)
         actor:K2_DestroyActor()
         error(tostring(failure), 0)
     end
-    fixture = { actor = actor, name = actor:GetFullName(), world = world,
-        guid = guid, pawn = pawn:GetFullName(), state = "spawned" }
-    report("spawned", guid, nil, fixture.name)
+    fixture = { actor = actor, name = actor:GetFullName(), world = world, guid = guid, state = "spawned" }
+    report("spawned", pawn, guid, nil, fixture.name)
     return "stock Bandage spawned"
 end
 
 local function prepare(world, pawn, source_name, guid)
-    if not live_source(world) or fixture.guid ~= guid or fixture.name ~= source_name
-        or fixture.pawn ~= pawn:GetFullName() then
+    if not live_source(world) or fixture.guid ~= guid or fixture.name ~= source_name then
         error("The exact staged native pickup source is unavailable", 0)
     end
     if fixture.state == "prepared" and not fixture.applied then
-        report("prepared", guid, fixture.item, source_name)
-        return "native pickup source already reserved"
+        if reserved_by(pawn) then
+            report("prepared", pawn, guid, fixture.item, source_name)
+            return "native pickup source already reserved"
+        end
+        -- Only an uncommitted, abandoned reservation may be reassigned. The host
+        -- ledger blocks fresh preparation when the prior reservation is durable.
+        if guest_save.matches(fixture.owner) and same(fixture.owner.Save, fixture.save) then
+            error("Another guest owns the pending native pickup reservation", 0)
+        end
+    elseif fixture.state ~= "spawned" then
+        error("The native pickup source cannot be reserved", 0)
     end
-    if fixture.state ~= "spawned" then error("The native pickup source cannot be reserved", 0) end
     if not standing(pawn) then error("Native pickup requires a living guest with positive HP", 0) end
     local distance = distance_squared(pawn:K2_GetActorLocation(), fixture.actor:K2_GetActorLocation())
     if not (distance <= pickup_radius * pickup_radius) then
@@ -133,8 +156,8 @@ local function prepare(world, pawn, source_name, guid)
     if not ok then error("Native pickup metadata unavailable (" .. tostring(ammo) .. ")", 0) end
     local record = { ammo = ammo, weight = weight, value = value, never_drop = never_drop }
     fixture.actor:SetActorHiddenInGame(true)
-    fixture.item, fixture.state = record, "prepared"
-    report("prepared", guid, record, source_name)
+    fixture.item, fixture.state, fixture.owner, fixture.save = record, "prepared", pawn, pawn.Save
+    report("prepared", pawn, guid, record, source_name)
     return "native pickup source reserved"
 end
 
@@ -145,12 +168,11 @@ local function apply(stock, pawn, guid, record)
 end
 
 local function commit(world, pawn, stock, guid)
-    if not fixture or not same(fixture.world, world) or fixture.guid ~= guid
-        or fixture.pawn ~= pawn:GetFullName() then
+    if not fixture or not same(fixture.world, world) or fixture.guid ~= guid or not reserved_by(pawn) then
         error("The requested native pickup transaction is unavailable", 0)
     end
     if fixture.state == "committed" then
-        report("committed", guid, fixture.item, fixture.name)
+        report("committed", pawn, guid, fixture.item, fixture.name)
         return "native pickup transaction already committed"
     end
     if fixture.state ~= "prepared" or (not fixture.applied and not live_source(world)) then
@@ -158,45 +180,63 @@ local function commit(world, pawn, stock, guid)
     end
     apply(stock, pawn, guid, fixture.item)
     fixture.applied = true
-    if live_source(world) then
-        fixture.actor:K2_DestroyActor()
-        if live_source(world) then error("The awarded native pickup actor could not be consumed", 0) end
-    end
-    fixture.state = "committed"
-    report("committed", guid, fixture.item, fixture.name)
+    consume(world)
+    report("committed", pawn, guid, fixture.item, fixture.name)
     return "native pickup awarded to the guest"
 end
 
 local function abort(world, pawn, guid)
-    if not live_source(world) or fixture.guid ~= guid or fixture.pawn ~= pawn:GetFullName()
+    if not live_source(world) or fixture.guid ~= guid or not reserved_by(pawn)
         or fixture.state == "committed" or fixture.applied then
         error("The native pickup reservation cannot be released", 0)
     end
     fixture.actor:SetActorHiddenInGame(false)
-    fixture.state, fixture.item = "spawned", nil
-    report("spawned", guid, nil, fixture.name)
+    fixture.state, fixture.item, fixture.owner, fixture.save = "spawned", nil, nil, nil
+    report("spawned", pawn, guid, nil, fixture.name)
     return "native pickup source reservation released"
 end
 
-local function restore(pawn, stock, guid, fields)
+local function durable_source(world, guid, name)
+    if not name or not fixture or fixture.guid ~= guid or not same(fixture.world, world) then return nil end
+    if name ~= fixture.name or (fixture.state ~= "prepared" and fixture.state ~= "committed") then
+        error("The durable native pickup does not match its staged source", 0)
+    end
+    return fixture
+end
+
+local function restore(world, pawn, stock, guid, fields)
     local ammo, weight, value, never_drop = math.tointeger(fields[5]), tonumber(fields[6]),
         math.tointeger(fields[7]), fields[8]
     if not ammo or not weight or not value or (never_drop ~= "0" and never_drop ~= "1") then
         error("Invalid saved native pickup metadata", 0)
     end
     local record = { ammo = ammo, weight = weight, value = value, never_drop = never_drop == "1" }
+    local source = durable_source(world, guid, fields[9])
+    if source and (source.item.ammo ~= ammo or source.item.weight ~= weight or source.item.value ~= value
+        or source.item.never_drop ~= record.never_drop) then
+        error("The durable native pickup metadata differs from the reserved source", 0)
+    end
     apply(stock, pawn, guid, record)
-    report("restored", guid, record)
+    if source then
+        source.applied = true
+        consume(world)
+    end
+    report("restored", pawn, guid, record)
     return "native pickup restored to the guest"
 end
 
-local function remove(pawn, stock, guid)
+local function remove(world, pawn, stock, guid, source_name)
     if type(SilverfishRemoveNativePickup) ~= "function" then
         error("Native pickup removal is unavailable", 0)
     end
+    local source = durable_source(world, guid, source_name)
     local ok, detail = SilverfishRemoveNativePickup(stock:GetAddress(), pawn:GetAddress(), pawn.Save:GetAddress(), guid)
     if not ok then error("Native guest inventory rejected pickup removal (" .. tostring(detail) .. ")", 0) end
-    report("removed", guid)
+    if source then
+        source.applied = true
+        consume(world)
+    end
+    report("removed", pawn, guid)
     return detail == "pickup_already_absent" and "native pickup was already absent" or "native pickup removed"
 end
 
@@ -207,17 +247,21 @@ function pickup.command(fields, state, phase)
         or type(SilverfishAppendNativePickup) ~= "function" then
         error("The isolated native pickup fixture is unavailable", 0)
     end
-    local pawn, stock = enrolled(state, phase, fields[3])
+    local pawn, stock = pickup.enrolled(state, phase, fields[3])
     if action == "native-pickup-prepare" and #fields == 5 then
         return prepare(state.world, pawn, fields[4], exact_guid(fields[5]))
     end
     local guid = exact_guid(fields[4])
-    if action == "native-pickup-restore" and #fields == 8 then return restore(pawn, stock, guid, fields) end
+    if action == "native-pickup-restore" and (#fields == 8 or #fields == 9) then
+        return restore(state.world, pawn, stock, guid, fields)
+    end
+    if action == "native-pickup-remove" and (#fields == 4 or #fields == 5) then
+        return remove(state.world, pawn, stock, guid, fields[5])
+    end
     if #fields ~= 4 then error("Invalid native pickup command arguments", 0) end
     if action == "native-pickup-spawn" then return spawn(state.world, pawn, guid) end
     if action == "native-pickup-commit" then return commit(state.world, pawn, stock, guid) end
     if action == "native-pickup-abort" then return abort(state.world, pawn, guid) end
-    if action == "native-pickup-remove" then return remove(pawn, stock, guid) end
     error("Unknown native pickup operation", 0)
 end
 
@@ -228,7 +272,7 @@ function pickup.rows(state, phase, status_row)
     local item = last.item
     return { status_row("native-pickup", last.state, last.guid, bandage_path,
         item and item.ammo or "-", item and string.format("%.17g", item.weight) or "-",
-        item and item.value or "-", item and (item.never_drop and 1 or 0) or "-", last.actor or "-") }
+        item and item.value or "-", item and (item.never_drop and 1 or 0) or "-", last.actor or "-", last.pawn) }
 end
 
 return pickup

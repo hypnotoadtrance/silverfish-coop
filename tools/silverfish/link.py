@@ -491,6 +491,7 @@ class HostLink:
         self._request_callback = on_request
         self._guest_sockets: dict[str, asyncio.DatagramTransport] = {}
         self._protocols: dict[str, _HostProtocol] = {}
+        self._native_admission: frozenset[str] | None = None
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
@@ -509,6 +510,13 @@ class HostLink:
         protocol = self._protocols.get(guest_id)
         return bool(protocol and protocol.authorized and protocol.game_access)
 
+    def restrict_game_routes(self, allowed: set[str] | None) -> None:
+        """Gate Unreal packets independently of authenticated control traffic."""
+        self._native_admission = None if allowed is None else frozenset(allowed)
+
+    def _native_route_permitted(self, guest_id: str) -> bool:
+        return self._native_admission is None or guest_id in self._native_admission
+
     async def release_guest(self, guest_id: str) -> bool:
         """Retire a disconnected guest's cached UDP endpoint after its grace period."""
         async with self._lock:
@@ -520,6 +528,17 @@ class HostLink:
                 return False
             transport.close()
             return True
+
+    async def abort_guest_route(self, guest_id: str) -> None:
+        """Close the admitted peer and its route after failed native enrollment."""
+        async with self._lock:
+            protocol = self._protocols.get(guest_id)
+            if protocol and protocol.game_access:
+                protocol.close(error_code=_APP_ERROR, reason_phrase="native enrollment failed")
+                await self._release_locked(protocol)
+            route = self._guest_sockets.pop(guest_id, None)
+            if route is not None:
+                route.close()
 
     async def _create_game_route(self, guest_id: str) -> asyncio.DatagramTransport:
         transport = None
@@ -688,14 +707,14 @@ class HostLink:
         guest_id = protocol.guest_id
         if guest_id is None or self._protocols.get(guest_id) is not protocol:
             return
-        if protocol.authorized and protocol.game_access:
+        if protocol.authorized and protocol.game_access and self._native_route_permitted(guest_id):
             transport = self._guest_sockets.get(guest_id)
             if transport is not None:
                 transport.sendto(data)
 
     def _from_game(self, guest_id: str, data: bytes) -> None:
         protocol = self._protocols.get(guest_id)
-        if protocol is not None:
+        if protocol is not None and self._native_route_permitted(guest_id):
             protocol.forward_game_packet(data)
 
     async def close(self) -> None:

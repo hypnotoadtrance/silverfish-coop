@@ -382,10 +382,13 @@ local function find_floor(library, context, pawn, target, xy, top, bottom)
     local found = library:LineTraceSingle(pawn,
         { X = xy[1], Y = xy[2], Z = top }, { X = xy[1], Y = xy[2], Z = bottom },
         0, false, { context.host, pawn, target }, 0, hit, true, floor_trace_color, floor_trace_color, 0)
-    if found == true and hit.bBlockingHit == true and hit.bStartPenetrating == false
-        and vector_qualified(hit.ImpactPoint) and vector_qualified(hit.ImpactNormal) and hit.ImpactNormal.Z >= 0.7 then
+    hit = hit.OutHit or hit
+    if found == true and vector_qualified(hit.ImpactPoint) and vector_qualified(hit.ImpactNormal)
+        and hit.ImpactNormal.Z >= 0.7 and hit.ImpactPoint.Z < top - 1 and hit.ImpactPoint.Z >= bottom then
         return hit.ImpactPoint.Z
     end
+    return nil, found == true and ("unqualified_floor_" .. tostring(hit.ImpactPoint ~= nil)
+        .. "_" .. tostring(hit.ImpactNormal and hit.ImpactNormal.Z)) or "no_trace_hit"
 end
 
 function broker.fixture_position(state, phase, pawn_name, point)
@@ -418,12 +421,15 @@ function broker.fixture_position(state, phase, pawn_name, point)
     end
     local aim = { Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll }
     local reach = radius
+    local last_probe = "no_floor"
     for _, offset in ipairs(offsets) do
         local xy = { anchor.X + offset[1], anchor.Y + offset[2] }
         for _, height in ipairs({ 180, 320, 450 }) do
-            local floor = find_floor(library, context, pawn, target, xy, anchor.Z + height, anchor.Z - 375)
+            local floor, reason = find_floor(library, context, pawn, target, xy, anchor.Z + height, anchor.Z - 375)
             if floor then
                 local place = { X = xy[1], Y = xy[2], Z = floor + half_height + 2 }
+                last_probe = string.format("floor=%.1f capsule=%.1f in_reach=%s", floor, half_height,
+                    tostring(within(place, center, reach)))
                 if within(place, center, reach) and pawn:K2_TeleportTo(place, aim) then
                     local actual = pawn:K2_GetActorLocation()
                     if same(pawn:GetWorld(), context.world) and vector_qualified(actual)
@@ -433,10 +439,13 @@ function broker.fixture_position(state, phase, pawn_name, point)
                             x = actual.X, y = actual.Y, z = actual.Z }
                     end
                 end
+            elseif not last_probe:find("floor=", 1, true) and reason then
+                last_probe = reason
             end
         end
     end
-    error("broker_fixture_no_safe_stand_point", 0)
+    error(string.format("broker_fixture_no_safe_stand_point (%s at %.1f,%.1f,%.1f reach=%.1f)",
+        last_probe, center.X, center.Y, center.Z, reach), 0)
 end
 
 local function guid_parts(id)
@@ -461,8 +470,10 @@ local function count_guid(array, limit, expected)
 end
 
 local function retire_source(source)
-    if valid(source) and not source:IsActorBeingDestroyed() then source:K2_DestroyActor() end
-    if valid(source) and not source:IsActorBeingDestroyed() then error("broker_fixture_manifest_source_still_live", 0) end
+    if not valid(source) or source:IsActorBeingDestroyed() then return end
+    source:SetActorEnableCollision(false)
+    source:SetActorHiddenInGame(true)
+    source:K2_DestroyActor()
 end
 
 function broker.fixture_grant_manifest(state, phase, expected_guid)

@@ -10,6 +10,7 @@ local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pyroclast = "/Game/Classes/Maps/Dreams/Pyroclast_P"
 local slate = "/Game/Classes/Maps/Dreams/Slate_P"
 local black_ocean = "/Game/Classes/Maps/Dreams/BlackOcean_P"
+local slate_return_plane = -18785.228689655527
 local countdown_name = "Dream_CountDown_BP_C_1"
 local countdown_class = "Dream_CountDown_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
@@ -119,7 +120,8 @@ local function update_slate_descent(state)
     local point, speed = host:K2_GetActorLocation(), lead.Velocity
     local host_falling = current.last_z and point.Z < current.last_z - 25
     current.last_z = point.Z
-    if not finite(point.Z) or not speed or not finite(speed.Z) or point.Z > -1500 then return false end
+    current.slate_state = host_falling and "host_descending" or "host_stationary"
+    if not finite(point.Z) or point.Z > -1500 then return false end
     local moved = false
     for _, detail in ipairs(state.guests) do
         local guest = detail.pawn
@@ -129,12 +131,20 @@ local function update_slate_descent(state)
             local follow, location = guest.CharacterMovement, guest:K2_GetActorLocation()
             local guest_falling = record.last_z and location.Z < record.last_z - 25
             record.last_z = location.Z
-            if valid(follow) and host_falling and guest_falling and finite(location.Z) and location.Z <= -1500
+            current.slate_state = string.format("%s %s dx=%.1f dy=%.1f dz=%.1f",
+                host_falling and "host_descending" or "host_stationary", guest_falling and "guest_descending" or "guest_stationary",
+                location.X - point.X, location.Y - point.Y, location.Z - point.Z)
+            -- Below the stock return plane there is no remaining descent encounter to play.
+            local past_return_plane = point.Z <= slate_return_plane and location.Z <= slate_return_plane
+            if valid(follow) and (host_falling and guest_falling or past_return_plane)
+                and finite(location.Z) and location.Z <= -1500
                 and math.abs(location.Z - point.Z) > 240
-                and (location.X - point.X) ^ 2 + (location.Y - point.Y) ^ 2 <= 750 ^ 2
+                and (location.X - point.X) ^ 2 + (location.Y - point.Y) ^ 2 <= 1450 ^ 2
                 and guest:K2_TeleportTo({ X = location.X, Y = location.Y, Z = point.Z }, guest:K2_GetActorRotation()) then
                 local velocity = follow.Velocity
-                if speed.Z < 0 then follow.Velocity = { X = velocity.X, Y = velocity.Y, Z = speed.Z } end
+                if speed and finite(speed.Z) and speed.Z < 0 then
+                    follow.Velocity = { X = velocity.X, Y = velocity.Y, Z = speed.Z }
+                end
                 guest:ForceNetUpdate()
                 record.last_z = point.Z
                 current.slate_adjustments = current.slate_adjustments + 1
@@ -154,7 +164,7 @@ function dream.sync(state, phase)
 
     if not current or not same(current.world, state.world) then
         current = { world = state.world, map = state.map, early_requested = false,
-            slate_guests = {}, slate_adjustments = 0 }
+            slate_guests = {}, slate_adjustments = 0, slate_state = "waiting", slate_enrolled = 0 }
     end
     local ok, ready, detail = pcall(inspect, state)
     current.status = ok and ready == true and "ready" or "blocked"
@@ -177,7 +187,8 @@ function dream.rows(status_row)
     local rows = { status_row("native-dream-isolation", current.status, current.map, actor, current.detail,
         current.early_requested and 1 or 0) }
     if current.map == slate then
-        rows[#rows + 1] = status_row("native-dream-formation", slate, current.slate_adjustments)
+        rows[#rows + 1] = status_row("native-dream-formation", slate, current.slate_adjustments,
+            current.slate_enrolled, current.slate_state)
     end
     return rows
 end
@@ -331,6 +342,7 @@ function dream.place_descending_guest(state, phase, name)
             end
             guest.controller_object:SetControlRotation(aim)
             guest.pawn:ForceNetUpdate()
+            if not current.slate_guests[name] then current.slate_enrolled = current.slate_enrolled + 1 end
             current.slate_guests[name] = { address = guest.pawn:GetAddress(), last_z = point.Z }
             return "stock Slate descent placement verified"
         end

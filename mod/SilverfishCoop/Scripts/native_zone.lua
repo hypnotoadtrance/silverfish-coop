@@ -3,7 +3,9 @@ local wall = require("zone_wall")
 local routes = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local event_path
+local expanded_event_path
 local heartbeat_path
 local armed
 local fixture
@@ -122,9 +124,35 @@ local function handle_door_event()
     if value == "travel_requested" then door_requests = door_requests + 1 end
 end
 
+local function handle_expanded_event(map, host)
+    if not expanded or type(SilverfishTakeNativeAuthoredRoute) ~= "function" then return true end
+    local source, destination, tag, actor, kind, travel_time = SilverfishTakeNativeAuthoredRoute()
+    if not source then return true end
+    if host and source == map and heartbeat_fresh() and destination and tag and actor
+        and (kind == "overlap" or kind == "door") then
+        local next_sequence = sequence + 1
+        local file = io.open(expanded_event_path, "ab")
+        if file then
+            local written = file:write(table.concat({ "authored-request", tostring(next_sequence), source,
+                destination, tag, actor, kind, travel_time and tostring(travel_time) or "-" }, "\t"), "\n")
+            local closed = file:close()
+            if written and closed then
+                sequence = next_sequence
+                requests = requests + 1
+                decision = "request"
+                return true
+            end
+        end
+    end
+    SilverfishReleaseNativeZoneRequest()
+    decision = "request_unavailable"
+    return false
+end
+
 function zone.start(bridge)
     if not enabled then return end
     event_path = bridge .. "/native-zone-events"
+    expanded_event_path = bridge .. "/native-authored-exit-events"
     heartbeat_path = bridge .. "/native-zone-heartbeat"
 end
 
@@ -132,13 +160,14 @@ function zone.sync(state, phase)
     if not enabled or not event_path then return end
     local host = phase == "hosting"
     local route = routes[state.map]
-    if not route or (not host and phase ~= "connected") then
+    if not route or route.expanded and not expanded or (not host and phase ~= "connected") then
         clear()
         status, failure = "inactive", ""
         return
     end
 
     if type(SilverfishSetNativeZoneScope) ~= "function" or type(SilverfishTakeNativeZoneEvent) ~= "function" then
+        wall.sync(state, phase, fixture, false, secondary_fixture)
         wait_for_scope("Waiting for native zone hooks")
         return
     end
@@ -150,6 +179,7 @@ function zone.sync(state, phase)
         end
     end
     if not valid(local_pawn) or #remote > 4 or (host and state.clients ~= #remote) then
+        wall.sync(state, phase, fixture, false, secondary_fixture)
         wait_for_scope("Waiting for the native player roster")
         return
     end
@@ -162,7 +192,7 @@ function zone.sync(state, phase)
     end
     local exit = find_fixture(local_pawn, route)
     if route.fixture and not valid(exit) then
-        wall.clear()
+        wall.sync(state, phase, nil, false, secondary_fixture)
         if qualify(0, false) then armed = state.map end
         wait_for_scope("Waiting for the placed " .. route.fixture)
         return
@@ -175,15 +205,15 @@ function zone.sync(state, phase)
     elseif not valid(secondary_fixture) or not same(secondary_fixture:GetWorld(), world) then
         secondary_fixture = placed_actor("Level_Exit_BP_C", route.secondary.fixture, world)
     end
-    wall.sync(state, phase, exit, accepting, secondary_fixture)
     local refreshed = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
+    wall.sync(state, phase, exit, accepting and refreshed, secondary_fixture)
     if not refreshed then
         wait_for_scope("Native zone hooks declined the scope")
         return
     end
     armed = state.map
     handle_door_event()
-    if not handle_event(state.map, host) then
+    if not handle_event(state.map, host) or not handle_expanded_event(state.map, host) then
         status, failure = "error", "The native zone request could not be written"
         return
     end
@@ -259,20 +289,26 @@ function zone.position_arrival(state, phase, tag)
     return "native arrival " .. tag .. " at " .. name
 end
 
+local function probe_player(state, selector)
+    local match
+    for _, details in ipairs(state.pawns) do
+        if ((details.slot or details.kind) == selector or details.name == selector)
+            and valid(details.pawn) and details.pawn:HasAuthority() and same(details.pawn:GetWorld(), state.world) then
+            if match then error("The requested authoritative pawn is ambiguous", 0) end
+            match = details
+        end
+    end
+    if not match then error("The requested authoritative pawn is unavailable", 0) end
+    return match
+end
+
 local function door_command(fields, state, phase, command)
     local route = routes[state.map]
     local slot = fields[3]
-    if not enabled or phase ~= "hosting" or armed ~= state.map or status ~= "ready" or not route or not route.door
-        or (slot ~= "local" and slot ~= "guest") then
+    if not enabled or phase ~= "hosting" or armed ~= state.map or status ~= "ready" or not route or not route.door then
         error("A qualified authored transition door and authoritative pawn are required", 0)
     end
-    local pawn
-    for _, details in ipairs(state.pawns) do
-        if details.kind == slot and valid(details.pawn) and details.pawn:HasAuthority() then
-            if pawn then error("More than one pawn occupies the requested slot", 0) end
-            pawn = details.pawn
-        end
-    end
+    local pawn = probe_player(state, slot).pawn
     local door = valid(pawn) and placed_actor("Dungeon_TransitionDoor_BP_C", route.door.fixture, pawn:GetWorld())
     if not valid(door) or not valid(door.Box) then error("The authored transition door is unavailable", 0) end
 
@@ -322,9 +358,8 @@ function zone.command(fields, state, phase)
         return "native exit request released"
     end
     local slot, position, entrance = fields[3], fields[4], fields[5]
-    if (#fields ~= 4 and #fields ~= 5) or (slot ~= "local" and slot ~= "guest")
-        or (position ~= "near" and position ~= "inside" and position ~= "far") then
-        error("Expected native-exit-position local|guest near|inside|far [entrance]", 0)
+    if (#fields ~= 4 and #fields ~= 5) or (position ~= "near" and position ~= "inside" and position ~= "far") then
+        error("Expected native-exit-position with a pawn and near, inside, or far", 0)
     end
     local route = routes[state.map]
     if entrance and route.entrance ~= entrance then
@@ -333,14 +368,8 @@ function zone.command(fields, state, phase)
         end
         route = route.secondary
     end
-    local pawn
-    for _, details in ipairs(state.pawns) do
-        if details.kind == slot and valid(details.pawn) and details.pawn:HasAuthority() then
-            if pawn then error("More than one pawn occupies the requested slot", 0) end
-            pawn = details.pawn
-        end
-    end
-    if not valid(pawn) then error("The authoritative pawn is unavailable", 0) end
+    local details = probe_player(state, slot)
+    local pawn = details.pawn
     local world = pawn:GetWorld()
     local exit = route == routes[state.map] and fixture or secondary_fixture
     if not valid(exit) or not valid(exit.Box) or not same(world, exit:GetWorld()) then
@@ -385,7 +414,11 @@ function zone.command(fields, state, phase)
         if position ~= "inside" then
             local distance = (position == "near" and 350 or 2250) * route.probe_approach
             local x, y = distance * forward.X, distance * forward.Y
-            local separation = slot == "guest" and position == "near" and 200 or 0
+            local separation = 0
+            if details.kind == "guest" and position == "near" then
+                local index = tonumber((details.slot or ""):match("^guest(%d+)$")) or 1
+                separation = (index % 2 == 0 and -1 or 1) * (index < 3 and 200 or 400)
+            end
             offsets = {{x + separation * tangent_x, y + separation * tangent_y},
                 {x - (separation + 150) * tangent_x, y - (separation + 150) * tangent_y},
                 {-x + separation * tangent_x, -y + separation * tangent_y}}

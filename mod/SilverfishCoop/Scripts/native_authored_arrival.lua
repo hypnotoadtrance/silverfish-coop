@@ -1,0 +1,162 @@
+local arrival = {}
+local bed = require("native_bed")
+
+local spawn_class = "LevelExit_Spawn_BP_C"
+local door_class = "Dungeon_TransitionDoor_BP_C"
+local statics_path = "/Script/Engine.Default__GameplayStatics"
+local main_menu = "/Game/Classes/Maps/MainMenu_P"
+local max_placement_error = 200
+
+local function valid(object)
+    return object ~= nil and object ~= false and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function stock(object, class)
+    if not valid(object) then return false end
+    local name = object:GetFullName()
+    return name:match("^" .. class .. " ") and not name:find("Default__", 1, true)
+end
+
+local function canonical_instance(controller)
+    local statics = StaticFindObject(statics_path)
+    local instance = valid(statics) and statics:GetGameInstance(controller)
+    if not stock(instance, "GameInstance_FP_C") or not stock(instance.SaveSlot_Ref, "SaveGame_BP_C") then
+        error("The canonical native host GameInstance and save are unavailable", 0)
+    end
+    return instance
+end
+
+local function owning_controller(controller, world)
+    return stock(controller, "PlayerControler_FP_C") and controller:HasAuthority()
+        and controller:IsLocalController() and not controller:IsActorBeingDestroyed()
+        and same(controller:GetWorld(), world)
+end
+
+local function host_context(state, phase, destination)
+    local details = state.local_pawn
+    local pawn = details and details.pawn
+    local controller = details and details.controller_object
+    local world = state.world
+    if phase ~= "hosting" or not state.listening or state.server or not valid(world)
+        or world:GetFullName() ~= "World " .. destination
+        or not stock(pawn, "Player_FP_C") or not pawn:HasAuthority() or pawn:IsActorBeingDestroyed()
+        or not owning_controller(controller, world) or not same(controller.Pawn, pawn)
+        or not same(pawn:GetWorld(), world) then
+        error("The authoritative host is not in the persistent authored destination", 0)
+    end
+
+    local instance = canonical_instance(controller)
+    if not same(pawn.Save, instance.SaveSlot_Ref) then
+        error("The authored arrival requires the canonical native host save", 0)
+    end
+    return pawn, controller, world, instance
+end
+
+function arrival.prepare_time(state, phase, step)
+    if type(step) ~= "number" or not math.tointeger(step) or step < 0 or step > 2147483647 then
+        error("Expected a nonnegative signed 32-bit stock travel time step", 0)
+    end
+    local map = state.map
+    local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+$")
+        and map:match("/([%w_]+)$")
+    if not basename then error("Expected a stock travel source map", 0) end
+    local destination = map .. "." .. basename
+    local instance
+    if phase == "ready" and step == 0 and map == main_menu and not state.listening and not state.server
+        and valid(state.world) and state.world:GetFullName() == "World " .. destination
+        and owning_controller(state.controller, state.world) then
+        instance = canonical_instance(state.controller)
+    else
+        local _, _, _, host_instance = host_context(state, phase, destination)
+        instance = host_instance
+    end
+    local previous = instance.Travel_TimeStep
+    if type(previous) ~= "number" then error("The canonical stock travel time step is unavailable", 0) end
+    instance.Travel_TimeStep = step
+    if instance.Travel_TimeStep ~= step then
+        instance.Travel_TimeStep = previous
+        error("The canonical stock travel time step could not be read back", 0)
+    end
+    return step
+end
+
+local function same_world_actor(actor, world)
+    return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+end
+
+local function marker_for_tag(world, tag)
+    local match
+    for _, marker in ipairs(FindAllOf(spawn_class) or {}) do
+        if same_world_actor(marker, world) and marker:GetFullName():match("^LevelExit_Spawn_BP_C ") then
+            local name = marker.EntranceTag
+            if type(name) ~= "string" and name then name = name:ToString() end
+            if name == tag and name ~= "None" then
+                if match then error("The authored destination contains duplicate entrance tags", 0) end
+                match = marker
+            end
+        end
+    end
+    if not match or not match:HasAuthority() then
+        error("The exact stock entrance marker is unavailable under host authority", 0)
+    end
+    return match
+end
+
+local function door_for_marker(world, expected, marker, tag)
+    local match
+    for _, door in ipairs(FindAllOf(door_class) or {}) do
+        if same_world_actor(door, world) and door:GetFullName() == expected then
+            if match then error("The authored arrival door is ambiguous", 0) end
+            match = door
+        end
+    end
+    local component = match and match.LevelExit_Spawn_BP
+    local parent_tag = match and match["Entrance Tag"]
+    if type(parent_tag) ~= "string" and parent_tag then parent_tag = parent_tag:ToString() end
+    if not match or not match:HasAuthority() or parent_tag ~= tag or not valid(component)
+        or not same(component:GetOwner(), match) or not same(component.ChildActor, marker)
+        or not same(marker:GetParentComponent(), component) then
+        error("The exact authored door does not own this stock arrival marker", 0)
+    end
+    return match
+end
+
+function arrival.place(state, phase, tag, kind, actor_name)
+    local map = state.map
+    local basename = type(map) == "string" and map:match("^/Game/Classes/Maps/Maps_[%w_]+/([%w_]+)$")
+    local class = kind == "overlap" and spawn_class or kind == "door" and door_class
+    if not basename or type(tag) ~= "string" or #tag > 64 or not tag:match("^[%w_]+$")
+        or not class or type(actor_name) ~= "string" or not actor_name:match("^" .. class .. "_%d+$") then
+        error("Expected an authored entrance tag, arrival kind and placed actor name", 0)
+    end
+
+    local destination = map .. "." .. basename
+    local pawn, controller, world = host_context(state, phase, destination)
+    local expected = class .. " " .. destination .. ":PersistentLevel." .. actor_name
+    local marker = marker_for_tag(world, tag)
+    local actor = marker
+    if kind == "door" then
+        actor = door_for_marker(world, expected, marker, tag)
+    elseif marker:GetFullName() ~= expected then
+        error("The stock entrance marker is not the authored persistent actor", 0)
+    end
+    local arrow = marker.Arrow
+    if not valid(arrow) or not same(arrow:GetOwner(), marker) then
+        error("The exact authored entrance has no stock Arrow component", 0)
+    end
+
+    local target, rotation = arrow:K2_GetComponentLocation(), arrow:K2_GetComponentRotation()
+    local location = bed.place_host(pawn, controller, world, target, rotation, "arrow")
+    local x, y, z = location.X - target.X, location.Y - target.Y, location.Z - target.Z
+    if x * x + y * y + z * z > max_placement_error * max_placement_error then
+        error("The stock arrival could not be placed within two meters of its Arrow", 0)
+    end
+    return { destination = map, actor = actor:GetFullName(), placement = "arrow",
+        x = location.X, y = location.Y, z = location.Z }
+end
+
+return arrival

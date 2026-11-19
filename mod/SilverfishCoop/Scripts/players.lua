@@ -16,11 +16,11 @@ local downed_pawn_fields = {
     "Speed_Walking", "Speed_Crouching", "Speed_Sprinting", "JumpMaxCount", "IsWeaponBlocked",
 }
 
-local desired = { ["local"] = "standing", guest = "standing" }
+local valid_slots = { ["local"] = true, guest = true, guest2 = true, guest3 = true, guest4 = true }
+local desired = {}
 local slot_pawns = {}
 local applied = {}
 local markers = {}
-local host_authority = false
 local local_player
 local walking
 local input_file
@@ -44,6 +44,39 @@ end
 
 local function active(phase)
     return phase == "hosting" or phase == "connected"
+end
+
+local function roster(state, phase)
+    local slots, names = {}, {}
+    local world = state.world
+    if not active(phase) or not valid(world) then return slots, names end
+
+    for _, details in ipairs(state.pawns) do
+        local slot = details.slot or details.kind
+        local pawn = details.pawn
+        local name = details.name
+        if valid_slots[slot] and valid(pawn) and same(pawn:GetWorld(), world)
+            and not pawn:IsActorBeingDestroyed() and type(name) == "string" and name:match("^Player_FP_C ")
+            and name == pawn:GetFullName()
+            and (phase ~= "hosting" or pawn:HasAuthority()) then
+            slots[slot] = slots[slot] == nil and details or false
+            names[name] = names[name] == nil and details or false
+        end
+    end
+    for slot, details in pairs(slots) do
+        if not details or not names[details.name] then slots[slot] = nil end
+    end
+    return slots, names
+end
+
+local function current_identity(record, details, world)
+    return details and same(record.pawn, details.pawn) and same(record.world, world)
+end
+
+local function writable(record)
+    local pawn = record.pawn
+    return valid(pawn) and not pawn:IsActorBeingDestroyed() and same(pawn:GetWorld(), record.world)
+        and pawn:GetFullName() == record.name and (pawn:HasAuthority() or pawn:IsLocallyControlled())
 end
 
 local function now(pawn)
@@ -120,7 +153,7 @@ end
 
 local function apply_downed(record)
     local pawn, movement = record.pawn, record.movement
-    if not valid(pawn) or not valid(movement) then return end
+    if not writable(record) or not valid(movement) then return end
     pawn.HoldingCrouch = true
     pawn.HoldingJump = false
     pawn.Sprinting = false
@@ -136,20 +169,20 @@ local function apply_downed(record)
     if not pawn.bIsCrouched or not movement.bWantsToCrouch then pawn:Crouch(false) end
 end
 
-local function release(slot)
-    local record = applied[slot]
+local function release(name)
+    local record = applied[name]
     if not record then return end
-    if valid(record.pawn) and valid(record.movement) then
+    if writable(record) and valid(record.movement) then
         restore_fields(record.pawn, record.pawn_values)
         restore_fields(record.movement, record.movement_values)
         record.pawn.HoldingCrouch = record.holding_crouch
         if not record.was_crouched then record.pawn:UnCrouch(false) end
     end
     remove_mapping_gate(record.gate)
-    applied[slot] = nil
+    applied[name] = nil
 end
 
-local function begin_downed(slot, details)
+local function begin_downed(details, world)
     local movement = details.pawn.CharacterMovement
     if not valid(movement) then return end
     local movement_values = read_fields(movement, downed_movement_fields)
@@ -157,7 +190,9 @@ local function begin_downed(slot, details)
     local baseline_speed = movement_values.MaxWalkSpeedCrouched
     if not finite(baseline_speed) or baseline_speed <= 0 then baseline_speed = pawn_values.Speed_Crouching end
     local record = {
+        name = details.name,
         pawn = details.pawn,
+        world = world,
         movement = movement,
         movement_values = movement_values,
         pawn_values = pawn_values,
@@ -165,7 +200,7 @@ local function begin_downed(slot, details)
         was_crouched = details.pawn.bIsCrouched,
         holding_crouch = details.pawn.HoldingCrouch,
     }
-    applied[slot] = record
+    applied[details.name] = record
     apply_downed(record)
     local ok, result = pcall(apply_mapping_gate, details)
     if ok then record.gate = result end
@@ -250,23 +285,22 @@ local function follow_marker(marker, details)
     if move then marker.x, marker.y, marker.z = details.x, details.y, details.z end
 end
 
-local function sync_marker(slot, details)
+local function sync_marker(name, details)
     local viewer = local_player and local_player.pawn
-    local show = slot == "guest" and desired[slot] == "downed" and details
-        and valid(details.pawn) and valid(viewer) and finite(details.x) and finite(details.y) and finite(details.z)
-    local marker = markers[slot]
-    if marker and (not show or not same(marker.pawn, details.pawn)) then
+    local world = valid(viewer) and viewer:GetWorld() or nil
+    local show = details and valid(world) and not same(details.pawn, viewer)
+        and finite(details.x) and finite(details.y) and finite(details.z)
+    local marker = markers[name]
+    if marker and (not show or not current_identity(marker, details, world)) then
         clear_marker(marker)
-        markers[slot] = nil
+        markers[name] = nil
         marker = nil
     end
     if not show then return end
 
     if not marker then
-        local world = viewer:GetWorld()
-        if not valid(world) then return end
-        marker = { pawn = details.pawn, actors = {}, visible = false }
-        markers[slot] = marker
+        marker = { pawn = details.pawn, world = world, actors = {}, visible = false }
+        markers[name] = marker
         local ok, failure = pcall(create_marker, marker, world, details)
         if not ok then
             clear_marker(marker)
@@ -282,28 +316,28 @@ local function sync_marker(slot, details)
 end
 
 function players.sync(state, phase)
-    local slots = {}
-    local enabled = active(phase)
-    if enabled then
-        for _, pawn in ipairs(state.pawns) do slots[pawn.kind] = pawn end
-    else
-        desired["local"], desired.guest = "standing", "standing"
-        walking = nil
-    end
+    local slots, names = roster(state, phase)
+    if not active(phase) then walking = nil end
     slot_pawns = slots
     local_player = slots["local"]
-    host_authority = phase == "hosting"
 
-    for slot, value in pairs(desired) do
-        local details = slots[slot]
-        local old = applied[slot]
-        local enforce = value == "downed" and details
-            and valid(details.pawn)
-            and ((slot == "local" and details.pawn:IsLocallyControlled())
-                or (host_authority and details.pawn:HasAuthority()))
-        if old and (not enforce or not same(old.pawn, details.pawn)) then release(slot) end
-        if enforce and not applied[slot] then begin_downed(slot, details) end
-        sync_marker(slot, details)
+    for name, record in pairs(desired) do
+        local details = names[name]
+        if not current_identity(record, details, state.world) then
+            desired[name] = nil
+        else
+            local enforce = phase == "hosting" or (details == local_player and details.pawn:IsLocallyControlled())
+            local old = applied[name]
+            if old and (not enforce or not current_identity(old, details, state.world)) then release(name) end
+            if enforce and not applied[name] then begin_downed(details, state.world) end
+            sync_marker(name, details)
+        end
+    end
+    for name in pairs(applied) do
+        if not desired[name] then release(name) end
+    end
+    for name in pairs(markers) do
+        if not desired[name] then sync_marker(name, nil) end
     end
 end
 
@@ -325,13 +359,19 @@ function players.command(fields, state, phase)
             deadline = now(pawn) + milliseconds / 1000 }
         pawn:AddMovementInput(walking.world_direction, 1.0, false)
         return "walking input scheduled"
-    elseif command == "player-state" then
-        local slot, next_state = fields[3], fields[4]
-        if #fields ~= 4 or desired[slot] == nil or (next_state ~= "standing" and next_state ~= "downed") then
-            error("Expected player-state local|guest standing|downed", 0)
+    elseif command == "player-state" or command == "player-state-exact" then
+        local target, next_state = fields[3], fields[4]
+        local exact = command == "player-state-exact"
+        if #fields ~= 4 or (not exact and not valid_slots[target])
+            or (next_state ~= "standing" and next_state ~= "downed") then
+            error("Expected player-state <slot> or player-state-exact <pawn full name>, with standing or downed", 0)
         end
         if not active(phase) then error("Player projection requires an active co-op session", 0) end
-        desired[slot] = next_state
+        local slots, names = roster(state, phase)
+        local details = (exact and names or slots)[target]
+        if not details then error("Player projection requires one current pawn matching the target", 0) end
+        local name = details.name
+        desired[name] = next_state == "downed" and { pawn = details.pawn, world = state.world } or nil
         return "player state projected"
     end
 end
@@ -339,12 +379,13 @@ end
 function players.rows(status_row)
     local rows = {}
     for slot, details in pairs(slot_pawns) do
-        local pawn, record, marker = details.pawn, applied[slot], markers[slot]
+        local name = details.name
+        local pawn, record, marker = details.pawn, applied[name], markers[name]
         local movement = pawn.CharacterMovement
         if valid(movement) then
             local speed = pawn.bIsCrouched and movement.MaxWalkSpeedCrouched or movement.MaxWalkSpeed
-            rows[#rows + 1] = status_row("player", slot, desired[slot], pawn.bIsCrouched and 1 or 0,
-                speed, movement.JumpZVelocity)
+            local state = desired[name] and "downed" or "standing"
+            rows[#rows + 1] = status_row("player", slot, state, pawn.bIsCrouched and 1 or 0, speed, movement.JumpZVelocity)
             rows[#rows + 1] = status_row("player-visual", slot,
                 record and record.gate and 1 or 0, marker and marker.visible and 1 or 0)
         end
@@ -353,7 +394,7 @@ function players.rows(status_row)
 end
 
 local function on_interact(context)
-    if not local_player or desired["local"] ~= "standing" then return end
+    if not local_player or desired[local_player.name] then return end
     local pawn = context:get()
     if not same(pawn, local_player.pawn) or not pawn:IsLocallyControlled() then return end
     local file = io.open(input_file, "ab")

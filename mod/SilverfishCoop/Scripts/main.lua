@@ -10,10 +10,13 @@ local native_dream = require("native_dream")
 local native_matrix = require("native_matrix")
 local native_quest_catalog = require("native_quest_catalog")
 local native_broker_quest = require("native_broker_quest")
+local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
 local native_green_cube = require("native_cubes").new("green")
 local native_hazard = require("native_hazard")
 local native_host_save = require("native_host_save")
+local native_world_flush = require("native_world_flush")
+local native_rest = require("native_rest")
 local native_inventory = require("native_inventory")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
@@ -29,6 +32,7 @@ local players = require("players")
 local vitals = require("vitals")
 local wallet = require("wallet")
 local weapon_inventory = require("weapon_inventory")
+local native_guest_weapon = require("native_guest_weapon")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
@@ -38,6 +42,7 @@ local blue_destinations = {
     ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true,
 }
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local expanded_routes = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local stock_save_probes = {
     ["native-death-probe"] = true,
     ["native-damage-probe"] = true,
@@ -63,6 +68,10 @@ local sequence = 0
 local tick_queued = false
 local last_blue_route, last_blue_arrival, last_dream_route, last_dream_arrival, last_dream_effects
 local last_quest_catalog, last_purple_arrival, last_broker_quest, last_broker_position
+local last_world_flush
+local last_rest
+local last_guest_xp
+local last_authored_arrival
 local last_green_options, last_green_arrival
 
 local function valid(object)
@@ -247,7 +256,9 @@ end
 
 local function supported_map(map)
     local route = zone_maps[map]
-    return route ~= nil and (route.entrance == nil or authored_routes)
+    if not route then return false end
+    if route.expanded then return authored_routes and expanded_routes end
+    return route.entrance == nil or authored_routes
 end
 
 local function loopback_endpoint(endpoint)
@@ -256,14 +267,17 @@ local function loopback_endpoint(endpoint)
 end
 
 local function restore_pawn(fields, state, current_phase)
-    local slot = fields[3]
-    local restore_health = fields[4] ~= "-"
-    local health = tonumber(fields[4])
-    local x, y, z = tonumber(fields[5]), tonumber(fields[6]), tonumber(fields[7])
+    local exact = fields[2] == "restore-exact"
+    local slot = exact and "guest" or fields[3]
+    local offset = exact and 2 or 0
+    local restore_health = fields[4 + offset] ~= "-"
+    local health = tonumber(fields[4 + offset])
+    local x, y, z = tonumber(fields[5 + offset]), tonumber(fields[6 + offset]), tonumber(fields[7 + offset])
+    local respawning = #fields == 8 + offset and fields[8 + offset] == "native-wipe"
     if role ~= "host" or current_phase ~= "hosting" then
         error("Pawn restoration requires the active listen host", 0)
     end
-    if #fields ~= 7 or (slot ~= "local" and slot ~= "guest")
+    if (not respawning and #fields ~= 7 + offset) or (slot ~= "local" and slot ~= "guest")
         or (restore_health and (not finite(health) or health < 0))
         or not finite(x) or not finite(y) or not finite(z)
         or math.abs(x) > 100000000 or math.abs(y) > 100000000 or math.abs(z) > 100000000 then
@@ -272,7 +286,7 @@ local function restore_pawn(fields, state, current_phase)
 
     local match
     for _, details in ipairs(state.pawns) do
-        if details.kind == slot then
+        if details.kind == slot and (not exact or (details.name == fields[3] and details.controller == fields[4])) then
             if match then error("Multiple pawns occupy the requested slot", 0) end
             match = details
         end
@@ -280,7 +294,23 @@ local function restore_pawn(fields, state, current_phase)
     if not match or not match.pawn:HasAuthority() then
         error("The requested authoritative pawn is unavailable", 0)
     end
-    if restore_health and (not same_object(match.save, match.pawn.Save) or health > match.pawn.MaxHealth) then
+    if exact then
+        local driver = state.world.NetDriver
+        local controller = match.controller_object
+        local connection = valid(controller) and controller.Player or nil
+        local membership = 0
+        if valid(driver) and valid(connection) and connection:GetFullName() == fields[5]
+            and same_object(connection.Driver, driver) and same_object(connection.PlayerController, controller)
+            and same_object(controller.Pawn, match.pawn) and not controller:IsLocalController() then
+            local connections = driver.ClientConnections
+            for index = 1, #connections do
+                if same_object(connections[index], connection) then membership = membership + 1 end
+            end
+        end
+        if membership ~= 1 then error("The restored pawn's exact native connection is unavailable", 0) end
+    end
+    if respawning and (not authored_routes or not restore_health or health ~= match.pawn.MaxHealth)
+        or restore_health and (not same_object(match.save, match.pawn.Save) or health > match.pawn.MaxHealth) then
         error("Independent health for this pawn is unavailable or out of range", 0)
     end
 
@@ -293,9 +323,15 @@ local function restore_pawn(fields, state, current_phase)
     end
     if restore_health then
         match.save.PlayerHealth = health
+        if respawning then
+            match.save.PlayerRegen = health
+            if match.save.PlayerHealth ~= health or match.save.PlayerRegen ~= health then
+                error("The stock game-over health and regeneration were not verified", 0)
+            end
+        end
         if health == match.pawn.MaxHealth then
             if slot == "guest" then guest_save.restored(match.pawn) end
-            native_death.rearm(slot)
+            native_death.rearm(match.slot or slot)
         end
     end
     match.pawn:ForceNetUpdate()
@@ -312,6 +348,7 @@ local function run_command(fields, state, current_phase)
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
     end
+    if command == "travel" or command == "leave" then native_rest.clear_hook() end
     if command == "host" then
         local carry, dream_kind
         local load_save = #fields >= 5 and #fields <= 7 and fields[4] == "native-save"
@@ -339,6 +376,7 @@ local function run_command(fields, state, current_phase)
             native_world.prepare_seed(state, current_phase, argument, fields[4])
         end
         if dream_kind then native_dream.prepare_duration(state.controller, dream_kind) end
+        if expanded_routes then native_authored_arrival.prepare_time(state, current_phase, 0) end
         open_level(state.controller, argument, "listen")
         role = "host"
         expected_map = argument
@@ -351,6 +389,8 @@ local function run_command(fields, state, current_phase)
         local green = #fields == 5 and fields[4] == "green" and native_green.supports(argument)
         local purple = #fields == 5 and fields[4] == "purple" and purple_arrival.supports(argument)
         local matrix = #fields == 5 and fields[4] == "matrix" and not native_dream.supports(argument)
+        local authored = expanded_routes and #fields == 5 and fields[4] == "authored"
+            and not native_dream.supports(argument)
         local dream_departure = native_dream.supports(argument) and #fields == 5
             and (fields[4] == "stardust" or fields[4] == "fruiting-stardust")
         local dream_return = native_dream.supports(state.map) and #fields == 4 and fields[4] == "stardust-return"
@@ -358,7 +398,7 @@ local function run_command(fields, state, current_phase)
         if not supported_map(argument) or argument == state.map
             or (native_dream.supports(argument) and not dream_departure)
             or (native_dream.supports(state.map) and not dream_return)
-            or (not (blue or red or green or purple or matrix or dream_departure or dream_return)
+            or (not (blue or red or green or purple or matrix or authored or dream_departure or dream_return)
                 and #fields ~= (argument == gold_nexus and 4 or 3)) then
             error("Expected a different qualified co-op map", 0)
         end
@@ -393,6 +433,9 @@ local function run_command(fields, state, current_phase)
         guest_save.clear()
         vitals.reset()
         native_world.prepare_travel_seed(state, current_phase, argument)
+        if expanded_routes then
+            native_authored_arrival.prepare_time(state, current_phase, authored and tonumber(fields[5]) or 0)
+        end
         open_level(state.controller, argument, "listen")
         expected_map = argument
         return "zone travel requested"
@@ -413,6 +456,13 @@ local function run_command(fields, state, current_phase)
         end
         last_blue_route.pawn = host.name
         return "qualified stock rest route"
+    elseif command == "native-wipe-fallback" then
+        last_blue_arrival = nil
+        if #fields ~= 2 or not authored_routes or role ~= "host" then
+            error("Default stock game-over arrival requires the active host", 0)
+        end
+        last_blue_arrival = native_bed.wipe_fallback(state, current_phase)
+        return "default stock game-over arrival verified"
     elseif command == "native-blue-arrival" then
         last_blue_arrival = nil
         if not authored_routes or (#fields ~= 4 and #fields ~= 5) or argument ~= state.map
@@ -455,6 +505,12 @@ local function run_command(fields, state, current_phase)
         end
         last_green_arrival = native_green.arrival(state, current_phase)
         return "qualified stock Green Cube arrival"
+    elseif command == "native-authored-arrival" then
+        if not expanded_routes or #fields ~= 5 or role ~= "host" or current_phase ~= "hosting" then
+            error("Expected a qualified authored route arrival", 0)
+        end
+        last_authored_arrival = native_authored_arrival.place(state, current_phase, argument, fields[4], fields[5])
+        return "stock authored arrival verified"
     elseif command == "native-purple-arrival" then
         last_purple_arrival = nil
         if (#fields ~= 3 and #fields ~= 4) or argument ~= state.map or not purple_arrival.supports(argument) then
@@ -532,6 +588,29 @@ local function run_command(fields, state, current_phase)
     elseif command == "native-host-save-capture" then
         if #fields ~= 3 or role ~= "host" then error("Expected an isolated host save generation", 0) end
         return native_host_save.capture(state, current_phase, argument)
+    elseif command == "native-guest-quest-xp" then
+        if #fields ~= 4 or role ~= "host" or current_phase ~= "hosting" or type(guest_save.quest_xp) ~= "function" then
+            error("Quest XP requires the exact enrolled native guest", 0)
+        end
+        last_guest_xp = guest_save.quest_xp(state, current_phase, argument, tonumber(fields[4]))
+        return "native guest quest XP verified"
+    elseif command == "native-world-flush" then
+        if #fields ~= 2 or role ~= "host" or current_phase ~= "hosting" then
+            error("Native world checkpoint flush requires an active listen host", 0)
+        end
+        last_world_flush = native_world_flush.flush(state, current_phase)
+        return "stock world checkpoint flush inspected"
+    elseif command == "native-rest-inspect" or command == "native-rest" then
+        local apply = command == "native-rest"
+        if #fields ~= (apply and 5 or 4) or role ~= "host" or current_phase ~= "hosting" then
+            error("Stock rest requires the exact active host and bed", 0)
+        end
+        if apply then
+            last_rest = native_rest.apply(state, current_phase, argument, fields[4], tonumber(fields[5]))
+        else
+            last_rest = native_rest.inspect(state, current_phase, argument, fields[4])
+        end
+        return "qualified stock rest inspected"
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -556,19 +635,31 @@ local function run_command(fields, state, current_phase)
             role = "idle"
         end
         return "leaving session"
-    elseif command == "restore" then
+    elseif command == "restore" or command == "restore-exact" then
         return restore_pawn(fields, state, current_phase)
     end
-    if command == "player-state" and #fields == 4 and argument == "guest"
+    local projection_slot
+    if (command == "player-state" or command == "player-state-exact") and #fields == 4
         and (fields[4] == "downed" or fields[4] == "standing") then
-        guest_save.project(state, current_phase, fields[4])
-    end
-    if command == "player-state" and #fields == 4 and argument == "local" then
-        native_death.project_host(state, current_phase, fields[4])
+        if command == "player-state" then
+            projection_slot = argument
+            if argument == "guest" then guest_save.project(state, current_phase, fields[4]) end
+        else
+            for _, details in ipairs(state.pawns) do
+                if details.name == argument then
+                    projection_slot = details.slot or details.kind
+                    if details.kind == "guest" and current_phase == "hosting" then
+                        guest_save.project(state, current_phase, fields[4], details.name)
+                    end
+                    break
+                end
+            end
+        end
+        if projection_slot == "local" then native_death.project_host(state, current_phase, fields[4]) end
     end
     local result = players.command(fields, state, current_phase)
-    if result and fields[2] == "player-state" and fields[4] == "standing" then
-        native_death.rearm(fields[3])
+    if result and projection_slot and fields[4] == "standing" then
+        native_death.rearm(projection_slot)
     end
     result = result
         or guest_save.command(fields, state, current_phase)
@@ -578,6 +669,7 @@ local function run_command(fields, state, current_phase)
         or native_pickup.command(fields, state, current_phase)
         or native_shop.command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
+        or native_guest_weapon.command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
         or native_blue.command(fields, state, current_phase)
@@ -632,6 +724,16 @@ local function write_status(state, current_phase, failure)
     if guest_save_row then rows[#rows + 1] = guest_save_row end
     local guest_frame = guest_save.frame_row(status_row)
     if guest_frame then rows[#rows + 1] = guest_frame end
+    if type(guest_save.rows) == "function" then
+        for _, row in ipairs(guest_save.rows(status_row)) do rows[#rows + 1] = row end
+    end
+    if type(guest_save.quest_xp) == "function" then
+        rows[#rows + 1] = status_row("native-guest-xp-capability", 1)
+    end
+    if last_guest_xp and last_guest_xp.map == state.map then
+        rows[#rows + 1] = status_row("native-guest-xp", last_guest_xp.map, last_guest_xp.pawn,
+            last_guest_xp.before, last_guest_xp.after)
+    end
     if not failure then
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -642,6 +744,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_weapon.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -661,6 +764,11 @@ local function write_status(state, current_phase, failure)
             local arrival = last_purple_arrival
             rows[#rows + 1] = status_row("native-purple-arrival", arrival.destination, arrival.actor, arrival.placement,
                 arrival.x, arrival.y, arrival.z)
+        end
+        if last_authored_arrival and last_authored_arrival.destination == state.map then
+            local proof = last_authored_arrival
+            rows[#rows + 1] = status_row("native-authored-arrival", proof.destination, proof.actor, proof.placement,
+                proof.x, proof.y, proof.z)
         end
         for _, row in ipairs(native_roster.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -682,6 +790,19 @@ local function write_status(state, current_phase, failure)
                 proof.x, proof.y, proof.z)
         end
         for _, row in ipairs(native_host_save.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        if last_world_flush and last_world_flush.map == state.map then
+            local proof = last_world_flush
+            rows[#rows + 1] = status_row("native-world-flush", proof.map, proof.state, proof.antfarm, proof.explosives,
+                proof.reason or "")
+        end
+        for _, row in ipairs(native_rest.hook_rows(status_row)) do rows[#rows + 1] = row end
+        if last_rest and last_rest.map == state.map then
+            local rest = last_rest
+            rows[#rows + 1] = status_row("native-rest", rest.map, rest.pawn, rest.actor, rest.bed, rest.level,
+                rest.eligible and 1 or 0, rest.reason or "", rest.points, rest.distance, rest.range,
+                rest.insomnia and 1 or 0, rest.x, rest.y, rest.z, rest.hours or "-", rest.before or "-",
+                rest.after or "-", rest.ping or "")
+        end
         if last_dream_route and last_dream_route.source == state.map then
             local route = last_dream_route
             rows[#rows + 1] = status_row("native-dream-route", route.source, route.destination, route.pawn,
@@ -762,6 +883,7 @@ local function tick()
     if not state then return end
     native_death.sync(state, current_phase)
     native_zone.sync(state, current_phase)
+    native_rest.sync_hook(state, current_phase)
     native_transport.sync(state, current_phase)
     native_blue.sync(state, current_phase)
     native_red.sync(state, current_phase)
@@ -778,17 +900,23 @@ local function tick()
         last_quest_catalog = nil
         last_broker_quest = nil
         last_broker_position = nil
+        last_world_flush = nil
+        last_rest = nil
+        last_guest_xp = nil
+        native_guest_weapon.reset()
+        last_authored_arrival = nil
         local was_guest_bound = guest_save.active()
         local accepted, message = pcall(run_command, fields, state, current_phase)
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
         if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival"
-            or fields[2] == "native-blue-arrival" or fields[2] == "native-red-arrival" or fields[2] == "native-green-arrival"
+            or fields[2] == "native-blue-arrival" or fields[2] == "native-wipe-fallback"
+            or fields[2] == "native-red-arrival" or fields[2] == "native-green-arrival"
             or fields[2] == "native-purple-arrival" or fields[2] == "native-dream-arrival"
             or fields[2] == "native-dream-place-guest" or fields[2] == "native-matrix-place"
-            or fields[2] == "native-broker-position-fixture"
-            or fields[2] == "restore" then
+            or fields[2] == "native-broker-position-fixture" or fields[2] == "native-authored-arrival"
+            or fields[2] == "restore" or fields[2] == "restore-exact" then
             state, current_phase = observe_session()
             if not state then return end
         else

@@ -10,9 +10,13 @@ local statics_path = "/Script/Engine.Default__GameplayStatics"
 local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local save_class_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local initial_lease_seconds = 3
+local max_guests = 4
+local max_int32 = 2147483647
+local xp_flag = "Player_Xp"
 local heartbeat_path
 local clear_death_scope
-local binding
+local bindings = {}
+local slot_owners = {}
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -45,6 +49,7 @@ local function inventory_counts(save)
 end
 
 local function heartbeat_fresh()
+    if not heartbeat_path then return false end
     local file = io.open(heartbeat_path, "rb")
     if not file then return false end
     local contents = file:read(32)
@@ -64,36 +69,105 @@ end
 
 local function participants(state, phase)
     local route = zones[state.map]
-    if phase ~= "hosting" or not route or (route.entrance and not authored_routes) or state.clients ~= 1
-        or state.server or not state.listening or #state.pawns ~= 2
+    if phase ~= "hosting" or not route or (route.entrance and not authored_routes) or state.clients > max_guests
+        or state.server or not state.listening
         or not valid(state.world) then return end
 
     local host = state.local_pawn
     if not host or not same(state.controller, host.controller_object)
         or not controlled(host.pawn, host.controller_object, state.world, true) then return end
+    local guests, pawns, controllers = {}, {}, {}
+    local count = 0
     for _, guest in ipairs(state.pawns) do
-        if guest.kind == "guest" and not same(host.pawn, guest.pawn)
-            and controlled(guest.pawn, guest.controller_object, state.world, false) then
-            return host, guest
+        if guest.kind == "guest" then
+            count = count + 1
+            if not same(host.pawn, guest.pawn) and controlled(guest.pawn, guest.controller_object, state.world, false) then
+                local pawn_address = guest.pawn:GetAddress()
+                local controller_address = guest.controller_object:GetAddress()
+                if guests[guest.name] or pawns[pawn_address] or controllers[controller_address] then return end
+                guests[guest.name], pawns[pawn_address], controllers[controller_address] = guest, true, true
+            end
         end
     end
+    if count > state.clients then return end
+    return host, guests
 end
 
-function guest_save.active()
-    return binding ~= nil
+local function sorted_names()
+    local names = {}
+    for name in pairs(bindings) do names[#names + 1] = name end
+    table.sort(names)
+    return names
 end
 
-function guest_save.matches(pawn)
-    return binding ~= nil and not binding.revoked and same(pawn, binding.pawn)
+local function stock_name(value)
+    return type(value) == "string" and #value > 0 and #value <= 512
+        and not value:find("[%c]") and not value:find("Default__", 1, true)
+end
+
+local function character_uuid(value)
+    if type(value) ~= "string" or #value ~= 36 then return false end
+    local first, second, third, fourth, fifth = value:match(
+        "^([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)$")
+    return first and #first == 8 and #second == 4 and #third == 4 and #fourth == 4 and #fifth == 12
+end
+
+local function exact_connection(world, pawn, controller, controller_name, connection_name)
+    local driver = world.NetDriver
+    local connection = controller.Player
+    local connection_class = StaticFindObject("/Script/Engine.NetConnection")
+    if not valid(driver) or not same(driver.World, world) or valid(driver.ServerConnection)
+        or not valid(connection) or not valid(connection_class) or not connection:IsA(connection_class)
+        or controller:GetFullName() ~= controller_name or not controller:HasAuthority()
+        or controller:IsActorBeingDestroyed() or pawn:IsActorBeingDestroyed() or not same(pawn.Controller, controller)
+        or not same(connection.Driver, driver) or connection:GetFullName() ~= connection_name
+        or not same(connection.PlayerController, controller) or not same(connection.OwningActor, controller)
+        or (valid(controller.NetConnection) and not same(controller.NetConnection, connection)) then return end
+
+    local connections = driver.ClientConnections
+    local count = math.tointeger(connections:GetArrayNum())
+    if not count or count < 1 or count > max_guests then return end
+    local found = false
+    for index = 1, count do
+        local current = connections[index]
+        if valid(current) and current:GetFullName() == connection_name then
+            if found or not same(current, connection) then return end
+            found = true
+        end
+    end
+    if found then return driver, connection end
+end
+
+local function managed_save(save, except)
+    for _, binding in pairs(bindings) do
+        if binding ~= except and same(save, binding.detached) then return true end
+    end
+    return false
+end
+
+local function matches(binding, pawn)
+    if not binding or binding.revoked or not (same(pawn, binding.pawn)
         and pawn:GetFullName() == binding.name
         and controlled(pawn, binding.controller, binding.world, false)
         and controlled(binding.host, binding.host_controller, binding.world, true)
         and same(pawn.Save, binding.detached) and valid(binding.owner)
         and same(binding.owner.SaveSlot_Ref, binding.stock)
-        and same(binding.host.Save, binding.stock)
+        and same(binding.host.Save, binding.stock) and not managed_save(binding.detached, binding)) then return false end
+    if not binding.character then return true end
+    local driver, connection = exact_connection(binding.world, pawn, binding.controller,
+        binding.controller_name, binding.connection_name)
+    return same(driver, binding.driver) and same(connection, binding.connection)
 end
 
-function guest_save.clear()
+function guest_save.active()
+    return next(bindings) ~= nil
+end
+
+function guest_save.matches(pawn)
+    return valid(pawn) and matches(bindings[pawn:GetFullName()], pawn)
+end
+
+local function clear_binding(binding)
     if not binding then return false end
     binding.revoked = true
     if not clear_death_scope() then
@@ -101,12 +175,21 @@ function guest_save.clear()
     end
 
     local pawn = binding.pawn
-    if same(valid(pawn) and pawn.Save or nil, binding.detached) then
+    local current = valid(pawn) and pawn.Save or nil
+    if managed_save(current, binding) then error("The guest is using a different managed save", 0) end
+    if same(current, binding.detached) then
+        for _, other in pairs(bindings) do
+            if other ~= binding and valid(other.pawn) and same(other.pawn.Save, binding.detached) then
+                error("The detached save is also in use by another guest", 0)
+            end
+        end
         local statics = StaticFindObject(statics_path)
         local owner = valid(statics) and statics:GetGameInstance(pawn) or nil
         local stock = valid(owner) and owner.SaveSlot_Ref or nil
-        if not same(owner, binding.owner) or not same(pawn:GetWorld(), binding.world)
-            or not valid(stock) or same(stock, binding.detached)
+        local controller = pawn.Controller
+        if pawn:GetFullName() ~= binding.name or (valid(controller) and not same(controller, binding.controller))
+            or not same(owner, binding.owner) or not same(pawn:GetWorld(), binding.world)
+            or not valid(stock) or managed_save(stock)
             or (not same(stock, binding.stock)
                 and not same(valid(binding.host) and binding.host.Save or nil, stock)) then
             error("Could not verify the current stock save for guest teardown", 0)
@@ -117,31 +200,64 @@ function guest_save.clear()
         end
     end
 
-    binding = nil
+    bindings[binding.name] = nil
+    return true
+end
+
+function guest_save.clear(name)
+    if name then return clear_binding(bindings[name]) end
+    local changed, failure = false, nil
+    for _, candidate in ipairs(sorted_names()) do
+        local cleared, result = pcall(clear_binding, bindings[candidate])
+        if cleared then changed = result or changed else failure = failure or result end
+    end
+    if failure then error(failure, 0) end
+    return changed
+end
+
+local function live_binding(binding, state, host, guest, fresh, now)
+    if not guest or state.map ~= binding.map or not same(state.world, binding.world)
+        or not same(host.pawn, binding.host) or not same(host.controller_object, binding.host_controller)
+        or not same(guest.controller_object, binding.controller) or not matches(binding, guest.pawn) then return false end
+    for _, other in ipairs(state.pawns) do
+        if not same(other.pawn, binding.pawn) and valid(other.pawn) and same(other.pawn.Save, binding.detached) then
+            return false
+        end
+    end
+    if fresh then
+        binding.lease_seen = true
+    elseif binding.lease_seen or now - binding.created > initial_lease_seconds then
+        return false
+    end
     return true
 end
 
 function guest_save.sync(state, phase)
-    if not binding then return false end
-    local host, guest = participants(state, phase)
-    if not guest or state.map ~= binding.map or not same(state.world, binding.world)
-        or not same(host.pawn, binding.host) or not same(host.controller_object, binding.host_controller)
-        or not same(guest.controller_object, binding.controller) or not guest_save.matches(guest.pawn) then
-        return guest_save.clear()
+    if not guest_save.active() then return false end
+    local host, guests = participants(state, phase)
+    local fresh, now = heartbeat_fresh(), os.time()
+    local changed = false
+    for _, name in ipairs(sorted_names()) do
+        local binding = bindings[name]
+        local checked, live = pcall(live_binding, binding, state, host, guests and guests[name], fresh, now)
+        if not checked or not live then
+            local was_revoked = binding.revoked
+            local cleared, removed = pcall(clear_binding, binding)
+            if not cleared then binding.revoked = true end
+            changed = changed or not was_revoked or (cleared and removed)
+        end
     end
-
-    if heartbeat_fresh() then
-        binding.lease_seen = true
-    elseif binding.lease_seen or os.time() - binding.created > initial_lease_seconds then
-        return guest_save.clear()
-    end
-    return false
+    return changed
 end
 
-local function exact_guest(state, phase, name)
-    local host, guest = participants(state, phase)
-    if not guest or guest.name ~= name or guest.pawn:GetFullName() ~= name then
+local function exact_guest(state, phase, name, legacy)
+    local host, guests = participants(state, phase)
+    local guest = guests and guests[name]
+    if not guest or not stock_name(name) or guest.pawn:GetFullName() ~= name then
         error("An exact authoritative co-op guest is required", 0)
+    end
+    if legacy and (state.clients ~= 1 or #state.pawns ~= 2) then
+        error("Multiple guests require a verified native connection binding", 0)
     end
     return host, guest
 end
@@ -150,6 +266,63 @@ local function stock_save_objects()
     local statics, class = StaticFindObject(statics_path), StaticFindObject(save_class_path)
     if not valid(statics) or not valid(class) then error("The native guest save class is unavailable", 0) end
     return statics, class
+end
+
+function guest_save.exact_item_context(state, phase, name)
+    if not enabled then return end
+    local host, guest = exact_guest(state, phase, name)
+    local binding = bindings[name]
+    if not binding or not binding.character or
+        not live_binding(binding, state, host, guest, heartbeat_fresh(), os.time()) then return end
+    return guest.pawn, binding.detached
+end
+
+local function flag_value(flags, key)
+    if not valid(flags) or flags:type() ~= "TMap" then error("guest_quest_xp_flags_unavailable", 0) end
+    local found = flags:Contains(key)
+    if found == false then return 0 end
+    if found ~= true then error("guest_quest_xp_flags_unavailable", 0) end
+    -- UE4SS v4.0.0 Find returns a RemoteUnrealParam and errors for absent keys.
+    local entry = flags:Find(key)
+    local value = entry:Get()
+    if type(value) ~= "number" or not math.tointeger(value) or value < -2147483648 or value > max_int32 then
+        error("guest_quest_xp_value_unqualified", 0)
+    end
+    return math.tointeger(value), entry
+end
+
+function guest_save.quest_xp(state, phase, pawn_full_name, delta)
+    if not enabled then error("guest_quest_xp_disabled", 0) end
+    if type(delta) ~= "number" or not math.tointeger(delta) or delta < 0 or delta > max_int32 then
+        error("guest_quest_xp_delta_out_of_range", 0)
+    end
+    delta = math.tointeger(delta)
+    local host, guest = exact_guest(state, phase, pawn_full_name)
+    local binding = bindings[pawn_full_name]
+    if not binding or not live_binding(binding, state, host, guest, heartbeat_fresh(), os.time()) then
+        error("guest_quest_xp_binding_unavailable", 0)
+    end
+    local _, class = stock_save_objects()
+    if not exact_save(binding.detached, class) or same(binding.detached, binding.stock) then
+        error("guest_quest_xp_save_not_detached", 0)
+    end
+    local key = FName(xp_flag, EFindName.FNAME_Find)
+    if key:GetComparisonIndex() == 0 or key:ToString() ~= xp_flag then
+        error("guest_quest_xp_flag_unavailable", 0)
+    end
+    local flags = binding.detached.Flags
+    local before, entry = flag_value(flags, key)
+    if before > max_int32 - delta then error("guest_quest_xp_balance_out_of_range", 0) end
+    local after = before + delta
+    if delta > 0 then
+        local host_before = flag_value(binding.stock.Flags, key)
+        if entry then entry:Set(after) else flags:Add(key, after) end
+        local observed = flag_value(binding.detached.Flags, key)
+        if observed ~= after or not guest_save.matches(guest.pawn) or flag_value(binding.stock.Flags, key) ~= host_before then
+            error("guest_quest_xp_write_unverified", 0)
+        end
+    end
+    return { pawn = pawn_full_name, map = state.map, before = before, after = after }
 end
 
 local function detached_save(statics, class, stock, slot)
@@ -172,8 +345,18 @@ local function detached_save(statics, class, stock, slot)
     return detached, backpack, equipment
 end
 
-local function bind(state, phase, name, raw_health, slot)
-    local host, guest = exact_guest(state, phase, name)
+local function bind(state, phase, name, raw_health, slot, proof)
+    local host, guest = exact_guest(state, phase, name, not proof)
+    local driver, connection, character
+    if proof then
+        if not stock_name(proof.controller) or not stock_name(proof.connection) or not character_uuid(proof.character) then
+            error("An exact native controller, connection, and character identifier are required", 0)
+        end
+        driver, connection = exact_connection(state.world, guest.pawn, guest.controller_object,
+            proof.controller, proof.connection)
+        if not driver then error("The guest's exact authoritative connection could not be verified", 0) end
+        character = proof.character
+    end
     local maximum = guest.pawn.MaxHealth
     if not finite(maximum) or maximum <= 0 then error("Native guest maximum health is unavailable", 0) end
     if slot and not generation_slot(slot) then error("An exact co-op guest save generation is required", 0) end
@@ -182,13 +365,28 @@ local function bind(state, phase, name, raw_health, slot)
     if override and (not finite(health) or health < 0 or health > maximum) then
         error("Saved guest health is outside the pawn's native range", 0)
     end
-    if binding then
-        local prior = binding.frame
-        if guest_save.matches(guest.pawn) and (not slot or (prior and prior.kind == "restored" and prior.slot == slot)) then
+    local existing = bindings[name]
+    if existing then
+        if matches(existing, guest.pawn) and existing.character == character
+            and (not slot or existing.restore_slot == slot) then
             return "native guest save is already bound"
         end
         error("The existing native guest save must be cleared first", 0)
     end
+    if slot and slot_owners[slot] and slot_owners[slot] ~= character then
+        error("The native guest save generation belongs to a different character", 0)
+    end
+    local count = 0
+    for _, other in pairs(bindings) do
+        count = count + 1
+        if character and other.character == character then
+            error("The character already has a managed native save", 0)
+        end
+        if slot and (other.restore_slot == slot or (other.frame and other.frame.slot == slot)) then
+            error("The native guest save generation is in use by a different pawn", 0)
+        end
+    end
+    if count >= max_guests then error("Native guest save capacity reached", 0) end
     if vitals.active() or type(SilverfishNativeDeathReady) ~= "function" or not SilverfishNativeDeathReady()
         or type(SilverfishClearNativeDeathScope) ~= "function" then
         error("Guest save binding requires a ready scoped native bridge", 0)
@@ -198,12 +396,14 @@ local function bind(state, phase, name, raw_health, slot)
     local owner = statics:GetGameInstance(host.pawn)
     local stock = valid(owner) and owner.SaveSlot_Ref or nil
     if not valid(owner) or not same(owner:GetClass(), StaticFindObject(instance_path)) or not exact_save(stock, class)
+        or managed_save(stock)
         or not same(host.pawn.Save, stock) or not same(guest.pawn.Save, stock)
         or not same(statics:GetGameInstance(guest.pawn), owner) then
         error("The active host and guest must share the canonical stock save before detaching", 0)
     end
 
     local detached, backpack, equipment = detached_save(statics, class, stock, slot)
+    if managed_save(detached) then error("The detached native save is already in use", 0) end
     if slot and not finite(detached.PlayerHealth) then error("The native guest save generation has invalid health", 0) end
     if not override then health = slot and math.min(maximum, detached.PlayerHealth) or maximum end
     local was_downed = health <= 0
@@ -212,25 +412,31 @@ local function bind(state, phase, name, raw_health, slot)
     detached.PlayerHealth = health
     if detached.PlayerHealth ~= health then error("Could not restore saved guest health", 0) end
 
-    binding = {
+    local binding = {
         pawn = guest.pawn, controller = guest.controller_object, name = name,
+        character = character, driver = driver, connection = connection,
+        controller_name = proof and proof.controller or nil, connection_name = proof and proof.connection or nil,
         host = host.pawn, host_controller = host.controller_object,
         world = state.world, map = state.map, owner = owner, stock = stock, detached = detached,
         created = os.time(), lease_seen = heartbeat_fresh(), was_downed = was_downed,
+        restore_slot = slot,
         frame = slot and { kind = "restored", slot = slot, backpack = backpack, equipment = equipment } or nil,
     }
+    bindings[name] = binding
     guest.pawn.Save = detached
-    if not guest_save.matches(guest.pawn) then
-        guest_save.clear()
+    if not matches(binding, guest.pawn) then
+        guest_save.clear(name)
         error("Could not verify the detached guest save binding", 0)
     end
+    if slot and character then slot_owners[slot] = character end
     return "native guest save bound"
 end
 
 local function capture(state, phase, name, slot)
     if not generation_slot(slot) then error("An exact co-op guest save generation is required", 0) end
     local _, guest = exact_guest(state, phase, name)
-    if not guest_save.matches(guest.pawn) or binding.map ~= state.map or not same(binding.world, state.world) then
+    local binding = bindings[name]
+    if not matches(binding, guest.pawn) or binding.map ~= state.map or not same(binding.world, state.world) then
         error("The authoritative guest does not have a bound detached stock save", 0)
     end
     local statics, class = stock_save_objects()
@@ -241,12 +447,15 @@ local function capture(state, phase, name, slot)
     local health = detached.PlayerHealth
     if not finite(health) then error("The native guest save health is unavailable", 0) end
     local backpack, equipment = inventory_counts(detached)
-    if statics:DoesSaveGameExist(slot, 0) ~= false then error("The co-op guest save generation already exists", 0) end
+    if slot_owners[slot] or statics:DoesSaveGameExist(slot, 0) ~= false then
+        error("The co-op guest save generation already exists", 0)
+    end
+    if binding.character then slot_owners[slot] = binding.character end
     if statics:SaveGameToSlot(detached, slot, 0) ~= true then error("Stock native guest save serialization failed", 0) end
 
     local verified = statics:LoadGameFromSlot(slot, 0)
     if not exact_save(verified, class) or same(verified, detached) or same(verified, binding.stock)
-        or not guest_save.matches(guest.pawn) then
+        or managed_save(verified) or not matches(binding, guest.pawn) then
         error("The co-op guest save generation failed stock readback", 0)
     end
     local checked_backpack, checked_equipment = inventory_counts(verified)
@@ -259,17 +468,26 @@ end
 
 function guest_save.command(fields, state, phase)
     local command = fields[2]
-    if command ~= "native-guest-bind" and command ~= "native-guest-clear"
+    if command ~= "native-guest-bind" and command ~= "native-guest-bind-exact" and command ~= "native-guest-clear"
         and command ~= "native-guest-save-capture" then return end
     if not enabled then error("Native guest saves are disabled", 0) end
     if command == "native-guest-clear" then
-        if #fields ~= 2 then error("Expected native-guest-clear", 0) end
-        guest_save.clear()
+        if #fields > 3 or (#fields == 3 and not stock_name(fields[3])) then
+            error("Expected native-guest-clear with an optional exact pawn name", 0)
+        end
+        guest_save.clear(fields[3])
         return "native guest save cleared"
     end
     if command == "native-guest-save-capture" then
         if #fields ~= 4 then error("Expected the exact guest pawn name and generation slot", 0) end
         return capture(state, phase, fields[3], fields[4])
+    end
+    if command == "native-guest-bind-exact" then
+        if #fields < 7 or #fields > 8 then
+            error("Expected the exact guest pawn, controller, connection, character, health, and optional slot", 0)
+        end
+        return bind(state, phase, fields[3], fields[7], fields[8],
+            { controller = fields[4], connection = fields[5], character = fields[6] })
     end
     if #fields < 3 or #fields > 5 then
         error("Expected the exact guest pawn name with optional saved health and generation slot", 0)
@@ -277,10 +495,13 @@ function guest_save.command(fields, state, phase)
     return bind(state, phase, fields[3], fields[4], fields[5])
 end
 
-function guest_save.project(state, phase, next_state)
-    if not binding then return end
-    local _, guest = participants(state, phase)
-    if not guest or not guest_save.matches(guest.pawn) then return end
+function guest_save.project(state, phase, next_state, name)
+    if not guest_save.active() then return end
+    local _, guests = participants(state, phase)
+    if not guests then return end
+    if not name and state.clients == 1 then name = next(guests) end
+    local guest, binding = guests[name], bindings[name]
+    if not guest or not matches(binding, guest.pawn) then return end
     if next_state == "downed" then
         binding.was_downed = true
     elseif binding.was_downed then
@@ -295,22 +516,45 @@ function guest_save.project(state, phase, next_state)
 end
 
 function guest_save.restored(pawn)
-    if guest_save.matches(pawn) then binding.was_downed = false end
+    if guest_save.matches(pawn) then bindings[pawn:GetFullName()].was_downed = false end
+end
+
+local function save_row(status_row, kind, binding)
+    return status_row(kind, binding.revoked and "blocked" or "bound", binding.name)
+end
+
+local function frame_row(status_row, kind, binding)
+    local frame = binding.frame
+    if not frame or not matches(binding, binding.pawn) then return end
+    return status_row(kind, frame.kind, frame.slot, binding.map, binding.name, frame.backpack, frame.equipment)
 end
 
 function guest_save.row(status_row)
     if not enabled then return end
-    if binding and not binding.revoked then
-        return status_row("native-guest-save", "bound", binding.name)
-    end
-    return status_row("native-guest-save", binding and "blocked" or "stock")
+    local name = next(bindings)
+    if not name then return status_row("native-guest-save", "stock") end
+    if next(bindings, name) then return status_row("native-guest-save", "multiple") end
+    local binding = bindings[name]
+    if binding.revoked then return status_row("native-guest-save", "blocked") end
+    return save_row(status_row, "native-guest-save", binding)
 end
 
 function guest_save.frame_row(status_row)
-    local frame = binding and binding.frame
-    if not frame or not guest_save.matches(binding.pawn) then return end
-    return status_row("native-guest-save-frame", frame.kind, frame.slot, binding.map, binding.name,
-        frame.backpack, frame.equipment)
+    local name = next(bindings)
+    if name and not next(bindings, name) then
+        return frame_row(status_row, "native-guest-save-frame", bindings[name])
+    end
+end
+
+function guest_save.rows(status_row)
+    local rows = {}
+    for _, name in ipairs(sorted_names()) do
+        local binding = bindings[name]
+        rows[#rows + 1] = save_row(status_row, "native-guest-save-member", binding)
+        local frame = frame_row(status_row, "native-guest-save-member-frame", binding)
+        if frame then rows[#rows + 1] = frame end
+    end
+    return rows
 end
 
 function guest_save.start(bridge, clear_scope)

@@ -1,5 +1,6 @@
 local shop = {}
 local guest_save = require("guest_save")
+local pickup = require("native_pickup")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local map_path = "/Game/Classes/Maps/PlaytestMap_01"
@@ -13,7 +14,8 @@ local item_weight = "Weight_12_11AB9ED547504E78A849A692A36DC938"
 local item_value = "Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"
 local item_never_drop = "NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
-local reservation
+local reservations = {}
+local last
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -39,19 +41,6 @@ end
 
 local function finite(value, maximum)
     return type(value) == "number" and value == value and value >= 0 and value <= maximum
-end
-
-local function enrolled(state, phase, name)
-    if phase ~= "hosting" or state.map ~= map_path or state.clients ~= 1 or #state.pawns ~= 2
-        or not state.local_pawn or not valid(state.world) then
-        error("Native purchases require the active two-player playtest host", 0)
-    end
-    for _, details in ipairs(state.pawns) do
-        if details.kind == "guest" and details.name == name and guest_save.matches(details.pawn) then
-            return details.pawn, state.local_pawn.pawn.Save
-        end
-    end
-    error("The exact purchaser's independent native save is unavailable", 0)
 end
 
 local function merchant(world, id)
@@ -137,12 +126,13 @@ end
 
 local function prepare(state, pawn, stock, id, guid)
     local name = pawn:GetFullName()
+    local reservation = reservations[name]
     if reservation and reservation.state == "prepared" then
-        if reservation.guid == guid and reservation.shop == id and reservation.pawn == name
-            and same(reservation.world, state.world) and same(reservation.save, pawn.Save) then
+        if reservation.guid == guid and reservation.shop == id then
+            last = reservation
             return "native purchase already prepared"
         end
-        error("Another native purchase is already prepared", 0)
+        error("This guest already has a prepared native purchase", 0)
     end
     if reservation and reservation.guid == guid then error("This native purchase already has an outcome", 0) end
     local actor = merchant(state.world, id)
@@ -151,29 +141,46 @@ local function prepare(state, pawn, stock, id, guid)
     end
     local source, offer, count = stock_offer(actor)
     local item = make_unit(actor, source, offer, count)
-    reservation = { state = "prepared", world = state.world, save = pawn.Save, pawn = name,
+    local prepared = { state = "prepared", world = state.world, save = pawn.Save, pawn = name, owner = pawn,
         shop = id, guid = guid, offer = offer, item = item, price = quoted_price(actor, pawn, stock, item.value) }
+    reservations[name], last = prepared, prepared
     return "native Bandage purchase prepared"
 end
 
-local function settle(action, state, pawn, stock, guid)
-    if not reservation or reservation.guid ~= guid or reservation.pawn ~= pawn:GetFullName()
-        or not same(reservation.world, state.world) or not same(reservation.save, pawn.Save) then
+local function settle(action, pawn, stock, guid)
+    local reservation = reservations[pawn:GetFullName()]
+    if not reservation or reservation.guid ~= guid then
         error("The exact native purchase reservation is unavailable", 0)
     end
     if action == "native-shop-abort" then
         if reservation.state == "committed" then error("The native purchase is already committed", 0) end
         reservation.state = "aborted"
+        last = reservation
         return "native purchase reservation released"
     end
-    if reservation.state == "committed" then return "native purchase already committed" end
+    if reservation.state == "committed" then
+        last = reservation
+        return "native purchase already committed"
+    end
     if reservation.state ~= "prepared" then error("The native purchase is not reserved", 0) end
     local item = reservation.item
     local ok, result = SilverfishAppendNativePickup(stock:GetAddress(), pawn:GetAddress(), pawn.Save:GetAddress(),
         guid, item.ammo, item.weight, item.value, item.never_drop)
     if not ok then error("Native guest inventory rejected the purchase (" .. tostring(result) .. ")", 0) end
     reservation.state = "committed"
+    last = reservation
     return "native Bandage purchase placed in the guest inventory"
+end
+
+local function remove_stale(state, phase)
+    for name, reservation in pairs(reservations) do
+        local owner = reservation.owner
+        if phase ~= "hosting" or not same(reservation.world, state.world) or not guest_save.matches(owner)
+            or not same(reservation.save, owner.Save) then
+            reservations[name] = nil
+            if last == reservation then last = nil end
+        end
+    end
 end
 
 function shop.command(fields, state, phase)
@@ -182,25 +189,28 @@ function shop.command(fields, state, phase)
     if not enabled or type(SilverfishAppendNativePickup) ~= "function" then
         error("The staged native merchant is unavailable", 0)
     end
-    local pawn, stock = enrolled(state, phase, fields[3])
-    if reservation and (not same(reservation.world, state.world) or not same(reservation.save, pawn.Save)) then
-        reservation = nil
+    if state.map ~= map_path then error("Native purchases require the active playtest merchant map", 0) end
+    local pawn, stock = pickup.enrolled(state, phase, fields[3])
+    remove_stale(state, phase)
+    local name = pawn:GetFullName()
+    local reservation = reservations[name]
+    if reservation and not same(reservation.owner, pawn) then
+        error("The native purchase reservation belongs to a different pawn", 0)
     end
     if action == "native-shop-prepare" and #fields == 5 then
         return prepare(state, pawn, stock, fields[4], exact_guid(fields[5]))
     end
     if action ~= "native-shop-prepare" and #fields == 4 then
-        return settle(action, state, pawn, stock, exact_guid(fields[4]))
+        return settle(action, pawn, stock, exact_guid(fields[4]))
     end
     error("Invalid native merchant arguments", 0)
 end
 
 function shop.rows(state, phase, status_row)
-    if not enabled or not reservation then return {} end
-    if phase ~= "hosting" or not same(reservation.world, state.world) then
-        reservation = nil
-        return {}
-    end
+    if not enabled then return {} end
+    remove_stale(state, phase)
+    local reservation = last
+    if not reservation then return {} end
     local item = reservation.item
     return { status_row("native-shop-purchase", reservation.state, reservation.guid, reservation.shop,
         reservation.pawn, reservation.offer, reservation.price, bandage_path, item.ammo,

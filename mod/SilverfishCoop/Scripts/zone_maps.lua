@@ -27,7 +27,7 @@ local scientist_shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local forest = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"
 local lake = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
 
-return {
+local maps = {
     [playtest_1] = { fixture = "Level_Exit_BP_C_0", destination = playtest_2 },
     [playtest_2] = { fixture = "Level_Exit_BP_C_0", destination = playtest_1 },
     [crossroads] = {
@@ -170,3 +170,9 @@ return {
         fixture = "Level_Exit_BP_C_242", destination = slums, entrance = "Slum_Refine",
     },
 }
+
+for _, package in ipairs(require("authored_zone_maps")) do
+    maps[package] = maps[package] or { expanded = true }
+end
+
+return maps
