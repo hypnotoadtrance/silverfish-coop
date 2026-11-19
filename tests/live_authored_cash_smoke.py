@@ -69,7 +69,9 @@ async def verify(work: Path, original: Path):
     async def inventory(directory):
         offset, items = None, {}
         for _ in range(32):
-            page = (await action(directory, "native-inventory-list", target=str(offset or 0)))["native_inventory"]
+            position = 0 if offset is None else offset
+            options = {"amount": position} if directory == host_run else {"target": str(position)}
+            page = (await action(directory, "native-inventory-list", **options))["native_inventory"]
             for item in page["items"]:
                 assert item["guid"] not in items, item
                 items[item["guid"]] = item
