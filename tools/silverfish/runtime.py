@@ -316,7 +316,7 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
-        self.gold_offset = 0
+        self.transport_offsets = {"gold": 0, "blue": 0}
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -373,19 +373,21 @@ class Bridge:
                              fields[4].decode("utf-8", errors="replace") if len(fields) == 5 else None))
         return requests
 
-    def native_gold_requests(self) -> list[GoldRequest]:
+    def native_cube_requests(self, cube: str) -> list[GoldRequest]:
+        offset = self.transport_offsets[cube]
+        filename = "native-transport-events" if cube == "gold" else "native-blue-events"
         try:
-            with (self.directory / "native-transport-events").open("rb") as stream:
-                stream.seek(self.gold_offset)
+            with (self.directory / filename).open("rb") as stream:
+                stream.seek(offset)
                 batch = stream.read(4096)
         except OSError:
             return []
         end = batch.rfind(b"\n") + 1
-        self.gold_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        self.transport_offsets[cube] = offset + (end or (len(batch) if len(batch) == 4096 else 0))
         requests = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if len(fields) != 9 or fields[0] != "gold-request" or not fields[1].isascii() \
+            if len(fields) != 9 or fields[0] != f"{cube}-request" or not fields[1].isascii() \
                     or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
             source, pawn, guid, entry = fields[2:6]
@@ -452,10 +454,20 @@ class Bridge:
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],
                         "item": fields[4], "entry": fields[5], "reason": fields[6],
                     }
-                elif fields[0] == "native-gold" and len(fields) == 6:
-                    data["native_gold"] = {
+                elif fields[0] in ("native-gold", "native-blue") and len(fields) == 6:
+                    data[fields[0].replace("-", "_")] = {
                         "operation": fields[1], "state": fields[2], "map": fields[3],
                         "pawn": fields[4], "guid": fields[5],
+                    }
+                elif fields[0] == "native-blue-route" and len(fields) == 5:
+                    data["native_blue_route"] = {
+                        "source": fields[1], "destination": fields[2], "bed": fields[3], "pawn": fields[4],
+                    }
+                elif fields[0] == "native-blue-arrival" and len(fields) == 10:
+                    data["native_blue_arrival"] = {
+                        "destination": fields[1], "bed": fields[2], "actor": fields[3], "placement": fields[4],
+                        "location": [_finite(value) for value in fields[5:8]], "points": int(fields[8]),
+                        "min_safe_rep": int(fields[9]),
                     }
                 elif fields[0] == "native-pickup" and len(fields) == 9:
                     data["native_pickup"] = {

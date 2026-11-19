@@ -68,6 +68,16 @@ class TravelGateTests(unittest.TestCase):
     def test_reverse_route_on_the_other_playtest_map(self):
         self.assertTrue(travel_decision("host", DESTINATION, SOURCE, (), {"host": pawn(zone=DESTINATION)})["allowed"])
 
+    def test_approved_same_map_placement_still_enforces_the_party_radius(self):
+        positions = {"host": pawn(), "guest": pawn((1500, 0, 0))}
+        roles = ("host", "guest")
+        self.assertFalse(travel_decision("host", SOURCE, SOURCE, roles, positions)["allowed"])
+        self.assertTrue(travel_decision("host", SOURCE, SOURCE, roles, positions,
+                                        allow_same_zone=True)["allowed"])
+        positions["guest"] = pawn((1501, 0, 0))
+        blocked = travel_decision("host", SOURCE, SOURCE, roles, positions, allow_same_zone=True)
+        self.assertEqual(blocked["blockers"], [{"id": "guest", "reason": "too_far"}])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, native_gold, native_quest, party, wipe
+from . import link, native_blue, native_gold, native_quest, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .native_pickup import NativePickup, STAGED_SHOPS
@@ -24,7 +24,7 @@ PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin")
 TRANSPORT_FIXTURES = ("stardust", "green", "blue", "red", "gold")
-GOLD_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
+CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
                 "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
 
 
@@ -48,6 +48,18 @@ def _pawn(state: dict, role: str) -> dict:
     health = pawn["health"]
     return {"map": state["map"], "location": pawn["location"],
             "health": max(0, health) if health is not None else None}
+
+
+def pending_cube(state: dict) -> tuple[str, dict] | None:
+    gold = native_gold.ledger(state)["pending"]
+    blue = native_blue.ledger(state)["pending"]
+    if gold and blue:
+        raise ValueError("The campaign has two pending item transports")
+    if gold:
+        return "gold", gold
+    if blue:
+        return "blue", blue
+    return None
 
 
 async def project_players(bridge: Bridge, game: dict, public: dict, *, client: bool) -> None:
@@ -96,7 +108,7 @@ class Host:
         self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         self.party = party.load_party(store.status()["world"].get("party"))
-        native_gold.ledger(self.party)
+        pending_cube(self.party)
         if death_rules is not None:
             if self.party["wipe"]:
                 raise ValueError("Finish the existing party wipe before changing its settings")
@@ -181,6 +193,14 @@ class Host:
         native = self.native_world_state()
         if native:
             world["native_observation"] = native
+        scene = native.get("native_scene", {})
+        level = scene.get("rest_level")
+        if self.native_zones and scene.get("active_map") == self.last_game["map"] and level is not None:
+            rest = native_blue.saved_rest(level, scene.get("bed"))
+            if rest:
+                world["native_rest"] = rest
+            elif level:
+                world.pop("native_rest", None)
         guest = _pawn(self.last_game, "guest")
         if self.native_guest and self.last_game.get("native_guest_save", {}).get("pawn") != self.guest_pawn:
             guest = {}
@@ -208,8 +228,10 @@ class Host:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
         view["native_quests"] = self.party.get("native_quests", {})
-        if pending := self.party.get("gold_transport", {}).get("pending"):
-            view["pending_item_travel"] = {"source": pending["source"], "destination": pending["destination"]}
+        for cube in ("gold", "blue"):
+            if pending := self.party.get(f"{cube}_transport", {}).get("pending"):
+                view["pending_item_travel"] = {"item": cube, "source": pending["source"],
+                                               "destination": pending["destination"]}
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
         return view
@@ -251,14 +273,15 @@ class Host:
                 pawns[character_id] = details
         return pawns
 
-    def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False) -> dict | None:
+    def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False,
+                       staying: bool = False) -> dict | None:
         if self.party["wipe"] and not respawning:
             return {"ok": False, "error": "wipe_in_progress"}
         if not respawning and any(actor in self.party["pending_spawns"] for actor in roles.values()):
             return {"ok": False, "error": "respawn_in_progress"}
         current = self.last_game.get("map", "")
         gate = travel_decision("host", current, destination, ("host",) if respawning else tuple(roles.values()),
-                               self.authoritative_pawns(roles), allowed_maps=self.allowed_maps)
+                               self.authoritative_pawns(roles), allowed_maps=self.allowed_maps, allow_same_zone=staying)
         if not gate["allowed"]:
             return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
         return None
@@ -280,20 +303,23 @@ class Host:
             self.transitioning = False
 
     async def switch_zone(self, bridge: Bridge, transport, destination: str, entrance: str | None,
-                          roles: dict[str, str], *, gold_guid: str | None = None) -> dict:
+                          roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None) -> dict:
         current = self.last_game["map"]
         guest = _pawn(self.last_game, "guest")
         self.control.event("zone_travel_requested", source=current, destination=destination)
-        if self.native_guest and guest.get("health") is not None and not gold_guid:
+        if self.native_guest and guest.get("health") is not None and not (gold_guid or blue_plan):
             self.checkpoint()
         try:
-            await bridge.command("travel", destination, *((gold_guid,) if gold_guid else ()))
+            authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
+            await bridge.command("travel", destination, *authorization)
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,
             )
             await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
-            if entrance:
+            if blue_plan:
+                observed = await self.blue_arrival(bridge, blue_plan)
+            elif entrance:
                 observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
                 if observed.get("map") != destination or observed.get("state") != "hosting":
                     raise RuntimeError("The authored arrival was acknowledged in the wrong world")
@@ -308,6 +334,8 @@ class Host:
             if self.guest:
                 self.guest["restore"] = {"health": guest.get("health")} if self.native_guest else {}
             candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
+            if blue_plan:
+                candidate = native_blue.arrive(self.party, blue_plan["guid"], observed["map"])
             revision = self.checkpoint(candidate)
             if candidate is not None:
                 self.party = candidate
@@ -319,21 +347,22 @@ class Host:
         return {"ok": True, "map": destination, "entrance": entrance,
                 "travel_epoch": self.zone_epoch, "revision": revision}
 
-    async def checked_gold(self, bridge: Bridge, operation: str, guid: str) -> tuple[dict, dict]:
+    async def checked_cube(self, bridge: Bridge, cube: str, operation: str, guid: str) -> tuple[dict, dict]:
         game = self.last_game
         area = game.get("map")
         pawn = game.get("pawns", {}).get("local", {}).get("name")
+        allowed = (CROSSROADS, GOLD_NEXUS) if cube == "gold" else AUTHORED_MAPS
         if (not native_gold.valid_guid(guid) or game.get("state") != "hosting" or not pawn
-                or area not in (CROSSROADS, GOLD_NEXUS) or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
-            raise ValueError("Golden Cube operations require a current host pawn and an exact item GUID")
+                or area not in allowed or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
+            raise ValueError("Cube operations require a current host pawn and an exact item GUID")
         write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
-        snapshot = await bridge.command(f"native-gold-{operation}", pawn, guid, timeout=4)
-        row = snapshot.get("native_gold", {})
+        snapshot = await bridge.command(f"native-{cube}-{operation}", pawn, guid, timeout=4)
+        row = snapshot.get(f"native_{cube}", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or snapshot.get("pawns", {}).get("local", {}).get("name") != pawn
                 or row.get("operation") != operation or row.get("map") != area or row.get("pawn") != pawn
-                or row.get("guid") != guid or row.get("state") not in GOLD_RESULTS[operation]):
-            raise RuntimeError("The game did not acknowledge the exact Golden Cube operation")
+                or row.get("guid") != guid or row.get("state") not in CUBE_RESULTS[operation]):
+            raise RuntimeError("The game did not acknowledge the exact cube operation")
         return snapshot, row
 
     async def activate_gold(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
@@ -346,7 +375,7 @@ class Host:
         history = native_gold.ledger(self.party)
         if request.guid in history["spent"]:
             return {"ok": False, "error": "gold_already_spent"}
-        if history["pending"]:
+        if pending_cube(self.party):
             return {"ok": False, "error": "gold_travel_pending"}
         if self.party["players"]["host"]["downed"]:
             return {"ok": False, "error": "actor_downed"}
@@ -354,7 +383,7 @@ class Host:
             return refusal
         self.transitioning = True
         try:
-            snapshot, item = await self.checked_gold(bridge, "inspect", request.guid)
+            snapshot, item = await self.checked_cube(bridge, "gold", "inspect", request.guid)
             if item["state"] != "present":
                 return {"ok": False, "error": "gold_item_unavailable"}
             self.last_game = snapshot
@@ -374,7 +403,7 @@ class Host:
             if (not pending or self.last_game.get("map") != pending["source"]
                     or not self.native_zones or pending["destination"] not in self.allowed_maps):
                 raise RuntimeError("Cannot recover Golden Cube travel from the current campaign map")
-            snapshot, item = await self.checked_gold(bridge, "debit", pending["guid"])
+            snapshot, item = await self.checked_cube(bridge, "gold", "debit", pending["guid"])
             if item["state"] != "removed" and not recovery:
                 raise RuntimeError("The committed Golden Cube could not be removed from the active inventory")
             self.last_game = snapshot
@@ -388,6 +417,112 @@ class Host:
             self.control.event("gold_travel_recovered" if recovery else "gold_travel_completed", guid=pending["guid"],
                                debit=item["state"], map=result["map"], revision=result["revision"])
         return result
+
+    async def blue_route(self, bridge: Bridge, operation: str, *arguments: str) -> tuple[dict, dict]:
+        game = self.last_game
+        source = game.get("map")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        if not pawn or game.get("state") != "hosting" or source not in self.allowed_maps:
+            raise RuntimeError("The authoritative Blue Cube routing pawn is unavailable")
+        snapshot = await bridge.command(operation, pawn, *arguments, timeout=4)
+        route = snapshot.get("native_blue_route", {})
+        if (route.get("source") != source or route.get("pawn") != pawn or snapshot.get("map") != source
+                or snapshot.get("state") != "hosting"
+                or not native_blue.valid_rest(source, route.get("destination"), route.get("bed"))):
+            raise RuntimeError("The host's exact stock rest destination could not be verified")
+        return snapshot, route
+
+    async def blue_arrival(self, bridge: Bridge, pending: dict, *, staying: bool = False) -> dict:
+        destination, bed = pending["destination"], pending["bed"]
+        authorization = (pending["guid"],) if staying else ()
+        snapshot = await bridge.command("native-blue-arrival", destination, bed or "-", *authorization, timeout=6)
+        proof = snapshot.get("native_blue_arrival", {})
+        if (proof.get("destination") != destination or snapshot.get("map") != destination
+                or snapshot.get("state") != "hosting" or not proof.get("actor")
+                or not native_blue.valid_rest(pending["source"], destination, proof.get("bed"))
+                or (bed and proof["bed"] != bed)
+                or proof.get("placement") not in ("arrow", "alternate")
+                or len(proof.get("location", [])) != 3 or any(axis is None for axis in proof["location"])):
+            raise RuntimeError("The verified Blue Cube rest placement did not match the committed destination")
+        return snapshot
+
+    async def activate_blue(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
+        if (not self.native_zones or self.stopping or self.transitioning or request.source not in AUTHORED_MAPS
+                or self.last_game.get("map") != request.source or self.last_game.get("state") != "hosting"
+                or request.entry not in native_gold.INVENTORY_ENTRIES or not native_gold.valid_guid(request.guid)
+                or self.last_game.get("pawns", {}).get("local", {}).get("name") != request.pawn):
+            return {"ok": False, "error": "blue_scope_unavailable"}
+        if request.guid in native_blue.ledger(self.party)["spent"]:
+            return {"ok": False, "error": "blue_already_spent"}
+        if pending_cube(self.party):
+            return {"ok": False, "error": "item_travel_pending"}
+        if self.party["players"]["host"]["downed"]:
+            return {"ok": False, "error": "actor_downed"}
+        self.transitioning = True
+        try:
+            _, item = await self.checked_cube(bridge, "blue", "inspect", request.guid)
+            if item["state"] != "present":
+                return {"ok": False, "error": "blue_item_unavailable"}
+            snapshot, route = await self.blue_route(bridge, "native-blue-route")
+            if snapshot.get("pawns", {}).get("local", {}).get("name") != request.pawn:
+                return {"ok": False, "error": "blue_scope_unavailable"}
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            destination = route["destination"]
+            if refusal := self.travel_refusal(destination, self.roles(), staying=destination == request.source):
+                return refusal
+            candidate = native_blue.begin(self.party, request.guid, request.source, destination, route["bed"])
+            self.checkpoint(candidate)
+            self.party = candidate
+            return await self.resume_blue(bridge, transport, recovery=False)
+        finally:
+            self.transitioning = False
+
+    async def resume_blue(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
+        pending = native_blue.ledger(self.party)["pending"]
+        try:
+            if (not pending or self.last_game.get("map") != pending["source"] or not self.native_zones
+                    or pending["destination"] not in self.allowed_maps):
+                raise RuntimeError("Cannot recover Blue Cube travel from the current campaign map")
+            snapshot, item = await self.checked_cube(bridge, "blue", "debit", pending["guid"])
+            if item["state"] != "removed" and not recovery:
+                raise RuntimeError("The committed Blue Cube could not be removed from the active inventory")
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            roles = self.roles()
+            if pending["destination"] != pending["source"]:
+                result = await self.switch_zone(bridge, transport, pending["destination"], "Bed", roles,
+                                                blue_plan=pending)
+            else:
+                result = await self.place_blue_party(bridge, pending, roles)
+        except (OSError, RuntimeError, ValueError):
+            self.stopping = True
+            raise
+        with contextlib.suppress(OSError):
+            self.control.event("blue_travel_recovered" if recovery else "blue_travel_completed", guid=pending["guid"],
+                               debit=item["state"], arrival=self.last_game.get("native_blue_arrival"), **result)
+        return result
+
+    async def place_blue_party(self, bridge: Bridge, pending: dict, roles: dict[str, str]) -> dict:
+        self.last_game = await self.blue_arrival(bridge, pending, staying=True)
+        self.last_seen = time.monotonic()
+        if "guest" in roles:
+            guest = self.last_game.get("pawns", {}).get("guest", {})
+            if not guest or guest.get("name") != self.guest_pawn:
+                raise RuntimeError("The active guest could not be verified for the Blue Cube arrival")
+            restored = await self.place_new_guest(bridge, guest)
+            if restored:
+                self.last_game = restored
+                self.last_seen = time.monotonic()
+            pawns = self.authoritative_pawns(roles)
+            host, peer = pawns.get("host"), pawns.get(roles["guest"])
+            if not host or not peer or math.dist(host["location"], peer["location"]) > party.INTERACT_RANGE:
+                raise RuntimeError("The guest could not be placed by the host's verified rest point")
+        candidate = native_blue.arrive(self.party, pending["guid"], self.last_game["map"])
+        revision = self.checkpoint(candidate)
+        self.party = candidate
+        return {"ok": True, "map": self.last_game["map"], "entrance": "Bed", "travel_epoch": self.zone_epoch,
+                "revision": revision, "in_zone": True}
 
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
@@ -753,11 +888,15 @@ class Host:
                 elif action == "native-transport-probe" and self.native_zones and self.fixtures:
                     result = await probe_transport(bridge, request.get("target"))
                 elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
-                                 "native-gold-action-probe")
+                                 "native-gold-action-probe", "native-blue-seed", "native-blue-inspect",
+                                 "native-blue-use-probe")
                       and self.native_zones and self.fixtures and GOLD_NEXUS in self.allowed_maps):
-                    operation = action.removeprefix("native-gold-")
-                    _, item = await self.checked_gold(bridge, operation, request.get("target"))
-                    result = {"native_gold": item}
+                    _, cube, operation = action.split("-", 2)
+                    _, item = await self.checked_cube(bridge, cube, operation, request.get("target"))
+                    result = {f"native_{cube}": item}
+                elif action == "native-blue-rest-fixture" and self.native_zones and self.fixtures:
+                    _, route = await self.blue_route(bridge, action)
+                    result = {"native_blue_route": route}
                 elif action == "walk":
                     await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
                     result = {"movement_scheduled": True}
@@ -833,17 +972,18 @@ class Host:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
-        for request in bridge.native_gold_requests():
-            try:
-                result = await self.activate_gold(bridge, transport, request)
-            except (OSError, RuntimeError, ValueError) as error:
-                self.control.event("native_gold_request_failed", sequence=request.sequence,
-                                   source=request.source, guid=request.guid, error=str(error))
-                if self.stopping:
-                    raise
-                result = {"ok": False, "error": str(error)}
-            self.control.event("native_gold_request", sequence=request.sequence, source=request.source,
-                               guid=request.guid, entry=request.entry, position=request.location, result=result)
+        for cube, activate in (("gold", self.activate_gold), ("blue", self.activate_blue)):
+            for request in bridge.native_cube_requests(cube):
+                try:
+                    result = await activate(bridge, transport, request)
+                except (OSError, RuntimeError, ValueError) as error:
+                    self.control.event(f"native_{cube}_request_failed", sequence=request.sequence,
+                                       source=request.source, guid=request.guid, error=str(error))
+                    if self.stopping:
+                        raise
+                    result = {"ok": False, "error": str(error)}
+                self.control.event(f"native_{cube}_request", sequence=request.sequence, source=request.source,
+                                   guid=request.guid, entry=request.entry, position=request.location, result=result)
         for sequence, source, destination, entrance in bridge.native_zone_requests():
             if self.last_game.get("state") != "hosting" or self.last_game.get("map") != source:
                 continue
@@ -920,9 +1060,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
-        pending = native_gold.ledger(party.load_party(old_world.get("party")))["pending"]
-        if pending and (not authored or entry_map != pending["source"]):
-            raise ValueError("The campaign's Golden Cube travel does not match its saved zone")
+        pending = pending_cube(party.load_party(old_world.get("party")))
+        if pending and (not authored or entry_map != pending[1]["source"]):
+            raise ValueError("The campaign's committed item travel does not match its saved zone")
         process = transport = None
         controller = None
         result = "stopped"
@@ -953,8 +1093,20 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
+            rest = old_world.get("native_rest")
+            if authored and isinstance(rest, dict):
+                qualified_rest = native_blue.saved_rest(rest.get("destination"), rest.get("bed"))
+                if not qualified_rest:
+                    raise ValueError("The campaign's saved native rest point is invalid")
+                restored, route = await controller.blue_route(bridge, "native-blue-rest-restore",
+                                                              qualified_rest["destination"], qualified_rest["bed"])
+                if route["destination"] != qualified_rest["destination"] or route["bed"] != qualified_rest["bed"]:
+                    raise RuntimeError("The saved native rest point did not restore")
+                controller.last_game = restored
+                controller.last_seen = time.monotonic()
             if pending:
-                await controller.resume_gold(bridge, None, recovery=True)
+                resume = controller.resume_gold if pending[0] == "gold" else controller.resume_blue
+                await resume(bridge, None, recovery=True)
             transport = await link.start_host(bind, port, "127.0.0.1", internal_port, identity,
                                               controller.admit, on_disconnect=controller.disconnected,
                                               on_request=controller.guest_request)

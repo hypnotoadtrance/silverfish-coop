@@ -69,6 +69,7 @@ def travel_decision(
     pawns: dict,
     *,
     allowed_maps: frozenset[str] = PLAYTEST_MAPS,
+    allow_same_zone: bool = False,
 ) -> TravelDecision:
     """Return a deterministic travel decision from host-authoritative pawn positions.
 
@@ -82,7 +83,7 @@ def travel_decision(
         return _deny(HOST_ID, "unknown_source")
     if not isinstance(destination, str) or destination not in allowed_maps:
         return _deny(HOST_ID, "unknown_destination")
-    if source == destination:
+    if source == destination and not allow_same_zone:
         return _deny(HOST_ID, "same_zone")
 
     host_position, host_issue = _position_in_zone(pawns.get(HOST_ID), source)

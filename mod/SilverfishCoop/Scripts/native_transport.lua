@@ -254,4 +254,13 @@ function transport.authorize_gold_travel(guid, state, phase)
     return true
 end
 
+function transport.scoped_host(state, phase)
+    local host = enabled and scoped and host_snapshot(state, phase) or nil
+    return host, host ~= nil and heartbeat_fresh()
+end
+
+transport.valid_guid = exact_guid
+transport.load_class = load_class
+transport.scratch_manager = scratch_manager
+
 return transport

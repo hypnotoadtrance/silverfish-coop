@@ -3,6 +3,8 @@ if not bridge or bridge == "" then return end
 
 local guest_save = require("guest_save")
 local loot = require("loot")
+local native_bed = require("native_bed")
+local native_blue = require("native_blue")
 local native_death = require("native_death")
 local native_hazard = require("native_hazard")
 local native_inventory = require("native_inventory")
@@ -19,6 +21,10 @@ local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
+local blue_destinations = {
+    ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P"] = true,
+    ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true,
+}
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local stock_save_probes = {
     ["native-death-probe"] = true,
@@ -43,6 +49,7 @@ local acknowledged_result = ""
 local acknowledged_message = ""
 local sequence = 0
 local tick_queued = false
+local last_blue_route, last_blue_arrival
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -296,8 +303,9 @@ local function run_command(fields, state, current_phase)
         expected_map = argument
         return "listen travel requested"
     elseif command == "travel" then
+        local blue = #fields == 5 and fields[4] == "blue" and blue_destinations[argument]
         if not supported_map(argument) or argument == state.map
-            or #fields ~= (argument == gold_nexus and 4 or 3) then
+            or (not blue and #fields ~= (argument == gold_nexus and 4 or 3)) then
             error("Expected a different qualified co-op map", 0)
         end
         if role ~= "host" or current_phase ~= "hosting" then
@@ -306,11 +314,44 @@ local function run_command(fields, state, current_phase)
         if argument == gold_nexus and not native_transport.authorize_gold_travel(fields[4], state, current_phase) then
             error("Gold Nexus travel requires the exact host inventory debit", 0)
         end
+        if blue and not native_blue.authorize_travel(fields[5], state, current_phase) then
+            error("Blue Cube travel requires the exact host inventory debit", 0)
+        end
         guest_save.clear()
         vitals.reset()
         open_level(state.controller, argument, "listen")
         expected_map = argument
         return "zone travel requested"
+    elseif command == "native-blue-route" or command == "native-blue-rest-fixture" or command == "native-blue-rest-restore" then
+        last_blue_route = nil
+        local host = native_transport.scoped_host(state, current_phase)
+        local restoring = command == "native-blue-rest-restore"
+        if not authored_routes or #fields ~= (restoring and 5 or 3) or not host or host.name ~= argument then
+            error("Blue Cube routing requires the exact authoritative host pawn", 0)
+        end
+        if command == "native-blue-rest-fixture" then
+            if os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" then error("Fixture host required", 0) end
+            last_blue_route = native_bed.select_fixture_rest(state, current_phase)
+        elseif restoring then
+            last_blue_route = native_bed.restore(state, current_phase, fields[4], fields[5])
+        else
+            last_blue_route = native_bed.source(state, current_phase)
+        end
+        last_blue_route.pawn = host.name
+        return "qualified stock rest route"
+    elseif command == "native-blue-arrival" then
+        last_blue_arrival = nil
+        if not authored_routes or (#fields ~= 4 and #fields ~= 5) or argument ~= state.map
+            or not blue_destinations[argument] then
+            error("Blue Cube arrival requires the qualified current world", 0)
+        end
+        if #fields == 5 and not native_blue.authorize_travel(fields[5], state, current_phase) then
+            error("Blue Cube movement requires the exact host inventory debit", 0)
+        end
+        local fallback = fields[4] == "-"
+        local itinerary = {destination = argument, bed_id = fallback and "" or fields[4], fallback = fallback}
+        last_blue_arrival = native_bed.arrival(state, current_phase, itinerary)
+        return "qualified Blue Cube arrival"
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -359,6 +400,7 @@ local function run_command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
+        or native_blue.command(fields, state, current_phase)
         or loot.command(fields, state, current_phase)
         or vitals.command(fields, state, current_phase)
         or wallet.command(fields, state, current_phase)
@@ -415,6 +457,16 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        if last_blue_route and last_blue_route.source == state.map then
+            local route = last_blue_route
+            rows[#rows + 1] = status_row("native-blue-route", route.source, route.destination, route.bed_id, route.pawn)
+        end
+        if last_blue_arrival and last_blue_arrival.destination == state.map then
+            local arrival = last_blue_arrival
+            rows[#rows + 1] = status_row("native-blue-arrival", arrival.destination, arrival.bed_id, arrival.actor,
+                arrival.placement, arrival.x, arrival.y, arrival.z, arrival.points, arrival.min_safe_rep)
+        end
         for _, row in ipairs(native_death.rows(state, current_phase, status_row)) do
             rows[#rows + 1] = row
         end
@@ -471,6 +523,7 @@ local function tick()
     native_death.sync(state, current_phase)
     native_zone.sync(state, current_phase)
     native_transport.sync(state, current_phase)
+    native_blue.sync(state, current_phase)
     local fields = read_command()
     if fields then
         local was_guest_bound = guest_save.active()
@@ -478,7 +531,8 @@ local function tick()
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
-        if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival" or fields[2] == "restore" then
+        if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival"
+            or fields[2] == "native-blue-arrival" or fields[2] == "restore" then
             state, current_phase = observe_session()
             if not state then return end
         else
