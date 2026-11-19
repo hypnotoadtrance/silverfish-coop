@@ -809,6 +809,16 @@ class Bridge:
                     data["native_zone_wall"] = {
                         "state": fields[1], "host_open": fields[2] == "1", "slot": fields[3],
                         "outcome": fields[4], "remaining_uu": _finite(fields[5]), "failure": fields[6],
+                elif (fields[0] == "player-local-input" and len(fields) == 15
+                      and fields[2] in ("standing", "downed") and fields[3] in ("verified", "waiting")
+                      and fields[14] in ("not_applicable", "clear", "open", "closed", "waiting")
+                      and all(value in ("0", "1", "-") for value in fields[4:14])):
+                    flags = ("stock_context", "reduced_context", "look", "move", "jump", "inventory",
+                             "primary", "secondary", "reload", "interact")
+                    data["player_local_input"] = {"pawn": fields[1], "state": fields[2], "verification": fields[3],
+                                                  "host_inventory": fields[14],
+                                                  **{key: {"0": False, "1": True, "-": None}[value]
+                                                     for key, value in zip(flags, fields[4:14], strict=True)}}
                     }
                 elif fields[0] == "native-door" and len(fields) == 4:
                     data["native_door"] = {
@@ -1489,6 +1499,9 @@ class Bridge:
             if self.process.poll() is not None:
                 raise RuntimeError(f"Staged game exited with code {self.process.returncode}")
             snapshot = self.snapshot()
+                local_input = data.get("player_local_input")
+                if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):
+                    del data["player_local_input"]
             if snapshot is not None and condition(snapshot):
                 return snapshot
             await asyncio.sleep(0.15)

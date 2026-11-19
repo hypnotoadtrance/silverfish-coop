@@ -9,8 +9,17 @@ local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local input_subsystem_path = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
 local subsystem_library_path = "/Script/Engine.Default__SubsystemBlueprintLibrary"
 local gameplay_input_path = "/Game/Classes/Player/Player_Inputs/IMC_FP.IMC_FP"
+local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
+local inventory_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local inventory_fixture_map = "/Game/Classes/Maps/PlaytestMap_01"
 local vector_zero = { X = 0, Y = 0, Z = 0 }
-local mapping_options = { bIgnoreAllPressedKeysUntilRelease = true }
+local mapping_options = { bIgnoreAllPressedKeysUntilRelease = true, bForceImmediately = true }
+local input_labels = {
+    IA_Look = "look", IA_Jump = "jump", IA_Inventory = "inventory", IA_Use_Primary = "primary",
+    IA_Use_Secondary = "secondary", IA_Reload = "reload", IA_Interact = "interact",
+}
+local input_fields = { "look", "move", "jump", "inventory", "primary", "secondary", "reload", "interact" }
 local downed_movement_fields = {
     "MaxWalkSpeed", "MaxWalkSpeedCrouched", "JumpZVelocity",
 }
@@ -26,6 +35,8 @@ local markers = {}
 local marker_frame
 local location_markers = {}
 local local_player
+local local_input_status
+local restoring_gate
 local walking
 local input_file
 local input_sequence = 0
@@ -149,47 +160,184 @@ local function prepare_mapping_gate(controller)
     end
     local subsystem = library:GetLocalPlayerSubSystemFromPlayerController(controller, subclass)
     if not valid(subsystem) or not valid(controller.PlayerInput) then return nil end
-    local contexts = controller.PlayerInput.AppliedInputContexts
+    local player_input = controller.PlayerInput
+    local contexts = player_input.AppliedInputContexts
     if not contexts:Contains(original) then return nil end
     local priority = contexts:Find(original):get()
     local clone = StaticConstructObject(original:GetClass(), controller, 0, 0x40, 0, false, false, original)
-    if not valid(clone) or #clone.Mappings ~= #original.Mappings then return nil end
+    if not valid(clone) or same(original, clone) or #clone.Mappings ~= #original.Mappings then return nil end
 
-    local blocked = {}
+    local allowed, blocked = {}, {}
     for index = 1, #clone.Mappings do
         local action = clone.Mappings[index].Action
-        if valid(action) and not retain_mapping(action) then blocked[action:GetAddress()] = action end
+        if not valid(action) then return nil end
+        local group = retain_mapping(action) and allowed or blocked
+        group[action:GetAddress()] = action
     end
     local original_count = #original.Mappings
     for _, action in pairs(blocked) do clone:UnmapAllKeysFromAction(action) end
     if #clone.Mappings < 1 or #clone.Mappings >= original_count or #original.Mappings ~= original_count then
         return nil
     end
-    return { subsystem = subsystem, original = original, clone = clone, priority = priority }
+    return { subsystem = subsystem, original = original, clone = clone, priority = priority,
+        controller = controller, player_input = player_input, allowed = allowed, blocked = blocked }
 end
 
-local function apply_mapping_gate(details)
-    if not valid(details.controller_object) or not details.controller_object:IsLocalController() then return nil end
-    local gate = prepare_mapping_gate(details.controller_object)
-    if not gate then return nil end
-    gate.subsystem:AddMappingContext(gate.clone, gate.priority, mapping_options)
-    local ok, err = pcall(function()
-        gate.subsystem:RemoveMappingContext(gate.original, mapping_options)
-    end)
-    if not ok then
-        gate.subsystem:RemoveMappingContext(gate.clone, mapping_options)
-        error(err, 0)
+local function apply_mapping_gate(gate)
+    local contexts = gate.player_input.AppliedInputContexts
+    if not contexts:Contains(gate.clone) then
+        gate.subsystem:AddMappingContext(gate.clone, gate.priority, mapping_options)
     end
-    return gate
+    if contexts:Contains(gate.original) then gate.subsystem:RemoveMappingContext(gate.original, mapping_options) end
 end
 
 local function remove_mapping_gate(gate)
-    if gate and valid(gate.subsystem) then
-        if valid(gate.original) then
-            gate.subsystem:AddMappingContext(gate.original, gate.priority, mapping_options)
-        end
+    if not valid(gate.subsystem) then return true end
+    if not valid(gate.player_input) or not valid(gate.controller) or not same(gate.controller.PlayerInput, gate.player_input) then
         if valid(gate.clone) then gate.subsystem:RemoveMappingContext(gate.clone, mapping_options) end
+        return true
     end
+    local contexts = gate.player_input.AppliedInputContexts
+    if not contexts:Contains(gate.original) then gate.subsystem:AddMappingContext(gate.original, gate.priority, mapping_options) end
+    if contexts:Contains(gate.clone) then gate.subsystem:RemoveMappingContext(gate.clone, mapping_options) end
+    return contexts:Contains(gate.original) and not contexts:Contains(gate.clone)
+end
+
+local function observe_mapping(controller, gate)
+    local original = StaticFindObject(gameplay_input_path)
+    local player_input = controller.PlayerInput
+    if not valid(original) or not valid(player_input) then return end
+    local contexts, mappings = player_input.AppliedInputContexts, player_input.EnhancedActionMappings
+    if #mappings > 512 then return end
+    local active, flags = {}, {}
+    for _, name in ipairs(input_fields) do flags[name] = false end
+    for index = 1, #mappings do
+        local action = mappings[index].Action
+        if valid(action) then
+            active[action:GetAddress()] = true
+            local name = action:GetFName():ToString()
+            local label = input_labels[name] or (name:match("^IA_Move") and "move")
+            if label then flags[label] = true end
+        end
+    end
+    return { stock = contexts:Contains(original), reduced = gate ~= nil and contexts:Contains(gate.clone),
+        flags = flags, active = active }
+end
+
+local function verified_mapping(observed, gate, downed)
+    if not observed or not observed.flags.look or not observed.flags.move then return false end
+    if not downed then
+        if not observed.stock or observed.reduced then return false end
+        for _, label in ipairs(input_fields) do if not observed.flags[label] then return false end end
+        return true
+    end
+    if not gate or observed.stock or not observed.reduced then return false end
+    for address in pairs(gate.allowed) do if not observed.active[address] then return false end end
+    for address in pairs(gate.blocked) do if observed.active[address] then return false end end
+    for _, label in ipairs(input_fields) do
+        if label ~= "look" and label ~= "move" and observed.flags[label] then return false end
+    end
+    return true
+end
+
+local function host_inventory_state(controller, pawn, record)
+    local stack = controller.MenuStack
+    local count = stack:GetArrayNum()
+    local clear = record and record.inventory_closed and "closed" or "clear"
+    if count == 0 then return clear end
+    local class = StaticFindObject(inventory_path)
+    if not valid(class) or count > 32 then return "waiting" end
+    local menu = stack[count]
+    if count ~= 1 or not valid(menu) or not same(menu:GetClass(), class) then
+        for index = 1, count do
+            local widget = stack[index]
+            if valid(widget) and same(widget:GetClass(), class) then return "waiting" end
+        end
+        return clear
+    end
+    if not same(menu:GetOwningPlayer(), controller) or not same(menu:GetOwningPlayerPawn(), pawn)
+        or not menu:IsInViewport() then return "waiting" end
+    if not record then return "open", menu end
+    local result = {}
+    controller:CloseMenu(result)
+    if result.Success ~= true or controller.MenuStack:GetArrayNum() ~= 0
+        or (valid(menu) and menu:IsInViewport()) then return "waiting" end
+    record.inventory_closed = true
+    return "closed"
+end
+
+local function local_input_controller(state, phase, details)
+    local controller, pawn = state.controller, details and details.pawn
+    if not active(phase) or not valid(pawn) or not valid(controller)
+        or not same(details.controller_object, controller) or not same(pawn.Controller, controller)
+        or not same(controller.Pawn, pawn) or not same(controller:GetWorld(), state.world)
+        or not same(pawn:GetWorld(), state.world) or not same(controller:GetClass(), StaticFindObject(controller_path))
+        or not same(pawn:GetClass(), StaticFindObject(player_path))
+        or controller:IsActorBeingDestroyed() or pawn:IsActorBeingDestroyed()
+        or not controller:IsLocalController() or not pawn:IsLocallyControlled() then return end
+    return controller, pawn
+end
+
+local function open_host_inventory_fixture(fields, state, phase)
+    local details = state.local_pawn
+    local controller, pawn = local_input_controller(state, phase, details)
+    if not inventory_fixture or #fields ~= 3 or phase ~= "hosting" or state.map ~= inventory_fixture_map
+        or not state.listening or state.server ~= false or not controller or not controller:HasAuthority()
+        or not pawn:HasAuthority() or details.name ~= fields[3] or pawn:GetFullName() ~= fields[3]
+        or desired[fields[3]] or pawn.Dead ~= false or controller.Loading ~= false
+        or controller.MenuStack:GetArrayNum() ~= 0 then error("The exact standing staged host inventory is unavailable", 0) end
+    local class = StaticFindObject(inventory_path)
+    if not valid(class) then
+        LoadAsset(inventory_path)
+        class = StaticFindObject(inventory_path)
+    end
+    if not valid(class) then error("The stock host inventory class is unavailable", 0) end
+    local created = {}
+    controller:OpenMenu(class, created)
+    local status, widget = host_inventory_state(controller, pawn)
+    if status ~= "open" or not same(widget, created.CreatedMenu) then
+        error("mutation_unverified_stock_host_inventory_fixture", 0)
+    end
+    return "exact stock host inventory active"
+end
+
+local function sync_local_input(state, phase)
+    local restore = restoring_gate
+    if restore then
+        local ok, complete = pcall(remove_mapping_gate, restore)
+        if ok and complete then restoring_gate = nil end
+    end
+    local_input_status = nil
+    local details = local_player
+    local controller, pawn = local_input_controller(state, phase, details)
+    if not controller then return end
+    local record, downed_request = applied[details.name], desired[details.name]
+    local downed = downed_request ~= nil
+    if record then
+        record.input_verified = false
+        if record.gate and (not same(record.gate.controller, controller)
+            or not same(record.gate.player_input, controller.PlayerInput)) then
+            restoring_gate, record.gate = record.gate, nil
+        end
+        if not restoring_gate then
+            pcall(function()
+                if not record.gate then record.gate = prepare_mapping_gate(controller) end
+                if record.gate then apply_mapping_gate(record.gate) end
+            end)
+        end
+    end
+    local gate = record and record.gate or restoring_gate
+    local ok, observed = pcall(observe_mapping, controller, gate)
+    if not ok then observed = nil end
+    local verified = verified_mapping(observed, gate, downed)
+    if record then record.input_verified = verified end
+    local inventory = "not_applicable"
+    if phase == "hosting" and state.server == false and controller:HasAuthority() and pawn:HasAuthority() then
+        local inspected, result = pcall(host_inventory_state, controller, pawn, downed_request)
+        inventory = inspected and result or "waiting"
+    end
+    local_input_status = { pawn = details.name, state = downed and "downed" or "standing",
+        verified = verified, mapping = observed, inventory = inventory }
 end
 
 local function apply_downed(record)
@@ -219,7 +367,7 @@ local function release(name)
         record.pawn.HoldingCrouch = record.holding_crouch
         if not record.was_crouched then record.pawn:UnCrouch(false) end
     end
-    remove_mapping_gate(record.gate)
+    if record.gate then restoring_gate = record.gate end
     applied[name] = nil
 end
 
@@ -243,8 +391,6 @@ local function begin_downed(details, world)
     }
     applied[details.name] = record
     apply_downed(record)
-    local ok, result = pcall(apply_mapping_gate, details)
-    if ok then record.gate = result end
 end
 
 local marker_parts = {
@@ -502,6 +648,7 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    sync_local_input(state, phase)
     sync_location_markers(state, phase)
     sync_native_interact(phase)
 end
@@ -549,6 +696,8 @@ function players.command(fields, state, phase)
             deadline = now(pawn) + milliseconds / 1000 }
         pawn:AddMovementInput(walking.world_direction, 1.0, false)
         return "walking input scheduled"
+    elseif command == "native-host-downed-inventory-fixture" then
+        return open_host_inventory_fixture(fields, state, phase)
     elseif command == "player-marker-frame" then
         return apply_marker_frame(fields, state, phase)
     elseif command == "player-state" or command == "player-state-exact" then
@@ -568,6 +717,11 @@ function players.command(fields, state, phase)
     end
 end
 
+local function input_flag(value)
+    if value == nil then return "-" end
+    return value and 1 or 0
+end
+
 function players.rows(status_row)
     local rows = {}
     for slot, details in pairs(slot_pawns) do
@@ -579,8 +733,18 @@ function players.rows(status_row)
             local state = desired[name] and "downed" or "standing"
             rows[#rows + 1] = status_row("player", slot, state, pawn.bIsCrouched and 1 or 0, speed, movement.JumpZVelocity)
             rows[#rows + 1] = status_row("player-visual", slot,
-                record and record.gate and 1 or 0, marker and marker.visible and 1 or 0)
+                record and record.input_verified and 1 or 0, marker and marker.visible and 1 or 0)
         end
+    end
+    local input = local_input_status
+    if input then
+        local mapping = input.mapping
+        local flags = {}
+        for _, label in ipairs(input_fields) do flags[#flags + 1] = input_flag(mapping and mapping.flags[label]) end
+        flags[#flags + 1] = input.inventory
+        rows[#rows + 1] = status_row("player-local-input", input.pawn, input.state,
+            input.verified and "verified" or "waiting", input_flag(mapping and mapping.stock),
+            input_flag(mapping and mapping.reduced), table.unpack(flags))
     end
     local frame = marker_frame
     if frame then

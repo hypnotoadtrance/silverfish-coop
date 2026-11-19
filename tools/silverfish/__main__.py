@@ -120,6 +120,7 @@ def parser() -> argparse.ArgumentParser:
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
         "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
         "native-exit-position", "native-exit-wall-probe", "native-host-damage", "native-friendly-fire",
+        "native-host-downed-inventory-fixture",
         "native-gold-seed", "native-gold-inspect", "native-gold-use-probe", "native-gold-action-probe",
         "native-blue-seed", "native-blue-inspect", "native-blue-use-probe", "native-blue-rest-fixture",
         "native-red-seed", "native-red-inspect", "native-red-use-probe",

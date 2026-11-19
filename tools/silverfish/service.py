@@ -2325,6 +2325,17 @@ class Host:
                     if not alias:
                         raise ValueError("The exact native death probe pawn is unavailable")
                     snapshot = await bridge.command(action, alias, timeout=4)
+                elif action == "native-host-downed-inventory-fixture" and self.fixtures and self.native_guest:
+                    pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                    if (not pawn or request.get("target") is not None or self.last_game.get("map") != MAP
+                            or self.last_game.get("state") != "hosting" or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
+                        raise ValueError("The stock inventory fixture requires the current local Playtest host")
+                    snapshot = await bridge.command(action, pawn, timeout=5)
+                    report = snapshot.get("player_local_input", {})
+                    if (report.get("pawn"), report.get("state"), report.get("host_inventory")) != (pawn, "standing", "open"):
+                        raise RuntimeError("The stock InventoryScreen did not verify that it opened for the local host")
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
+                    result = {"player_local_input": report}
                     result = {"native_death_hook": snapshot.get("native_death_hook"),
                               "native_damage_canary": snapshot.get("native_damage_canary")}
                 elif action == "quest-probe" and self.fixtures:
