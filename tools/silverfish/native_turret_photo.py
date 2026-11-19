@@ -79,7 +79,11 @@ async def offers(host, bridge, character, offset):
     host.last_game, host.last_seen = snapshot, time.monotonic()
     rows = native_quest_catalog.page(catalog, f"board@{int(offset or 0)}", board=True)
     for quest in rows["quests"]:
-        quest["co_op"] = "verified" if quest["id"] in SUPPORTED else "unqualified"
+        identifier = quest["id"]
+        if identifier == native_computer_board.COUP_REPORT.quest_id:
+            quest["co_op"] = "experimental"
+        else:
+            quest["co_op"] = "verified" if identifier in SUPPORTED else "unqualified"
     return {"native_bounty_board": {**proof, **rows}}
 
 

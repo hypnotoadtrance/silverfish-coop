@@ -17,7 +17,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from .native_authored_pickup import SOURCE as AUTHORED_PICKUP_SOURCE
+from .native_authored_pickup import SOURCES as AUTHORED_PICKUP_SOURCES
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
@@ -27,6 +27,7 @@ from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
 
 REPO = Path(__file__).resolve().parents[2]
+AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in AUTHORED_PICKUP_SOURCES)
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
 WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
@@ -476,7 +477,7 @@ class Bridge:
             if len(fields) not in (2, 3) or fields[0] != b"interact" or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
             target = fields[2] if len(fields) == 3 else None
-            if (target is not None and target != AUTHORED_PICKUP_SOURCE.encode("ascii")
+            if (target is not None and target not in AUTHORED_PICKUP_TARGETS
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
@@ -886,15 +887,16 @@ class Bridge:
                     data["native_turret_photo"] = photo
                 elif fields[0] == "native-bounty-board" and len(fields) == 4:
                     data["native_bounty_board"] = dict(zip(("map", "pawn", "board"), fields[1:]))
-                elif fields[0] == "native-computer-board" and len(fields) == 15 and fields[14] in ("0", "1"):
+                elif fields[0] in ("native-computer-board", "native-coup-report") and len(fields) == 15 and fields[14] in ("0", "1"):
                     proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
                     for name, value in zip(("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after"), fields[6:12]):
                         proof[name] = None if value == "-" else int(value)
                     proof.update(objective_guid=fields[12], objective_owner=fields[13], can_turn_in=fields[14] == "1", reputation={})
-                    data["native_computer_board"] = proof
-                elif (fields[0] == "native-computer-board-reputation" and len(fields) == 4
-                      and fields[1] in ("2", "4", "5") and "native_computer_board" in data):
-                    data["native_computer_board"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                    data[fields[0].replace("-", "_")] = proof
+                elif fields[0] in ("native-computer-board-reputation", "native-coup-report-reputation") and len(fields) == 4:
+                    quest = fields[0].removesuffix("-reputation").replace("-", "_")
+                    if quest in data and fields[1] in (("2", "5") if quest == "native_coup_report" else ("2", "4", "5")):
+                        data[quest]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
                 elif fields[0] == "native-meet-broker" and len(fields) == 13:
                     proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")

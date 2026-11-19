@@ -15,14 +15,16 @@ QUEST = native_wire_quest.QUEST_ID
 BOARD = native_wire_quest.BOARD
 BOARDS = native_computer_board.BOARDS
 MAPS = frozenset(BOARDS)
+COUP_REPORT = native_computer_board.COUP_REPORT
 QUESTS = {
-    BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID}),
+    BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID}),
 }
 PREFLIGHTS = {
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
     native_computer_board.QUEST_ID: (native_computer_board.PREFLIGHT, "native_computer_board"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
+    COUP_REPORT.quest_id: (COUP_REPORT.command("preflight"), COUP_REPORT.key),
 }
 
 
@@ -118,7 +120,8 @@ class WireBoardView:
         try:
             proof = (await action(verb, operation, None)).get(report, {})
         except (RuntimeError, ValueError) as error:
-            if quest != QUEST and str(error) in {"stock_turret_photo_quest_not_offered", "stock_computer_board_quest_not_offered"}:
+            if quest != QUEST and str(error) in {"stock_turret_photo_quest_not_offered", "stock_computer_board_quest_not_offered",
+                                                "stock_coup_report_quest_not_offered"}:
                 return "not_offered"
             raise
         expected_quest = proof.get("id") if quest == QUEST else proof.get("quest")
@@ -138,6 +141,10 @@ class WireBoardView:
             return "completed"
         if quest == native_turret_photo.QUEST_ID:
             return "ready" if step == last else "missing"
+        if quest == COUP_REPORT.quest_id:
+            if proof.get("can_turn_in") is not True or area != BOROUGH:
+                raise RuntimeError("The host board report has an unexpected redemption location")
+            return "ready" if proof.get("objective_qualified") is True else "missing"
         if proof.get("can_turn_in") is not (area == SCIENTIST_SHOP):
             raise RuntimeError("The host board report has an unexpected redemption location")
         if area != SCIENTIST_SHOP:

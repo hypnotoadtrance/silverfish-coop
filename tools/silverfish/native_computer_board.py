@@ -1,8 +1,9 @@
-"""Start the stock Computer Board contract and redeem it at its Scientist board."""
+"""Start qualified stock collection contracts and redeem their exact objectives."""
 
 import time
+from dataclasses import dataclass
 
-from . import native_loot, native_rewards, native_wire_quest, party
+from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .travel import BOROUGH, SCIENTIST_SHOP
 
@@ -20,7 +21,34 @@ FACTIONS = {"2", "4", "5"}
 STEPS = {None, 1, 2, -10}
 
 
-def _scope(host, actor: str) -> tuple[str, str]:
+@dataclass(frozen=True)
+class CollectionContract:
+    quest_id: str
+    prefix: str
+    title: str
+    redeem_map: str
+    wrong_board: str
+    cash: int
+    factions: frozenset[str]
+    consumed_field: str
+    pickup_source: str | None = None
+
+    @property
+    def key(self) -> str:
+        return self.prefix.replace("-", "_")
+
+    def command(self, action: str) -> str:
+        return f"{self.prefix}-{action}"
+
+
+COMPUTER_BOARD = CollectionContract(QUEST_ID, "native-computer-board", "Computer Board", SCIENTIST_SHOP,
+                                    "scientist_redemption_required", 800, frozenset(FACTIONS), "consumed_board")
+COUP_REPORT = CollectionContract("Clt_CoupReport_01", "native-coup-report", "Northern Passage", BOROUGH,
+                                 "borough_redemption_required", 1200, frozenset({"2", "5"}), "consumed_note",
+                                 native_authored_pickup.COUP_REPORT)
+
+
+def _scope(host, actor: str, spec: CollectionContract) -> tuple[str, str]:
     player = host.party["players"].get(actor)
     area = host.last_game.get("map")
     if (not host.native_profile or not host.native_zones or not host.native_guest or host.transitioning
@@ -28,116 +56,133 @@ def _scope(host, actor: str) -> tuple[str, str]:
             or host.last_game.get("state") != "hosting" or area not in BOARDS
             or time.monotonic() - host.last_seen > 3 or not player or player["downed"]
             or actor in host.party["pending_spawns"]):
-        raise party.RuleError("native_computer_board_unavailable")
+        raise party.RuleError(f"{spec.key}_unavailable")
     pawn = native_loot._scope(host, actor)
     if not pawn:
-        raise party.RuleError("native_computer_board_interactor_unavailable")
+        raise party.RuleError(f"{spec.key}_interactor_unavailable")
     return pawn, area
 
 
-async def _command(host, bridge, verb: str, pawn: str, area: str, *arguments: str) -> dict:
+async def _command(host, bridge, spec: CollectionContract, action: str, pawn: str, area: str, *arguments: str) -> dict:
+    verb = spec.command(action)
+    refusal = "stock_" + spec.key.removeprefix("native_") + "_"
     try:
-        snapshot = await bridge.command(verb, pawn, *arguments, timeout=8 if verb == TURN_IN else 5)
+        snapshot = await bridge.command(verb, pawn, *arguments, timeout=8 if action == "turn-in" else 5)
     except RuntimeError as error:
-        if str(error).startswith("stock_computer_board_"):
+        if str(error).startswith(refusal):
             host.native_checkpoint_unsafe = False
             raise party.RuleError(str(error)) from error
         raise
-    proof = snapshot.get("native_computer_board", {})
+    proof = snapshot.get(spec.key, {})
     if not isinstance(proof, dict) or (snapshot.get("state"), snapshot.get("map"), *(proof.get(field) for field in
             ("operation", "map", "pawn", "board", "quest", "can_turn_in"))) != (
-            "hosting", area, verb, area, pawn, BOARDS[area], QUEST_ID, area == SCIENTIST_SHOP):
-        raise RuntimeError("The stock Computer Board report did not match the exact board and player")
+            "hosting", area, verb, area, pawn, BOARDS[area], spec.quest_id, area == spec.redeem_map):
+        raise RuntimeError(f"The stock {spec.title} report did not match the exact board and player")
     reputation = proof.get("reputation", {})
-    if (not isinstance(reputation, dict) or reputation.keys() != FACTIONS
+    if (not isinstance(reputation, dict) or reputation.keys() != spec.factions
             or type(proof.get("can_turn_in")) is not bool
             or any(not isinstance(row, dict) or type(row.get("before")) is not int or type(row.get("after")) is not int
                    for row in reputation.values())
             or any(field not in proof or proof[field] is not None and
                    (type(proof[field]) is not int or proof[field] not in STEPS) for field in ("step_before", "step_after"))
             or any(type(proof.get(field)) is not int for field in ("cash_before", "cash_after", "xp_before", "xp_after"))):
-        raise RuntimeError("The stock Computer Board report omitted the authoritative quest balances")
+        raise RuntimeError(f"The stock {spec.title} report omitted the authoritative quest balances")
     guid, owner = proof.get("objective_guid"), proof.get("objective_owner")
     if ((guid not in (None, "-") or owner not in (None, "-")) and (not valid_guid(guid) or owner not in ("host", "guest"))
-            or verb == PREFLIGHT and (any(proof[f"{field}_before"] != proof[f"{field}_after"] for field in ("step", "cash", "xp"))
+            or action == "preflight" and (any(proof[f"{field}_before"] != proof[f"{field}_after"] for field in ("step", "cash", "xp"))
                                       or any(row["before"] != row["after"] for row in reputation.values()))):
-        raise RuntimeError("The stock Computer Board report did not preserve preflight state and item custody")
+        raise RuntimeError(f"The stock {spec.title} report did not preserve preflight state and item custody")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
 
-async def preflight(host, bridge, actor: str) -> dict:
-    pawn, area = _scope(host, actor)
-    return {"native_computer_board": await _command(host, bridge, PREFLIGHT, pawn, area)}
+def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) -> bool:
+    guid = proof.get("objective_guid")
+    if not valid_guid(guid) or proof.get("objective_owner") != ("host" if actor == "host" else "guest"):
+        return False
+    if spec.pickup_source is None:
+        return True
+    pickup = host.party.get(native_authored_pickup.STATE_KEY, {}).get(spec.pickup_source, {})
+    area, placed_actor, item_class = native_authored_pickup.SOURCES[spec.pickup_source]
+    return tuple(pickup.get(key) for key in ("source", "map", "actor", "class_path", "guid", "owner")) == (
+        spec.pickup_source, area, placed_actor, item_class, guid, actor)
 
 
-async def approach(host, bridge, actor: str) -> dict:
-    pawn, area = _scope(host, actor)
+async def preflight(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
+    pawn, area = _scope(host, actor, spec)
+    proof = await _command(host, bridge, spec, "preflight", pawn, area)
+    if spec.pickup_source:
+        proof = dict(proof, objective_qualified=_objective_owned(host, actor, spec, proof))
+    return {spec.key: proof}
+
+
+async def approach(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
+    pawn, area = _scope(host, actor, spec)
     if not host.fixtures:
-        raise party.RuleError("native_computer_board_approach_unavailable")
-    snapshot = await bridge.command(APPROACH, pawn, timeout=5)
+        raise party.RuleError(f"{spec.key}_approach_unavailable")
+    snapshot = await bridge.command(spec.command("approach"), pawn, timeout=5)
     if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
-        raise RuntimeError("The Computer Board approach left the qualified listen world")
+        raise RuntimeError(f"The {spec.title} approach left the qualified listen world")
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    return {"native_computer_board_approach": {"pawn": pawn, "board": BOARDS[area]}}
+    return {f"{spec.key}_approach": {"pawn": pawn, "board": BOARDS[area]}}
 
 
-async def start(host, bridge, actor: str) -> dict:
-    return await _commit(host, bridge, actor, START)
+async def start(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
+    return await _commit(host, bridge, actor, spec, turning_in=False)
 
 
-async def turn_in(host, bridge, actor: str) -> dict:
-    return await _commit(host, bridge, actor, TURN_IN)
+async def turn_in(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
+    return await _commit(host, bridge, actor, spec, turning_in=True)
 
 
-async def _commit(host, bridge, actor: str, verb: str) -> dict:
-    pawn, area = _scope(host, actor)
-    turning_in = verb == TURN_IN
-    if turning_in and area != SCIENTIST_SHOP:
-        raise party.RuleError("stock_computer_board_scientist_redemption_required")
-    receipt = host.party.get("native_quests", {}).get(QUEST_ID, {})
+async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning_in: bool) -> dict:
+    pawn, area = _scope(host, actor, spec)
+    refusal = "stock_" + spec.key.removeprefix("native_") + "_"
+    if turning_in and area != spec.redeem_map:
+        raise party.RuleError(refusal + spec.wrong_board)
+    receipt = host.party.get("native_quests", {}).get(spec.quest_id, {})
     if turning_in and receipt.get("step") == -10:
         return {"effect": "native_quest_already_settled", **receipt}
 
     host.transitioning = True
     try:
-        before = await _command(host, bridge, PREFLIGHT, pawn, area)
+        before = await _command(host, bridge, spec, "preflight", pawn, area)
         step = before["step_after"]
         if not turning_in and step is not None:
-            return {"effect": "native_quest_present", "quest_id": QUEST_ID, "step": step}
+            return {"effect": "native_quest_present", "quest_id": spec.quest_id, "step": step}
         if turning_in and step == -10:
-            return {"effect": "native_quest_already_completed", "quest_id": QUEST_ID, "step": step}
+            return {"effect": "native_quest_already_completed", "quest_id": spec.quest_id, "step": step}
 
         arguments = ()
         if turning_in:
             if step not in (1, 2):
-                raise party.RuleError("stock_computer_board_quest_not_active")
+                raise party.RuleError(refusal + "quest_not_active")
             guid = before.get("objective_guid")
             owner = "host" if actor == "host" else "guest"
-            if not valid_guid(guid) or before.get("objective_owner") != owner:
-                raise party.RuleError("stock_computer_board_objective_required")
+            if not _objective_owned(host, actor, spec, before):
+                raise party.RuleError(refusal + "objective_required")
             arguments = (guid, owner)
 
         await host.checkpoint_native(bridge)
         recipients = sorted(set(host.roles().values()) & host.party["players"].keys()) if turning_in else []
         if turning_in and actor not in recipients:
-            raise party.RuleError("native_computer_board_interactor_unavailable")
+            raise party.RuleError(f"{spec.key}_interactor_unavailable")
         host.native_checkpoint_unsafe = True
-        proof = await _command(host, bridge, verb, pawn, area, *arguments)
+        proof = await _command(host, bridge, spec, "turn-in" if turning_in else "start", pawn, area, *arguments)
         cash = proof["cash_after"] - proof["cash_before"]
         xp = proof["xp_after"] - proof["xp_before"]
         expected_step = -10 if turning_in else 1
         reputation = proof["reputation"]
         if ((proof["step_before"], proof["step_after"], cash, xp) !=
-                (step, expected_step, 800 if turning_in else 0, 1 if turning_in else 0)
+                (step, expected_step, spec.cash if turning_in else 0, 1 if turning_in else 0)
                 or proof["cash_before"] != before["cash_after"] or proof["xp_before"] != before["xp_after"]
                 or any(row["before"] != before["reputation"][faction]["after"]
                        or not turning_in and row["before"] != row["after"] for faction, row in reputation.items())
                 or turning_in and (proof.get("objective_guid"), proof.get("objective_owner")) != arguments):
-            raise RuntimeError("The stock Computer Board transition did not reconcile with its authoritative preflight")
+            raise RuntimeError(f"The stock {spec.title} transition did not reconcile with its authoritative preflight")
 
         candidate = party.load_party(host.party)
-        record = {"quest_id": QUEST_ID, "step": expected_step, "actor": actor}
+        record = {"quest_id": spec.quest_id, "step": expected_step, "actor": actor}
         if turning_in:
             for character in recipients:
                 player = candidate["players"][character]
@@ -147,15 +192,16 @@ async def _commit(host, bridge, actor: str, verb: str) -> dict:
             candidate["economy"].update(wallet=proof["cash_after"], native_wallet_active=True)
             record.update(recipients=recipients, cash=cash, xp=xp, wallet=proof["cash_after"],
                           reputation={faction: row["after"] for faction, row in reputation.items()},
-                          consumed_board=arguments[0], objective_owner=actor)
-        candidate.setdefault("native_quests", {})[QUEST_ID] = record
+                          objective_owner=actor)
+            record[spec.consumed_field] = arguments[0]
+        candidate.setdefault("native_quests", {})[spec.quest_id] = record
         required = frozenset({actor}) if turning_in and actor != "host" else frozenset()
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
         host.party = candidate
         host.native_checkpoint_unsafe = False
-        event = "native_computer_board_completed" if turning_in else "native_computer_board_started"
+        event = spec.key + ("_completed" if turning_in else "_started")
         host.control.event(event, revision=revision, **record)
-        return {"effect": "native_quest_changed", **record, "native_computer_board": proof}
+        return {"effect": "native_quest_changed", **record, spec.key: proof}
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

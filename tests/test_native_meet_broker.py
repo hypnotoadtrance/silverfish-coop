@@ -145,3 +145,14 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.host.stopping)
         self.assertNotIn("native_quests", self.host.party)
         self.assertEqual(self.created, {})
+
+    async def test_stock_hidden_offer_never_issues_a_quest(self):
+        detail = "stock_meet_broker_stock_catalog_hidden:global_board=false,show_all=false,board=1,xp=0"
+        self.bridge.command.side_effect = RuntimeError(detail)
+        with self.assertRaisesRegex(party.RuleError, "stock_catalog_hidden"):
+            await broker.commit(self.host, self.bridge, "scout", turning_in=False)
+        self.bridge.command.assert_awaited_once_with(broker.PREFLIGHT, "exact scout pawn", timeout=5)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertFalse(self.host.stopping)
+        self.assertFalse(self.host.native_checkpoint_unsafe)
+        self.assertNotIn(broker.QUEST_ID, self.host.party.get("native_quests", {}))

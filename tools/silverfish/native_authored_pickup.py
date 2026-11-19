@@ -12,10 +12,14 @@ SOURCE = "observatory-comp-board"
 ACTOR = f"Item_CompBoard_C {OBSERVATORY}.Observitory_P:PersistentLevel.Item_CompBoard_C_2"
 ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
+DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
+COUP_REPORT = "dead-end-coup-report"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
                 "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
+    COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
+                  "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
 }
 MAP_SOURCES = {area: source for source, (area, _, _) in SOURCES.items()}
 ACTION = "native-authored-pickup-claim"

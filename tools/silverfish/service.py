@@ -40,6 +40,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         native_computer_board.PREFLIGHT, native_flood_jammer.PREFLIGHT, native_meet_broker.PREFLIGHT,
+                        native_computer_board.COUP_REPORT.command("preflight"),
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1444,6 +1445,8 @@ class Host:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action == native_computer_board.PREFLIGHT and target is None:
                 result = await native_computer_board.preflight(self, bridge, character)
+            elif action == native_computer_board.COUP_REPORT.command("preflight") and target is None:
+                result = await native_computer_board.preflight(self, bridge, character, spec=native_computer_board.COUP_REPORT)
             elif action == native_meet_broker.PREFLIGHT and target is None:
                 result = await native_meet_broker.preflight(self, bridge, character)
             elif action == native_flood_jammer.PREFLIGHT and target is None:
@@ -2231,6 +2234,11 @@ class Host:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action == native_computer_board.PREFLIGHT and request.get("target") is None:
                     result = await native_computer_board.preflight(self, bridge, "host")
+                elif action == native_computer_board.COUP_REPORT.command("preflight") and request.get("target") is None:
+                    result = await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.COUP_REPORT)
+                elif action == native_computer_board.COUP_REPORT.command("approach") and self.fixtures:
+                    actor = request.get("target") or "host"
+                    result = await native_computer_board.approach(self, bridge, actor, spec=native_computer_board.COUP_REPORT)
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
                     result = await native_meet_broker.preflight(self, bridge, "host")
                 elif action == native_meet_broker.APPROACH and self.fixtures:
@@ -2704,6 +2712,8 @@ class Host:
                 return await native_wire_quest.preflight(self, bridge, "host")
             if action == native_computer_board.PREFLIGHT:
                 return await native_computer_board.preflight(self, bridge, "host")
+            if action == native_computer_board.COUP_REPORT.command("preflight"):
+                return await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.COUP_REPORT)
             if action == native_turret_photo.PREFLIGHT:
                 return await native_turret_photo.preflight(self, bridge, "host")
             return await native_quest.action(self, bridge, "host", action, target)

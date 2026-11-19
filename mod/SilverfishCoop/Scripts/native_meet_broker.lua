@@ -230,6 +230,10 @@ function contract.command(fields, state, phase)
     if before.step == "-" then
         context.board:Configure_Stock()
         local offered = board_check(board_scope.stock_row, context.board.Contracts, context.key)
+        if not offered and context.board.ShowAllContracts == false then
+            -- Configure_Stock requires the global offer flag or the board's all-contracts mode.
+            refuse("stock_catalog_hidden:global_board=false,show_all=false,board=1,xp=" .. tostring(before.xp))
+        end
         if not offered or offered[step_field] ~= 1 then refuse("quest_not_offered") end
         recipe(offered)
     end

@@ -155,6 +155,7 @@ def parser() -> argparse.ArgumentParser:
         "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",
         "native-host-camera-aim-fixture", "native-host-camera-equip-fixture", "refresh-invite",
         "native-computer-board-preflight", "native-computer-board-approach",
+        "native-coup-report-preflight", "native-coup-report-approach",
         "native-meet-broker-preflight", "native-meet-broker-approach",
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-inventory-list",

@@ -41,6 +41,7 @@ namespace
     constexpr auto ball_ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto wire_path = STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C");
     constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
+    constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto quest_path = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
@@ -642,19 +643,24 @@ namespace
         return enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == count;
     }
 
-    template <bool ComputerBoard>
+    enum class ObjectiveQuest { copper_stop, computer_board, coup_report };
+
+    template <ObjectiveQuest Quest>
     int stage_objective(const Lua& lua)
     {
+        constexpr bool computer_board = Quest == ObjectiveQuest::computer_board;
+        constexpr bool coup_report = Quest == ObjectiveQuest::coup_report;
         const auto fail = [&](std::string_view reason) {
-            if constexpr (ComputerBoard)
+            if constexpr (computer_board || coup_report)
             {
                 const auto wire = reason.find("wire_objective");
                 if (wire != std::string_view::npos)
-                    return reply(lua, false, std::format("{}computer_board_{}", reason.substr(0, wire), reason.substr(wire + 5)));
+                    return reply(lua, false, std::format("{}{}_{}", reason.substr(0, wire),
+                        computer_board ? "computer_board" : "coup_report", reason.substr(wire + 5)));
             }
             return reply(lua, false, reason);
         };
-        constexpr auto location = ComputerBoard ? PartyWorld::scientist : PartyWorld::borough;
+        constexpr auto location = computer_board ? PartyWorld::scientist : PartyWorld::borough;
         std::array<Address, 3> args{};
         if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args)) return fail("wire_objective_stage_unavailable");
         const auto objective_id = read_guid(lua.get_string());
@@ -662,13 +668,15 @@ namespace
         Party party;
         Inventory inventory;
         if (!party.read(args[0], args[1], args[2], true, location)) return fail("wire_objective_exact_detached_guest_required");
-        auto* wanted = find<U::UClass>(ComputerBoard ? board_item_path : wire_path);
+        auto* wanted = find<U::UClass>(computer_board ? board_item_path : coup_report ? coup_report_item_path : wire_path);
         const auto matches_recipe = [&] {
-            if constexpr (ComputerBoard)
+            if constexpr (computer_board)
                 return objective_recipe(party.stock, STR("Clt_ComputerBoard"), wanted, 800, nullptr, nullptr, WirePhase::active);
+            if constexpr (coup_report)
+                return objective_recipe(party.stock, STR("Clt_CoupReport_01"), wanted, 1200, nullptr, nullptr, WirePhase::active);
             return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
         };
-        if (!inventory.bind(!ComputerBoard) || !matches_recipe())
+        if (!inventory.bind(Quest == ObjectiveQuest::copper_stop) || !matches_recipe())
             return fail("wire_objective_active_recipe_required");
         auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
         if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
@@ -945,8 +953,9 @@ namespace
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStageWireQuestObjective", stage_objective<false>);
-    lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<true>);
+    lua.register_function("SilverfishStageWireQuestObjective", stage_objective<ObjectiveQuest::copper_stop>);
+    lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<ObjectiveQuest::computer_board>);
+    lua.register_function("SilverfishStageCoupReportObjective", stage_objective<ObjectiveQuest::coup_report>);
     lua.register_function("SilverfishCaptureWireRewards", capture<false>);
     lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
     lua.register_function("SilverfishGrantWireRewards", grant<false>);

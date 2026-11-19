@@ -39,6 +39,7 @@ namespace
         const U::TCHAR* actor;
         const U::TCHAR* item_class;
         double x, y, z;
+        int item_type;
     };
 
     constexpr std::array profiles{
@@ -46,13 +47,19 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Item_CompBoard_C_2"),
             STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"),
-            -5680.476689, -849.040347, 128.496287,
+            -5680.476689, -849.040347, 128.496287, 11,
         },
         Profile{
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CopperWire_C_3"),
             STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
-            1299.7165908306, 3418.79597614179, 1239.49197257439,
+            1299.7165908306, 3418.79597614179, 1239.49197257439, 11,
+        },
+        Profile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1"),
+            STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
+            63519.2477725694, 36406.1978875462, 849.5514682383, 9,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -201,7 +208,7 @@ namespace
         auto* item = static_cast<U::AActor*>(actor);
         auto* category = field<U::FByteProperty>(actor, STR("ItemType"));
         if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel")) ||
-            !category || category->GetPropertyValueInContainer(actor) != 11) return false;
+            !category || category->GetPropertyValueInContainer(actor) != profile.item_type) return false;
         auto position = item->K2_GetActorLocation();
         const auto dx = position.GetX() - profile.x;
         const auto dy = position.GetY() - profile.y;

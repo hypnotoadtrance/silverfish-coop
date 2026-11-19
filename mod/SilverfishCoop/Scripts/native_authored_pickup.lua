@@ -9,6 +9,7 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local profiles = {
     [observatory] = {
         source = "observatory-comp-board",
@@ -22,6 +23,13 @@ local profiles = {
         path = city .. ".City_01_P:PersistentLevel.Item_CopperWire_C_3",
         class = "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C",
         name = "Item_CopperWire_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    [dead_end] = {
+        source = "dead-end-coup-report",
+        path = dead_end .. ".DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
+        class = "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C",
+        name = "Note_DeadEnd_01_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }
