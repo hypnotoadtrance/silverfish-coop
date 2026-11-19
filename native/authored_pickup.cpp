@@ -513,9 +513,10 @@ namespace
         if (!mode || mode->GetPropertyValueInContainer(actor) != 0) return "respawn_mode";
         if (!boolean(actor, STR("DespawnIfPlayerOwns"), true)) return "owned_despawn";
         if (!boolean(actor, STR("Physics"), false)) return "physics";
+        // Both peers load this exact root at world yaw -150; the export contains its relative rotation.
         auto facing = static_cast<U::AActor*>(actor)->K2_GetActorRotation();
         if (!(std::abs(std::remainder(facing.GetPitch(), 360.0)) <= 0.5 &&
-              std::abs(std::remainder(facing.GetYaw() + 90.0, 360.0)) <= 0.5 &&
+              std::abs(std::remainder(facing.GetYaw() + 150.0, 360.0)) <= 0.5 &&
               std::abs(std::remainder(facing.GetRoll(), 360.0)) <= 0.5)) return "rotation";
         return nullptr;
     }
