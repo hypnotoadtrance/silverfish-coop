@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
-from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, PLACEMENTS, OVERRIDDEN_PLACEMENTS, full_name
+from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name
+from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, OBSERVATORY, RAIL_YARD
 
 
 OTHER_CRATE = full_name(CROSSROADS, "LootCrate_Small_BP_C_9")
@@ -162,6 +163,63 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                         await native_loot.perform(host, bridge, "host", "open", crate, OPERATION)
                     host.checkpoint_native.assert_not_awaited()
                     self.assertTrue(host.stopping)
+
+    async def test_only_pinned_cabinet_commits_four_rows_and_keeps_one_immutable_escrow(self):
+        items = [dict(ITEM, actor=f"stock item {index}", guid=f"{index:032X}") for index in range(1, 5)]
+        for area, container, accepted in ((LAB_E206, SMALL_CABINET, True), (CROSSROADS, OTHER_CRATE, False)):
+            with self.subTest(container=container):
+                host = self.host(area)
+
+                async def open_container(verb, pawn, current, slot, *, timeout):
+                    self.assertEqual((verb, pawn, current), ("native-loot-open", PAWN, container))
+                    self.frame(area, slot)
+                    return self.game(area, native_loot={"action": "open", "map": area, "pawn": pawn, "crate": current,
+                                                        "escrow_slot": slot, "ok": True, "invoked": True,
+                                                        "looted": True, "trait_calls": 5 if accepted else 3,
+                                                        "items": items, "item_count": 4, "lucky_looter": True,
+                                                        "trait_source": "canonical"})
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=open_container))
+                if not accepted:
+                    with self.assertRaisesRegex(RuntimeError, "exact stock crate roll did not verify"):
+                        await native_loot.perform(host, bridge, "host", "open", container, OPERATION)
+                    host.checkpoint_native.assert_not_awaited()
+                    continue
+
+                result = await native_loot.perform(host, bridge, "host", "open", container, OPERATION)
+                self.assertEqual(result["native_loot_roll"]["items"], items)
+                repeated = await native_loot.perform(host, bridge, "host", "open", container, "e" * 32)
+                self.assertEqual(repeated, result)
+                bridge.command.assert_awaited_once()
+                host.checkpoint_native.assert_awaited_once()
+                saved = {"world": {"party": host.party}, "characters": {}}
+                self.assertEqual(native_host_save.references(saved), [host.party[native_loot.STATE_KEY][container]["escrow"]])
+                host.party[native_loot.STATE_KEY][container]["items"][-1] = dict(items[-1], guid=items[0]["guid"])
+                with self.assertRaisesRegex(CampaignFormatError, "small cabinet escrow has an invalid identity or item"):
+                    native_host_save.references(saved)
+
+    def test_bridge_bounds_container_receipt_before_collecting_items(self):
+        slot = "SFCoop_" + "a" * 32
+        for area, container, declared, count, accepted in (
+            (LAB_E206, SMALL_CABINET, 4, 4, True),
+            (LAB_E206, SMALL_CABINET, 4, 5, False),
+            (CROSSROADS, OTHER_CRATE, 4, 4, False),
+            (CROSSROADS, SMALL_CABINET, 2, 2, False),
+        ):
+            with self.subTest(container=container, declared=declared, count=count):
+                records = [
+                    ("schema", "1"), ("session", "host", "hosting", area, "0", "1"),
+                    ("native-loot", "open", area, container, PAWN, "1", "opened", "1", "1", "canonical", "1",
+                     "100", str(declared), "1", slot),
+                ]
+                records.extend(("native-loot-item", f"item {index}", ITEM["class_path"], f"{index:032X}")
+                               for index in range(1, count + 1))
+                (self.root / "status.tsv").write_text("".join("\t".join(row) + "\n" for row in records), encoding="utf-8")
+                proof = runtime.Bridge(self.root, None).snapshot()
+                if accepted:
+                    self.assertEqual(len(proof["native_loot"]["items"]), count)
+                else:
+                    self.assertNotIn("native_loot", proof or {})
 
     async def test_claim_requires_exact_scope_and_retries_keep_the_original_crate(self):
         rolls = {crate: self.roll(CROSSROADS, crate, str(index) * 32)

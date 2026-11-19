@@ -11,6 +11,7 @@ local path = docks .. ".Docks_01_P:PersistentLevel.LootCrate_Small_BP_C_10"
 local profile = {index = 1, map = docks, path = path, name = "LootCrate_Small_BP_C " .. path, guarantee_spawn = true}
 package.loaded.authored_loot_registry = {profile}
 package.loaded.authored_supply_catalog = {}
+package.loaded.authored_cash_catalog = {}
 
 local world, pawn, crate, box, sibling, trace = object(1), object(2), object(3), object(4), object(5), object(6)
 local camera, capsule, camera_class, capsule_class, box_class = object(7), object(8), object(9), object(10), object(11)
@@ -75,15 +76,15 @@ SilverfishProbeNativeInteractInput = function() error("Authority geometry must n
 
 local input = assert(loadfile("mod/SilverfishCoop/Scripts/native_authored_pickup_input_fixture.lua"))()
 local state = {map = docks, world = world, server = false, listening = true, pawns = {{pawn = pawn}}}
-input.approach_docks_crate(state, "hosting", profile, pawn, crate, box)
+input.approach_exact_container(state, "hosting", profile, pawn, crate, box)
 assert(placements == 1 and net_updates == 1 and pos.Z == 123 and math.abs(pos.Y) > 10)
 assert(lower_hits >= 2 and visibility_hits >= 3)
 
 resolved_box = sibling
-local accepted, failure = pcall(input.approach_docks_crate, state, "hosting", profile, pawn, crate, box)
+local accepted, failure = pcall(input.approach_exact_container, state, "hosting", profile, pawn, crate, box)
 assert(not accepted and failure:find("native_loot_docks_fixture_no_clear_sight", 1, true) == 1)
 assert(placements == 1 and net_updates == 1, "A sibling Box must never qualify as exact sight")
 
-accepted, failure = pcall(input.approach_docks_crate, state, "hosting", profile, pawn, crate, sibling)
+accepted, failure = pcall(input.approach_exact_container, state, "hosting", profile, pawn, crate, sibling)
 assert(not accepted and failure == "native_loot_docks_fixture_scope_unavailable")
 print("Docks crate fixture proves a reachable stock Box from the lower floor")

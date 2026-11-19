@@ -34,7 +34,7 @@ from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_melee import parse as parse_guest_melee
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
+from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -1609,18 +1609,24 @@ class Bridge:
                         row["weather_verified"] = fields[26] == "1"
                     data["native_world_view"] = row
                 elif fields[0] == "native-loot" and len(fields) in (14, 15):
+                    count = int(fields[12])
+                    if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
+                        raise ValueError("Stock container receipt has an unqualified map or item count")
                     data["native_loot"] = {
                         "action": fields[1], "map": fields[2], "crate": fields[3], "pawn": fields[4],
                         "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
                         "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
-                        "distance": _finite(fields[11]), "item_count": int(fields[12]), "invoked": fields[13] == "1",
+                        "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
                         "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
                     }
                 elif fields[0] == "native-loot-item" and len(fields) in (3, 4) and "native_loot" in data:
+                    loot = data["native_loot"]
+                    if len(loot["items"]) >= loot["item_count"]:
+                        raise ValueError("Stock container reported more rows than its receipt")
                     item = {"actor": fields[1], "class_path": fields[2]}
                     if len(fields) == 4:
                         item["guid"] = fields[3]
-                    data["native_loot"]["items"].append(item)
+                    loot["items"].append(item)
                 elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
                     loot = data["native_loot"]
                     if loot.get("action") != "claim" or "cash" in loot:

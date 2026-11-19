@@ -3,6 +3,7 @@ local guest_save = require("guest_save")
 local registry = require("authored_loot_registry")
 
 local crate_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
+local cabinet_class = "/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"
 local spawner_class = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local box_class = "/Script/Engine.BoxComponent"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -26,6 +27,7 @@ for _, profile in ipairs(registry) do
     table.insert(maps[profile.map], profile)
     names[profile.name] = profile
     profile.world = profile.path:match("^(.-):PersistentLevel%.")
+    profile.capacity = profile.small_cabinet and 4 or 2
 end
 
 function loot.profiles(map)
@@ -180,7 +182,7 @@ local function participant(state, name, host, world)
 end
 
 local function find_crate(world, profile)
-    local class = StaticFindObject(crate_class)
+    local class = StaticFindObject(profile.small_cabinet and cabinet_class or crate_class)
     local crate = StaticFindObject(profile.path)
     if not exact(crate, class) or crate:GetFullName() ~= profile.name or not authority(crate, world)
         or crate.SpawnSalt ~= profile.salt then
@@ -189,17 +191,22 @@ local function find_crate(world, profile)
     return crate
 end
 
-local function child_spawners(crate, instance)
+local function child_spawners(crate, instance, profile)
     local class = StaticFindObject(spawner_class)
     local spawners = { crate.Loot_Spawner, crate.Loot_Spawner1 }
-    for index = 1, 2 do
+    if profile.small_cabinet then
+        spawners[3], spawners[4] = crate.Loot_Spawner2, crate.Loot_Spawner3
+    end
+    for index = 1, profile.capacity do
         local child = spawners[index]
         if not exact(child, class) or not same(child:GetOwner(), crate) or not same(child.Container, crate)
             or not same(child["As Game Instance FP"], instance) then
             error("native_loot_exact_crate_spawners_unavailable", 0)
         end
+        for previous = 1, index - 1 do
+            if same(spawners[previous], child) then error("native_loot_crate_spawners_ambiguous", 0) end
+        end
     end
-    if same(spawners[1], spawners[2]) then error("native_loot_crate_spawners_ambiguous", 0) end
     return spawners
 end
 
@@ -231,7 +238,7 @@ function loot.qualify(state, phase, pawn_name, requested_crate, allow_distant)
     local collision = box:GetCollisionEnabled()
     if collision ~= 1 and collision ~= 3 then error("native_loot_crate_box_not_interactable", 0) end
     local position, distance = distance_to_box(pawn, box, allow_distant)
-    local spawners = child_spawners(crate, instance)
+    local spawners = child_spawners(crate, instance, profile)
     local trait, source = loot.lucky_looter(pawn.Save)
     return { world = world, instance = instance, stock = stock, pawn = pawn, save = pawn.Save, crate = crate, profile = profile,
         box = box, spawners = spawners, lucky_looter = trait, lucky_source = source,
@@ -295,9 +302,9 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
-    if scope.profile.guarantee_spawn and scope.profile.map == docks_map then
+    if scope.profile.small_cabinet or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
         local input = require("native_authored_pickup_input_fixture")
-        input.approach_docks_crate(state, phase, scope.profile, pawn, scope.crate, scope.box)
+        input.approach_exact_container(state, phase, scope.profile, pawn, scope.crate, scope.box)
         return loot.qualify(state, phase, pawn_name, requested_crate)
     end
     if scope.profile.index > 3 then return crate_fixture_floor(state, phase, scope, pawn_name, requested_crate, rotation) end
@@ -328,11 +335,10 @@ function loot.claim_context(state, phase, pawn_name, requested_crate)
     if not finite(range) or range <= 0 or range > 1000 or not finite(distance) or distance > range then
         error("native_loot_crate_out_of_reach", 0)
     end
-    return { pawn = pawn, save = pawn.Save, stock = stock, distance = distance }
+    return { pawn = pawn, save = pawn.Save, stock = stock, distance = distance, crate = crate, profile = profile }
 end
 
--- The native hook supplies only the item addresses captured from this exact
--- crate's two SpawnLoot out parameters. Nearby world items have no provenance.
+-- Each address comes from an exact owned child's stock SpawnLoot out parameter.
 function loot.results(state, phase, scope, item_addresses)
     local profile = type(scope) == "table" and scope.profile
     local host, world, instance, stock = host_context(state, phase, profile)
@@ -340,7 +346,7 @@ function loot.results(state, phase, scope, item_addresses)
         or not same(scope.stock, stock) or not same(find_crate(world, profile), scope.crate)
         or not authority(scope.pawn, world) or not same(scope.pawn.Save, scope.save)
         or not (same(scope.pawn, host) or guest_save.matches(scope.pawn))
-        or scope.crate.Looted ~= true or type(item_addresses) ~= "table" or #item_addresses > 2 then
+        or scope.crate.Looted ~= true or type(item_addresses) ~= "table" or #item_addresses > profile.capacity then
         error("native_loot_result_scope_unavailable", 0)
     end
     local expected = {}

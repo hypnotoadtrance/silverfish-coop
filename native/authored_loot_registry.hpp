@@ -8,6 +8,26 @@
 
 namespace silverfish::authored_loot
 {
+    struct StockClass
+    {
+        const RC::CharType* actor_class;
+        const RC::CharType* input;
+        const RC::CharType* script;
+        std::int32_t input_entry;
+        std::uint8_t slots;
+    };
+
+    inline constexpr StockClass small_crate{
+        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),
+        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),
+        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:ExecuteUbergraph_LootCrate_Small_BP"),
+        0x376, 2};
+    inline constexpr StockClass small_cabinet{
+        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"),
+        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:SendInteractionToActor"),
+        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:ExecuteUbergraph_LootCabnet_Small_BP"),
+        0x438, 4};
+
     struct Profile
     {
         const RC::CharType* world;
@@ -16,6 +36,8 @@ namespace silverfish::authored_loot
         const RC::CharType* loot_override{};
         bool guarantee_spawn{};
         std::uint8_t replenish_override{};
+        const StockClass* stock_class{&small_crate};
+        std::array<std::int32_t, 4> child_salts{};
     };
 
     inline constexpr std::array worlds{
@@ -56,6 +78,7 @@ namespace silverfish::authored_loot
         STR("/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"),
         STR("/Game/Classes/Maps/Maps_Dungeons/TutTnl_01_P.TutTnl_01_P"),
         STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
     };
 
     inline constexpr std::array profiles{
@@ -815,5 +838,7 @@ namespace silverfish::authored_loot
                 STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_21"), -46571264, nullptr, true, 2},
         Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P"),
                 STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P:PersistentLevel.LootCrate_Small_BP_C_2"), -1379009344, nullptr, true, 2},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5"), -595904512, nullptr, false, 2, &small_cabinet, {-34893800, -46555604, -43386008, -81274330}},
     };
 }

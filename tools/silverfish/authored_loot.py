@@ -1,6 +1,6 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
-from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, RAIL_YARD
+from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, RAIL_YARD
 
 
 PLACEMENTS = (
@@ -493,9 +493,20 @@ CRATE_PROFILES = tuple((*placement, None) for placement in PLACEMENTS) + OVERRID
 
 
 def full_name(area: str, actor: str) -> str:
-    return f"LootCrate_Small_BP_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.{actor}"
+    actor_class = actor.rsplit("_", 1)[0]
+    return f"{actor_class} {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.{actor}"
 
 
+SMALL_CABINET_PROFILE = (LAB_E206, "LootCabnet_Small_BP_C_5", -595904512)
+SMALL_CABINET_CHILD_SALTS = (-34893800, -46555604, -43386008, -81274330)
+SMALL_CABINET = full_name(*SMALL_CABINET_PROFILE[:2])
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
+CRATES[SMALL_CABINET] = LAB_E206
 GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS)
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
+
+
+def loot_capacity(container: str) -> int:
+    if container == SMALL_CABINET:
+        return 4
+    return 2 if container in CRATES else 0

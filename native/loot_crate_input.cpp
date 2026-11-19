@@ -32,15 +32,12 @@ namespace
     using Iteration = Hook::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
 
-    constexpr auto open_path = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor");
-    constexpr auto script_path = STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:ExecuteUbergraph_LootCrate_Small_BP");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::seconds(4);
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
-    constexpr int open_entry = 0x376;
     constexpr auto& profiles = silverfish::authored_loot::profiles;
 
     template <typename T>
@@ -185,25 +182,24 @@ namespace
 
     bool ready_profile(U::UObject* crate, U::UWorld* world)
     {
-        if (!silverfish::shared_loot::qualified_crate_settings(crate)) return false;
+        const auto* profile = silverfish::shared_loot::authored_profile(crate);
+        if (!profile || !silverfish::shared_loot::qualified_crate_settings(crate)) return false;
         auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
         if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate) return false;
+        if (profile->stock_class == &silverfish::authored_loot::small_cabinet)
+        {
+            auto* second = object(crate, STR("SM_Prop_Cabinet_Small_Door_02"));
+            if (!exact(second, STR("/Script/Engine.StaticMeshComponent")) ||
+                second == door || second->GetOuterPrivate() != crate) return false;
+        }
         if (boolean(crate, STR("Looted"), true)) return true;
         auto* value = field<U::FIntProperty>(crate, STR("SpawnedValue"));
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!boolean(crate, STR("Looted"), false) || !value || value->GetPropertyValueInContainer(crate) != 0 ||
             !instance || object(crate, STR("As Game Instance FP")) != instance || !presentation_box(crate).box)
             return false;
-        auto* first = object(crate, STR("Loot_Spawner"));
-        auto* second = object(crate, STR("Loot_Spawner1"));
-        if (first == second) return false;
-        for (auto* child : {first, second})
-        {
-            if (!exact(child, STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C")) ||
-                child->GetOuterPrivate() != crate || object(child, STR("Container")) != crate ||
-                object(child, STR("As Game Instance FP")) != instance) return false;
-        }
-        return true;
+        silverfish::shared_loot::ContainerActors children;
+        return silverfish::shared_loot::read_spawners(crate, instance, children);
     }
 
 
@@ -258,10 +254,13 @@ namespace
     {
         if (!ready() || !crate || !method || !args || call.OriginalFunctionCallPrevented()) return;
         static const U::FName open_name{STR("SendInteractionToActor")};
-        static const U::FName script_name{STR("ExecuteUbergraph_LootCrate_Small_BP")};
+        static const U::FName crate_script{STR("ExecuteUbergraph_LootCrate_Small_BP")};
+        static const U::FName cabinet_script{STR("ExecuteUbergraph_LootCabnet_Small_BP")};
         const auto name = method->GetFName();
-        if ((name != open_name && name != script_name) || (name == script_name && method != find<U::UFunction>(script_path)) ||
-            (name == open_name && method != find<U::UFunction>(open_path))) return;
+        const bool script = name == crate_script || name == cabinet_script;
+        if (name != open_name && !script) return;
+        const auto* profile = silverfish::shared_loot::authored_profile(crate);
+        if (!profile || method != find<U::UFunction>(script ? profile->stock_class->script : profile->stock_class->input)) return;
         auto* world = silverfish::shared_loot::authored_crate_world(crate);
         if (!world) return;
         const auto local = local_owner(world);
@@ -270,17 +269,17 @@ namespace
             return same_scope(candidate, crate, local);
         });
         const auto now = Clock::now();
-        const bool legacy = crate->GetPathName() == profiles.front().actor;
+        const bool legacy = profile == &profiles.front();
         const bool scoped = active != scopes.end() && now < active->expires;
         // The original exact crate keeps its existing live co-op guard. A new
         // profile cannot suppress stock callbacks unless its actual scene armed.
         if (!legacy && (!scoped || !ready_profile(crate, world))) return;
 
-        if (name == script_name)
+        if (script)
         {
             auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
             if (stock_function(crate, method, 1, sizeof(std::int32_t)) && entry &&
-                entry->GetPropertyValueInContainer(args) == open_entry &&
+                entry->GetPropertyValueInContainer(args) == profile->stock_class->input_entry &&
                 !silverfish::shared_loot::permits_stock_script(crate, method)) call.PreventOriginalFunctionCall();
             return;
         }

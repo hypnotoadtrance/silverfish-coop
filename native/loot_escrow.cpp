@@ -13,6 +13,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -31,6 +32,9 @@ namespace
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
     using Owner = silverfish::shared_loot::EscrowOwner;
+    using silverfish::shared_loot::ContainerActors;
+    using silverfish::shared_loot::ContainerAddresses;
+    using silverfish::shared_loot::max_container_slots;
 
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -114,10 +118,9 @@ namespace
         return guid;
     }
 
-    template<std::size_t Count>
-    bool read_addresses(const Lua& lua, std::array<Address, Count>& addresses, std::size_t required)
+    bool read_addresses(const Lua& lua, std::span<Address> addresses, std::size_t required)
     {
-        for (std::size_t index = 0; index < Count; ++index)
+        for (std::size_t index = 0; index < addresses.size(); ++index)
         {
             if (!lua.is_integer(1)) return false;
             const auto value = lua.get_integer();
@@ -252,24 +255,26 @@ namespace
         return result;
     }
 
-    bool qualified_escrow(const Inventory& inventory, Unreal::UObject* save, Unreal::FScriptArrayHelper& rows)
+    bool qualified_escrow(const Inventory& inventory, Unreal::UObject* save, Unreal::FScriptArrayHelper& rows,
+                          int capacity = max_escrow)
     {
         auto* defaults = inventory.save_class->GetClassDefaultObject().Get();
-        if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || rows.Num() < 0 || rows.Num() > max_escrow)
+        if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || rows.Num() < 0 || rows.Num() > capacity)
             return false;
         for (auto* prop : std::array<Unreal::FProperty*, 3>{inventory.equipment, inventory.armor, inventory.helmet})
         {
             if (!prop->Identical(prop->ContainerPtrToValuePtr<void>(save), prop->ContainerPtrToValuePtr<void>(defaults)))
                 return false;
         }
-        Guid previous{};
+        std::array<Guid, max_container_slots> seen{};
         for (int index = 0; index < rows.Num(); ++index)
         {
             const void* row = rows.GetRawPtr(index);
             const auto id = inventory.identity(row);
             auto* type = Unreal::Cast<Unreal::UClass>(inventory.klass(row));
-            if (!live(type) || !type->IsChildOf(inventory.item_base) || id == Guid{} || id == previous) return false;
-            previous = id;
+            if (!live(type) || !type->IsChildOf(inventory.item_base) || id == Guid{} ||
+                std::find(seen.begin(), seen.begin() + index, id) != seen.begin() + index) return false;
+            seen[index] = id;
         }
         return true;
     }
@@ -333,17 +338,20 @@ namespace
     template <bool enemy>
     int capture(const Lua& lua)
     {
-        std::array<Address, 4> arguments{};
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 || !read_addresses(lua, arguments, 2))
+        std::array<Address, 2> arguments{};
+        ContainerAddresses addresses{};
+        const auto argc = lua.get_stack_size();
+        const auto slots = !enemy && argc == 2 + max_container_slots ? max_container_slots : max_escrow;
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || argc != 2 + slots || !read_addresses(lua, arguments, 2) ||
+            !read_addresses(lua, std::span{addresses}.first(slots), 0))
             return result(lua, false, "native_loot_escrow_capture_unavailable");
-        const std::array addresses{arguments[2], arguments[3]};
         Owner owner;
-        std::array<Unreal::UObject*, 2> actors{};
+        ContainerActors actors{};
         const auto ticket = [&](bool consume) {
             if constexpr (enemy)
                 return !addresses[1] && silverfish::native_enemy_loot::verified_ammo_roll(
                     arguments[0], addresses[0], owner, actors[0], consume);
-            return silverfish::shared_loot::verified_escrow_roll(arguments[0], addresses, owner, actors, consume);
+            return silverfish::shared_loot::verified_escrow_roll(arguments[0], addresses, slots, owner, actors, consume);
         };
         if (!ticket(false))
             return result(lua, false, "native_loot_verified_roll_unavailable");
@@ -356,8 +364,8 @@ namespace
         if (rows.Num() != 0 || !qualified_escrow(inventory, scratch, rows))
             return result(lua, false, "native_loot_blank_escrow_required");
 
-        std::array<Value, max_escrow> items;
-        std::array<std::string, max_escrow> ids;
+        std::array<Value, max_container_slots> items;
+        std::array<std::string, max_container_slots> ids;
         int count = 0;
         for (std::size_t index = 0; index < actors.size(); ++index)
         {
@@ -365,9 +373,10 @@ namespace
             items[index] = convert(inventory, owner.pawn, actors[index]);
             if (!items[index]) return result(lua, false, "native_loot_stock_actor_conversion_unverified");
             ids[index] = print_guid(inventory.identity(items[index].get()));
+            if (std::find(ids.begin(), ids.begin() + index, ids[index]) != ids.begin() + index)
+                return result(lua, false, "native_loot_escrow_guid_conflict");
             ++count;
         }
-        if (count == max_escrow && ids[0] == ids[1]) return result(lua, false, "native_loot_escrow_guid_conflict");
 
         AddedRows append{rows};
         for (const auto& item : items)
@@ -384,22 +393,31 @@ namespace
         }
         // Revalidate the live ticket after conversion. Consuming it is the
         // final non-Lua step so the same crate cannot produce a second escrow.
-        if (rows.Num() != count || !qualified_escrow(inventory, scratch, rows) ||
+        if (rows.Num() != count || !qualified_escrow(inventory, scratch, rows, static_cast<int>(slots)) ||
             !ticket(true))
             return result(lua, false, "native_loot_escrow_roll_changed");
         append.committed = true;
         result(lua, true, "captured");
         lua.set_integer(count);
-        for (const auto& id : ids) lua.set_string(id);
-        return 5;
+        for (std::size_t index = 0; index < slots; ++index) lua.set_string(ids[index]);
+        return static_cast<int>(3 + slots);
     }
 
     int verify_escrow(const Lua& lua)
     {
         std::array<Address, 2> arguments{};
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 ||
+        const auto argc = lua.get_stack_size();
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || (argc != 2 && argc != 3) ||
             !read_addresses(lua, arguments, 2) || arguments[0] == arguments[1])
             return result(lua, false, "native_loot_escrow_verify_unavailable");
+        int capacity = max_escrow;
+        if (argc == 3)
+        {
+            std::array<Address, 1> cabinet{};
+            if (!read_addresses(lua, cabinet, 1) || !silverfish::shared_loot::qualified_cabinet_escrow(cabinet[0]))
+                return result(lua, false, "native_loot_escrow_cabinet_source_unqualified");
+            capacity = static_cast<int>(max_container_slots);
+        }
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
         std::string_view failure;
@@ -409,7 +427,8 @@ namespace
         if (!reloaded) return result(lua, false, failure);
         Unreal::FScriptArrayHelper first(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(captured));
         Unreal::FScriptArrayHelper second(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(reloaded));
-        if (!qualified_escrow(inventory, captured, first) || !qualified_escrow(inventory, reloaded, second) || first.Num() != second.Num())
+        if (!qualified_escrow(inventory, captured, first, capacity) ||
+            !qualified_escrow(inventory, reloaded, second, capacity) || first.Num() != second.Num())
             return result(lua, false, "native_loot_escrow_shape_changed");
         for (int index = 0; index < first.Num(); ++index)
         {
@@ -484,7 +503,8 @@ namespace
     int claim(const Lua& lua)
     {
         std::array<Address, 4> arguments{};
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 5 || !lua.is_string(5) ||
+        const auto argc = lua.get_stack_size();
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || (argc != 5 && (enemy || argc != 6)) || !lua.is_string(5) ||
             !read_addresses(lua, arguments, 4)) return result(lua, false, "native_loot_escrow_claim_unavailable");
         const auto guid = parse_guid(lua.get_string());
         if (guid == Guid{}) return result(lua, false, "native_loot_exact_escrow_guid_required");
@@ -496,13 +516,21 @@ namespace
         Owner owner;
         if (!qualify(owner))
             return result(lua, false, "native_loot_exact_claimant_unavailable");
+        int capacity = max_escrow;
+        if (argc == 6)
+        {
+            std::array<Address, 1> cabinet{};
+            if (!read_addresses(lua, cabinet, 1) || !silverfish::shared_loot::qualified_cabinet_escrow(cabinet[0], owner.world))
+                return result(lua, false, "native_loot_escrow_cabinet_source_unqualified");
+            capacity = static_cast<int>(max_container_slots);
+        }
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
         std::string_view failure;
         auto* escrow = isolated_save(arguments[3], inventory, failure);
         if (!escrow) return result(lua, false, failure);
         Unreal::FScriptArrayHelper source(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
-        if (!qualified_escrow(inventory, escrow, source)) return result(lua, false, "native_loot_escrow_shape_changed");
+        if (!qualified_escrow(inventory, escrow, source, capacity)) return result(lua, false, "native_loot_escrow_shape_changed");
         const void* item = nullptr;
         for (int index = 0; index < source.Num(); ++index)
         {

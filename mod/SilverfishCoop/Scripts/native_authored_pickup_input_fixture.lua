@@ -304,19 +304,21 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     return "stock pickup floor and interaction sight verified"
 end
 
-function input.approach_docks_crate(state, phase, profile, pawn, actor, box)
-    if profile.map ~= docks or profile.guarantee_spawn ~= true
+function input.approach_exact_container(state, phase, profile, pawn, actor, box)
+    local docks_crate = profile.map == docks and profile.guarantee_spawn == true
+    local lab_cabinet = profile.small_cabinet == true and profile.map == "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
+    local label = docks_crate and "native_loot_docks_fixture" or "native_loot_cabinet_fixture"
+    if (not docks_crate and not lab_cabinet)
         or require("authored_loot_registry")[profile.index] ~= profile
-        or not approach_scope(state, phase, pawn, actor, docks) or not actor:HasAuthority()
+        or not approach_scope(state, phase, pawn, actor, profile.map) or not actor:HasAuthority()
         or not same(StaticFindObject(profile.path), actor) or actor:GetFullName() ~= profile.name
         or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
-        error("native_loot_docks_fixture_scope_unavailable", 0)
+        error(label .. "_scope_unavailable", 0)
     end
     local forward = vector(box:GetForwardVector())
     local bearing = forward and math.deg(math.atan(forward.Y, forward.X)) or 0
     -- Match the exact center and edge rays used by the local crate F fixture.
-    approach_clear_sight(state, pawn, actor, box, "native_loot_docks_fixture",
-        {95, 125, 155, 195, 225}, bearing, true, false)
+    approach_clear_sight(state, pawn, actor, box, label, {95, 125, 155, 195, 225}, bearing, true, false)
 end
 
 local function restored(camera, original)

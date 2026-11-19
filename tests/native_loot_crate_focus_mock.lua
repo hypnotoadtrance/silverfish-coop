@@ -69,3 +69,26 @@ local accepted, failure = pcall(input.command, request, state, "connected")
 assert(not accepted and failure:find("native_loot_crate_stock_fixture_focus_unavailable:another crate box", 1, true) == 1)
 assert(sequence == 1 and camera.RelativeRotation.Yaw == 90 and pawn.InteractionTarget_Component == nil)
 print("New crate fixture requires exact stock LookTrace and restores the camera")
+
+profile.small_cabinet = true
+local frame, second_door = object(11, "exact cabinet frame"), object(12, "exact second cabinet door")
+crate.SM_Prop_Cabinet_Small_02, crate.SM_Prop_Cabinet_Small_Door_02 = frame, second_door
+frame.GetClass, second_door.GetClass = door.GetClass, door.GetClass
+frame.GetOwner, second_door.GetOwner = door.GetOwner, door.GetOwner
+door.GetAttachParent = function() return frame end
+box.GetAttachParent, second_door.GetAttachParent = door.GetAttachParent, door.GetAttachParent
+local function set_rotation(component, angle) component.RelativeRotation = angle end
+door.RelativeRotation, second_door.RelativeRotation = {Pitch = 0, Yaw = 0, Roll = 0}, {Pitch = 0, Yaw = 0, Roll = 0}
+door.K2_SetRelativeRotation, second_door.K2_SetRelativeRotation = set_rotation, set_rotation
+local query_collision = 1
+box.GetCollisionEnabled = function() return query_collision end
+box.SetCollisionEnabled = function(_, value) query_collision = value end
+local project = {"request", "native-loot-crate-project", "exhausted", profile.name}
+second_door.GetAttachParent = function() return sibling end
+assert(not pcall(input.command, project, state, "connected"))
+assert(query_collision == 1 and crate.Looted == false)
+second_door.GetAttachParent = door.GetAttachParent
+assert(input.command(project, state, "connected") == "stock crate exhausted projection verified")
+assert(query_collision == 0 and crate.Looted and door.RelativeRotation.Yaw == 95 and second_door.RelativeRotation.Yaw == -95)
+assert(input.command(project, state, "connected") == "stock crate exhausted projection verified" and sequence == 1)
+print("Per-cabinet projection proves both exact doors and never replays stock Interact")

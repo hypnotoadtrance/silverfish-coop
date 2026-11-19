@@ -18,7 +18,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_loot
-from tools.silverfish.authored_loot import CRATES, GUARANTEED_REPLENISHMENT, full_name
+from tools.silverfish.authored_loot import CRATES, GUARANTEED_REPLENISHMENT, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD
 
 
@@ -38,6 +38,8 @@ GUARANTEED_SCENES = {
     "guaranteed-docks": ("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P", ("LootCrate_Small_BP_C_7", "LootCrate_Small_BP_C_16")),
 }
 SCENES.update(GUARANTEED_SCENES)
+CABINET_SCENE = "lab-small-cabinet"
+SCENES[CABINET_SCENE] = (SMALL_CABINET_PROFILE[0], (SMALL_CABINET_PROFILE[1],))
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
     "/Game/Classes/Items/Item_DeadBeetle.Item_DeadBeetle_C",
@@ -95,10 +97,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         raise ValueError("The exact Rail Yard forced stock draw requires single-player save verification")
     area, actors = SCENES[name]
     guaranteed = name in GUARANTEED_SCENES
+    cabinet = name == CABINET_SCENE
+    permanent = guaranteed or cabinet
     targets = [full_name(area, actor) for actor in actors]
     assert all(CRATES.get(crate) == area for crate in targets)
     if guaranteed:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
+    if cabinet:
+        assert targets == [SMALL_CABINET]
     key = f"crate-{name}-{uuid.uuid4().hex[:8]}"
     campaign = work / "campaigns" / key
     run = campaign / "run"
@@ -106,14 +112,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     host, guest = ("--campaign", key), ("--profile", key)
     originals = saved_hashes(original_save) if original_save else None
-    if (force_stock_roll or guaranteed) and not originals:
+    if (force_stock_roll or permanent) and not originals:
         raise ValueError("The single-player save directory must contain files to verify")
     evidence = {"map": area, "stock_interactions": []}
     if force_stock_roll:
         evidence["force_stock_roll"] = True
     processes = []
     cash_requests = []
-    exhaustion_flags = {crate: f"{actor}-{area.rsplit('/', 1)[1]}-" for crate, actor in zip(targets, actors)} if guaranteed else {}
+    exhaustion_flags = {crate: f"{actor}-{area.rsplit('/', 1)[1]}-" for crate, actor in zip(targets, actors)} if permanent else {}
     print(run, flush=True)
 
     async def command(*arguments, expected=True):
@@ -184,7 +190,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
         character = invitation["character_id"]
         await command("action", *host, "native-loot-seed", "--target", targets[0])
-        if guaranteed:
+        if permanent:
             await command("action", *host, "checkpoint")
             initial = permanent_flags(saved_checkpoint())
             assert all(value is None for value in initial.values()), initial
@@ -218,6 +224,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             assert roll["lucky_looter"], roll
             if guaranteed:
                 assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
+            elif cabinet:
+                assert roll["trait_calls"] == 5 and 1 <= len(roll["items"]) <= 4, roll
             else:
                 assert 1 <= roll["trait_calls"] <= 3, roll
             if name == "guaranteed-docks":
@@ -248,7 +256,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     await wait(guest_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == credit["after"])
                     cash_requests.append((request, claim))
                     roll["items"][0]["wallet_credit"] = credit
-                elif force_stock_roll or guaranteed:
+                elif force_stock_roll or permanent:
                     item = await typed_inventory_item(character, claim["guid"])
                     assert item and (item["source"], item["class_path"]) == ("backpack", claim["class_path"]), item
                 denied = await command("action", *host, "native-loot-claim", "--target", target, expected=False)
@@ -260,9 +268,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
             assert native_loot.public_roll(durable) == roll, durable
             entry = {"receipt": pressed, "roll": roll, "claim": claim}
-            if force_stock_roll or guaranteed:
+            if force_stock_roll or permanent:
                 entry["typed_guest_item"] = item
-            if guaranteed:
+            if permanent:
                 actual_flags = permanent_flags(saved)
                 expected_flags = {flag: 1 if index <= position else None for index, flag in enumerate(exhaustion_flags.values())}
                 assert actual_flags == expected_flags, actual_flags
@@ -271,10 +279,10 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
         rolls = evidence["stock_interactions"]
         assert len({entry["roll"]["id"] for entry in rolls}) == len(targets)
-        if guaranteed:
+        if permanent:
             guids = [item["guid"] for entry in rolls for item in entry["roll"]["items"]]
             assert len(set(guids)) == len(guids), guids
-        if require_cash or guaranteed:
+        if require_cash or permanent:
             if require_cash:
                 assert cash_requests, "The stock crate rolls produced no cash in this campaign"
                 expected = cash_requests[-1][1]["wallet_credit"]["after"]
@@ -288,20 +296,20 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             resumed = await wait(run, lambda state: state.get("state") == "hosting"
                                  and state.get("generation") != opening["generation"] and state["endpoint"]["port"] == port
                                  and (not require_cash or state.get("game", {}).get("native_wallet") == expected)
-                                 and (not guaranteed or all(status_of(state, crate) == "exhausted" for crate in targets)))
+                                 and (not permanent or all(status_of(state, crate) == "exhausted" for crate in targets)))
             fresh = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
             await start("guest-restart", guest, "join", *guest, "--headless", "--invite", fresh["invite_file"])
             peer = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
                               and state.get("generation") != ready["generation"] and state.get("character_id") == character
                               and state.get("host_session") == resumed["generation"] and state.get("zone_epoch") == resumed["zone_epoch"]
                               and (not require_cash or state.get("gameplay", {}).get("shared_wallet") == expected)
-                              and (not guaranteed or all(status_of(state, crate) == "exhausted" for crate in targets)))
+                              and (not permanent or all(status_of(state, crate) == "exhausted" for crate in targets)))
             for request, claim in cash_requests:
                 assert (await command(*request))["native_loot_claim"] == claim
                 assert await typed_inventory_item(character, claim["guid"]) is None
             if require_cash:
                 evidence["wallet_restart"] = {"balance": expected, "same_port": True, "receipt_count": len(cash_requests)}
-            if guaranteed:
+            if permanent:
                 for crate, entry in zip(targets, rolls):
                     assert public_roll(resumed, crate) == public_roll(peer, crate) == entry["roll"], entry
                     item = entry["typed_guest_item"]
@@ -352,8 +360,8 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
-    if any(area in GUARANTEED_SCENES for area in arguments.area or ()) and not arguments.vanilla_saved:
-        parser.error("Guaranteed crate scenes require --vanilla-saved")
+    if any(area in GUARANTEED_SCENES or area == CABINET_SCENE for area in arguments.area or ()) and not arguments.vanilla_saved:
+        parser.error("Permanent stock loot scenes require --vanilla-saved")
     if arguments.force_stock_roll:
         if (arguments.area is not None and arguments.area != ["rail-yard"]) or not arguments.vanilla_saved:
             parser.error("--force-stock-roll requires Rail Yard and --vanilla-saved")

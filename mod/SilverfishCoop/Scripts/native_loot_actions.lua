@@ -15,37 +15,49 @@ local function valid_object(value)
     return value and value:IsValid()
 end
 
-local function capture(scope, slot, first, second, items)
+local function capture(scope, slot, outputs, items)
     local api, class = StaticFindObject(statics), StaticFindObject(save)
     if not valid_object(api) or not valid_object(class) or api:DoesSaveGameExist(slot, 0) then
         error("native_loot_escrow_slot_unavailable", 0)
     end
     local pool = api:CreateSaveGameObject(class)
     if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
-    local ok, reason, count, first_guid, second_guid = SilverfishCaptureNativeLootEscrow(
-        scope.crate:GetAddress(), pool:GetAddress(), first, second)
-    if not ok or count ~= #items then error(reason or "native_loot_escrow_capture_unverified", 0) end
-    if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
-    local restored = api:LoadGameFromSlot(slot, 0)
-    if not valid_object(restored) or not SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress()) then
-        error("native_loot_escrow_typed_roundtrip_unverified", 0)
+    local captured = table.pack(SilverfishCaptureNativeLootEscrow(
+        scope.crate:GetAddress(), pool:GetAddress(), table.unpack(outputs)))
+    if captured[1] ~= true or captured[3] ~= #items or captured.n ~= 3 + #outputs then
+        error(captured[2] or "native_loot_escrow_capture_unverified", 0)
     end
-    local index = 1
-    for _, guid in ipairs({ first_guid, second_guid }) do
+    local index, seen = 1, {}
+    for slot_index = 1, #outputs do
+        local guid = captured[3 + slot_index]
+        if type(guid) ~= "string" or (#guid > 0) ~= (outputs[slot_index] > 0) then
+            error("native_loot_escrow_item_slot_unverified", 0)
+        end
         if #guid > 0 then
             local item = items[index]
-            if not item or not valid_object(item.object) then error("native_loot_escrow_item_unverified", 0) end
+            if #guid ~= 32 or not guid:match("^[0-9A-F]+$") or not guid:find("[^0]") or seen[guid]
+                or not item or not valid_object(item.object) then error("native_loot_escrow_item_unverified", 0) end
+            seen[guid] = true
             item.guid = guid
-            item.object:SetActorEnableCollision(false)
-            item.object:SetActorHiddenInGame(true)
-            if item.object:GetActorEnableCollision() ~= false or item.object.bHidden ~= true then
-                error("native_loot_escrow_item_retirement_unverified", 0)
-            end
-            item.object:K2_DestroyActor()
             index = index + 1
         end
     end
     if index - 1 ~= #items then error("native_loot_escrow_item_identity_count_unverified", 0) end
+    if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
+    local restored = api:LoadGameFromSlot(slot, 0)
+    local source = scope.profile.small_cabinet and {scope.crate:GetAddress()} or {}
+    if not valid_object(restored) or not SilverfishVerifyNativeLootEscrow(
+        pool:GetAddress(), restored:GetAddress(), table.unpack(source)) then
+        error("native_loot_escrow_typed_roundtrip_unverified", 0)
+    end
+    for _, item in ipairs(items) do
+        item.object:SetActorEnableCollision(false)
+        item.object:SetActorHiddenInGame(true)
+        if item.object:GetActorEnableCollision() ~= false or item.object.bHidden ~= true then
+            error("native_loot_escrow_item_retirement_unverified", 0)
+        end
+        item.object:K2_DestroyActor()
+    end
 end
 
 function actions.command(fields, state, phase)
@@ -85,8 +97,9 @@ function actions.command(fields, state, phase)
             return "stock loot escrow missing"
         end
         result.distance, result.escrow_slot = scope.distance, slot
+        local source = scope.profile.small_cabinet and {scope.crate:GetAddress()} or {}
         local ok, status, amount, before, after = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
-            scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid)
+            scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid, table.unpack(source))
         result.ok, result.status = ok, status
         if ok and status == "cash_credited" then
             result.cash = { guid = guid, amount = amount, before = before, after = after }
@@ -129,17 +142,26 @@ function actions.command(fields, state, phase)
         return "stock loot hook unavailable"
     end
     local fixture_args = fixture_nonempty and { true } or {}
-    local ok, status, looted, first, second, calls, invoked = SilverfishOpenNativeLootCrate(
+    local ok, status, looted, first, second, calls, invoked, third, fourth = SilverfishOpenNativeLootCrate(
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
         scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(fixture_args))
     result.ok, result.status, result.looted, result.calls, result.invoked = ok, status, looted, calls, invoked
     if ok then
-        local addresses = {}
-        if first > 0 then addresses[#addresses + 1] = first end
-        if second > 0 then addresses[#addresses + 1] = second end
-        local verified, items = pcall(loot.results, state, phase, scope, addresses)
+        local outputs = { first, second, third, fourth }
+        local verified, items = pcall(function()
+            local addresses = {}
+            for index = 1, scope.profile.capacity do
+                local address = outputs[index]
+                if math.type(address) ~= "integer" or address < 0 then
+                    error("native_loot_unverified_child_output", 0)
+                end
+                if address > 0 then addresses[#addresses + 1] = address end
+            end
+            if #outputs ~= scope.profile.capacity then error("native_loot_unexpected_child_output", 0) end
+            return loot.results(state, phase, scope, addresses)
+        end)
         local saved, problem = false, items
-        if verified then saved, problem = pcall(capture, scope, slot, first, second, items) end
+        if verified then saved, problem = pcall(capture, scope, slot, outputs, items) end
         if verified and saved then
             result.items = items
             result.escrow_slot = slot

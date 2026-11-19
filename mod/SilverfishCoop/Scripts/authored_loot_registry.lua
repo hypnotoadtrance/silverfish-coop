@@ -1134,4 +1134,7 @@ return {
     { index = 378, map = "/Game/Classes/Maps/Maps_OverWorld/Slums_P",
       name = "LootCrate_Small_BP_C /Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P:PersistentLevel.LootCrate_Small_BP_C_2",
       path = "/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P:PersistentLevel.LootCrate_Small_BP_C_2", salt = -1379009344, guarantee_spawn = true, replenish_mode = 2 },
+    { index = 379, map = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
+      name = "LootCabnet_Small_BP_C /Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5",
+      path = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.LootCabnet_Small_BP_C_5", salt = -595904512, replenish_mode = 2, small_cabinet = true },
 }

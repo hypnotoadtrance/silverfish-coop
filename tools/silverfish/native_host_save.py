@@ -8,6 +8,7 @@ import re
 import uuid
 
 from .campaign import CampaignFormatError
+from .authored_loot import CRATES, SMALL_CABINET, loot_capacity
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_tape_profiles import BY_MAP as TAPE_PROFILES, STONE
@@ -137,6 +138,25 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     if type(enemy_rolls) is not dict:
         raise CampaignFormatError("The campaign's stock enemy drops are invalid")
     members = {"host", *checkpoint["characters"]}
+    for container, roll in rolls.items():
+        items = roll.get("items")
+        if isinstance(items, list) and len(items) > (loot_capacity(container) or 2):
+            raise CampaignFormatError("A stock container exceeds its exact escrow capacity")
+        if container != SMALL_CABINET:
+            continue
+        if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, CRATES[container])
+                or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != CRATES[container]
+                or not isinstance(roll.get("opener"), str) or roll["opener"] not in members
+                or type(roll.get("trait_calls")) is not int
+                or not 1 <= roll["trait_calls"] <= 1 + loot_capacity(container)
+                or any(type(item) is not dict or not valid_guid(item.get("guid"))
+                       or not isinstance(item.get("actor"), str) or not item["actor"]
+                       or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")
+                       or item.get("claimed_by") is not None and (not isinstance(item["claimed_by"], str)
+                                                                  or item["claimed_by"] not in members) for item in items)
+                or len({item["guid"] for item in items}) != len(items)
+                or len({item["actor"] for item in items}) != len(items)):
+            raise CampaignFormatError("The stock small cabinet escrow has an invalid identity or item")
     cqc_visits = set()
     cqc_drops = set()
     for guid, roll in enemy_rolls.items():

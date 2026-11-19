@@ -46,7 +46,7 @@ local function scope(state, phase, crate)
     local distance = math.sqrt((here.X - target.X)^2 + (here.Y - target.Y)^2 + (here.Z - target.Z)^2)
     if distance ~= distance or distance >= range then return end
     return { pawn = pawn, controller = controller, name = binding.name, crate = crate, actor = binding.crate,
-        distance = distance }
+        distance = distance, capacity = binding.profile.capacity }
 end
 
 local function remove_widget()
@@ -150,7 +150,7 @@ function view.command(fields, state, phase)
     if not active or active.name ~= fields[4] or not bounded_id(fields[3], true) then
         error("stock_crate_view_scope_unavailable", 0)
     end
-    if command == "native-loot-view-render" and #fields >= 5 and #fields <= 7 then
+    if command == "native-loot-view-render" and #fields >= 5 and #fields <= 5 + active.capacity then
         local id, signature = fields[3], table.concat(fields, "\t", 6)
         local closed = dismissed and dismissed.id == id and dismissed.crate == active.crate
         if not closed and #fields > 5 then
