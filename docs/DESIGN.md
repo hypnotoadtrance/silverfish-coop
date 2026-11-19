@@ -26,7 +26,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 10. **Independent inventories.** Each character has their own inventory. The host tracks and saves it with that character.
 
-11. **Host-only zone transitions.** Only the host can initiate zone transitions. Zone boundaries block guests. The host is also blocked when any active character is more than 15 meters from the host. Party travel follows rule 18.
+11. **Host-only zone transitions.** Only the host can initiate zone transitions. Zone boundaries block guests. Interacting with a transition door is also host-only. The host still has to meet the door's normal requirements. The host is blocked when any active character is more than 15 meters from the host. Party travel follows rule 18.
 
 12. **Shared, trait-aware loot.** The host rolls loot from a container or dead enemy using the traits of the player who opened it or was credited with the kill. For a container, the first accepted open establishes the opener. The host synchronizes the same rolled pool to the party. A stack can be claimed once, and reopening or reconnecting preserves the original roll.
 
@@ -40,7 +40,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 17. **Revive and wipe details.** Revive requires a living teammate outside the downed state and within interaction range. Revive restores 10% of the target's maximum health, with a minimum of 1 HP. The initial defaults are no bleed-out timer and friendly fire off. A downed host continues hosting. Once a party wipe starts, lock the roster and give each player a bounded item-selection window if retention is enabled. Resolve each character's item retention and owner-only backpack drop once before the party respawns.
 
-18. **Coordinated zone travel.** The host validates the 15-meter check against the active roster before travel. Downed characters and characters within reconnect grace count. Show which characters block the transition. Queue incoming joins during travel or a wipe, then admit new arrivals at a safe spot near the host once the party can accept them.
+18. **Coordinated zone travel.** The host validates the 15-meter check against the active roster before travel. Downed characters and characters within reconnect grace count. Show which characters block the transition. Stardust, the green, blue, red, and golden cubes, and similar transport items or events are host-only in co-op. An approved use transports the whole party to the event's destination and uses its arrival rules. A destination in the current map moves the party together without reconnecting. A rejected use leaves the item, charges, and travel state intact. Queue incoming joins during travel or a wipe, then admit new arrivals at a safe spot near the host once the party can accept them.
 
 ## Implementation milestones
 

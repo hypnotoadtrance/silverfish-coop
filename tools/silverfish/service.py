@@ -11,16 +11,19 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, party, wipe
+from . import link, native_quest, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
-from .travel import PLAYTEST_MAPS, travel_decision
-from .runtime import (Bridge, MAP, launch, native_death_backend, read_json, spare_udp_port, staged_build,
+from .native_pickup import NativePickup, STAGED_SHOPS
+from .travel import AUTHORED_EXITS, AUTHORED_MAPS, PLAYTEST_MAPS, travel_decision
+from .runtime import (Bridge, MAP, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       stop_game, verify_loopback_socket, write_json, write_text)
 
 
 PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
+GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin")
+TRANSPORT_FIXTURES = ("stardust", "green", "blue", "red", "gold")
 
 
 def _identity(directory: Path):
@@ -61,7 +64,8 @@ async def project_players(bridge: Bridge, game: dict, public: dict, *, client: b
 class Host:
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
                  bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
-                 native_backend: str | None, native_events: bool, native_guest: bool):
+                 native_backend: str | None, native_events: bool, native_guest: bool, native_zones: bool = False,
+                 authored_zones: bool = False, native_zone_walls: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -78,8 +82,16 @@ class Host:
         self.native_backend = native_backend
         self.native_events = native_events
         self.native_guest = native_guest
+        self.native_zones = native_zones
+        self.native_zone_walls = native_zone_walls
+        self.allowed_maps = AUTHORED_MAPS if authored_zones else PLAYTEST_MAPS
         self.next_native_heartbeat = 0.0
+        self.next_zone_heartbeat = 0.0
         self.native_guest_health = None
+        self.native_guest_position = None
+        self.hazard_origin = None
+        self.native_pickup = NativePickup()
+        self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         self.party = party.load_party(store.status()["world"].get("party"))
         if death_rules is not None:
@@ -191,14 +203,20 @@ class Host:
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
+        view["native_quests"] = self.party.get("native_quests", {})
+        if self.native_guest:
+            view["native_inventory_projected"] = self.native_pickup.projected()
         return view
 
     def act(self, actor: str, operation_id: str, action: str, target: str | None,
-            amount: int | None = None, retained: dict | None = None) -> dict:
+            amount: int | None = None, retained: dict | None = None, *,
+            last_native_target: dict | None = None) -> dict:
         if self.stopping or self.transitioning or time.monotonic() - self.last_seen > POSITION_MAX_AGE:
             raise party.RuleError("game_snapshot_unavailable")
         roles = self.roles()
         pawns = self.authoritative_pawns(roles)
+        if action == "native-down" and target is not None and last_native_target:
+            pawns.setdefault(target, last_native_target)
         if action == "test-damage":
             if actor != "host" or not self.fixtures:
                 raise party.RuleError("action_unavailable")
@@ -227,7 +245,8 @@ class Host:
                 pawns[character_id] = details
         return pawns
 
-    async def travel(self, bridge: Bridge, transport, destination: str, *, respawning: bool = False) -> dict:
+    async def travel(self, bridge: Bridge, transport, destination: str, *, respawning: bool = False,
+                     entrance: str | None = None) -> dict:
         if self.party["wipe"] and not respawning:
             return {"ok": False, "error": "wipe_in_progress"}
         roles = self.roles()
@@ -235,9 +254,13 @@ class Host:
             return {"ok": False, "error": "respawn_in_progress"}
         current = self.last_game.get("map", "")
         gate = travel_decision("host", current, destination, ("host",) if respawning else tuple(roles.values()),
-                               self.authoritative_pawns(roles))
+                               self.authoritative_pawns(roles), allowed_maps=self.allowed_maps)
         if not gate["allowed"]:
             return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
+        if not respawning and (current in AUTHORED_MAPS or entrance is not None):
+            expected = AUTHORED_EXITS.get((current, destination))
+            if not expected or entrance != expected:
+                return {"ok": False, "error": "authored_exit_required"}
         self.transitioning = True
         self.control.event("zone_travel_requested", source=current, destination=destination)
         try:
@@ -251,6 +274,8 @@ class Host:
                     timeout=22,
                 )
                 await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
+                if entrance:
+                    observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
                 await transport.refresh_game_routes()
             except (OSError, RuntimeError):
                 self.stopping = True
@@ -265,12 +290,12 @@ class Host:
                 self.guest["restore"] = {"health": guest.get("health")} if self.native_guest else {}
             revision = self.checkpoint()
             self.control.event("zone_travel_ready", source=current, destination=destination,
-                               epoch=self.zone_epoch, revision=revision)
+                               entrance=entrance, epoch=self.zone_epoch, revision=revision)
             return {"ok": True, "map": destination, "travel_epoch": self.zone_epoch, "revision": revision}
         finally:
             self.transitioning = False
 
-    def guest_request(self, guest_id: str, request: dict) -> dict:
+    def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
         if request == {"action": "characters"}:
             return {"ok": True, "characters": self.store.linked_character_catalog(guest_id)}
@@ -286,6 +311,8 @@ class Host:
             return {"ok": True, "gameplay": self.public_gameplay(), "zone_epoch": self.zone_epoch,
                     "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
         action = request.get("action")
+        if action in GUEST_NATIVE_ACTIONS and set(request) == {"action", "operation_id", "target"}:
+            return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:
             return {"ok": False, "error": "action_unavailable"}
         try:
@@ -295,6 +322,36 @@ class Host:
             return {"ok": False, "error": str(error)}
         return {"ok": True, **result}
 
+    async def enqueue_native_request(self, guest_id: str, request: dict) -> dict:
+        future = asyncio.get_running_loop().create_future()
+        try:
+            self.native_requests.put_nowait((guest_id, request, future))
+        except asyncio.QueueFull:
+            return {"ok": False, "error": "native_actions_busy"}
+        return await future
+
+    async def service_guest_native_requests(self, bridge: Bridge) -> None:
+        if self.native_requests.empty():
+            return
+        guest_id, request, future = self.native_requests.get_nowait()
+        if future.cancelled():
+            return
+        try:
+            if not self.guest or self.guest["guest_id"] != guest_id or self.guest["disconnected"] is not None:
+                raise party.RuleError("guest_not_active")
+            character = self.guest["character_id"]
+            action, target = request["action"], request["target"]
+            if action == "native-pickup":
+                result = await self.native_pickup.claim(self, bridge, character, request["operation_id"], target)
+            elif action == "native-shop-buy":
+                result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
+            else:
+                result = await native_quest.action(self, bridge, character, action, target)
+        except (OSError, RuntimeError, ValueError) as error:
+            result = {"ok": False, "error": str(error)}
+        if not future.done():
+            future.set_result({"ok": True, **result})
+
     async def project_gameplay(self, bridge: Bridge) -> None:
         now = time.monotonic()
         if self.last_game.get("state") != "hosting" or now < self.next_projection:
@@ -303,6 +360,16 @@ class Host:
             await project_players(bridge, self.last_game, self.public_gameplay(), client=False)
             if not self.fixtures:
                 return
+            await native_quest.project(self, bridge)
+            if self.native_guest:
+                await self.native_pickup.restore(self, bridge)
+            money = self.party["economy"]["wallet"]
+            quest_paid = any(row.get("step") == native_quest.COMPLETED
+                             for row in self.party.get("native_quests", {}).values())
+            if ((self.party["economy"]["quest_completed"] or quest_paid
+                 or self.party["economy"].get("native_wallet_active"))
+                    and self.last_game.get("native_wallet") != money):
+                await bridge.command("wallet-set", str(money), timeout=4)
             if self.party["loot"] is None:
                 if self.last_game["map"] != MAP:
                     return
@@ -327,9 +394,6 @@ class Host:
                     else:
                         await bridge.command("loot-clear", loot["id"], timeout=4)
                     self.marker_ready = desired
-            money = self.party["economy"]["wallet"]
-            if (self.party["economy"]["quest_completed"] and self.last_game.get("native_wallet") != money):
-                await bridge.command("wallet-set", str(money), timeout=4)
         except (OSError, RuntimeError) as error:
             self.next_projection = time.monotonic() + 2
             self.control.event("gameplay_projection_error", reason=str(error))
@@ -381,6 +445,11 @@ class Host:
                 self.party = candidate
                 continue
             try:
+                if self.native_guest:
+                    body = self.last_game["pawns"][name]
+                    if body["health"] is None or body.get("max_health") is None:
+                        continue
+                    spot = dict(spot, health=body["max_health"])
                 state = await bridge.restore(name, spot)
             except (OSError, RuntimeError) as error:
                 self.control.event("respawn_placement_pending", actor=actor, reason=str(error))
@@ -405,6 +474,7 @@ class Host:
             "host": address, "port": self.port, "guest_id": guest["guest_id"],
             "credential": guest["credential"], "character_id": guest["character_id"],
             "game_build": self.game_build, "protocol_version": PROTOCOL,
+            "native_zones": self.native_zones, "native_zone_walls": self.native_zone_walls,
         })
         self.control.event("invite_created", guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -445,6 +515,7 @@ class Host:
             if self.native_guest_health and self.native_guest_health[:2] == (self.guest["character_id"], pawn["name"]):
                 saved_health = self.native_guest_health[2]
             health = "-" if saved_health is None else str(saved_health)
+            self.native_pickup.invalidate()
             snapshot = await bridge.command("native-guest-bind", pawn["name"], health, timeout=4)
             if snapshot.get("native_guest_save", {}).get("pawn") != pawn["name"]:
                 raise RuntimeError("The guest's independent native save could not be verified")
@@ -480,6 +551,10 @@ class Host:
                     self.guest = None
                     self.guest_pawn = None
                     self.awaiting_zone_guest = None
+        if self.native_guest and pawn and self.guest and self.guest_pawn == pawn["name"]:
+            position = _pawn(self.last_game, "guest")
+            if position and all(axis is not None for axis in position["location"]):
+                self.native_guest_position = (self.guest["character_id"], pawn["name"], position, self.last_seen)
 
     async def service_requests(self, bridge: Bridge, transport) -> None:
         for path, request in self.control.requests():
@@ -487,13 +562,40 @@ class Host:
             try:
                 if action == "invite":
                     result = self.invite(request)
+                elif action == "native-pickup-spawn" and self.native_guest and self.fixtures:
+                    result = await self.native_pickup.spawn(self, bridge)
+                elif action == "native-shop-approach" and self.native_guest and self.fixtures:
+                    target = request.get("target")
+                    shop = next((entry for entry in self.last_game.get("native_shops", [])
+                                 if entry["id"] == target and entry["state"] in ("ok", "partial")), None)
+                    if (not shop or target not in STAGED_SHOPS or self.last_game.get("map") != MAP
+                            or any(axis is None for axis in shop["location"])):
+                        raise ValueError("The staged stock merchant is unavailable")
+                    x, y, z = shop["location"]
+                    for dx, dy in ((130, 0), (-130, 0), (0, 130), (0, -130)):
+                        try:
+                            await bridge.restore("guest", {"location": [x + dx, y + dy, z + 20]})
+                            break
+                        except (RuntimeError, TimeoutError):
+                            continue
+                    else:
+                        raise RuntimeError("No safe position near the staged merchant")
+                    result = {"near_native_shop": target}
+                elif action == "native-weapon-roundtrip" and self.native_guest and self.fixtures and self.guest_pawn:
+                    snapshot = await bridge.command(action, self.guest_pawn, timeout=4)
+                    proof = snapshot.get("native_weapon_roundtrip") or {}
+                    if proof.get("state") != "verified":
+                        raise RuntimeError("Native weapon round-trip did not verify its typed payload")
+                    result = {"native_weapon_roundtrip": proof}
+                elif action in ("native-quest-start", "native-quest-objective", "native-quest-turnin"):
+                    result = await native_quest.action(self, bridge, "host", action, request.get("target"))
                 elif (action == "native-inventory-probe" and self.native_backend == "cpp"
                       and self.fixtures and not self.native_guest):
                     snapshot = await bridge.command(action, timeout=4)
                     result = {"native_inventory_canary": snapshot.get("native_inventory_canary")}
-                elif (action in ("native-death-probe", "native-damage-probe", "native-guest-damage")
+                elif (action in ("native-death-probe", "native-damage-probe", "native-guest-damage", "native-host-damage")
                       and self.native_backend and self.fixtures):
-                    if (action == "native-guest-damage") != self.native_guest:
+                    if (action in ("native-guest-damage", "native-host-damage")) != self.native_guest:
                         raise ValueError("Use the damage probe for this host's native ownership mode")
                     target = request.get("target")
                     if target not in ("host", "guest"):
@@ -504,6 +606,11 @@ class Host:
                 elif action == "quest-probe" and self.fixtures:
                     snapshot = await bridge.command(action, timeout=4)
                     result = {"native_quest": snapshot.get("native_quest")}
+                elif action == "native-friendly-fire" and self.native_guest and self.fixtures:
+                    snapshot = await bridge.command(action, timeout=4)
+                    result = {"native_friendly_fire": snapshot.get("native_friendly_fire")}
+                elif action in ("native-hazard-position", "native-hazard-start", "native-hazard-return"):
+                    result = await self.native_hazard(bridge, action)
                 elif action in ("vitals-probe", "vitals-reset") and self.fixtures:
                     snapshot = await bridge.command(action, timeout=4)
                     result = {"native_vitals_probe": snapshot.get("native_vitals_probe")}
@@ -512,6 +619,34 @@ class Host:
                     success = result.pop("ok")
                     self.control.respond(path, success, **result)
                     continue
+                elif action == "native-exit-position" and self.native_zones and self.fixtures:
+                    target = request.get("target")
+                    position = request.get("exit_position")
+                    if target not in ("host", "guest") or position not in ("near", "inside", "far"):
+                        raise ValueError("Specify a host or guest and an exit fixture position")
+                    snapshot = await bridge.command(action, "local" if target == "host" else "guest",
+                                                    position, timeout=4)
+                    result = {"native_zone": snapshot.get("native_zone"), "target": target, "position": position}
+                elif action == "native-exit-wall-probe" and self.native_zones and self.fixtures:
+                    target = request.get("target")
+                    if target not in ("host", "guest"):
+                        raise ValueError("Specify the host or guest for the exit sweep")
+                    snapshot = await bridge.command(action, "local" if target == "host" else "guest", timeout=4)
+                    result = {"native_zone_wall": snapshot.get("native_zone_wall")}
+                elif action in ("native-door-position", "native-door-probe") and self.native_zones and self.fixtures:
+                    target = request.get("target")
+                    if target not in ("host", "guest"):
+                        raise ValueError("Specify the host or guest for the door fixture")
+                    arguments = [action, "local" if target == "host" else "guest"]
+                    if action == "native-door-position":
+                        position = request.get("exit_position")
+                        if position not in ("near", "far"):
+                            raise ValueError("Specify a near or far door fixture position")
+                        arguments.append(position)
+                    snapshot = await bridge.command(*arguments, timeout=4)
+                    result = {"native_zone": snapshot.get("native_zone"), "native_door": snapshot.get("native_door")}
+                elif action == "native-transport-probe" and self.native_zones and self.fixtures:
+                    result = await probe_transport(bridge, request.get("target"))
                 elif action == "walk":
                     await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
                     result = {"movement_scheduled": True}
@@ -530,6 +665,30 @@ class Host:
             except (ValueError, OSError, CampaignError, RuntimeError) as error:
                 self.control.respond(path, False, error=str(error))
 
+    async def native_hazard(self, bridge: Bridge, action: str) -> dict:
+        if not self.native_guest or not self.fixtures or self.last_game.get("map") != MAP or not self.guest_pawn:
+            raise ValueError("The stock hazard probe requires the paired C++ fixtures")
+        status = self.last_game.get("native_hazard", {})
+        if action == "native-hazard-position":
+            if self.hazard_origin:
+                raise ValueError("Return the guest from the previous hazard probe first")
+            position = _pawn(self.last_game, "guest")
+            if not position or any(axis is None for axis in position["location"]):
+                raise ValueError("The guest's safe return position is unavailable")
+            await bridge.command(action, self.guest_pawn, timeout=4)
+            self.hazard_origin = (self.guest_pawn, position)
+            return {"hazard_positioned": True}
+        if not self.hazard_origin or self.hazard_origin[0] != self.guest_pawn:
+            raise ValueError("The exact hazard probe pawn is unavailable")
+        if action == "native-hazard-start":
+            snapshot = await bridge.command(action, self.guest_pawn, timeout=4)
+            return {"native_hazard": snapshot.get("native_hazard")}
+        if status.get("state") not in ("downed", "stopped", "failed", "timeout"):
+            raise ValueError("The stock gas must finish shutting down before moving the guest")
+        await bridge.restore("guest", dict(self.hazard_origin[1], health=None))
+        self.hazard_origin = None
+        return {"hazard_guest_returned": True}
+
     def deliver_native_deaths(self, bridge: Bridge) -> None:
         self.pending_native_deaths.extend(bridge.native_deaths())
         if time.monotonic() - self.last_seen > POSITION_MAX_AGE:
@@ -538,16 +697,43 @@ class Host:
         for slot, operation_id, pawn in self.pending_native_deaths:
             observed = self.last_game.get("pawns", {}).get(slot, {}).get("name")
             target = self.roles().get("host" if slot == "local" else "guest")
-            if (pawn and pawn != observed) or (self.native_guest and not pawn):
+            last_target = None
+            if slot == "guest" and observed is None and self.native_guest_position and target and pawn:
+                actor, prior, position, observed_at = self.native_guest_position
+                if (actor == target and prior == pawn == self.guest_pawn
+                        and position["map"] == self.last_game.get("map")
+                        and time.monotonic() - observed_at <= POSITION_MAX_AGE):
+                    last_target = position
+            if (pawn and pawn != observed and not last_target) or (self.native_guest and not pawn):
                 self.control.event("native_death_rejected", operation_id=operation_id, reason="pawn_identity_changed")
                 continue
             try:
-                self.act("host", operation_id, "native-down", target, 1000)
+                if last_target:
+                    self.act("host", operation_id, "native-down", target, 1000, last_native_target=last_target)
+                else:
+                    self.act("host", operation_id, "native-down", target, 1000)
             except OSError:
                 pending.append((slot, operation_id, pawn))
             except (ValueError, RuntimeError) as error:
                 self.control.event("native_death_rejected", operation_id=operation_id, reason=str(error))
         self.pending_native_deaths = pending
+
+    async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
+        if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
+            write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+            self.next_zone_heartbeat = now + 0.6
+        for sequence, source, destination, entrance in bridge.native_zone_requests():
+            if self.last_game.get("state") != "hosting" or self.last_game.get("map") != source:
+                continue
+            try:
+                result = await self.travel(bridge, transport, destination, entrance=entrance)
+            except (RuntimeError, OSError, TimeoutError) as error:
+                result = {"ok": False, "error": str(error)}
+            self.control.event("native_zone_request", sequence=sequence, source=source, destination=destination,
+                               result=result)
+            if not result["ok"] and not self.stopping and self.last_game.get("map") == source:
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    await bridge.command("native-exit-release", timeout=2)
 
     async def run(self, bridge: Bridge, transport) -> None:
         while not self.stopping:
@@ -564,6 +750,10 @@ class Host:
                 self.next_native_heartbeat = now + 0.6
             if self.native_backend:
                 self.deliver_native_deaths(bridge)
+            if self.native_zones:
+                await self.service_native_zones(bridge, transport, now)
+            if not self.stopping:
+                await self.service_guest_native_requests(bridge)
             for operation_id in bridge.interactions():
                 try:
                     self.act("host", operation_id, "interact", None)
@@ -588,7 +778,8 @@ class Host:
 
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
                     fixtures: bool = False, death_rules: dict | None = None, *,
-                    native_events: bool = False, native_guest: bool = False) -> None:
+                    native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
+                    native_zone_walls: bool = False, start_zone: str | None = None) -> None:
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
     if native_events and native_backend != "cpp":
@@ -596,6 +787,15 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     if native_guest and not (native_events and fixtures):
         raise ValueError("--native-guest requires --fixtures and --native-events")
     with Control(directory / "run") as control, CampaignStore(directory / "save") as store:
+        old_world = store.status()["world"]
+        if start_zone and old_world.get("map") not in (None, start_zone):
+            raise ValueError("An existing campaign resumes in its saved zone")
+        entry_map = old_world.get("map", start_zone or MAP)
+        authored = entry_map in AUTHORED_MAPS
+        if authored and not (native_zones and qualified_authored_routes(work)):
+            raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
+        if not authored and entry_map not in PLAYTEST_MAPS:
+            raise ValueError("The campaign is saved in an unqualified zone")
         process = transport = None
         controller = None
         result = "stopped"
@@ -605,13 +805,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             internal_port = spare_udp_port()
             bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
             process = launch(work, directory / "game-user", bridge_directory, headless, internal_port,
-                             native_events=native_events, native_guest=native_guest)
+                             native_events=native_events, native_guest=native_guest, native_zones=native_zones,
+                             native_zone_walls=native_zone_walls)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
-            old_world = store.status()["world"]
-            entry_map = old_world.get("map", MAP)
-            if entry_map not in PLAYTEST_MAPS:
-                raise ValueError("The campaign is saved in an unsupported test zone")
             await bridge.command("host", entry_map)
             initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
             await asyncio.to_thread(verify_loopback_socket, process.pid, internal_port)
@@ -624,7 +821,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     with contextlib.suppress(RuntimeError, TimeoutError):
                         await bridge.restore("local", dict(saved, health=None))
             controller = Host(store, control, game_build, identity, bind, port, fixtures, death_rules,
-                              native_backend=native_backend, native_events=native_events, native_guest=native_guest)
+                              native_backend=native_backend, native_events=native_events, native_guest=native_guest,
+                              native_zones=native_zones, authored_zones=authored, native_zone_walls=native_zone_walls)
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
@@ -654,6 +852,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             control.status(active=False, role="host", state=result, campaign=store.status())
 
 
+async def probe_transport(bridge: Bridge, item: str) -> dict:
+    if item not in TRANSPORT_FIXTURES:
+        raise ValueError("Choose Stardust or a green, blue, red, or gold cube")
+    snapshot = await bridge.command("native-transport-probe", item, timeout=6)
+    return {"native_transport": snapshot.get("native_transport")}
+
+
 def load_invite(file: Path, build: str) -> dict:
     invite = read_json(file, limit=32_768)
     required = {"schema", "host", "port", "certificate", "guest_id", "credential", "character_id",
@@ -666,6 +871,8 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation has an invalid endpoint")
     if not all(isinstance(invite[key], str) for key in ("certificate", "guest_id", "credential", "character_id")):
         raise ValueError("Invitation has invalid credential fields")
+    if any(type(invite[key]) is not bool for key in ("native_zones", "native_zone_walls") if key in invite):
+        raise ValueError("Invitation has invalid native travel settings")
     return invite
 
 
@@ -709,11 +916,13 @@ async def character_catalog(work: Path, invitation: Path, name: str | None,
 
 
 class Client:
-    def __init__(self, control: Control, transport, invite: dict, bridge: Bridge, auto_delay: float = 1):
+    def __init__(self, control: Control, transport, invite: dict, bridge: Bridge, auto_delay: float = 1, *,
+                 allowed_maps: frozenset[str] = PLAYTEST_MAPS):
         self.control = control
         self.transport = transport
         self.invite = invite
         self.bridge = bridge
+        self.allowed_maps = allowed_maps
         self.endpoint = f"127.0.0.1:{transport.address[1]}"
         self.auto_delay = auto_delay
         self.next_retry = 0.0
@@ -753,7 +962,7 @@ class Client:
             self.loot_tracking = None
             self.gameplay_seen = 0.0
             self.server_transitioning = False
-        if result.get("zone") not in PLAYTEST_MAPS or not isinstance(result.get("zone_epoch"), str):
+        if result.get("zone") not in self.allowed_maps or not isinstance(result.get("zone_epoch"), str):
             await self.transport.disconnect()
             raise RuntimeError("Host did not return a supported zone")
         if self.zone_epoch and result["zone_epoch"] != self.zone_epoch:
@@ -804,7 +1013,7 @@ class Client:
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained
-        reply = await self.transport.request(request, timeout=4)
+        reply = await self.transport.request(request, timeout=7 if action in GUEST_NATIVE_ACTIONS else 4)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
         return {key: value for key, value in reply.items() if key != "ok"}
@@ -859,7 +1068,9 @@ class Client:
                 elif action == "walk":
                     await self.bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
                     result = {"movement_scheduled": True}
-                elif action in ("interact", "buy", "keep"):
+                elif action == "native-transport-probe" and self.last_game.get("native_transport", {}).get("state") == "ready":
+                    result = await probe_transport(self.bridge, request.get("target"))
+                elif action in ("interact", "buy", "keep", *GUEST_NATIVE_ACTIONS):
                     result = await self.gameplay_action(action, request.get("operation_id") or path.stem,
                                                         request.get("target"), request.get("retained"))
                 elif action == "stop":
@@ -913,8 +1124,11 @@ class Client:
 
 
 async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,
-                    character_id: str | None = None) -> None:
+                    character_id: str | None = None, *, native_zones: bool = False,
+                    native_zone_walls: bool = False) -> None:
     invite = load_invite(invitation, staged_build(work))
+    native_zones = native_zones or invite.get("native_zones", False)
+    native_zone_walls = native_zone_walls or invite.get("native_zone_walls", False)
     if character_id is not None:
         try:
             if str(uuid.UUID(character_id)) != character_id:
@@ -929,9 +1143,11 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             control.status(active=True, role="client", state="starting")
             transport = await link.start_client()
             bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
-            process = launch(work, directory / "game-user", bridge_directory, headless)
+            process = launch(work, directory / "game-user", bridge_directory, headless,
+                             native_zones=native_zones, native_zone_walls=native_zone_walls)
             bridge = Bridge(bridge_directory, process)
-            client = Client(control, transport, invite, bridge)
+            maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
+            client = Client(control, transport, invite, bridge, allowed_maps=maps)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
             await client.open_game_link()

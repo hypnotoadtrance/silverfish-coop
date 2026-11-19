@@ -4,17 +4,21 @@ if not bridge or bridge == "" then return end
 local guest_save = require("guest_save")
 local loot = require("loot")
 local native_death = require("native_death")
+local native_hazard = require("native_hazard")
 local native_inventory = require("native_inventory")
+local native_pickup = require("native_pickup")
+local native_shop = require("native_shop")
+local native_transport = require("native_transport")
 local native_world = require("native_world")
+local native_zone = require("native_zone")
 local players = require("players")
 local vitals = require("vitals")
 local wallet = require("wallet")
+local weapon_inventory = require("weapon_inventory")
+local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
-local travel_maps = {
-    ["/Game/Classes/Maps/PlaytestMap_01"] = true,
-    ["/Game/Classes/Maps/PlaytestMap_02"] = true,
-}
+local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local stock_save_probes = {
     ["native-death-probe"] = true,
     ["native-damage-probe"] = true,
@@ -104,6 +108,7 @@ local function describe_pawn(pawn, local_player, controller)
         y = location.Y,
         z = location.Z,
         health = health,
+        max_health = pawn.MaxHealth,
         save = save,
     }
 end
@@ -214,8 +219,8 @@ local function open_level(context, level, options)
 end
 
 local function supported_map(map)
-    return type(map) == "string" and #map <= 160
-        and map:match("^/Game/Classes/Maps/[%w_/]+$") and map ~= main_menu
+    local route = zone_maps[map]
+    return route ~= nil and (route.entrance == nil or authored_routes)
 end
 
 local function loopback_endpoint(endpoint)
@@ -259,7 +264,13 @@ local function restore_pawn(fields, state, current_phase)
             error("No valid teleport location near the saved position", 0)
         end
     end
-    if restore_health then match.save.PlayerHealth = health end
+    if restore_health then
+        match.save.PlayerHealth = health
+        if health == match.pawn.MaxHealth then
+            if slot == "guest" then guest_save.restored(match.pawn) end
+            native_death.rearm(slot)
+        end
+    end
     match.pawn:ForceNetUpdate()
     return "pawn restored"
 end
@@ -271,6 +282,9 @@ local function run_command(fields, state, current_phase)
     if guest_save.active() and stock_save_probes[command] then
         error("Clear the managed native guest save before running a stock-save probe", 0)
     end
+    if command == "native-guest-clear" or command == "travel" or command == "leave" then
+        native_hazard.clear("co-op session is changing")
+    end
     if command == "host" then
         if #fields ~= 3 or not supported_map(argument) then
             error("Expected a packaged game map", 0)
@@ -281,8 +295,8 @@ local function run_command(fields, state, current_phase)
         expected_map = argument
         return "listen travel requested"
     elseif command == "travel" then
-        if #fields ~= 3 or not travel_maps[argument] or argument == state.map then
-            error("Expected a different supported co-op playtest map", 0)
+        if #fields ~= 3 or not supported_map(argument) or argument == state.map then
+            error("Expected a different qualified co-op map", 0)
         end
         if role ~= "host" or current_phase ~= "hosting" then
             error("Zone travel requires the active listen host", 0)
@@ -323,6 +337,9 @@ local function run_command(fields, state, current_phase)
         and (fields[4] == "downed" or fields[4] == "standing") then
         guest_save.project(state, current_phase, fields[4])
     end
+    if command == "player-state" and #fields == 4 and argument == "local" then
+        native_death.project_host(state, current_phase, fields[4])
+    end
     local result = players.command(fields, state, current_phase)
     if result and fields[2] == "player-state" and fields[4] == "standing" then
         native_death.rearm(fields[3])
@@ -330,7 +347,13 @@ local function run_command(fields, state, current_phase)
     result = result
         or guest_save.command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
+        or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
+        or native_pickup.command(fields, state, current_phase)
+        or native_shop.command(fields, state, current_phase)
+        or weapon_inventory.command(fields, state, current_phase)
+        or native_zone.command(fields, state, current_phase)
+        or native_transport.command(fields, state, current_phase)
         or loot.command(fields, state, current_phase)
         or vitals.command(fields, state, current_phase)
         or wallet.command(fields, state, current_phase)
@@ -370,7 +393,7 @@ local function write_status(state, current_phase, failure)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             rows[#rows + 1] = status_row("pawn", details.kind, details.name, details.health or "-",
-                details.x, details.y, details.z, details.controller)
+                details.x, details.y, details.z, details.controller, details.max_health or "-")
         end
     end
     local guest_save_row = guest_save.row(status_row)
@@ -382,9 +405,15 @@ local function write_status(state, current_phase, failure)
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_death.rows(state, current_phase, status_row)) do
             rows[#rows + 1] = row
         end
+        for _, row in ipairs(native_hazard.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local native_ok, native_rows = pcall(native_world.rows, state, current_phase, status_row)
         if native_ok then
             for _, row in ipairs(native_rows) do rows[#rows + 1] = row end
@@ -411,6 +440,7 @@ local function observe_session()
     local ok, state, current_phase = pcall(function()
         local observed = inspect()
         local observed_phase = phase(observed)
+        native_hazard.sync(observed, observed_phase)
         if guest_save.sync(observed, observed_phase) then
             observed = inspect()
             observed_phase = phase(observed)
@@ -418,8 +448,11 @@ local function observe_session()
         return observed, observed_phase
     end)
     if not ok then
-        local cleared, failure = pcall(guest_save.clear)
         local diagnostic = tostring(state)
+        local cleared, failure = pcall(function()
+            native_hazard.clear("game bridge observation failed")
+            guest_save.clear()
+        end)
         if not cleared then diagnostic = diagnostic .. " / " .. tostring(failure) end
         write_status({ map = "", clients = 0, server = false, pawns = {} }, "opening", diagnostic)
         return
@@ -431,6 +464,8 @@ local function tick()
     local state, current_phase = observe_session()
     if not state then return end
     native_death.sync(state, current_phase)
+    native_zone.sync(state, current_phase)
+    native_transport.sync(state, current_phase)
     local fields = read_command()
     if fields then
         local was_guest_bound = guest_save.active()
@@ -438,14 +473,16 @@ local function tick()
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
-        if was_guest_bound or guest_save.active() then
+        if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival" or fields[2] == "restore" then
             state, current_phase = observe_session()
             if not state then return end
         else
             current_phase = phase(state)
         end
         -- Ambient damage results are drained by the ordinary tick above.
-        if fields[2] ~= "native-guest-damage" then native_death.sync(state, current_phase) end
+        if fields[2] ~= "native-guest-damage" and fields[2] ~= "native-host-damage" then
+            native_death.sync(state, current_phase)
+        end
     end
     local projected, failure = pcall(function()
         vitals.sync(state, current_phase)
@@ -457,6 +494,7 @@ end
 players.start(bridge)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)
+native_zone.start(bridge)
 LoopAsync(250, function()
     if not tick_queued then
         tick_queued = true

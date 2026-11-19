@@ -132,7 +132,8 @@ def select_items(wipe: dict, actor_id: str, retained: dict[str, int], *, now: fl
     selected = _inventory(retained)
     if len(selected) > wipe["keep_slots"]:
         raise WipeError("too_many_items")
-    frozen = wipe["players"][actor_id]["inventory"]
+    player = wipe["players"][actor_id]
+    frozen = {**player["inventory"], **dict.fromkeys(player.get("native_inventory", {}), 1)}
     if any(count > frozen.get(item, 0) for item, count in selected.items()):
         raise WipeError("item_unavailable")
     candidate = deepcopy(wipe)
@@ -157,10 +158,15 @@ def finish_wipe(wipe: dict, now: float) -> dict | None:
     for actor in wipe["roster"]:
         player = deepcopy(wipe["players"][actor])
         inventory = player["inventory"]
-        kept = dict(inventory if wipe["keep_slots"] is None else wipe["choices"].get(actor, {}))
+        native = player.get("native_inventory", {})
+        choice = wipe["choices"].get(actor, {})
+        kept = dict(inventory if wipe["keep_slots"] is None
+                    else {item: quantity for item, quantity in choice.items() if item in inventory})
+        kept_native = native if wipe["keep_slots"] is None else {guid: native[guid] for guid in native if guid in choice}
         lost = {item: count - kept.get(item, 0) for item, count in inventory.items()
                 if count > kept.get(item, 0)}
-        if lost and wipe["drop_backpacks"]:
+        lost_native = {guid: record for guid, record in native.items() if guid not in kept_native}
+        if (lost or lost_native) and wipe["drop_backpacks"]:
             backpack_id = uuid.uuid5(namespace, actor).hex
             backpacks[backpack_id] = {
                 "id": backpack_id,
@@ -168,7 +174,11 @@ def finish_wipe(wipe: dict, now: float) -> dict | None:
                 "inventory": lost,
                 "position": deepcopy(wipe["drop_positions"].get(actor)),
             }
+            if lost_native:
+                backpacks[backpack_id]["native_inventory"] = lost_native
         player.update(health=player["max_health"], downed=False, inventory=kept)
+        if "native_inventory" in player:
+            player["native_inventory"] = kept_native
         players[actor] = player
 
     return {

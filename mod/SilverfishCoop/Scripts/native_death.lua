@@ -1,25 +1,26 @@
 local native_death = {}
 local guest_save = require("guest_save")
 local vitals = require("vitals")
+local zones = require("zone_maps")
 
 local configured_mode = os.getenv("SILVERFISH_COOP_NATIVE_DEATH")
 local scoped = configured_mode == "cpp" and os.getenv("SILVERFISH_COOP_NATIVE_EVENTS") == "1"
 local backend = configured_mode == "1" and "overlay" or configured_mode == "cpp" and "cpp" or nil
 if scoped then backend = "cpp-scoped" end
 local die_path = "/Game/Classes/Player/Player_FP.Player_FP_C:Die"
-local lab_maps = {
-    ["/Game/Classes/Maps/PlaytestMap_01"] = true,
-    ["/Game/Classes/Maps/PlaytestMap_02"] = true,
-}
+local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local hook_status = "arming"
 local hook_failure = ""
 local slots = {}
 local scope_records = {}
-local scope_map
+local scope_token
+local outbound = {}
 local file_path
 local heartbeat_path
 local sequence = 0
 local last_damage
+local friendly_fire
+local host_revived_health
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -30,7 +31,8 @@ local function same(first, second)
 end
 
 local function active(state, phase)
-    return backend and phase == "hosting" and lab_maps[state.map]
+    local route = zones[state.map]
+    return backend and phase == "hosting" and route and (not route.entrance or authored_routes)
 end
 
 local function update_cpp_status()
@@ -89,24 +91,19 @@ end
 local function clear_scope(force)
     if not force and not next(scope_records) then return true end
     local cleared = pcall(SilverfishClearNativeDeathScope)
-    scope_records, scope_map = {}, nil
+    if cleared then scope_records, scope_token = {}, nil end
     return cleared
 end
 
-function native_death.clear_scope()
-    if not scoped then return true end
-    return clear_scope(true)
-end
-
-local function publish_scope(eligible, map)
+local function publish_scope(eligible)
     if not next(eligible) then return clear_scope() end
-    local guest = eligible.guest
-    local refreshed, accepted = pcall(SilverfishSetNativeDeathScope, 0, guest.address)
-    if not refreshed or accepted ~= true then
+    local host, guest = eligible["local"], eligible.guest
+    local refreshed, accepted, token = pcall(SilverfishSetNativeDeathScope, host and host.address or 0, guest.address)
+    if not refreshed or accepted ~= true or type(token) ~= "number" then
         clear_scope(true)
         return false
     end
-    scope_records, scope_map = eligible, map
+    scope_records, scope_token = eligible, token
     return true
 end
 
@@ -124,20 +121,27 @@ local function eligible_scope(current)
     return { guest = guest }
 end
 
-local function drain_scope(current, map)
-    for slot, previous in pairs(scope_records) do
-        local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, previous.address)
+local function drain_scope()
+    for slot, record in pairs(scope_records) do
+        local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, record.address, scope_token)
         if not observed then return false end
-        -- The native latch belongs to a pawn in the previous scope. A
-        -- replacement in the same slot must never inherit that event.
-        if hit == true and scope_map == map and current[slot] == previous and not previous.emitted then
-            previous.pending_native = true
+        if hit == true and not record.emitted and not record.pending_native then
+            record.pending_native = true
+            outbound[#outbound + 1] = { slot = slot, record = record }
         end
     end
-    for slot, record in pairs(current) do
-        if record.pending_native and not emit(slot, record) then return false end
+    while outbound[1] do
+        local event = outbound[1]
+        if not emit(event.slot, event.record) then return false end
+        table.remove(outbound, 1)
     end
     return true
+end
+
+function native_death.clear_scope()
+    if not scoped then return true end
+    local drained = drain_scope()
+    return clear_scope() and drained
 end
 
 function native_death.sync(state, phase)
@@ -166,7 +170,7 @@ function native_death.sync(state, phase)
 
     -- Consume the previous scope before replacing identities or refreshing
     -- expiry. Authority and map came from this tick's game-thread inspection.
-    local drained = not scoped or drain_scope(current, state.map)
+    local drained = not scoped or drain_scope()
     slots = current
     if not session_active then
         if scoped then clear_scope() end
@@ -186,14 +190,38 @@ function native_death.sync(state, phase)
     elseif not heartbeat_fresh() then
         clear_scope()
         hook_status, hook_failure = "arming", "Waiting for a fresh host heartbeat"
-    elseif not publish_scope(current.guest and guest_save.matches(current.guest.pawn)
-            and eligible_scope(current) or {}, state.map) then
-        hook_status, hook_failure = "error", "The C++ death hook declined the authority scope"
+    else
+        local eligible = current.guest and guest_save.matches(current.guest.pawn) and eligible_scope(current) or {}
+        if eligible.guest then eligible["local"] = current["local"] end
+        if not publish_scope(eligible) then
+            hook_status, hook_failure = "error", "The C++ death hook declined the authority scope"
+        end
     end
 end
 
 function native_death.rearm(slot)
     if slots[slot] then slots[slot].emitted = false end
+end
+
+function native_death.has_pair(host, guest)
+    local local_record, remote = scope_records["local"], scope_records.guest
+    return local_record ~= nil and remote ~= nil and hook_status == "ready" and heartbeat_fresh()
+        and same(local_record.pawn, host) and same(remote.pawn, guest) and guest_save.matches(guest)
+end
+
+function native_death.project_host(state, phase, next_state)
+    local record = slots["local"]
+    if not scoped or next_state ~= "standing" or not record or not record.emitted or not active(state, phase)
+        or scope_records["local"] ~= record or not state.local_pawn or not same(state.local_pawn.pawn, record.pawn) then
+        return
+    end
+    local pawn = record.pawn
+    local save, maximum = pawn.Save, pawn.MaxHealth
+    if valid(save) and finite(maximum) and maximum > 0 then
+        save.PlayerHealth = math.max(1, maximum * 0.1)
+        host_revived_health = save.PlayerHealth
+        pawn:ForceNetUpdate()
+    end
 end
 
 local function on_die(context)
@@ -226,16 +254,16 @@ local function invoke_death_path(slot, record, invoke)
             clear_scope()
             error("The scoped death hook needs a fresh host and independent pawn health", 0)
         end
-        if not drain_scope(slots, record.map) or record.emitted then
+        if not drain_scope() or record.emitted then
             clear_scope()
             error("An earlier scoped death event is pending", 0)
         end
-        if not publish_scope({ [slot] = record }, record.map) then
+        if not publish_scope({ [slot] = record }) then
             error("The C++ death hook declined the diagnostic scope", 0)
         end
 
         local called, failure = pcall(invoke)
-        local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, record.address)
+        local observed, hit = pcall(SilverfishTakeScopedNativeDeathHit, record.address, scope_token)
         -- Remove this temporary scope before the caller restores the original
         -- save binding. This diagnostic never uses the explicit one-shot arm.
         local cleared = clear_scope()
@@ -308,35 +336,55 @@ local function direct_damage_probe(state, phase, record)
     return "native direct damage reached co-op death and stock binding was restored"
 end
 
-local function ambient_damage_probe(record)
-    if not scoped or not heartbeat_fresh() or scope_records.guest ~= record
-        or not guest_save.matches(record.pawn) or not valid(slots["local"] and slots["local"].pawn) then
-        error("The guest does not have a supervised native scope", 0)
+local function ambient_damage_probe(slot, record)
+    local other = slots[slot == "guest" and "local" or "guest"]
+    local guest = slots.guest
+    if not scoped or not heartbeat_fresh() or scope_records[slot] ~= record or not other
+        or not guest or not guest_save.matches(guest.pawn) then
+        error("The requested pawn does not have a supervised native scope", 0)
     end
-    local host = slots["local"] and slots["local"].pawn
-    local guest = record.pawn
-    local stock, detached = host.Save, guest.Save
-    local host_before, before = stock.PlayerHealth, detached.PlayerHealth
+    local pawn = record.pawn
+    local save, other_save = pawn.Save, other.pawn.Save
+    local other_before, before = other_save.PlayerHealth, save.PlayerHealth
     if not finite(before) or before <= 0 or before > 1000000 then
-        error("The guest health is outside the canary range", 0)
+        error("The pawn health is outside the canary range", 0)
     end
     -- Normal scope renewal owns interception and event delivery. This command
     -- leaves that scope alone and only introduces a deterministic stock hit.
-    guest:Deal_DirectDamage(before + 1, host, FText("Co-op scoped damage probe"), false)
-    local after = detached.PlayerHealth
-    if not guest_save.matches(guest) or guest.Dead ~= false
-        or not finite(after) or after > 0 or stock.PlayerHealth ~= host_before then
+    pawn:Deal_DirectDamage(before + 1, other.pawn, FText("Co-op scoped damage probe"), false)
+    local after = save.PlayerHealth
+    if not guest_save.matches(guest.pawn) or pawn.Dead ~= false
+        or not finite(after) or after > 0 or other_save.PlayerHealth ~= other_before then
         error("Scoped lethal damage did not preserve independent live pawns", 0)
     end
-    last_damage = { before = before, after = after, host_before = host_before,
-        host_after = stock.PlayerHealth, sequence = sequence + 1, binding_restored = false }
-    return "stock direct damage delivered to the enrolled guest"
+    last_damage = { slot = slot, before = before, after = after, host_before = other_before,
+        host_after = other_save.PlayerHealth, sequence = sequence + 1, binding_restored = false }
+    return "stock direct damage delivered to the enrolled pawn"
 end
 
 function native_death.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-friendly-fire" then
+        local host, guest = scope_records["local"], scope_records.guest
+        if #fields ~= 2 or not active(state, phase) or not host or not guest
+            or type(SilverfishFriendlyFireBlockedCount) ~= "function" then
+            error("The paired native damage scope is unavailable", 0)
+        end
+        local total, lethal = {}, {}
+        local before = SilverfishFriendlyFireBlockedCount()
+        local host_hp, guest_hp = host.pawn.Save.PlayerHealth, guest.pawn.Save.PlayerHealth
+        guest.pawn:DealDamage({ Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 100 }, {},
+            host.pawn, { X = 0, Y = 0, Z = 0 }, false, total, lethal)
+        local blocked = SilverfishFriendlyFireBlockedCount()
+        if blocked ~= before + 1 or total.TotalDamage ~= 0 or lethal.IsLethal ~= false
+            or host.pawn.Save.PlayerHealth ~= host_hp or guest.pawn.Save.PlayerHealth ~= guest_hp then
+            error("The stock damage path did not confirm a friendly-fire veto", 0)
+        end
+        friendly_fire = blocked
+        return "stock paired friendly fire vetoed"
+    end
     if command ~= "native-death-probe" and command ~= "native-damage-probe"
-        and command ~= "native-guest-damage" then return end
+        and command ~= "native-guest-damage" and command ~= "native-host-damage" then return end
     local slot = fields[3]
     if #fields ~= 3 or (slot ~= "local" and slot ~= "guest") then
         error("Expected one pawn slot, local or guest", 0)
@@ -352,7 +400,12 @@ function native_death.command(fields, state, phase)
         error("The requested authoritative pawn is unavailable", 0)
     end
     if record.emitted then error("This pawn already reported a native death", 0) end
-    if command == "native-guest-damage" then return ambient_damage_probe(record) end
+    if command == "native-guest-damage" or command == "native-host-damage" then
+        if (command == "native-host-damage") ~= (slot == "local") then
+            error("Incorrect slot for the native damage probe", 0)
+        end
+        return ambient_damage_probe(slot, record)
+    end
     if command == "native-damage-probe" then return direct_damage_probe(state, phase, record) end
     local previous = sequence
     invoke_death_path(slot, record, function()
@@ -367,9 +420,11 @@ end
 function native_death.rows(state, phase, status_row)
     if not active(state, phase) then return {} end
     local rows = { status_row("native-death", hook_status, sequence, hook_failure, backend,
-        scope_records.guest and "guest" or "") }
+        scope_records["local"] and "party" or scope_records.guest and "guest" or "") }
+    if friendly_fire then rows[#rows + 1] = status_row("native-friendly-fire", friendly_fire) end
+    if host_revived_health then rows[#rows + 1] = status_row("native-host-revive", host_revived_health) end
     if last_damage then
-        rows[#rows + 1] = status_row("native-damage-canary", "guest",
+        rows[#rows + 1] = status_row("native-damage-canary", last_damage.slot or "guest",
             last_damage.before, last_damage.after, last_damage.host_before, last_damage.host_after,
             last_damage.binding_restored and 1 or 0, last_damage.sequence)
     end

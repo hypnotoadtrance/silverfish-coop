@@ -1,6 +1,6 @@
 # Native C++ playtest
 
-The C++ add-on tests an exact pre-call hook on the stock `Player_FP_C:Die` Blueprint function. The stock game packages are used in this stage. The normal diagnostic arms one authority pawn for one synchronous call. An opt-in mode renews a short-lived scope for the authenticated remote guest with independent native health.
+The C++ add-on hooks the stock `Player_FP_C:Die` Blueprint function in a stage built with the original game packages. The explicit diagnostic arms one authority pawn for one call. The paired playtest renews a short-lived scope for the exact host and authenticated guest after their native health becomes independent.
 
 ## Build the matched runtime and add-on
 
@@ -31,9 +31,20 @@ The live check invokes native direct damage against a transient independent gues
 
 ```powershell
 & $sfPython tests/live_smoke.py --work $sfCppLab --native-inventory --native-damage --native-backend cpp-scoped --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
-& $sfPython tests/live_smoke.py --work $sfCppLab --native-guest --zones --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
+& $sfPython tests/live_smoke.py --work $sfCppLab --native-guest --native-pair --native-pickup --native-wipe --native-quest-flow --native-shop --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
 ```
 
 The inventory check copies allowlisted inventory, equipment, and vitals from the stock save to a temporary guest SaveGame. It changes one guest-side native item value and verifies that the donor's value stays fixed. The report identifies an existing stock item or a synthetic Bandage in temporary guest storage. This check restores the normal pawn save references.
 
-The guest ownership playtest uses `host --fixtures --native-events --native-guest`. The host binds its authenticated guest's exact server pawn to an independent save in memory. C++ rechecks pawn, controller, connection, world, and save ownership at the stock death call. If the host stops renewing the scope, C++ stops intercepting calls and the Lua bridge takes the guest out of the experiment. The smoke test waits for several renewals, runs deterministic stock direct damage, observes the downed event from the normal bridge tick, and checks that the same pawn revives at 10% of native maximum HP. It also checks that the host-owned checkpoint restores health after host-led travel and restart. The `status` JSON exposes the bound pawn, current death scope, and authoritative HP. Native inventory actions still use stock routing and this mode is limited to the playtest maps.
+The paired playtest uses `host --fixtures --native-events --native-guest`. C++ rechecks pawn, controller, connection, world, and save ownership at the stock death call. The smoke test waits for scope renewal, triggers stock direct damage, and checks both in-place revives at 10% of native maximum HP. It tests friendly fire separately through the stock damage interface. The wipe check tests full native health at the saved rest location, removal of the guest Bandage from the backpack, and recovery by its owner through the co-op ledger.
+
+The staged merchant quotes one Bandage from real infinite stock. `native-shop-buy` applies the quoted amount to the shared wallet before issuing the item. The sampled merchant quote is zero. The positive-price and insufficient-funds cases are covered by automated transaction tests. The `status` JSON exposes the verified native inventory GUIDs, native pawn HP, downed state, wallet, and quest progress. The stock inventory widget, generic use and equip actions, and finite shop stock remain development areas.
+
+## Authored travel
+
+```powershell
+& $sfPython tests/live_smoke.py --work $sfCppLab --native-zones --native-walls --authored-zone --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
+& $sfPython tests/live_smoke.py --work $sfCppLab --native-zones --native-door --native-transport --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"
+```
+
+For a manual run, start a new campaign with `host --native-zones --native-zone-walls --start-zone /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P`. Invitations carry the native travel options. The qualified DeadBridge route uses the physical blocker and `DB_CR` arrival marker. The Cistern route uses the stock transition door and `CR_Cstrn` marker. The host service checks the active party within 15 meters and places guests near the host after travel. Native travel mode guards Stardust and the four cubes. The host's coordinated item-use transaction is pending.

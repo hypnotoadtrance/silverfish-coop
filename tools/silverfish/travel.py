@@ -1,4 +1,4 @@
-"""Evaluate host-only travel on the two known prototype maps."""
+"""Evaluate the host gate for verified co-op map routes."""
 
 from __future__ import annotations
 
@@ -10,6 +10,16 @@ PLAYTEST_MAPS = frozenset({
     "/Game/Classes/Maps/PlaytestMap_01",
     "/Game/Classes/Maps/PlaytestMap_02",
 })
+CROSSROADS = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+CISTERN = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
+AUTHORED_EXITS = {
+    (CROSSROADS, DEAD_BRIDGE): "DB_CR",
+    (DEAD_BRIDGE, CROSSROADS): "DB_CR",
+    (CROSSROADS, CISTERN): "CR_Cstrn",
+    (CISTERN, CROSSROADS): "CR_Cstrn",
+}
+AUTHORED_MAPS = frozenset({CROSSROADS, DEAD_BRIDGE, CISTERN})
 TRAVEL_RADIUS_UU = 1500
 
 
@@ -52,6 +62,8 @@ def travel_decision(
     destination: str,
     active_ids: tuple[str, ...],
     pawns: dict,
+    *,
+    allowed_maps: frozenset[str] = PLAYTEST_MAPS,
 ) -> TravelDecision:
     """Return a deterministic travel decision from host-authoritative pawn positions.
 
@@ -61,9 +73,9 @@ def travel_decision(
     """
     if role != "host":
         return _deny(HOST_ID, "host_only")
-    if not isinstance(source, str) or source not in PLAYTEST_MAPS:
+    if not isinstance(source, str) or source not in allowed_maps:
         return _deny(HOST_ID, "unknown_source")
-    if not isinstance(destination, str) or destination not in PLAYTEST_MAPS:
+    if not isinstance(destination, str) or destination not in allowed_maps:
         return _deny(HOST_ID, "unknown_destination")
     if source == destination:
         return _deny(HOST_ID, "same_zone")

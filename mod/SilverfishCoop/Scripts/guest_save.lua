@@ -1,13 +1,11 @@
 local guest_save = {}
 local vitals = require("vitals")
+local zones = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
     and os.getenv("SILVERFISH_COOP_NATIVE_EVENTS") == "1"
-local playtest_maps = {
-    ["/Game/Classes/Maps/PlaytestMap_01"] = true,
-    ["/Game/Classes/Maps/PlaytestMap_02"] = true,
-}
+local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local save_class_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local initial_lease_seconds = 3
@@ -46,7 +44,8 @@ local function controlled(pawn, controller, world, local_controller)
 end
 
 local function participants(state, phase)
-    if phase ~= "hosting" or not playtest_maps[state.map] or state.clients ~= 1
+    local route = zones[state.map]
+    if phase ~= "hosting" or not route or (route.entrance and not authored_routes) or state.clients ~= 1
         or state.server or not state.listening or #state.pawns ~= 2
         or not valid(state.world) then return end
 
@@ -205,11 +204,16 @@ function guest_save.project(state, phase, next_state)
     elseif binding.was_downed then
         local maximum = guest.pawn.MaxHealth
         if not finite(maximum) or maximum <= 0 then error("Guest revive health is unavailable", 0) end
-        binding.detached.PlayerHealth = maximum * 0.10
-        if binding.detached.PlayerHealth ~= maximum * 0.10 then error("Guest revive health write failed", 0) end
+        local health = math.min(maximum, math.max(1, maximum * 0.10))
+        binding.detached.PlayerHealth = health
+        if binding.detached.PlayerHealth ~= health then error("Guest revive health write failed", 0) end
         binding.was_downed = false
         guest.pawn:ForceNetUpdate()
     end
+end
+
+function guest_save.restored(pawn)
+    if guest_save.matches(pawn) then binding.was_downed = false end
 end
 
 function guest_save.row(status_row)

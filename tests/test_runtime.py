@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -59,3 +60,14 @@ class StageBackendTests(unittest.TestCase):
         runtime.write_json(self.manifest, self.metadata)
         with self.assertRaisesRegex(ValueError, "missing its stage manifest"):
             runtime.native_death_backend(self.work)
+
+    @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
+    def test_only_headless_launches_use_unreals_offscreen_application(self):
+        with patch("tools.silverfish.win_job.GameProcess") as game:
+            runtime.launch(self.work, self.work / "profile", self.work / "bridge", headless=True)
+            command = game.call_args.args[0]
+            self.assertIn("-RenderOffScreen", command)
+            self.assertIn("-nullrhi", command)
+
+            runtime.launch(self.work, self.work / "profile", self.work / "bridge", headless=False)
+            self.assertNotIn("-RenderOffScreen", game.call_args.args[0])

@@ -19,6 +19,7 @@ OFFER_ITEM = "training-bandage"
 OFFER_PRICE = 10
 REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 RECENT_ACTIONS = 64
+MAX_NATIVE_ITEMS = 24
 
 
 class RuleError(ValueError):
@@ -117,10 +118,19 @@ def _interact(party: dict, actor: str, target: str | None, pawns: dict, loot_ava
         position = backpack["position"]
         if not position or not _nearby(origin, position["map"], position["location"]):
             raise RuleError("target_out_of_range")
+        native = backpack.get("native_inventory", {})
+        if native:
+            owned = player.setdefault("native_inventory", {})
+            if len(owned.keys() | native.keys()) > MAX_NATIVE_ITEMS:
+                raise RuleError("native_inventory_full")
+            owned.update(native)
         for item, quantity in backpack["inventory"].items():
             player["inventory"][item] = player["inventory"].get(item, 0) + quantity
         del party["backpacks"][target]
-        return {"effect": "recover_backpack", "target": target, "items": backpack["inventory"]}
+        result = {"effect": "recover_backpack", "target": target, "items": backpack["inventory"]}
+        if native:
+            result["native_items"] = list(native)
+        return result
 
     if loot and target == loot["id"]:
         if loot["claimed_by"] is not None:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .control import select_run, status, submit
 from .runtime import REPO, prepare_game
+from .travel import AUTHORED_MAPS, PLAYTEST_MAPS
 
 def _workspace(value: str) -> Path:
     return Path(value).expanduser().resolve()
@@ -57,6 +58,10 @@ def parser() -> argparse.ArgumentParser:
                       help="enable supervised host-side native event scope in the C++ lab")
     host.add_argument("--native-guest", action="store_true",
                       help="detach the authenticated guest's native save for the C++ playtest")
+    host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
+    host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
+    host.add_argument("--start-zone", choices=sorted(AUTHORED_MAPS | PLAYTEST_MAPS),
+                      help="start a new campaign in a qualified zone")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
     host.add_argument("--fixture-backpacks", action="store_true", help="drop unretained test inventory in owner-only bags")
@@ -71,6 +76,8 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--profile", required=True)
     join.add_argument("--invite", type=Path, required=True)
     join.add_argument("--headless", action="store_true")
+    join.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
+    join.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
@@ -92,6 +99,13 @@ def parser() -> argparse.ArgumentParser:
         "checkpoint", "drop-link", "reconnect", "stop", "walk", "interact", "test-damage", "travel",
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
         "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
+        "native-exit-position", "native-exit-wall-probe", "native-host-damage", "native-friendly-fire",
+        "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
+        "native-weapon-roundtrip",
+        "native-shop-approach", "native-shop-buy",
+        "native-hazard-position", "native-hazard-start", "native-hazard-return",
+        "native-door-position", "native-door-probe",
+        "native-transport-probe",
     ])
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
@@ -100,6 +114,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--y", type=float, help="normalized world Y movement")
     action.add_argument("--milliseconds", type=int, help="movement duration, from 50 to 1000")
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
+    action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     return cli
 
 
@@ -129,12 +144,14 @@ async def execute(opts):
             rules = {"keep_slots": opts.fixture_keep_slots, "drop_backpacks": opts.fixture_backpacks}
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
                         opts.bind, opts.port, opts.headless, opts.fixtures, rules,
-                        native_events=opts.native_events, native_guest=opts.native_guest)
+                        native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
+                        native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone)
         return {"ok": True, "state": "stopped"}
     if operation == "join":
         from .service import join_game
         await join_game(opts.work, select_run(opts.work, "clients", opts.profile),
-                        opts.invite, opts.headless, opts.character)
+                        opts.invite, opts.headless, opts.character, native_zones=opts.native_zones,
+                        native_zone_walls=opts.native_zone_walls)
         return {"ok": True, "state": "stopped"}
     if operation in {"characters", "create-character"}:
         from .service import character_catalog
@@ -158,7 +175,7 @@ async def execute(opts):
         retained[item] = int(count)
     return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
                         amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
-                        retained=retained if opts.action == "keep" else None)
+                        retained=retained if opts.action == "keep" else None, exit_position=opts.exit_position)
 
 
 def main() -> int:

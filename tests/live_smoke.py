@@ -20,6 +20,18 @@ options.add_argument("--native-death", action="store_true", help="explicitly inv
 options.add_argument("--native-damage", action="store_true", help="exercise stock direct damage and its death handoff")
 options.add_argument("--native-inventory", action="store_true", help="exercise native inventory copy ownership")
 options.add_argument("--native-guest", action="store_true", help="exercise persistent scoped native guest damage and revive")
+options.add_argument("--native-pair", action="store_true", help="also down and revive the native host")
+options.add_argument("--native-hazard", action="store_true", help="exercise a real stock poison gas hazard")
+options.add_argument("--native-zones", action="store_true", help="exercise a stock overlap at the staged exit")
+options.add_argument("--native-walls", action="store_true", help="verify swept physical exit collision")
+options.add_argument("--authored-zone", action="store_true", help="start from CrossRoads and take the stock DeadBridge exit")
+options.add_argument("--native-door", action="store_true", help="exercise the stock CrossRoads to Cistern transition door")
+options.add_argument("--native-transport", action="store_true", help="verify pre-consumption guards for Stardust and four cubes")
+options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
+options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
+options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
+options.add_argument("--native-shop", action="store_true", help="buy a stock merchant item with the party wallet")
+options.add_argument("--native-wipe", action="store_true", help="wipe both native pawns and recover a native item")
 options.add_argument("--native-backend", choices=("cpp", "cpp-scoped", "overlay"),
                      help="require the specified death probe backend")
 options.add_argument("--wipe", action="store_true", help="exercise wipe, item retention and backpack ownership")
@@ -28,6 +40,28 @@ if args.native_backend and not (args.native_death or args.native_damage):
     options.error("--native-backend requires a native death or damage probe")
 if args.native_guest and any((args.native_death, args.native_damage, args.native_inventory, args.native_probe)):
     options.error("--native-guest requires its own run without transient save probes")
+if args.native_pair and not args.native_guest:
+    options.error("--native-pair requires --native-guest")
+if args.native_hazard and not args.native_pair:
+    options.error("--native-hazard requires --native-pair")
+if args.native_pickup and not args.native_guest:
+    options.error("--native-pickup requires --native-guest")
+if args.native_weapon and not args.native_guest:
+    options.error("--native-weapon requires --native-guest")
+if args.native_shop and not (args.native_guest and args.native_quest_flow):
+    options.error("--native-shop requires --native-guest and --native-quest-flow")
+if args.native_wipe and not (args.native_pair and args.native_pickup):
+    options.error("--native-wipe requires --native-pair and --native-pickup")
+if args.native_zones and args.zones:
+    options.error("Choose either --native-zones or --zones")
+if args.native_walls and not args.native_zones:
+    options.error("--native-walls requires --native-zones")
+if args.authored_zone and not args.native_zones:
+    options.error("--authored-zone requires --native-zones")
+if args.native_door and (not args.native_zones or args.authored_zone):
+    options.error("--native-door requires --native-zones and its own run")
+if args.native_transport and not args.native_zones:
+    options.error("--native-transport requires --native-zones")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -89,8 +123,8 @@ async def start(*args):
     processes.append((process, path))
     return process
 
-async def wait(directory, condition):
-    end = time.monotonic() + deadline
+async def wait(directory, condition, *, timeout=None):
+    end = time.monotonic() + (deadline if timeout is None else timeout)
     last = None
     while time.monotonic() < end:
         try:
@@ -176,15 +210,22 @@ async def smoke():
     relay = None
     try:
         fixture_test = any((args.gameplay, args.native_probe, args.native_quest, args.wipe,
-                            args.native_death, args.native_damage, args.native_inventory, args.native_guest))
+                            args.native_death, args.native_damage, args.native_inventory, args.native_guest,
+                            args.native_zones, args.native_quest_flow))
         fixtures = ["--fixtures"] if fixture_test else []
         if args.native_backend == "cpp-scoped" or args.native_guest:
             fixtures += ["--native-events"]
         if args.native_guest:
             fixtures += ["--native-guest"]
-        if args.wipe:
+        if args.native_zones:
+            fixtures += ["--native-zones"]
+        if args.native_walls:
+            fixtures += ["--native-zone-walls"]
+        if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
-        host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures)
+        initial_zone = (["--start-zone", "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"]
+                        if args.authored_zone or args.native_door else [])
+        host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
         note("host_listening", {"udp_port": port, "map": host_status["game"]["map"],
@@ -216,7 +257,8 @@ async def smoke():
             assert len(catalog["characters"]) == 2
             note("character_catalog_and_idempotent_create", {"selected": chosen, "characters": 2})
         client = await start("join", "--profile", profile, "--invite", str(fixture), "--headless",
-                             "--character", chosen)
+                             "--character", chosen, *(["--native-zones"] if args.native_zones else []),
+                             *(["--native-zone-walls"] if args.native_walls else []))
         guest = await wait(client_run, lambda state: state.get("state") == "connected"
                            and len(state.get("game", {}).get("pawns", {})) == 2)
         host_status = await wait(run, lambda state: state.get("game", {}).get("remote_clients") == 1
@@ -225,6 +267,21 @@ async def smoke():
         assert len(guest["game"]["pawns"]) == 2
         original_guest = host_status["game"]["pawns"]["guest"]["name"]
         assert original_guest != host_status["game"]["pawns"]["local"]["name"]
+        if args.native_transport:
+            role_cases = (
+                ("host", ("--campaign", campaign), run, "coordinated_route_required"),
+                ("guest", ("--profile", profile), client_run, "host_activation_required"),
+            )
+            for role, arguments, directory, reason in role_cases:
+                await wait(directory, lambda state: state.get("game", {}).get("native_transport", {}).get("state") == "ready")
+                rows = []
+                for item in ("stardust", "green", "blue", "red", "gold"):
+                    reply = await command("action", *arguments, "native-transport-probe", "--target", item)
+                    row = reply["native_transport"]
+                    assert row["role"] == role and row["reason"] == reason and row["item"] == item, row
+                    assert row["entry"] == "use_held_item"
+                    rows.append(item)
+                note("stock_transport_use_guard", {"role": role, "guarded": rows, "reason": reason})
         note("two_players", {"host_and_client_pawns": len(host_status["game"]["pawns"]),
                              "client_can_see": len(guest["game"]["pawns"]),
                              "host_pawn": host_status["game"]["pawns"]["local"],
@@ -285,13 +342,34 @@ async def smoke():
         if args.native_guest:
             async def enrolled():
                 return await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state")
-                                  == "bound" and state["game"].get("native_death_hook", {}).get("scope") == "guest")
+                                  == "bound" and state["game"].get("native_death_hook", {}).get("scope")
+                                  in (("party",) if args.native_pair else ("guest", "party")))
 
             await enrolled()
             await asyncio.sleep(2)
             before = (await enrolled())["game"]
             assert before["native_guest_save"]["pawn"] == original_guest
             assert before["native_death_hook"]["sequence"] == 0
+            if args.native_weapon:
+                weapon = (await command("action", "--campaign", campaign, "native-weapon-roundtrip")
+                          )["native_weapon_roundtrip"]
+                assert weapon["state"] == "verified" and weapon["payload_type"].endswith("WeaponData_Struct")
+                assert weapon["item_text_chars"] > weapon["payload_text_chars"] > 0
+                note("stock_weapon_typed_payload_round_trip", weapon)
+            if args.native_pickup:
+                spawned = await command("action", "--campaign", campaign, "native-pickup-spawn")
+                source = spawned["native_pickup"]
+                pickup_arguments = ("action", "--profile", profile, "native-pickup", "--target", source["actor"],
+                                    "--operation-id", uuid.uuid4().hex)
+                awarded = await command(*pickup_arguments)
+                assert awarded["guid"] == source["guid"] and awarded["effect"] == "native_pickup"
+                repeated = await command(*pickup_arguments)
+                assert all(repeated[field] == awarded[field] for field in ("guid", "item", "effect"))
+                note("stock_bandage_claimed_exactly_once", {"guid": awarded["guid"], "item": awarded["item"]})
+            if args.native_pair:
+                friendly = await command("action", "--campaign", campaign, "native-friendly-fire")
+                assert friendly["native_friendly_fire"]["blocked"] >= 1
+                note("stock_friendly_fire_blocked", friendly["native_friendly_fire"])
             invoked = await command("action", "--campaign", campaign, "native-guest-damage", "--target", "guest")
             hit = invoked["native_damage_canary"]
             assert hit["guest_before"] > 0 >= hit["guest_after"] and not hit["binding_restored"]
@@ -314,6 +392,88 @@ async def smoke():
             assert abs(native_health - hit["guest_before"] * 0.10) < 1, revived["game"]["pawns"]
             note("same_native_pawn_revived_in_place", {"guest_health": native_health,
                                                       "host_health": hit["host_before"], "pawn": original_guest})
+            if args.native_hazard:
+                authority = ("action", "--campaign", campaign)
+                await command(*authority, "native-hazard-position")
+                await command(*authority, "native-hazard-start")
+                hazard = await wait(run, lambda state: state["game"].get("native_hazard", {}).get("state")
+                                    in ("downed", "failed", "timeout", "stopped"), timeout=38)
+                proof = hazard["game"]["native_hazard"]
+                assert proof["state"] == "downed" and proof["guest_health"] <= 0, proof
+                assert proof["host_health"] == proof["host_before"]
+                assert hazard["gameplay"]["players"]["guest"]["downed"] and not hazard["game"]["native_dead_flags"]["guest"]
+                await command(*authority, "native-hazard-return")
+                result = await command(*authority, "interact", "--target", chosen)
+                assert result["effect"] == "revive"
+                await wait(run, lambda state: state["game"]["pawns"]["guest"]["health"] == native_health)
+                note("real_stock_poison_gas_downs_only_guest", proof)
+            if args.native_pair:
+                host_before = revived["game"]["pawns"]["local"]
+                damage = await command("action", "--campaign", campaign, "native-host-damage", "--target", "host")
+                assert damage["native_damage_canary"]["slot"] == "local"
+                await wait(run, lambda state: state["gameplay"]["players"]["host"]["downed"]
+                           and state["game"].get("player_effects", {}).get("local", {}).get("state") == "downed")
+                host_revive = await command("action", "--profile", profile, "interact", "--target", "host")
+                assert host_revive["effect"] == "revive"
+                standing = await wait(run, lambda state: (state["game"]["pawns"]["local"].get("health") or 0) > 0
+                                      and state["game"].get("player_effects", {}).get("local", {}).get("state")
+                                      == "standing")
+                assert standing["game"]["pawns"]["local"]["name"] == host_before["name"]
+                assert standing["game"]["native_host_revived_health"] == host_before["health"] * 0.1
+                assert standing["game"]["pawns"]["guest"]["health"] == native_health
+                note("same_native_host_pawn_revived_by_guest", {"health": standing["game"]["native_host_revived_health"]})
+                if args.native_wipe:
+                    await command("action", "--campaign", campaign, "rest")
+                    await command("action", "--campaign", campaign, "native-guest-damage", "--target", "guest")
+                    await wait(run, lambda state: state["gameplay"]["players"]["guest"]["downed"])
+                    await command("action", "--campaign", campaign, "native-host-damage", "--target", "host")
+                    await wait(run, lambda state: state["gameplay"].get("wipe"))
+                    await command("action", "--campaign", campaign, "keep")
+                    await command("action", "--profile", profile, "keep")
+                    emerged = await wait(run, lambda state: not state["gameplay"]["pending_spawns"]
+                                         and not state["gameplay"]["wipe"]
+                                         and awarded["guid"] not in state["gameplay"].get("native_inventory_projected", []))
+                    for slot in ("local", "guest"):
+                        assert emerged["game"]["pawns"][slot]["health"] == emerged["game"]["pawns"][slot]["max_health"]
+                    native_health = emerged["game"]["pawns"]["guest"]["health"]
+                    bag = next(key for key, value in emerged["gameplay"]["backpacks"].items()
+                               if awarded["guid"] in value.get("native_inventory", {}))
+                    denied = await command("action", "--campaign", campaign, "interact", "--target", bag, check=False)
+                    assert denied["error"] == "backpack_not_owned", denied
+                    recovered = await command("action", "--profile", profile, "interact", "--target", bag)
+                    assert recovered["native_items"] == [awarded["guid"]]
+                    await wait(run, lambda state: awarded["guid"] in state["gameplay"].get("native_inventory_projected", []))
+                    note("native_wipe_removes_and_recovers_the_owner_item", {"bag": bag, "item": awarded["guid"],
+                                                                             "native_health": native_health})
+        if args.native_quest_flow:
+            quest_target = ("--target", "Jmr_CrossRoads")
+            player = ("action", "--profile", profile)
+            authority = ("action", "--campaign", campaign)
+            started = await command(*player, "native-quest-start", *quest_target)
+            assert started["step"] == 1 and started["actor"] == chosen
+            refused = await command(*player, "native-quest-turnin", *quest_target, check=False)
+            assert refused["error"] == "native_quest_objective_incomplete", refused
+            progressed = await command(*authority, "native-quest-objective", *quest_target)
+            assert progressed["step"] == 2
+            settled = await command(*player, "native-quest-turnin", *quest_target)
+            assert settled["step"] == -10 and settled["wallet"] == 200
+            assert set(settled["recipients"]) == {"host", chosen}
+            duplicate = await command(*player, "native-quest-turnin", *quest_target)
+            assert duplicate["effect"] == "native_quest_already_settled" and duplicate["wallet"] == 200
+            await wait(client_run, lambda state: (state.get("gameplay", {}).get("native_quests", {})
+                                                  .get("Jmr_CrossRoads", {}).get("step")) == -10)
+            note("stock_quest_settled_once_for_whole_party", settled)
+            expected_wallet = 200
+            if args.native_shop:
+                shop_id = "Shop_BP_C_1"
+                await command(*authority, "native-shop-approach", "--target", shop_id)
+                purchase = (*player, "native-shop-buy", "--target", shop_id, "--operation-id", uuid.uuid4().hex)
+                bought = await command(*purchase)
+                assert bought["wallet"] == expected_wallet - bought["price"] and bought["item"]["ammo"] == 1
+                replay = await command(*purchase)
+                assert replay["guid"] == bought["guid"] and replay["wallet"] == bought["wallet"]
+                expected_wallet = bought["wallet"]
+                note("stock_merchant_checkout_uses_shared_wallet", bought)
         winner = await gameplay_slice(host_status, chosen) if args.gameplay else None
         dropped = await command("action", "--profile", profile, "drop-link")
         assert dropped["link_connected"] is False
@@ -391,24 +551,124 @@ async def smoke():
         assert automatic["game"]["pawns"]["guest"]["name"] == original_guest
         note("packet_loss_recovers_automatically", {"pawn": original_guest})
         expected_map = host_status["game"]["map"]
-        if args.zones:
-            destination = "/Game/Classes/Maps/PlaytestMap_02"
+        if args.native_door:
+            destination = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
+            expected_map = destination
+            authority = ("action", "--campaign", campaign)
+
+            async def position_at_door(target, distance):
+                return await command(*authority, "native-door-position", "--target", target,
+                                     "--exit-position", distance)
+
+            await wait(run, lambda state: state["game"].get("native_zone", {}).get("state") == "ready")
+            await position_at_door("guest", "near")
+            await command(*authority, "native-door-probe", "--target", "guest")
+            await wait(run, lambda state: state["game"].get("native_door", {}).get("decision") == "guest_denied")
+            await position_at_door("guest", "far")
+            await position_at_door("host", "near")
+            await command(*authority, "native-door-probe", "--target", "host")
+            await wait(run, lambda state: state["game"].get("native_door", {}).get("decision") == "host_out_of_range")
+            await position_at_door("guest", "near")
+            await command(*authority, "native-door-probe", "--target", "host")
+            await wait(run, lambda state: state["game"].get("map") == destination
+                       and not state.get("awaiting_zone_guest") and len(state["game"]["pawns"]) == 2)
+            await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == destination)
+            events = await command("events", "--campaign", campaign)
+            arrived = next(entry for entry in events["events"] if entry["event"] == "zone_travel_ready")
+            assert arrived["entrance"] == "CR_Cstrn", arrived
+            note("stock_transition_door_is_host_only", {"map": destination, "entrance": arrived["entrance"]})
+            expected_map = host_status["game"]["map"]
+            await wait(run, lambda state: state["game"].get("native_zone", {}).get("state") == "ready")
+            await command(*authority, "native-door-probe", "--target", "host")
+            await wait(run, lambda state: state["game"].get("map") == expected_map
+                       and not state.get("awaiting_zone_guest") and len(state["game"]["pawns"]) == 2)
+            await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == expected_map)
+            note("stock_transition_door_returns_party", {"map": expected_map, "entrance": "CR_Cstrn"})
+        elif args.zones or args.native_zones:
+            destination = ("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P" if args.authored_zone
+                           else "/Game/Classes/Maps/PlaytestMap_02")
             forbidden = await command("action", "--profile", profile, "travel", "--target", destination, check=False)
             assert not forbidden["ok"]
-            result = await command("action", "--campaign", campaign, "travel", "--target", destination)
-            expected_map = result["map"]
+            if args.native_zones:
+                async def position(target, where):
+                    return await command("action", "--campaign", campaign, "native-exit-position",
+                                         "--target", target, "--exit-position", where)
+
+                await wait(run, lambda state: state["game"].get("native_zone", {}).get("state") == "ready")
+                if args.native_walls:
+                    async def sweep(target):
+                        result = await command("action", "--campaign", campaign, "native-exit-wall-probe",
+                                               "--target", target)
+                        return result["native_zone_wall"]
+
+                    await wait(run, lambda state: state["game"].get("native_zone_wall", {}).get("state") == "ready")
+                    await position("guest", "near")
+                    guest_wall = await sweep("guest")
+                    assert guest_wall["outcome"] == "wall", guest_wall
+                    await position("guest", "far")
+                    await position("host", "near")
+                    host_wall = await sweep("host")
+                    assert host_wall["outcome"] == "wall", host_wall
+                    await position("host", "near")
+                    await position("guest", "near")
+                    await wait(run, lambda state: state["game"].get("native_zone_wall", {}).get("host_open"))
+                    admitted = await sweep("host")
+                    assert admitted["outcome"] == "clear", admitted
+                    note("physical_wall_only_admits_nearby_party_host", {
+                        "guest_blocked": guest_wall["remaining_uu"], "distant_host_blocked": host_wall["remaining_uu"],
+                    })
+                else:
+                    await position("guest", "near")
+                    await position("guest", "inside")
+                    await wait(run, lambda state: state["game"].get("native_zone", {}).get("guest_denied", 0) > 0)
+                    await position("guest", "far")
+                    await position("host", "near")
+                    await position("host", "inside")
+                    await wait(run, lambda state: state["game"].get("native_zone", {}).get("too_far", 0) > 0)
+                    await position("host", "near")
+                    await position("guest", "near")
+                    await position("host", "inside")
+                expected_map = destination
+                note("stock_exit_blocks_guest_and_distant_party", {"map": host_status["game"]["map"]})
+            else:
+                result = await command("action", "--campaign", campaign, "travel", "--target", destination)
+                expected_map = result["map"]
             await wait(run, lambda state: state.get("game", {}).get("map") == destination
                        and len(state["game"]["pawns"]) == 2)
             client_map = await wait(client_run, lambda state: state.get("game", {}).get("map") == destination
                                     and state.get("state") == "connected")
             assert client_map["character_id"] == chosen and client_map["host_session"] == guest["host_session"]
             note("party_travels_with_same_authenticated_session", {"map": destination, "character_id": chosen})
+            if args.authored_zone:
+                arrival = await wait(run, lambda state: abs(state["game"]["pawns"]["local"]["location"][0] + 17790) < 350)
+                note("authored_exit_uses_destination_marker", {
+                    "map": destination, "entrance": "DB_CR", "host": arrival["game"]["pawns"]["local"]["location"],
+                })
             if args.native_guest:
                 traveled = (await enrolled())["game"]
                 assert traveled["map"] == destination and traveled["pawns"]["guest"]["health"] == native_health
                 assert traveled["native_guest_save"]["pawn"] != original_guest
                 note("native_guest_health_preserved_across_travel", {
                     "guest_health": native_health, "map": destination, "pawn": traveled["native_guest_save"]["pawn"],
+                })
+            if args.authored_zone:
+                expected_map = host_status["game"]["map"]
+                await wait(run, lambda state: state["game"].get("native_zone", {}).get("state") == "ready")
+                await position("host", "near")
+                await position("guest", "near")
+                if args.native_walls:
+                    await wait(run, lambda state: state["game"].get("native_zone_wall", {}).get("host_open"))
+                    assert (await sweep("host"))["outcome"] == "clear"
+                else:
+                    await position("host", "inside")
+                returned = await wait(run, lambda state: state["game"].get("map") == expected_map
+                                      and abs(state["game"]["pawns"]["local"]["location"][0] - 13850) < 350
+                                      and len(state["game"]["pawns"]) == 2
+                                      and not state.get("awaiting_zone_guest"))
+                await wait(client_run, lambda state: state.get("state") == "connected"
+                           and state["game"].get("map") == expected_map)
+                note("authored_return_exit_uses_destination_marker", {
+                    "map": expected_map, "entrance": "DB_CR", "host": returned["game"]["pawns"]["local"]["location"],
                 })
         saved = await command("action", "--campaign", campaign, "checkpoint")
         assert saved["revision"] > 0
@@ -446,6 +706,19 @@ async def smoke():
             note("native_guest_health_restored_after_host_restart", {
                 "guest_health": rebound["pawns"]["guest"]["health"], "same_character_id": chosen,
             })
+        if args.native_pickup:
+            restored_item = await wait(run, lambda state: awarded["guid"] in state.get("gameplay", {})
+                                       .get("native_inventory_projected", []))
+            note("stock_bandage_restored_after_restart", {"guid": awarded["guid"],
+                                                          "pawn": restored_item["game"]["native_guest_save"]["pawn"]})
+        if args.native_quest_flow:
+            restored_quest = await wait(run, lambda state: state["game"].get("native_quest", {})
+                                        .get("state") == "completed" and state["game"].get("native_wallet") == expected_wallet)
+            assert restored_quest["gameplay"]["players"]["guest"]["quest_xp"] == 1
+            note("stock_quest_and_rewards_restored_after_restart", restored_quest["game"]["native_quest"])
+            if args.native_shop:
+                assert bought["guid"] in restored_quest["gameplay"]["players"]["guest"]["native_inventory"]
+                await wait(run, lambda state: bought["guid"] in state["gameplay"].get("native_inventory_projected", []))
         if args.gameplay:
             restored_party = await wait(client_run, lambda state: state.get("gameplay", {}).get("loot", {})
                                         .get("claimed_by") and state["host_session"] == restored["generation"]

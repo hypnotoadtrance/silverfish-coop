@@ -1,5 +1,6 @@
 -- Project the durable co-op wallet into the staged host's stock UI state.
 local wallet = {}
+local zones = require("zone_maps")
 
 local playtest_maps = {
     ["/Game/Classes/Maps/PlaytestMap_01"] = true,
@@ -7,6 +8,7 @@ local playtest_maps = {
 }
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local max_cash = 2147483647
+local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local last_read_error
 
 local function valid(object)
@@ -15,7 +17,8 @@ end
 
 local function host_pawn(state, phase)
     local pawn = state.local_pawn and state.local_pawn.pawn
-    if phase == "hosting" and playtest_maps[state.map] and valid(pawn) and pawn:HasAuthority() then
+    if phase == "hosting" and (playtest_maps[state.map] or (authored_routes and zones[state.map]))
+        and valid(pawn) and pawn:HasAuthority() then
         return pawn
     end
 end

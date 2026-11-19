@@ -191,6 +191,12 @@ def native_death_backend(work: Path, metadata: dict | None = None) -> str | None
     return "cpp"
 
 
+def qualified_authored_routes(work: Path) -> bool:
+    metadata = read_json(work / "stage" / "silverfish-coop-stage.json")
+    return (metadata.get("game_build") == "8682dc057e1b38738862760a8c3b848a837c81d72c0e6ddffa3b7f963960374d"
+            and native_death_backend(work, metadata) == "cpp")
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -231,7 +237,8 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 
 
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
-           port: int | None = None, *, native_events: bool = False, native_guest: bool = False):
+           port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
+           native_zones: bool = False, native_zone_walls: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -242,32 +249,42 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
+    env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
+    env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
+    env.pop("SILVERFISH_COOP_NATIVE_TRANSPORT", None)
     backend = native_death_backend(work)
     if native_events and (backend != "cpp" or port is None):
         raise ValueError("Native event scope requires a staged C++ listen host")
     if native_guest and not native_events:
         raise ValueError("Native guest ownership requires native event scope")
+    if native_zones and backend != "cpp":
+        raise ValueError("Natural exit handling requires a staged C++ game")
+    if native_zone_walls and not native_zones:
+        raise ValueError("Physical exit blockers require native exit handling")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
     if native_events:
         env["SILVERFISH_COOP_NATIVE_EVENTS"] = "1"
     if native_guest:
         env["SILVERFISH_COOP_NATIVE_GUEST_SAVE"] = "1"
+    if native_zones:
+        env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
+        env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
+    if native_zone_walls:
+        env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
         arguments += f" -port={port}"
-    if headless:
-        arguments += " -nullrhi -nosound -ResX=640 -ResY=480"
     info = None
     if headless:
+        arguments += " -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
         info = subprocess.STARTUPINFO()
         info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         info.wShowWindow = subprocess.SW_HIDE
     from .win_job import GameProcess
 
-    return GameProcess(arguments, executable=game, cwd=game.parent, env=env,
-                       startupinfo=info)
+    return GameProcess(arguments, executable=game, cwd=game.parent, env=env, startupinfo=info)
 
 
 async def stop_game(process) -> None:
@@ -293,6 +310,7 @@ class Bridge:
         self.input_namespace = uuid.uuid4()
         self.input_offset = 0
         self.death_offset = 0
+        self.zone_offset = 0
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -330,6 +348,25 @@ class Bridge:
                 events.append((fields[1].decode("ascii"), identifier, pawn))
         return events
 
+    def native_zone_requests(self) -> list[tuple[int, str, str, str | None]]:
+        try:
+            with (self.directory / "native-zone-events").open("rb") as stream:
+                stream.seek(self.zone_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.zone_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        requests = []
+        for line in batch[:end].splitlines():
+            fields = line.split(b"\t")
+            if len(fields) not in (4, 5) or fields[0] != b"request" or not fields[1].isdigit() or len(fields[1]) > 12:
+                continue
+            requests.append((int(fields[1]), fields[2].decode("utf-8", errors="replace"),
+                             fields[3].decode("utf-8", errors="replace"),
+                             fields[4].decode("utf-8", errors="replace") if len(fields) == 5 else None))
+        return requests
+
     def snapshot(self) -> dict | None:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
@@ -365,6 +402,43 @@ class Bridge:
                     data["native_guest_save"] = {
                         "state": fields[1], "pawn": fields[2] if len(fields) == 3 else None,
                     }
+                elif fields[0] == "native-zone" and len(fields) == 7:
+                    data["native_zone"] = {
+                        "state": fields[1], "decision": fields[2], "requests": int(fields[3]),
+                        "guest_denied": int(fields[4]), "too_far": int(fields[5]), "failure": fields[6],
+                    }
+                elif fields[0] == "native-zone-wall" and len(fields) == 7:
+                    data["native_zone_wall"] = {
+                        "state": fields[1], "host_open": fields[2] == "1", "slot": fields[3],
+                        "outcome": fields[4], "remaining_uu": _finite(fields[5]), "failure": fields[6],
+                    }
+                elif fields[0] == "native-door" and len(fields) == 4:
+                    data["native_door"] = {
+                        "decision": fields[1], "guest_denied": int(fields[2]), "requests": int(fields[3]),
+                    }
+                elif fields[0] == "native-transport" and len(fields) == 7:
+                    data["native_transport"] = {
+                        "state": fields[1], "denied": int(fields[2]), "role": fields[3],
+                        "item": fields[4], "entry": fields[5], "reason": fields[6],
+                    }
+                elif fields[0] == "native-pickup" and len(fields) == 9:
+                    data["native_pickup"] = {
+                        "state": fields[1], "guid": fields[2], "class_path": fields[3],
+                        "ammo": int(fields[4]) if fields[4] != "-" else None, "weight": _finite(fields[5]),
+                        "value": int(fields[6]) if fields[6] != "-" else None,
+                        "never_drop": fields[7] == "1", "actor": fields[8] if fields[8] != "-" else None,
+                    }
+                elif fields[0] == "native-weapon-roundtrip" and len(fields) == 8:
+                    data["native_weapon_roundtrip"] = {
+                        "state": fields[1], "class_path": fields[2], "payload_type": fields[3], "guid": fields[4],
+                        "ammo": int(fields[5]), "item_text_chars": int(fields[6]), "payload_text_chars": int(fields[7]),
+                    }
+                elif fields[0] == "native-shop-purchase" and len(fields) == 12:
+                    data["native_shop_purchase"] = {
+                        "state": fields[1], "guid": fields[2], "shop": fields[3], "pawn": fields[4],
+                        "offer": fields[5], "price": int(fields[6]), "class_path": fields[7], "ammo": int(fields[8]),
+                        "weight": _finite(fields[9]), "value": int(fields[10]), "never_drop": fields[11] == "1",
+                    }
                 elif fields[0] == "native-damage-canary" and len(fields) == 8:
                     data["native_damage_canary"] = {
                         "slot": fields[1], "guest_before": _finite(fields[2]), "guest_after": _finite(fields[3]),
@@ -373,6 +447,16 @@ class Bridge:
                     }
                 elif fields[0] == "native-death-pawn" and len(fields) == 3:
                     data.setdefault("native_dead_flags", {})[fields[1]] = fields[2] == "1"
+                elif fields[0] == "native-friendly-fire" and len(fields) == 2:
+                    data["native_friendly_fire"] = {"blocked": int(fields[1])}
+                elif fields[0] == "native-host-revive" and len(fields) == 2:
+                    data["native_host_revived_health"] = _finite(fields[1])
+                elif fields[0] == "native-hazard" and len(fields) == 10:
+                    data["native_hazard"] = {
+                        "state": fields[1], "tank": fields[2], "gas": fields[3], "guest": fields[4],
+                        "guest_before": _finite(fields[5]), "guest_health": _finite(fields[6]),
+                        "host_before": _finite(fields[7]), "host_health": _finite(fields[8]), "detail": fields[9],
+                    }
                 elif fields[0] == "native-death" and len(fields) >= 3:
                     data["native_death_hook"] = {
                         "state": fields[1], "sequence": int(fields[2]),
@@ -425,10 +509,11 @@ class Bridge:
                         "id": None if fields[1] == "-" else fields[1],
                         "location": [_finite(axis) for axis in fields[2:5]], "name": fields[5],
                     })
-                elif fields[0] == "pawn" and len(fields) == 8:
+                elif fields[0] == "pawn" and len(fields) in (8, 9):
                     data["pawns"][fields[1]] = {"name": fields[2], "health": _finite(fields[3]),
                                                "location": [_finite(axis) for axis in fields[4:7]],
-                                               "controller": fields[7]}
+                                               "controller": fields[7],
+                                               "max_health": _finite(fields[8]) if len(fields) == 9 else None}
             if data.get("schema") == 1 and "state" in data:
                 return data
         except (OSError, UnicodeError, ValueError):

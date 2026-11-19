@@ -9,7 +9,8 @@ if(NOT TARGET UE4SS)
     add_subdirectory("${SILVERFISH_UE4SS_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ue4ss")
 endif()
 
-add_library(SilverfishCoopNative SHARED native_death.cpp save_copy.cpp)
+add_library(SilverfishCoopNative SHARED
+    native_death.cpp item_roundtrip.cpp pickup.cpp save_copy.cpp transport_items.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)
 target_link_libraries(SilverfishCoopNative PRIVATE UE4SS)
 set_target_properties(SilverfishCoopNative PROPERTIES

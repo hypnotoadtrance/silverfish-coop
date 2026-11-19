@@ -42,7 +42,7 @@ On the guest PC, launch with the received invitation.
 & $sfPython -m tools.silverfish join --profile scout --invite 'C:\Path\To\Received.invite.json'
 ```
 
-The host starts on the shipped `PlaytestMap_01`. Add `--headless` to host and join for diagnostic runs. Use windowed launches for manual movement and gameplay checks.
+The host starts on the shipped `PlaytestMap_01`. Add `--headless` to host and join for diagnostic runs. Headless launches use Unreal's `-RenderOffScreen` option, which selects a cursor backend that leaves the Windows desktop cursor alone. Use windowed launches for manual movement and gameplay checks.
 
 ## Local controls and AI operation
 
