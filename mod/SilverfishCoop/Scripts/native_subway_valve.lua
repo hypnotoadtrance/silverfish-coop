@@ -21,6 +21,7 @@ local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local art_path = "/Game/Classes/Items/Artifacts/Art_AcidResist.Art_AcidResist_C"
 local mask_path = "/Game/Classes/Armor_Items/Helm_HazOp.Helm_HazOp_C"
 local code_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
+local characters_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
 local table_path = "/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT"
 local operations = {preflight = true, approach = true, start = true, ["turn-in"] = true, ["xp-fixture"] = true}
 local board = {
@@ -54,6 +55,14 @@ local function integer(value)
 end
 local function vector(point) return point and finite(point.X) and finite(point.Y) and finite(point.Z) end
 local function square(a, b) return (a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2 end
+local function qualified_name(key, expected)
+    return type(key) == "userdata" and key:GetComparisonIndex() ~= 0 and key:ToString() == expected
+end
+local function stock_name(expected)
+    local key = FName(expected, EFindName.FNAME_Find)
+    if not qualified_name(key, expected) then refuse("name_unavailable:" .. expected) end
+    return key
+end
 local function valid_id(value, charset)
     return type(value) == "string" and #value == 32 and not value:find(charset) and value:find("[^0]")
 end
@@ -114,7 +123,17 @@ local function canonical(state, phase)
     if not fresh or not exact(host, pawn_class) or not exact(instance, instance_class) or not exact(save, save_class)
         or not same(host.Save, save) or not same(instance["As Player FP"], host) then refuse("canonical_save_unavailable") end
     return {host = host, instance = instance, save = save, world = state.world, statics = statics,
-        key = FName(board.quest_id, EFindName.FNAME_Find)}
+        key = stock_name(board.quest_id)}
+end
+
+local function completion_flag(context, step)
+    local expected = "SubValve_Closed"
+    local key = FName(expected, EFindName.FNAME_Find)
+    if qualified_name(key, expected) then return wire.stock_flag(context.instance, key) end
+    -- Before the Subway level script has loaded, its literal can be absent from the name pool.
+    if (step == "-" or step == 1) and type(key) == "userdata"
+        and key:GetComparisonIndex() == 0 and key:ToString() == "None" then return 0 end
+    refuse("name_unavailable:" .. expected)
 end
 
 local function progress(context)
@@ -122,11 +141,22 @@ local function progress(context)
     if row then recipe(row) end
     local step = row and row[step_key] or "-"
     if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse("quest_step_unqualified") end
-    local stock = {step = step, flag = wire.stock_flag(context.instance, "SubValve_Closed"),
-        cash = wire.stock_flag(context.instance, "Player_Cash"), xp = wire.stock_flag(context.instance, "Player_Xp"),
-        advantage = wire.stock_flag(context.instance, "Adv_Commune"), rep = {}}
+    local library = StaticFindObject(characters_path)
+    if not valid(library) or library:GetFullName() ~= "FL_Characters_C " .. characters_path then
+        refuse("reputation_library_unavailable")
+    end
+    local advantage = {}
+    library:Compose_FactionAdvantage_FlagName(2, context.host, advantage)
+    if not qualified_name(advantage.Name, "Adv_Commune") then refuse("advantage_flag_unqualified") end
+    local stock = {step = step, flag = completion_flag(context, step),
+        cash = wire.stock_flag(context.instance, stock_name("Player_Cash")),
+        xp = wire.stock_flag(context.instance, stock_name("Player_Xp")),
+        advantage = wire.stock_flag(context.instance, advantage.Name), rep = {}}
     for _, id in ipairs(factions) do
-        local amount, found = wire.stock_flag(context.instance, faction_flags[id])
+        local result = {}
+        library:Compose_FactionRep_FlagName(id, context.host, result)
+        if not qualified_name(result.Name, faction_flags[id]) then refuse("reputation_flag_unqualified:" .. id) end
+        local amount, found = wire.stock_flag(context.instance, result.Name)
         stock.rep[id] = {amount = amount, found = found}
     end
     if stock.flag ~= 0 and stock.flag ~= 1 then refuse("completion_flag_unqualified") end
