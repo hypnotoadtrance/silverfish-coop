@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
+from .native_tape_profiles import PUMP, TapeProfile
 from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
 
@@ -37,6 +38,7 @@ class CollectionContract:
     pickup_source: str | None = None
     board_maps: frozenset[str] = BOROUGH_SCIENTIST_BOARDS
     fixture_xp: int | None = None
+    exchange: TapeProfile | None = None
 
     @property
     def key(self) -> str:
@@ -63,10 +65,15 @@ POCKET_WATCH = CollectionContract("Clt_Watch", "native-pocket-watch", "Pocket Wa
 SAVLO_RING = CollectionContract("Clct_EvilEye", "native-savlo-ring", "Savlo's Ring", SCAV_BAR,
                                 "scav_bar_redemption_required", 20000, frozenset({"5"}), "consumed_ring",
                                 native_authored_pickup.SAVLO_RING, frozenset({SCAV_BAR}), fixture_xp=10)
-CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING)}
+PUMP_ROOM = CollectionContract("Clt_EatherPumpTape", "native-pump-room", "Pump Room", BLACK_MARKET,
+                                "black_market_redemption_required", 3200, frozenset({"8", "3"}), "consumed_tape",
+                                board_maps=frozenset({BLACK_MARKET}), fixture_xp=8, exchange=PUMP)
+CONTRACTS = {spec.quest_id: spec for spec in (
+    COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING, PUMP_ROOM,
+)}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
-AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source}
+AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source or spec.exchange}
 XP_FIXTURES = {spec.command("xp-fixture"): spec for spec in CONTRACTS.values() if spec.fixture_xp is not None}
 
 
@@ -123,6 +130,12 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
     guid = proof.get("objective_guid")
     if not valid_guid(guid) or proof.get("objective_owner") != ("host" if actor == "host" else "guest"):
         return False
+    if profile := spec.exchange:
+        return any(
+            (trade.get("map"), trade.get("station"), trade.get("class_path"), trade.get("filled_guid"), trade.get("owner"))
+            == (profile.map, profile.station, profile.product, guid, actor)
+            for trade in host.party.get(profile.ledger, {}).values()
+        )
     if spec.pickup_source is None:
         return True
     pickup = host.party.get(native_authored_pickup.STATE_KEY, {}).get(spec.pickup_source, {})
@@ -134,7 +147,7 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
 async def preflight(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
     pawn, area = _scope(host, actor, spec)
     proof = await _command(host, bridge, spec, "preflight", pawn, area)
-    if spec.pickup_source:
+    if spec.pickup_source or spec.exchange:
         proof = dict(proof, objective_qualified=_objective_owned(host, actor, spec, proof))
     return {spec.key: proof}
 

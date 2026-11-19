@@ -707,7 +707,7 @@ class Bridge:
                 events.append((sequence, pawn, token, choice))
         return events
 
-    def native_mosby_station_requests(self) -> list[tuple[int, int, str, str, str | None]]:
+    def native_mosby_station_requests(self) -> list[tuple[int, int, str, str, str | None, str]]:
         try:
             with (self.directory / "native-mosby-station-events").open("rb") as stream:
                 stream.seek(self.mosby_station_offset)
@@ -1054,8 +1054,10 @@ class Bridge:
                     if ("native_borough_barter" in data or data.get("state") != "hosting" or data.get("map") != proof["map"]):
                         raise ValueError("Invalid stock Borough barter frame scope")
                     data["native_borough_barter"] = proof
-                elif fields[0] == "native-mosby-tape":
-                    data["native_mosby_tape"] = native_mosby_tape.parse_exchange(fields)
+                elif profile := native_mosby_tape.BY_PREFIX.get(fields[0]):
+                    if profile.key in data:
+                        raise ValueError("Duplicate stock tape station proof")
+                    data[profile.key] = native_mosby_tape.parse_exchange(fields)
                 elif fields[0] == "native-mosby-station-view":
                     data[native_mosby_station_view.KEY] = native_mosby_station_view.parse(fields)
                 elif fields[0] == "native-mosby-readings":
@@ -1699,9 +1701,10 @@ class Bridge:
                     if not mosby_frame:
                         raise ValueError("Missing Stone Maze quest frame")
                     data["native_mosby_readings"] = native_mosby_tape.parse_readings(mosby_frame, mosby_reputation)
-                for key in ("native_mosby_tape", "native_mosby_readings", "native_mosby_reward"):
+                for key in (*(profile.key for profile in native_mosby_tape.BY_MAP.values()),
+                            "native_mosby_readings", "native_mosby_reward"):
                     if key in data and (data.get("state"), data.get("map")) != ("hosting", data[key]["map"]):
-                        raise ValueError("Stone Maze proof is outside its authoritative map")
+                        raise ValueError("Stock tape proof is outside its authoritative map")
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))

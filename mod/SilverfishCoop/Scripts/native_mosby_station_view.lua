@@ -1,11 +1,8 @@
 local view = {}
+local profiles = require("native_tape_profiles").maps
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local map = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
-local world_path = map .. ".StoneMaze_P"
-local station_path = world_path .. ":PersistentLevel.DataTape_DownloadStation_BP_C_1"
-local station_name = "DataTape_DownloadStation_BP_C " .. station_path
 local station_class = "/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local box_class = "/Script/Engine.BoxComponent"
@@ -18,10 +15,8 @@ local last_sequence = 0
 local messages = {
     focused = "Interact to inspect the tape exchange.",
     checking = "Checking the party's tape exchange...",
-    offer = "Exchange one Blank Data Tape for one Ground Saturation Data tape.\nInteract again to confirm.",
     missing = "Bring one Blank Data Tape in your backpack.\nInteract to check again.",
     trading = "Exchanging the selected tape...",
-    exchanged = "Ground Saturation Data added to your backpack.",
     unavailable = "The exchange is unavailable.\nInteract to check again.",
 }
 
@@ -32,19 +27,21 @@ local function reject(reason) error("native_mosby_station_" .. reason, 0) end
 local function guid(value) return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value:find("[^0]") end
 
 local function context(state, phase)
-    if not enabled or not events or phase ~= "connected" or state.map ~= map or state.server ~= true or not state.listening
-        or not valid(state.world) or state.world:GetFullName() ~= "World " .. world_path then return end
+    local profile = profiles[state.map]
+    if not enabled or not events or phase ~= "connected" or not profile or state.server ~= true or not state.listening
+        or not valid(state.world) or state.world:GetFullName() ~= "World " .. profile.world then return end
     local pawn, controller = state.local_pawn and state.local_pawn.pawn, state.controller
-    local station = StaticFindObject(station_path)
+    local station = StaticFindObject(profile.path)
     if not exact(pawn, pawn_class) or not valid(controller) or not pawn:IsLocallyControlled() or not controller:IsLocalController()
         or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
         or state.local_pawn.name ~= pawn:GetFullName() or not exact(station, station_class)
-        or station:GetFullName() ~= station_name or not same(station:GetWorld(), state.world) or station:IsActorBeingDestroyed() then return end
+        or station:GetFullName() ~= profile.station or not same(station:GetWorld(), state.world) or station:IsActorBeingDestroyed() then return end
     local box = station.Box
     if not exact(box, box_class) or not same(box:GetOwner(), station) then return end
     local collision = box:GetCollisionEnabled()
     if collision ~= 1 and collision ~= 3 then return end
-    return {pawn = pawn, controller = controller, world = state.world, station = station, box = box, name = state.local_pawn.name}
+    return {pawn = pawn, controller = controller, world = state.world, station = station, box = box,
+        name = state.local_pawn.name, profile = profile}
 end
 
 local function matches(a, b)
@@ -90,7 +87,11 @@ end
 
 local function display(current, status)
     if headless then return true end
-    local message = "Stone Maze Download Station\n\n" .. messages[status]
+    local profile = current.profile
+    local message = messages[status]
+    if status == "offer" then message = "Exchange one Blank Data Tape for one " .. profile.label .. " tape.\nInteract again to confirm." end
+    if status == "exchanged" then message = profile.label .. " added to your backpack." end
+    message = profile.title .. "\n\n" .. message
     if shown == message and valid(widget) then return true end
     if not valid(widget) then
         local class, library = StaticFindObject(widget_class), StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
@@ -134,7 +135,7 @@ local function drain(current, now, press_fixture)
     end
     local file = io.open(events, "ab")
     if not file then return false end
-    local written = file:write(table.concat({"mosby-station", sequence, opened, kind, current.name, station_name, blank}, "\t"), "\n")
+    local written = file:write(table.concat({"mosby-station", sequence, opened, kind, current.name, current.profile.station, blank}, "\t"), "\n")
     local closed = file:close()
     if not written or not closed then return false end
     session = {sequence = sequence, open = opened, pending = kind, state = kind == "trade" and "trading" or "checking",
@@ -201,7 +202,7 @@ local function fixture(current, now)
         if math.abs((restored[axis] - rotation[axis] + 180) % 360 - 180) > 0.05 then reject("fixture_camera_restore_unverified") end
     end
     if not checked then error(issue, 0) end
-    return "exact stock Stone Maze station press verified"
+    return "exact stock download station press verified"
 end
 
 function view.command(fields, state, phase)
@@ -224,13 +225,13 @@ function view.command(fields, state, phase)
     if not accepted or not present(current, status) then reject("render_proof_unqualified") end
     session.state, session.blank, session.filled, session.pending = status, blank, filled, nil
     session.expires, session.grace = now + 30, now + 2
-    return "authenticated Stone Maze station state rendered"
+    return "authenticated station state rendered"
 end
 
 function view.rows(state, phase, row)
-    if not binding or phase ~= "connected" or state.map ~= map or not same(state.world, binding.world)
+    if not binding or phase ~= "connected" or state.map ~= binding.profile.map or not same(state.world, binding.world)
         or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return {} end
-    return {row("native-mosby-station-view", map, binding.name, station_name, session and session.state or binding.state,
+    return {row("native-mosby-station-view", binding.profile.map, binding.name, binding.profile.station, session and session.state or binding.state,
         session and session.sequence or 0, session and session.open or 0, session and session.blank or "-", session and session.filled or "-")}
 end
 

@@ -20,7 +20,9 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_host_save
 from tools.silverfish import native_computer_board as collections
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from tools.silverfish.native_authored_pickup import DEAD_END, SOURCES, STATE_KEY as PICKUPS
+from tools.silverfish.native_authored_pickup import DEAD_END, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
+from tools.silverfish.native_mosby_station_view import FIXTURE as STATION_FIXTURE, KEY as STATION_VIEW
+from tools.silverfish.native_tape_profiles import BLANK_CLASS
 from tools.silverfish.travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, RAIL_YARD
 
 
@@ -52,7 +54,9 @@ NORTHERN_PASSAGE = CollectionSmoke(
 
 async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASSAGE):
     spec = plan.spec
-    quest, redemption, source = spec.quest_id, spec.redeem_map, spec.pickup_source
+    quest, redemption = spec.quest_id, spec.redeem_map
+    exchange = spec.exchange
+    source = SCIENTIST_BLANK_TAPE if exchange else spec.pickup_source
     pickup_map, pickup_actor, pickup_class = SOURCES[source]
     board = collections.BOARDS[redemption]
     routes = plan.routes()
@@ -146,6 +150,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         return record(saved)
 
     async def accept():
+        if spec.fixture_xp:
+            await action(host, spec.command("approach"), "--target", "host")
+            hidden = await action(host, spec.command("preflight"), accepted=False)
+            assert "quest_not_offered" in hidden["error"], hidden
+            qualified = (await action(host, spec.command("xp-fixture")))[spec.key]
+            assert (qualified["xp_before"], qualified["xp_after"]) == (0, spec.fixture_xp), qualified
+            assert qualified["step_before"] is None and qualified["step_after"] is None, qualified
+            evidence["stock_xp_setup"] = {"before": hidden["error"], "after": qualified}
         await action(host, spec.command("approach"), "--target", character)
         if start_area != BOROUGH and redemption == BOROUGH:
             refused = await action(guest, "native-quest-start", "--target", quest, accepted=False)
@@ -156,7 +168,7 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         assert offered["board"] == board and offered["step_after"] is None, offered
         host_xp = offered["xp_before"]
         expected = spec.fixture_xp or 0
-        assert (host_xp == expected if plan.accept_before_pickup else host_xp >= 3), offered
+        assert (host_xp == expected if plan.accept_before_pickup or spec.fixture_xp else host_xp >= 3), offered
         offset = 0
         while offset is not None:
             catalog = (await action(guest, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
@@ -180,6 +192,40 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             accepted = await action(guest, "native-quest-start", "--target", quest)
         assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
         evidence["accepted"] = accepted
+
+    async def download_tape(blank):
+        assert blank and exchange and exchange.map == current["game"]["map"]
+        positioned = (await action(host, exchange.verb("approach"), "--target", "guest"))[exchange.key + "_approach"]
+        assert (positioned["map"], positioned["target"]) == (exchange.map, exchange.station), positioned
+        preflight = (await action(guest, exchange.verb("preflight"), "--target", blank))[exchange.key]
+        assert (preflight["state"], preflight["blank_guid"], preflight["quest_step"]) == ("offer", blank, None), preflight
+        assert preflight["give"] == {"class_path": BLANK_CLASS, "quantity": 1, "cash": 0}, preflight
+        assert preflight["receive"] == {"class_path": exchange.product, "quantity": 1, "cash": 0}, preflight
+
+        async def observed(*states):
+            current = await wait(client_run, lambda client: (proof := client.get("game", {}).get(STATION_VIEW, {}))
+                                 and proof.get("state") in states and proof.get("map") == exchange.map
+                                 and proof.get("station") == exchange.station)
+            return current["game"][STATION_VIEW]
+
+        await observed("armed", "focused")
+        opened = (await action(guest, STATION_FIXTURE))[STATION_VIEW]
+        assert (opened["state"], opened["open"]) == ("checking", opened["sequence"]), opened
+        offer = await observed("offer")
+        assert (offer["blank_guid"], offer["open"]) == (blank, opened["sequence"]), offer
+        submitted = (await action(guest, STATION_FIXTURE))[STATION_VIEW]
+        assert (submitted["state"], submitted["open"], submitted["blank_guid"]) == ("trading", offer["open"], blank)
+        product = await observed("exchanged")
+        assert (product["open"], product["sequence"], product["blank_guid"]) == (offer["open"], submitted["sequence"], blank)
+        output = product["filled_guid"]
+        pack = await inventory(guest)
+        assert (pack[output]["class_path"], pack[output]["quantity"], pack[output]["source"]) == (exchange.product, 1, "backpack"), pack
+        assert blank not in pack and output not in await inventory(host), pack
+        replay = await action(guest, exchange.verb("convert"), "--target", blank)
+        assert (replay["effect"], replay["owner"], replay["filled_guid"], replay["station"], replay["class_path"]) == (
+            exchange.effect + "_already_exchanged", character, output, exchange.station, exchange.product), replay
+        evidence["stock_download"] = {"offer": offer, "receipt": replay, "inventory": pack[output]}
+        return output
 
     try:
         start_area = plan.maps[0]
@@ -217,14 +263,6 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
 
         if plan.accept_before_pickup:
             assert start_area == redemption and pickup_map != start_area
-            if spec.fixture_xp:
-                await action(host, spec.command("approach"), "--target", "host")
-                hidden = await action(host, spec.command("preflight"), accepted=False)
-                assert "quest_not_offered" in hidden["error"], hidden
-                qualified = (await action(host, spec.command("xp-fixture")))[spec.key]
-                assert (qualified["xp_before"], qualified["xp_after"]) == (0, spec.fixture_xp), qualified
-                assert qualified["step_before"] is None and qualified["step_after"] is None, qualified
-                evidence["stock_xp_setup"] = {"before": hidden["error"], "after": qualified}
             await accept()
             refused = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
             assert "objective_required" in refused["error"], refused
@@ -246,6 +284,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             evidence["routes"].append(evidence.pop("pending_route"))
             if route.destination == pickup_map and guid is None:
                 guid = await collect_pickup()
+            if exchange and route.destination == exchange.map:
+                guid = await download_tape(guid)
 
         assert guid is not None and current["game"]["map"] == redemption
         if plan.accept_before_pickup:
@@ -288,6 +328,9 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         await launch(guest, "guest-restart", "join", *guest, "--headless", "--native-zones", "--invite", renewed["invite_file"])
         restarted = await paired(redemption)
         assert guid not in await inventory(guest) and await stock_balances() == after
+        if exchange:
+            trade = restarted["campaign"]["world"]["party"][exchange.ledger][evidence["stock_download"]["receipt"]["blank_guid"]]
+            assert trade["filled_guid"] == guid and trade["station"] == exchange.station and trade["owner"] == character, trade
         assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"
         evidence.update(verified=True, restarted_generation=restarted["generation"])
     except BaseException as error:

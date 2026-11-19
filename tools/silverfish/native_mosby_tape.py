@@ -7,22 +7,19 @@ import uuid
 from . import native_host_save, native_rewards, party
 from .native_dialogue import MOSBY_QUEST
 from .native_gold import valid_guid
+from .native_tape_profiles import APPROACHES, BLANK_CLASS, BY_MAP, BY_PREFIX, CONVERSIONS, PREFLIGHTS, STONE, STONE_MAZE
 from .travel import SCIENTIST_SHOP
 
 
-STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
-STATION = f"DataTape_DownloadStation_BP_C {STONE_MAZE}.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"
+STATION = STONE.station
 BOARD = f"BountyBoard_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2"
-BLANK_CLASS = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"
-READINGS_CLASS = "/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C"
+READINGS_CLASS = STONE.product
 ARMOR_CLASS = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
-PREFLIGHT = "native-mosby-tape-preflight"
-CONVERT = "native-mosby-tape-convert"
-APPROACH = "native-mosby-tape-approach"
+PREFLIGHT, CONVERT, APPROACH = (STONE.verb(action) for action in ("preflight", "convert", "approach"))
 READINGS_PREFLIGHT = "native-mosby-readings-preflight"
 TURN_IN = "native-mosby-readings-turn-in"
 CAPTURE, GRANT = "native-mosby-reward-capture", "native-mosby-reward-grant"
-EXCHANGES = "native_mosby_tape_exchanges"
+EXCHANGES = STONE.ledger
 REWARDS = "native_mosby_rewards"
 CASH, XP = 7500, 3
 FACTIONS = {2: "commune", 4: "state", 5: "coup"}
@@ -45,16 +42,19 @@ def _step(value: str) -> int | None:
 
 
 def parse_exchange(fields: list[str]) -> dict:
-    _, operation, area, pawn, station, status, before, after, step, cash, xp, give, receive, debit, credit = fields
+    tag, operation, area, pawn, station, status, before, after, step, cash, xp, give, receive, debit, credit = fields
+    profile = BY_MAP.get(area)
     blank, filled = _optional_guid(before), _optional_guid(after)
-    if ((area, station, give, receive, debit, credit) != (STONE_MAZE, STATION, "1", "1", "0", "0")
-            or step not in ("1", "2") or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
-            or not (operation == PREFLIGHT and status == "offer" and filled is None
-                    or operation == CONVERT and status in ("exchanged", "already_exchanged") and blank and filled and blank != filled)):
-        raise ValueError("Invalid Stone Maze station exchange proof")
+    if (not profile or (tag, station, give, receive, debit, credit) != (profile.prefix, profile.station, "1", "1", "0", "0")
+            or (profile.requires_active_quest and step not in ("1", "2"))
+            or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
+            or not (operation == profile.verb("preflight") and status == "offer" and filled is None
+                    or operation == profile.verb("convert") and status in ("exchanged", "already_exchanged")
+                    and blank and filled and blank != filled)):
+        raise ValueError("Invalid stock station exchange proof")
     return dict(operation=operation, map=area, pawn=pawn, station=station, state=status, blank_guid=blank, filled_guid=filled,
-                quest_step=int(step), cash=int(cash), xp=int(xp), give={"class_path": BLANK_CLASS, "quantity": 1, "cash": 0},
-                receive={"class_path": READINGS_CLASS, "quantity": 1, "cash": 0})
+                quest_step=_step(step), cash=int(cash), xp=int(xp), give={"class_path": BLANK_CLASS, "quantity": 1, "cash": 0},
+                receive={"class_path": profile.product, "quantity": 1, "cash": 0})
 
 
 def parse_readings(fields: list[str], rows: list[list[str]]) -> dict:
@@ -118,84 +118,93 @@ def _same_guest(host, actor, pawn):
 
 
 async def _command(host, bridge, verb, pawn, *args):
-    key, area, actor_key, expected = (("native_mosby_tape", STONE_MAZE, "station", STATION) if verb in (PREFLIGHT, CONVERT)
+    profile = PREFLIGHTS.get(verb) or CONVERSIONS.get(verb)
+    key, area, actor_key, expected = ((profile.key, profile.map, "station", profile.station) if profile
                                       else ("native_mosby_readings", SCIENTIST_SHOP, "board", BOARD))
     snapshot = await bridge.command(verb, pawn, *args, timeout=7)
     proof = snapshot.get(key, {})
     if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("operation"), proof.get("pawn"),
             proof.get(actor_key)) != ("hosting", area, area, verb, pawn, expected):
-        raise RuntimeError("Stock Stone Maze proof did not match the exact authoritative pawn and actor")
+        raise RuntimeError("Stock tape proof did not match the exact authoritative pawn and actor")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
 
 async def preflight(host, bridge, actor, action, target):
-    if action == PREFLIGHT:
+    if profile := PREFLIGHTS.get(action):
         if target is not None and not valid_guid(target):
             raise party.RuleError("native_mosby_tape_exact_blank_guid_required")
-        pawn = _scope(host, actor, STONE_MAZE, guest_only=True)
-        return {"native_mosby_tape": await _command(host, bridge, action, pawn, target or "-")}
+        pawn = _scope(host, actor, profile.map, guest_only=True)
+        return {profile.key: await _command(host, bridge, action, pawn, target or "-")}
     if target is not None:
         raise party.RuleError("native_mosby_readings_has_fixed_board")
     pawn = _scope(host, actor, SCIENTIST_SHOP)
     return {"native_mosby_readings": await _command(host, bridge, action, pawn)}
 
 
-async def approach(host, bridge, actor, variant=None):
+async def approach(host, bridge, actor, variant=None, *, profile=STONE):
     if not host.fixtures:
         raise party.RuleError("native_mosby_tape_approach_unavailable")
     area = host.last_game.get("map")
-    if area not in (STONE_MAZE, SCIENTIST_SHOP):
+    if area != profile.map and (profile != STONE or area != SCIENTIST_SHOP):
         raise party.RuleError("native_mosby_tape_exact_zone_unavailable")
-    if variant is not None and (area != STONE_MAZE or type(variant) is not int or not 1 <= variant <= 8):
+    if variant is not None and (area != profile.map or type(variant) is not int or not 1 <= variant <= 8):
         raise party.RuleError("native_mosby_tape_approach_invalid_variant")
-    pawn = _scope(host, actor, area, guest_only=area == STONE_MAZE)
-    snapshot = await bridge.command(APPROACH, pawn, *((str(variant),) if variant is not None else ()), timeout=6)
+    pawn = _scope(host, actor, area, guest_only=area == profile.map)
+    snapshot = await bridge.command(profile.verb("approach"), pawn, *((str(variant),) if variant is not None else ()), timeout=6)
     if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
-        raise RuntimeError("Stone Maze approach left the qualified stock zone")
+        raise RuntimeError("The station approach left the qualified stock zone")
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    return {"native_mosby_tape_approach": {"map": area, "pawn": pawn, "target": STATION if area == STONE_MAZE else BOARD}}
+    return {profile.key + "_approach": {"map": area, "pawn": pawn, "target": profile.station if area == profile.map else BOARD}}
 
 
-async def convert(host, bridge, character, blank_guid, operation):
+async def convert(host, bridge, character, blank_guid, operation, *, profile=STONE):
     if not valid_guid(blank_guid) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("native_mosby_tape_exact_blank_guid_required")
-    pawn = _scope(host, character, STONE_MAZE, guest_only=True)
-    ledger = host.party.get(EXCHANGES, {})
-    if any(row["operation_id"] == operation and row["owner"] == character and old != blank_guid for old, row in ledger.items()):
-        raise party.RuleError("operation_id_conflict")
+    pawn = _scope(host, character, profile.map, guest_only=True)
+    preflight, exchange = profile.verb("preflight"), profile.verb("convert")
+    ledger = host.party.get(profile.ledger, {})
+    for other in BY_MAP.values():
+        trades = host.party.get(other.ledger, {})
+        if any(row["operation_id"] == operation and row["owner"] == character and (other != profile or old != blank_guid)
+               for old, row in trades.items()):
+            raise party.RuleError("operation_id_conflict")
+        if other != profile and blank_guid in trades:
+            raise party.RuleError("native_mosby_tape_blank_already_exchanged")
     previous = ledger.get(blank_guid)
     if previous:
         if previous["owner"] != character:
             raise party.RuleError("native_mosby_tape_blank_already_exchanged")
-        await _command(host, bridge, PREFLIGHT, pawn, blank_guid)
-        return {"effect": "stone_maze_tape_already_exchanged", **previous}
+        await _command(host, bridge, preflight, pawn, blank_guid)
+        return {"effect": profile.effect + "_already_exchanged", **previous}
     host.transitioning = True
     try:
-        before = await _command(host, bridge, PREFLIGHT, pawn, blank_guid)
+        before = await _command(host, bridge, preflight, pawn, blank_guid)
         if before["blank_guid"] != blank_guid:
             raise party.RuleError("native_mosby_tape_blank_not_owned")
         await host.checkpoint_native(bridge)
         _same_guest(host, character, pawn)
         host.native_checkpoint_unsafe = True
-        product = uuid.uuid5(uuid.NAMESPACE_URL, f"silverfish-stone-maze:{character}:{blank_guid}").hex.upper()
+        product = uuid.uuid5(uuid.NAMESPACE_URL, f"{profile.namespace}:{character}:{blank_guid}").hex.upper()
         try:
-            after = await _command(host, bridge, CONVERT, pawn, blank_guid, product)
+            after = await _command(host, bridge, exchange, pawn, blank_guid, product)
         except RuntimeError as error:
-            if str(error).startswith(("native_mosby_tape_", "stone_maze_tape_")):
+            if str(error).startswith(("native_mosby_tape_", "stone_maze_tape_", "eather_pump_")):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
         if (after["blank_guid"], after["filled_guid"]) != (blank_guid, product) or any(
                 after[key] != before[key] for key in ("quest_step", "cash", "xp", "give", "receive")):
-            raise RuntimeError("The typed Stone Maze conversion did not reconcile with its stock offer")
+            raise RuntimeError("The typed conversion did not reconcile with its stock offer")
         candidate = party.load_party(host.party)
         receipt = {"owner": character, "blank_guid": blank_guid, "filled_guid": product, "operation_id": operation}
-        candidate.setdefault(EXCHANGES, {})[blank_guid] = receipt
+        if profile != STONE:
+            receipt.update(map=profile.map, station=profile.station, class_path=profile.product)
+        candidate.setdefault(profile.ledger, {})[blank_guid] = receipt
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
         host.party, host.native_checkpoint_unsafe = candidate, False
-        host.control.event("native_mosby_tape_committed", revision=revision, **receipt)
-        return {"effect": "stone_maze_tape_exchanged", **receipt}
+        host.control.event(profile.key + "_committed", revision=revision, **receipt)
+        return {"effect": profile.effect + "_exchanged", **receipt}
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

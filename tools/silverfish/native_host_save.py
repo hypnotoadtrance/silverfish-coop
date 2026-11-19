@@ -9,6 +9,7 @@ import uuid
 
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
+from .native_tape_profiles import BY_MAP as TAPE_PROFILES, STONE
 from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
 
@@ -160,19 +161,28 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("The campaign's pending stock quest recipient or reward identity is invalid")
             used.update(items)
         quests.append(reward["escrow"])
-    tape_exchanges = party.get("native_mosby_tape_exchanges", {})
-    if type(tape_exchanges) is not dict:
-        raise CampaignFormatError("The campaign's Stone Maze station exchanges are invalid")
-    products, operations = set(), set()
-    for blank, trade in tape_exchanges.items():
-        if (not valid_guid(blank) or type(trade) is not dict or trade.get("blank_guid") != blank
-                or not isinstance(trade.get("owner"), str) or trade["owner"] not in checkpoint["characters"]
-                or not valid_guid(trade.get("filled_guid")) or trade["filled_guid"] in products or trade["filled_guid"] in tape_exchanges
-                or not isinstance(trade.get("operation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", trade["operation_id"])
-                or (trade["owner"], trade["operation_id"]) in operations):
-            raise CampaignFormatError("A Stone Maze station exchange has an invalid owner or tape identity")
-        products.add(trade["filled_guid"])
-        operations.add((trade["owner"], trade["operation_id"]))
+    blanks, products, operations = set(), set(), set()
+    for profile in TAPE_PROFILES.values():
+        exchanges = party.get(profile.ledger, {})
+        if type(exchanges) is not dict:
+            raise CampaignFormatError("The campaign's stock station exchanges are invalid")
+        for blank, trade in exchanges.items():
+            if (not valid_guid(blank) or blank in blanks or type(trade) is not dict or trade.get("blank_guid") != blank
+                    or not isinstance(trade.get("owner"), str) or trade["owner"] not in checkpoint["characters"]
+                    or not valid_guid(trade.get("filled_guid")) or trade["filled_guid"] in products
+                    or not isinstance(trade.get("operation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", trade["operation_id"])
+                    or (trade["owner"], trade["operation_id"]) in operations):
+                raise CampaignFormatError("A stock station exchange has an invalid owner or tape identity")
+            if profile != STONE:
+                expected = uuid.uuid5(uuid.NAMESPACE_URL, f"{profile.namespace}:{trade['owner']}:{blank}").hex.upper()
+                if (trade.get("map"), trade.get("station"), trade.get("class_path"), trade["filled_guid"]) != (
+                        profile.map, profile.station, profile.product, expected):
+                    raise CampaignFormatError("A stock station exchange does not match its exact product and station")
+            blanks.add(blank)
+            products.add(trade["filled_guid"])
+            operations.add((trade["owner"], trade["operation_id"]))
+    if blanks & products:
+        raise CampaignFormatError("A stock tape is both an exchange input and a product")
     mosby = party.get("native_mosby_rewards")
     if mosby is not None:
         if (type(mosby) is not dict or type(mosby.get("escrow")) is not dict or mosby["escrow"].get("map") != SCIENTIST_SHOP

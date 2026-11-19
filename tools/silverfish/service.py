@@ -41,7 +41,7 @@ GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION,
-                        native_mosby_tape.PREFLIGHT, native_mosby_tape.CONVERT, native_mosby_tape.READINGS_PREFLIGHT,
+                        *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, native_flood_jammer.PREFLIGHT, native_meet_broker.PREFLIGHT,
@@ -1523,10 +1523,11 @@ class Host:
                 result = await self.dialogue_sessions.act(self, bridge, character, action, target, request["operation_id"])
             elif action == native_borough_barter.ACTION:
                 result = await native_borough_barter.trade(self, bridge, character, target, request["operation_id"])
-            elif action in (native_mosby_tape.PREFLIGHT, native_mosby_tape.READINGS_PREFLIGHT):
+            elif action in native_mosby_tape.PREFLIGHTS or action == native_mosby_tape.READINGS_PREFLIGHT:
                 result = await native_mosby_tape.preflight(self, bridge, character, action, target)
-            elif action == native_mosby_tape.CONVERT:
-                result = await native_mosby_tape.convert(self, bridge, character, target, request["operation_id"])
+            elif action in native_mosby_tape.CONVERSIONS:
+                result = await native_mosby_tape.convert(self, bridge, character, target, request["operation_id"],
+                                                        profile=native_mosby_tape.CONVERSIONS[action])
             elif action == native_wire_quest.PREFLIGHT:
                 if target is not None:
                     raise party.RuleError("native_wire_quest_has_fixed_board")
@@ -2373,9 +2374,10 @@ class Host:
                     target = request.get("target") or "guest"
                     actor = self.roles().get(target, target)
                     result = await self.dialogue_sessions.approach(self, bridge, actor)
-                elif action == native_mosby_tape.APPROACH and self.fixtures:
+                elif action in native_mosby_tape.APPROACHES and self.fixtures:
                     target = request.get("target") or "guest"
-                    result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"))
+                    result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
+                                                           profile=native_mosby_tape.APPROACHES[action])
                 elif action == native_mosby_tape.READINGS_PREFLIGHT:
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
@@ -3720,7 +3722,7 @@ class Client:
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
             (self.wire_board is not None, native_wire_board.MAPS, native_wire_board.HEARTBEAT),
             (self.dialogue_view is not None, self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
-            (self.mosby_station is not None, (native_mosby_tape.STONE_MAZE,), native_mosby_station_view.HEARTBEAT),
+            (self.mosby_station is not None, native_mosby_tape.BY_MAP, native_mosby_station_view.HEARTBEAT),
         )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
@@ -3949,13 +3951,15 @@ class Client:
                         raise RuntimeError("The stock dialogue input did not return a pending response")
                     result = {"native_dialogue_view": proof}
                 elif action == native_mosby_station_view.FIXTURE and self.mosby_station:
-                    if (self.last_game.get("state"), self.last_game.get("map"), request.get("target")) != (
-                            "connected", native_mosby_tape.STONE_MAZE, None):
-                        raise ValueError("Connect the enrolled guest to the exact Stone Maze station")
+                    area = self.last_game.get("map")
+                    if (self.last_game.get("state") != "connected" or area not in native_mosby_tape.BY_MAP
+                            or request.get("target") is not None):
+                        raise ValueError("Connect the enrolled guest at a qualified stock tape station")
                     self.last_game = await self.bridge.command(action, timeout=6)
                     proof = self.last_game.get(native_mosby_station_view.KEY, {})
-                    if proof.get("state") not in ("checking", "trading") or not proof.get("sequence"):
-                        raise RuntimeError("The stock Stone Maze station press did not verify")
+                    if (proof.get("state") not in ("checking", "trading") or not proof.get("sequence")
+                            or (proof.get("map"), proof.get("station")) != (area, native_mosby_tape.BY_MAP[area].station)):
+                        raise RuntimeError("The stock tape station press did not verify")
                     result = {native_mosby_station_view.KEY: proof}
                 elif action == "native-wipe-view-key-fixture" and self.wipe_view:
                     self.last_game = await self.wipe_view.fixture(action, request.get("target"))

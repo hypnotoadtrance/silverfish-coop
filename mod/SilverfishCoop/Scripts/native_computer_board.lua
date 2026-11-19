@@ -65,6 +65,15 @@ local recipes = {
         redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
         stage_objective = "SilverfishStageSavloRingObjective",
     },
+    ["native-pump-room"] = {
+        id = "Clt_EatherPumpTape", title = "Pump Room", fault = "pump_room",
+        objective_path = "/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C",
+        cash = 3200, difficulty = 8, fail_on_death = false, redeem = 1, fixture_xp = 8,
+        offered_boards = {1, 3}, scoped_boards = {1}, factions = {8, 3}, reputation = {[8] = 50, [3] = -100},
+        reputation_flags = {[8] = "Rep_Freelancer", [3] = "Rep_Fae"}, advantage = {[8] = 70}, no_track_flag = true,
+        redeem_map = black_market, wrong_board = "black_market_redemption_required",
+        stage_objective = "SilverfishStagePumpRoomObjective",
+    },
 }
 local operations = {}
 for prefix, spec in pairs(recipes) do

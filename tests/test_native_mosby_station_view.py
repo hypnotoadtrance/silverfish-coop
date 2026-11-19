@@ -35,7 +35,7 @@ class StoneMazeStockControlTests(unittest.IsolatedAsyncioTestCase):
         action = AsyncMock(return_value=offer())
 
         async def press(sequence, opened, kind, blank=None, pawn=PAWN, epoch=EPOCH):
-            bridge.native_mosby_station_requests.return_value = [(sequence, opened, kind, pawn, blank)]
+            bridge.native_mosby_station_requests.return_value = [(sequence, opened, kind, pawn, blank, tape.STATION)]
             return (await view.sync(station_frame(sequence, opened, station.WAITING[kind], blank), epoch, True, action))[station.KEY]
 
         await press(1, 1, "view", pawn="Player_FP_C sibling guest")
@@ -60,8 +60,8 @@ class StoneMazeStockControlTests(unittest.IsolatedAsyncioTestCase):
     def test_intents_require_exact_stock_station_and_bounded_sequences(self):
         first = ["mosby-station", "4", "4", "view", PAWN, tape.STATION, "-"]
         trade = ["mosby-station", "5", "4", "trade", PAWN, tape.STATION, BLANK]
-        self.assertEqual(station.parse_intent(first), (4, 4, "view", PAWN, None))
-        self.assertEqual(station.parse_intent(trade), (5, 4, "trade", PAWN, BLANK))
+        self.assertEqual(station.parse_intent(first), (4, 4, "view", PAWN, None, tape.STATION))
+        self.assertEqual(station.parse_intent(trade), (5, 4, "trade", PAWN, BLANK, tape.STATION))
         self.assertIsNone(station.parse_intent([*trade[:5], tape.STATION.replace("_C_1", "_C_2"), BLANK]))
         self.assertIsNone(station.parse_intent([trade[0], str(2**53), *trade[2:]]))
         self.assertIsNone(station.parse_intent([*trade[:6], "-"]))

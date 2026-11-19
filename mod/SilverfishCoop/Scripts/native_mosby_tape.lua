@@ -4,20 +4,19 @@ local mosby = require("native_dialogue_mosby")
 local players = require("players")
 local wire = require("native_wire_quest")
 local zones = require("zone_maps")
+local stations = require("native_tape_profiles")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
-local scientist, maze = mosby.map, "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
+local scientist = mosby.map
 local station_class = "/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C"
-local station_path = maze .. ".StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"
-local station_name = "DataTape_DownloadStation_BP_C " .. station_path
 local quest = "Clt_Tape_StoneMaze_01"
 local board_path = mosby.world .. ":PersistentLevel.BountyBoard_BP_C_2"
 local board_name = "BountyBoard_BP_C " .. board_path
 local board = {map = scientist, world_path = mosby.world, board_path = board_path, board_name = board_name, board_id = 4, quest_id = quest}
 local blank_path = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"
-local product_path = "/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C"
+local product_path = stations.stone.product
 local armor_path = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -74,7 +73,7 @@ local function singleton(rows)
     if id and not next(rows, id) and backpack then return id end
 end
 
-local function scope(state, phase, required_map)
+local function scope(state, phase, required_map, station_profile)
     local route = zones[state.map]
     local leaf = state.map:match("/([^/]+)$")
     local driver = valid(state.world) and state.world.NetDriver
@@ -82,6 +81,29 @@ local function scope(state, phase, required_map)
         or state.server or not valid(driver) or valid(driver.ServerConnection) or not same(driver.World, state.world)
         or state.world:GetFullName() ~= "World " .. state.map .. "." .. leaf or required_map and state.map ~= required_map then
         refuse("listen_scope_unavailable")
+    end
+    if station_profile == stations.pump then
+        local pawn, controller = state.local_pawn and state.local_pawn.pawn, state.controller
+        local library = StaticFindObject(statics_path)
+        if not exact(pawn, "/Game/Classes/Player/Player_FP.Player_FP_C")
+            or not exact(controller, "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")
+            or not controller:IsLocalController() or not controller:HasAuthority() or not pawn:HasAuthority()
+            or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
+            or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller) or not valid(library) then
+            refuse("canonical_host_unavailable")
+        end
+        local instance = library:GetGameInstance(pawn)
+        local save = valid(instance) and instance.SaveSlot_Ref
+        local template = wire.stock_quest_table():FindRow(station_profile.id)
+        local key = FName(station_profile.id, EFindName.FNAME_Find)
+        if not exact(instance, "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")
+            or not exact(save, save_path) or not same(pawn.Save, save) or not same(instance["As Player FP"], pawn)
+            or not template or key:GetComparisonIndex() == 0 then refuse("canonical_save_unavailable") end
+        local row = wire.stock_row(save.ActiveQuests, key)
+        local step = row and row.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A or "-"
+        if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse("stock_quest_step_unqualified") end
+        return {step = step, cash = wire.stock_flag(instance, "Player_Cash"), xp = wire.stock_flag(instance, "Player_Xp")},
+            {instance = instance, save = save, host = pawn, key = key}
     end
     local progress, host = mosby.progress(state)
     if not same(host.instance["As Player FP"], host.host) then refuse("canonical_host_changed") end
@@ -112,14 +134,14 @@ local function reaches(pawn, station, box)
     return within(point, station:K2_GetActorLocation(), range) and within(point, box:K2_GetComponentLocation(), range)
 end
 
-local function target_station(state)
-    local station = StaticFindObject(station_path)
+local function target_station(state, profile)
+    local station = StaticFindObject(profile.path)
     local box = valid(station) and station.Box
-    if not exact(station, station_class) or station:GetFullName() ~= station_name or not same(station:GetWorld(), state.world)
+    if not exact(station, station_class) or station:GetFullName() ~= profile.station or not same(station:GetWorld(), state.world)
         or not station:HasAuthority() or station:IsActorBeingDestroyed() or not exact(box, "/Script/Engine.BoxComponent")
         or not same(box:GetOwner(), station) then refuse("exact_station_unavailable") end
     local anchor = station:K2_GetActorLocation()
-    if not within(anchor, {X = 24873.440989, Y = -11925.632572, Z = 19.047219}, 3) then refuse("station_placement_changed") end
+    if not within(anchor, profile.anchor, 3) then refuse("station_placement_changed") end
     return station, box
 end
 
@@ -142,12 +164,14 @@ local function qualify_offer(station, blank, product)
         or not require_one(row.Items_Recive_22_BF8DA3D74F10EFDF07693DB9957DFFCD, product) then refuse("station_offer_item_changed") end
 end
 
-local function approach(state, phase, name, variant)
+local function approach(state, phase, name, variant, profile)
     if not fixtures then refuse("approach_unavailable") end
-    if state.map == scientist and not variant then return wire.stock_board_approach(state, phase, name, board) end
-    local _, host = scope(state, phase, maze)
+    if profile == stations.stone and state.map == scientist and not variant then
+        return wire.stock_board_approach(state, phase, name, board)
+    end
+    local _, host = scope(state, phase, profile.map, profile)
     local pawn = receiver(state, phase, name, host, false)
-    local station, box = target_station(state)
+    local station, box = target_station(state, profile)
     local library, origin = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"), box:K2_GetComponentLocation()
     local capsule = pawn.CapsuleComponent
     local height = valid(capsule) and capsule:GetScaledCapsuleHalfHeight()
@@ -169,34 +193,36 @@ local function approach(state, phase, name, variant)
         if found == true and point and normal and normal.Z >= 0.7 then
             local place = {X = x, Y = y, Z = point.Z + height + 4}
             if within(place, origin, pawn.InteractionRange) and pawn:K2_TeleportTo(place, pawn:K2_GetActorRotation())
-                and reaches(pawn, station, box) then pawn:ForceNetUpdate(); return "exact Stone Maze station approach verified" end
+                and reaches(pawn, station, box) then pawn:ForceNetUpdate(); return "exact stock station approach verified" end
         end
     end
     refuse("approach_no_safe_floor")
 end
 
-local function exchange(state, phase, name, operation, blank_guid, replacement_guid)
-    local before, host = scope(state, phase, maze)
-    if before.step ~= 1 and before.step ~= 2 then refuse("stock_quest_not_active") end
+local function exchange(state, phase, name, operation, blank_guid, replacement_guid, profile)
+    local before, host = scope(state, phase, profile.map, profile)
+    if profile == stations.stone and before.step ~= 1 and before.step ~= 2 then refuse("stock_quest_not_active") end
     local pawn, save = receiver(state, phase, name, host, false)
-    local station, box = target_station(state)
+    local station, box = target_station(state, profile)
     if not reaches(pawn, station, box) then refuse("station_out_of_reach") end
-    local blank, product = StaticFindObject(blank_path), StaticFindObject(product_path)
+    local blank, product = StaticFindObject(blank_path), StaticFindObject(profile.product)
     qualify_offer(station, blank, product)
     local rows, first_backpack = owned(save, blank, blank_guid ~= "-" and blank_guid or nil)
     local held = blank_guid == "-" and first_backpack or rows[blank_guid] and blank_guid or nil
     if blank_guid ~= "-" and not guid(blank_guid) then refuse("blank_guid_unqualified") end
     local status, filled = "offer", "-"
     local checked, after = true, before
-    if operation == "native-mosby-tape-convert" then
-        if not guid(replacement_guid) or replacement_guid == blank_guid or type(SilverfishExchangeStoneMazeTape) ~= "function" then
+    if operation == profile.prefix .. "-convert" then
+        local convert = SilverfishExchangeStoneMazeTape
+        if profile == stations.pump then convert = SilverfishExchangeEatherPumpTape end
+        if not guid(replacement_guid) or replacement_guid == blank_guid or type(convert) ~= "function" then
             refuse("typed_conversion_unavailable") end
-        local ok, reason, output = SilverfishExchangeStoneMazeTape(pawn:GetAddress(), save:GetAddress(), host.save:GetAddress(),
+        local ok, reason, output = convert(pawn:GetAddress(), save:GetAddress(), host.save:GetAddress(),
             blank_guid, replacement_guid)
         if ok ~= true then error(reason or "native_mosby_tape_conversion_refused", 0) end
         checked, after = pcall(function()
-            local verified, current = scope(state, phase, maze)
-            if not same(current.save, host.save) or not same(pawn.Save, save) or not same(target_station(state), station)
+            local verified, current = scope(state, phase, profile.map, profile)
+            if not same(current.save, host.save) or not same(pawn.Save, save) or not same(target_station(state, profile), station)
                 or (reason ~= "exchanged" and reason ~= "already_exchanged") or output ~= replacement_guid
                 or owned(save, blank, blank_guid)[blank_guid] ~= nil or owned(save, product, output)[output] ~= true then return end
             for key, value in pairs(before) do if verified[key] ~= value then return end end
@@ -205,9 +231,10 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
         if not checked or not after then error("mutation_unverified_stone_maze_tape_readback", 0) end
         status, filled, held = reason, output, blank_guid
     end
-    last = {type = "exchange", operation = operation, map = maze, pawn = name, station = station_name, status = status,
+    last = {type = "exchange", operation = operation, map = profile.map, pawn = name, station = profile.station,
+        prefix = profile.prefix, status = status,
         blank = held or "-", filled = filled, step = after.step, cash = after.cash, xp = after.xp, world = state.world}
-    return "exact live Stone Maze station trade verified"
+    return "exact stock tape exchange verified"
 end
 
 local function faction_state(context)
@@ -350,11 +377,13 @@ end
 
 function tape.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-mosby-tape-approach" and (#fields == 3 or #fields == 4) then
-        last = nil; return approach(state, phase, fields[3], fields[4])
-    end
-    if action == "native-mosby-tape-preflight" and #fields == 4 or action == "native-mosby-tape-convert" and #fields == 5 then
-        last = nil; return exchange(state, phase, fields[3], action, fields[4], fields[5])
+    for _, profile in pairs(stations.maps) do
+        if action == profile.prefix .. "-approach" and (#fields == 3 or #fields == 4) then
+            last = nil; return approach(state, phase, fields[3], fields[4], profile)
+        end
+        if action == profile.prefix .. "-preflight" and #fields == 4 or action == profile.prefix .. "-convert" and #fields == 5 then
+            last = nil; return exchange(state, phase, fields[3], action, fields[4], fields[5], profile)
+        end
     end
     if action == "native-mosby-readings-preflight" and #fields == 3 or action == "native-mosby-readings-turn-in" and #fields == 4 then
         last = nil; return redeem(state, phase, fields[3], action, fields[4])
@@ -368,7 +397,7 @@ end
 function tape.rows(state, phase, row)
     if not last or phase ~= "hosting" or last.map ~= state.map or not same(last.world, state.world) then return {} end
     if last.type == "exchange" then
-        return {row("native-mosby-tape", last.operation, last.map, last.pawn, last.station, last.status, last.blank, last.filled,
+        return {row(last.prefix, last.operation, last.map, last.pawn, last.station, last.status, last.blank, last.filled,
             last.step, last.cash, last.xp, 1, 1, 0, 0)}
     end
     if last.type == "redemption" then

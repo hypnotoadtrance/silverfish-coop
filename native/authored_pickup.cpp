@@ -126,11 +126,24 @@ namespace
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto default_item_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeDefaultItem");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
-    constexpr auto stone_maze_world = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P");
-    constexpr auto tape_station_path = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1");
     constexpr auto tape_station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
     constexpr auto blank_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
-    constexpr auto filled_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
+    struct TapeExchangeProfile
+    {
+        const U::TCHAR* world;
+        const U::TCHAR* station;
+        const U::TCHAR* product;
+    };
+    constexpr TapeExchangeProfile stone_maze_tape{
+        STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
+        STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C"),
+    };
+    constexpr TapeExchangeProfile eather_pump_tape{
+        STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
+        STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C"),
+    };
     constexpr std::array guid_members{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr std::size_t parameter_capacity = 256;
     constexpr double maximum_range_squared = 250.0 * 250.0;
@@ -638,7 +651,8 @@ namespace
         }
     };
 
-    U::UWorld* tape_owner_world(U::UObject* pawn, U::UObject* target, U::UObject* canonical)
+    U::UWorld* tape_owner_world(U::UObject* pawn, U::UObject* target, U::UObject* canonical,
+                              const TapeExchangeProfile& profile)
     {
         if (!pawn || !target || !canonical || !boolean(pawn, STR("Dead"), false) ||
             !boolean(pawn, STR("bActorIsBeingDestroyed"), false) || role(pawn) != 3 || object(pawn, STR("Save")) != target)
@@ -647,7 +661,7 @@ namespace
         auto* controller = object(pawn, STR("Controller"));
         auto* instance = object(world, STR("OwningGameInstance"));
         auto* driver = object(world, STR("NetDriver"));
-        if (!live(world) || world->GetPathName() != stone_maze_world ||
+        if (!live(world) || world->GetPathName() != profile.world ||
             !exact(instance, instance_path) || object(instance, STR("SaveSlot_Ref")) != canonical ||
             !exact(controller, controller_path) || !boolean(controller, STR("bActorIsBeingDestroyed"), false) ||
             role(controller) != 3 || object(controller, STR("Pawn")) != pawn ||
@@ -661,9 +675,9 @@ namespace
         return owned ? world : nullptr;
     }
 
-    bool tape_station_reachable(U::UWorld* world, U::UObject* pawn)
+    bool tape_station_reachable(U::UWorld* world, U::UObject* pawn, const TapeExchangeProfile& profile)
     {
-        auto* station = find<U::UObject>(tape_station_path);
+        auto* station = find<U::UObject>(profile.station);
         auto* box = object(station, STR("Box"));
         return exact(station, tape_station_class) && role(station) == 3 &&
             boolean(station, STR("bActorIsBeingDestroyed"), false) && exact(box, STR("/Script/Engine.BoxComponent")) &&
@@ -695,32 +709,41 @@ namespace
         return unique;
     }
 
+    template<const TapeExchangeProfile& Profile>
     int exchange_tape(const Lua& lua)
     {
+        const auto fail = [&](std::string_view reason) {
+            if constexpr (&Profile == &eather_pump_tape)
+            {
+                if (const auto at = reason.find("stone_maze"); at != std::string_view::npos)
+                    return result(lua, false, std::format("{}eather_pump{}", reason.substr(0, at), reason.substr(at + 10)));
+            }
+            return result(lua, false, reason);
+        };
         if (!ready() || !env("SILVERFISH_COOP_NATIVE_ZONE") || lua.get_stack_size() != 5 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
-            !lua.is_string(4) || !lua.is_string(5)) return result(lua, false, "stone_maze_tape_arguments");
+            !lua.is_string(4) || !lua.is_string(5)) return fail("stone_maze_tape_arguments");
         const auto pawn_address = lua.get_integer();
         const auto target_address = lua.get_integer();
         const auto canonical_address = lua.get_integer();
         Guid blank, filled;
         if (pawn_address <= 0 || target_address <= 0 || canonical_address <= 0 || !parse_guid(lua.get_string(), blank))
-            return result(lua, false, "stone_maze_tape_arguments");
+            return fail("stone_maze_tape_arguments");
         const auto supplied_guid = lua.get_string();
-        if (!parse_guid(supplied_guid, filled) || blank == filled) return result(lua, false, "stone_maze_tape_arguments");
+        if (!parse_guid(supplied_guid, filled) || blank == filled) return fail("stone_maze_tape_arguments");
 
         RowSchema rows;
         TapeStores stores{rows};
-        if (!rows.bind() || !stores.valid()) return result(lua, false, "stone_maze_tape_inventory_schema_unavailable");
+        if (!rows.bind() || !stores.valid()) return fail("stone_maze_tape_inventory_schema_unavailable");
         auto* pawn = live_address(static_cast<Address>(pawn_address), find<U::UClass>(pawn_path));
         auto* target = live_address(static_cast<Address>(target_address), rows.save);
         auto* canonical = live_address(static_cast<Address>(canonical_address), rows.save);
-        auto* world = tape_owner_world(pawn, target, canonical);
-        if (!world || !tape_station_reachable(world, pawn) || !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
-            return result(lua, false, "stone_maze_exact_tape_owner_unavailable");
+        auto* world = tape_owner_world(pawn, target, canonical, Profile);
+        if (!world || !tape_station_reachable(world, pawn, Profile) || !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
+            return fail("stone_maze_exact_tape_owner_unavailable");
 
         auto* blank_class = find<U::UClass>(blank_tape_path);
-        auto* filled_class = find<U::UClass>(filled_tape_path);
+        auto* filled_class = find<U::UClass>(Profile.product);
         auto* base = find<U::UClass>(base_class);
         auto* filled_cdo = filled_class ? filled_class->GetClassDefaultObject().Get() : nullptr;
         auto* blank_cdo = blank_class ? blank_class->GetClassDefaultObject().Get() : nullptr;
@@ -734,7 +757,7 @@ namespace
         TapeStores::Found old, replacement;
         if (!quantity || !stock_tape(blank_cdo, blank_class) || !stock_tape(filled_cdo, filled_class) ||
             !stores.scan(target, blank, old) || !stores.scan(target, filled, replacement))
-            return result(lua, false, "stock_stone_maze_tapes_unavailable");
+            return fail("stock_stone_maze_tapes_unavailable");
 
         const auto success = [&](std::string_view status) {
             result(lua, true, status);
@@ -745,7 +768,7 @@ namespace
             rows.matches_actor(replacement.backpack_row, filled_cdo)) return success("already_exchanged");
         if (old.count != 1 || !old.backpack_row || !rows.authored(old.backpack_row, blank_class) ||
             quantity->GetPropertyValueInContainer(old.backpack_row) != 0 || replacement.count != 0)
-            return result(lua, false, "stone_maze_exact_blank_tape_required");
+            return fail("stone_maze_exact_blank_tape_required");
 
         auto* fn = find<U::UFunction>(default_item_path);
         auto* library = find<U::UObject>(library_path);
@@ -765,7 +788,8 @@ namespace
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(buffer.data()), pawn);
         library->ProcessEvent(fn, buffer.data());
         auto* generated = output->ContainerPtrToValuePtr<void>(buffer.data());
-        if (!rows.matches_actor(generated, filled_cdo) || tape_owner_world(pawn, target, canonical) != world ||
+        if (!rows.matches_actor(generated, filled_cdo) || tape_owner_world(pawn, target, canonical, Profile) != world ||
+            !tape_station_reachable(world, pawn, Profile) ||
             !stores.scan(target, blank, old) || old.count != 1 || !old.backpack_row ||
             !rows.authored(old.backpack_row, blank_class) || quantity->GetPropertyValueInContainer(old.backpack_row) != 0 ||
             !stores.scan(target, filled, replacement) || replacement.count != 0)
@@ -994,7 +1018,8 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);
-        lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape);
+        lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape<stone_maze_tape>);
+        lua.register_function("SilverfishExchangeEatherPumpTape", exchange_tape<eather_pump_tape>);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);
         if (headless()) lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
     }

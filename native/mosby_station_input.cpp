@@ -1,6 +1,7 @@
 #include "mosby_station_input.hpp"
 #include "interaction_input.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 
@@ -20,8 +21,17 @@ namespace
     using Lua = RC::LuaMadeSimple::Lua;
     using Clock = std::chrono::steady_clock;
     using Address = std::uintptr_t;
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P");
-    constexpr auto station_path = STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1");
+    struct Profile
+    {
+        const U::TCHAR* world;
+        const U::TCHAR* station;
+    };
+    constexpr std::array profiles{
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P:PersistentLevel.DataTape_DownloadStation_BP_C_1")},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1")},
+    };
     constexpr auto station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
     constexpr auto callback_path = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C:SendInteractionToActor");
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -37,6 +47,7 @@ namespace
         Clock::time_point expires{}, receipt_expires{};
         std::uint64_t pending{};
         bool accepting{};
+        const Profile* profile{};
     };
     Scope scope;
     std::uint64_t sequence{};
@@ -64,13 +75,13 @@ namespace
         return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
     }
 
-    U::UObject* stock_box(U::UObject* station, U::UObject* pawn)
+    U::UObject* stock_box(U::UObject* station, U::UObject* pawn, const Profile& profile)
     {
-        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(station_class) || station->GetPathName() != station_path)
+        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(station_class) || station->GetPathName() != profile.station)
             return nullptr;
         auto* world = static_cast<U::AActor*>(station)->GetWorld();
         auto* destroying = field<U::FBoolProperty>(station, STR("bActorIsBeingDestroyed"));
-        if (!live(world) || !pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world || world->GetPathName() != world_path ||
+        if (!live(world) || !pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world || world->GetPathName() != profile.world ||
             !destroying || destroying->GetPropertyValueInContainer(station)) return nullptr;
         auto* type = find<U::UClass>(box_class);
         auto* property = field<U::FObjectProperty>(station, STR("Box"));
@@ -99,8 +110,13 @@ namespace
         const auto requested = lua.get_integer();
         const bool accepting = lua.get_bool();
         auto* pawn = requested > 0 ? active_guest(static_cast<Address>(requested)) : nullptr;
-        auto* station = pawn ? find<U::AActor>(station_path) : nullptr;
-        auto* box = station ? stock_box(station, pawn) : nullptr;
+        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        if (!live(world)) return respond(false);
+        const Profile* selected{};
+        for (const auto& profile : profiles)
+            if (world->GetPathName() == profile.world) { selected = &profile; break; }
+        auto* station = selected ? find<U::AActor>(selected->station) : nullptr;
+        auto* box = station ? stock_box(station, pawn, *selected) : nullptr;
         if (!box) return respond(false);
         const auto now = Clock::now();
         if (scope.pawn.Get() != pawn || scope.station.Get() != station || scope.box.Get() != box ||
@@ -109,6 +125,7 @@ namespace
         scope.station = station;
         scope.box = box;
         scope.accepting = accepting;
+        scope.profile = selected;
         scope.expires = now + lease;
         return respond(true);
     }
@@ -142,7 +159,7 @@ namespace silverfish::mosby_station_input
             call.OriginalFunctionCallPrevented() || function != find<U::UFunction>(callback_path)) return;
         auto* scoped = scope.pawn.Get();
         auto* pawn = scoped ? active_guest(reinterpret_cast<Address>(scoped)) : nullptr;
-        auto* box = pawn ? stock_box(actor, pawn) : nullptr;
+        auto* box = pawn && scope.profile ? stock_box(actor, pawn, *scope.profile) : nullptr;
         if (!box || box != scope.box.Get() || function->GetOuterPrivate() != actor->GetClassPrivate() ||
             function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
