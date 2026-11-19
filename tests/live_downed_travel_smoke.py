@@ -124,7 +124,10 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         if not output or (process.returncode == 0) != accepted:
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
         result = json.loads(output)
-        assert result.get("ok") is accepted, result
+        if arguments[0] == "events":
+            assert result.get("schema") == 1 and isinstance(result.get("events"), list), result
+        else:
+            assert result.get("ok") is accepted, result
         return result
 
     async def action(owner, operation, *arguments, accepted=True):
