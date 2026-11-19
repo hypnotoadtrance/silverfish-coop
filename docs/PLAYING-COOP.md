@@ -115,6 +115,8 @@ At the Stone Maze station, face the station and press Interact to review the exa
 
 ## Machine-readable controls
 
+The native guest backpack also supports `native-inventory-sort` with an `--operation-id`. Look for `gameplay.native_inventory_sort_capability` equal to 1 on the connected guest. The action returns the verified row count and either `sorted` or `already_sorted`. Request a new `native-inventory-list` page to read the resulting order.
+
 The shared crate roll appears under `gameplay.native_loot_rolls` for the current map. Use the selected row's exact `guid` and crate key as `GUID@CRATE` with `native-loot-claim --target`. Supply an `--operation-id` of 32 lowercase hexadecimal characters and reuse it for the same action on retry. A stock cash claim returns `native_loot_claim.wallet_credit` with `amount`, `before`, and `after`. Read `gameplay.shared_wallet` for the current balance, including later changes.
 
 Run the commands below on the PC with the targeted launcher. Use `--campaign` for the host and `--profile` for the guest.

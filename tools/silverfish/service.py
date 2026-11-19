@@ -1435,6 +1435,8 @@ class Host:
         gameplay = self.public_gameplay()
         if self.last_game.get(native_inventory.SPLIT_CAPABILITY) == 1:
             gameplay[native_inventory.SPLIT_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.SORT_CAPABILITY) == 1:
+            gameplay[native_inventory.SORT_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)

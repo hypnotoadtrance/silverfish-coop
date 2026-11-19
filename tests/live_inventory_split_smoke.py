@@ -56,7 +56,9 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
 
     async def enrolled():
         await wait(guest_run, lambda state: state.get("state") == "connected"
-                   and state.get("game", {}).get("map") == OBSERVATORY)
+                   and state.get("game", {}).get("map") == OBSERVATORY
+                   and (not sort_backpack or (state.get("gameplay_fresh") and
+                        state.get("gameplay", {}).get("native_inventory_sort_capability") == 1)))
         return await wait(run, lambda state: state.get("state") == "hosting"
                           and state.get("game", {}).get("map") == OBSERVATORY
                           and state["game"].get("native_guest_save", {}).get("state") == "bound"

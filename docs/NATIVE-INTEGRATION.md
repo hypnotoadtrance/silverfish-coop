@@ -236,6 +236,8 @@ The headless inventory-input run opened the guest overlay through the stock menu
 
 An Observatory guest split a nine-round 9 mm Ball stack into five and four through the local action interface. The host refused a request based on a stale count. The guest then used the original inventory binding and the overlay's Home confirmation to split the five-round stack into three and two. Exact stack GUIDs and counts of three, four, and two restored after a same-port restart. The host inventory and original save hashes matched their baselines.
 
+A structured guest backpack sort called the stock category sorter. The test seeded an SMG before its ammunition, then verified that the sorter put the ammunition first. Both typed rows kept their GUIDs and payloads. The guest also completed the existing ammo split from the reordered inventory. Its final order and the sort receipt survived same-port restart, and the host inventory and original saves matched.
+
 Two guests collected separate authored ammunition stacks through stock Interact. The first carried 14 buckshot shells from Slums. The second collected 10 .45 Ball rounds in CrossRoads. The host refused a stale visit, a wrong-map source, an out-of-range claim, and a second claim on the same source. Each guest retained their own exact stack through Rail Yard travel, a same-port restart, and a revisit to Slums. The host inventory and original save hashes matched.
 
 A separate three-instance run collected the same .45 placement into a guest's existing 10-round backpack stack. The stock calculation increased it to 20 rounds under the original stack GUID. The pickup kept a distinct source receipt, other inventories matched, and the owner kept the 20-round stack after same-port restart.
