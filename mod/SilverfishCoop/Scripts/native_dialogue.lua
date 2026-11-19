@@ -1,22 +1,28 @@
 local dialogue = {}
 local guest_save = require("guest_save")
+local mosby = require("native_dialogue_mosby")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local world_path = map .. ".Observitory_P"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local world_path = observatory .. ".Observitory_P"
 local level = world_path .. ":PersistentLevel."
-local npc_path = level .. "NPC_Castaway_C_1"
-local controller_path = level .. "Dialogue_Controler_BP_C_3"
-local receiver_path = level .. "GlobalPing_ScriptingReciver_BP_C_3"
-local table_path = "/Game/Classes/Libraries/Tables_Dialogue/Dialogue_Observatory.Dialogue_Observatory"
-local npc_class = "/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local root, story = "Cast_Root", "Cast_Origin"
-local profiles = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
-    [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1}}
+local castaway = {
+    id = "castaway", title = "Castaway", map = observatory, world = world_path, root = root,
+    npc = level .. "NPC_Castaway_C_1", npc_kind = "NPC_Castaway_C",
+    npc_class = "/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C",
+    component = "Sphere_Interact", component_class = "/Script/Engine.SphereComponent",
+    controller = level .. "Dialogue_Controler_BP_C_3", receiver = level .. "GlobalPing_ScriptingReciver_BP_C_3",
+    source = "/Game/Classes/Libraries/Tables_Dialogue/Dialogue_Observatory.Dialogue_Observatory",
+    row_order = {root, story},
+    rows = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
+        [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1, continuation = true}},
+}
+local profiles = {[observatory] = castaway, [mosby.map] = mosby}
 
 local npc_lines = "NPC_Dialogue_3_CE4B2EF741973F79EF3C89BB03B96687"
 local responses = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
@@ -28,11 +34,13 @@ local fallback = "FallbackPointer_24_9DB7DB6F4078EDB4D209A5B9751FB7A1"
 local choice_text = "TextContent_2_891360234FC305CA4D09FE9EA69C8936"
 local exit_field = "Terminate_Convo_5_BAA128604982D7FC877B498C6500026C"
 local next_pointer = "NextConvo_8_59FA977C44DA6739371CD9992F385F4F"
+local activate = "Activate_Quests_22_323EA585468EFFDA9A12A188EBDF5022"
 local effect_arrays = {"Add_JournalEntries_17_E77934214DFD7B85991F729C59678191",
-    "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23", "Activate_Quests_22_323EA585468EFFDA9A12A188EBDF5022",
+    "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23",
     "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD"}
-local effect_maps = {"Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7", "Flags_PreReq_26_50B864DB4BE3226CB3721BB63C4D74DE",
-    "Flags_HideIfMet_28_6501CD9247D8EA6D695B5C9F5FD8C639", "Rep_Effect_33_CA3AB131482DEE2637F973B7480AA04F"}
+local effect_maps = {add = "Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7",
+    require_flag = "Flags_PreReq_26_50B864DB4BE3226CB3721BB63C4D74DE",
+    hide_flag = "Flags_HideIfMet_28_6501CD9247D8EA6D695B5C9F5FD8C639", rep = "Rep_Effect_33_CA3AB131482DEE2637F973B7480AA04F"}
 
 local events, heartbeat, players, host_report
 local binding, session, widget, last_text
@@ -54,16 +62,20 @@ local function text(value)
 end
 
 local function placement(state)
-    if not enabled or state.map ~= map or state.listening ~= true or not valid(state.world)
-        or state.world:GetFullName() ~= "World " .. world_path then return end
-    local npc = StaticFindObject(npc_path)
-    if not exact(npc, npc_class) or npc:GetFullName() ~= "NPC_Castaway_C " .. npc_path
+    local profile = profiles[state.map]
+    if not enabled or not profile or state.listening ~= true or not valid(state.world)
+        or state.world:GetFullName() ~= "World " .. profile.world then return end
+    local npc = StaticFindObject(profile.npc)
+    if not exact(npc, profile.npc_class) or npc:GetFullName() ~= profile.npc_kind .. " " .. profile.npc
         or not same(npc:GetWorld(), state.world) or npc:IsActorBeingDestroyed() or npc.Alive ~= true then return end
-    local sphere = npc.Sphere_Interact
-    if not exact(sphere, "/Script/Engine.SphereComponent") or not same(sphere:GetOwner(), npc) then return end
-    local collision = sphere:GetCollisionEnabled()
+    local target = profile.target and StaticFindObject(profile.target) or npc
+    if profile.target and (not exact(target, profile.target_class) or target:GetFullName() ~= profile.target_kind .. " " .. profile.target
+        or not same(target:GetWorld(), state.world) or target:IsActorBeingDestroyed()) then return end
+    local component = target[profile.component]
+    if not exact(component, profile.component_class) or not same(component:GetOwner(), target) then return end
+    local collision = component:GetCollisionEnabled()
     if collision ~= 1 and collision ~= 3 then return end
-    return npc, sphere
+    return profile, npc, target, component
 end
 
 local function pointer_matches(pointer, source, row)
@@ -72,62 +84,77 @@ local function pointer_matches(pointer, source, row)
     return same(pointer.DataTable, source) and named(pointer.RowName) == row
 end
 
-local function catalog(state)
-    local controller = StaticFindObject(controller_path)
-    local receiver = StaticFindObject(receiver_path)
-    local source = StaticFindObject(table_path)
+local function catalog(state, profile, progress)
+    local controller = StaticFindObject(profile.controller)
+    local source = StaticFindObject(profile.source)
     local schema = valid(source) and source:GetRowStruct()
-    if not valid(source) or source:GetFullName() ~= "DataTable " .. table_path or not valid(schema)
+    if not valid(source) or source:GetFullName() ~= "DataTable " .. profile.source or not valid(schema)
         or schema:GetFullName() ~= "UserDefinedStruct /Game/Classes/Libraries/Structs/Conversation_Struct.Conversation_Struct"
         or not exact(controller, "/Game/Classes/ScriptingActors/Dialogue_Controler_BP.Dialogue_Controler_BP_C")
-        or controller:GetFullName() ~= "Dialogue_Controler_BP_C " .. controller_path or not same(controller:GetWorld(), state.world)
-        or not pointer_matches(controller.ConversationPointer, source, root) or not none(controller.Flag_OnMeet)
-        or not pointer_matches(controller.FirstMeet_Pointer, source, false)
-        or not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
-        or receiver:GetFullName() ~= "GlobalPing_ScriptingReciver_BP_C " .. receiver_path or not same(receiver:GetWorld(), state.world)
-        or named(receiver.Ping_ID) ~= "Talk_Castaway" or count(receiver.ActorsToPower) ~= 1
-        or not same(receiver.ActorsToPower[1], controller) then reject("stock_scope_unqualified") end
+        or controller:GetFullName() ~= "Dialogue_Controler_BP_C " .. profile.controller or not same(controller:GetWorld(), state.world)
+        or not pointer_matches(controller.ConversationPointer, source, profile.root) or not none(controller.Flag_OnMeet)
+        or not pointer_matches(controller.FirstMeet_Pointer, source, false) then reject("stock_scope_unqualified") end
+    if profile.receiver then
+        local receiver = StaticFindObject(profile.receiver)
+        if not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
+            or receiver:GetFullName() ~= "GlobalPing_ScriptingReciver_BP_C " .. profile.receiver or not same(receiver:GetWorld(), state.world)
+            or named(receiver.Ping_ID) ~= "Talk_Castaway" or count(receiver.ActorsToPower) ~= 1
+            or not same(receiver.ActorsToPower[1], controller) then reject("stock_receiver_unqualified") end
+    end
     local result = {}
-    for _, name in ipairs({root, story}) do
-        local profile, row = profiles[name], source:FindRow(name)
+    for _, name in ipairs(profile.row_order) do
+        local spec, row = profile.rows[name], source:FindRow(name)
         local lines, choices = row and row[npc_lines], row and row[responses]
-        if count(lines) ~= profile.lines or count(choices) ~= profile.count then reject("stock_row_unqualified") end
+        if count(lines) ~= spec.lines or count(choices) ~= spec.count then reject("stock_row_unqualified:" .. name) end
         local found = {lines = {}, choices = {}}
-        for index = 1, profile.lines do
+        for index = 1, spec.lines do
             local line = lines[index]
-            local inherited_speaker = name == story and index > 1
+            local inherited_speaker = spec.continuation == true and index > 1
             if not line or line[ignore_speaker] ~= inherited_speaker or count(line[give]) ~= 0
                 or not pointer_matches(line[fallback], source, false) then
-                reject("stock_line_effects_unqualified")
+                reject("stock_line_effects_unqualified:" .. name .. ":" .. tostring(index))
             end
             local target = line[speaker]
             if (inherited_speaker and valid(target)) or (not inherited_speaker
-                and (not valid(target) or target:GetFullName() ~= "BlueprintGeneratedClass " .. npc_class)) then
+                and (not valid(target) or target:GetFullName() ~= "BlueprintGeneratedClass " .. profile.npc_class)) then
                 reject("stock_line_effects_unqualified")
             end
             found.lines[index] = text(line[line_text])
         end
-        for _, ordinal in ipairs(profile.choices) do
-            local choice, following = choices[ordinal], profile.next[ordinal]
+        for _, ordinal in ipairs(spec.choices) do
+            local choice, following = choices[ordinal], spec.next[ordinal]
+            local effect = profile.effects and profile.effects[name] and profile.effects[name][ordinal] or {}
+            local pointer = spec.pointer and spec.pointer[ordinal] or following
             if not choice or choice[exit_field] ~= (not following)
-                or not pointer_matches(choice[next_pointer], source, following) then reject("stock_choice_unqualified") end
+                or not pointer_matches(choice[next_pointer], source, pointer) then reject("stock_choice_unqualified:" .. name) end
             for _, field in ipairs(effect_arrays) do
                 if count(choice[field]) ~= 0 then reject("stock_choice_effects_unqualified") end
             end
-            for _, field in ipairs(effect_maps) do
-                if not choice[field] or #choice[field] ~= 0 then reject("stock_choice_effects_unqualified") end
+            for kind, field in pairs(effect_maps) do
+                local values, expected = choice[field], effect[kind]
+                if not values or #values ~= (expected and 1 or 0) then reject("stock_choice_effects_unqualified:" .. name .. ":" .. kind) end
+                if expected then
+                    local key = FName(expected, EFindName.FNAME_Find)
+                    if key:GetComparisonIndex() == 0 or key:ToString() ~= expected
+                        or not values:Contains(key) or values:Find(key):get() ~= 1 then reject("stock_choice_flag_unqualified:" .. name) end
+                end
             end
-            found.choices[ordinal] = text(choice[choice_text])
+            local quests = choice[activate]
+            if count(quests) ~= (effect.quest and 1 or 0) then reject("stock_choice_quest_unqualified:" .. name) end
+            if effect.quest and not pointer_matches(quests[1], profile.table_and_key(), effect.quest) then
+                reject("stock_choice_quest_unqualified:" .. name)
+            end
+            if not profile.available or profile.available(effect, progress) then found.choices[ordinal] = text(choice[choice_text]) end
         end
         result[name] = found
     end
     return result, controller
 end
 
-local function reach(pawn, npc, sphere)
+local function reach(pawn, target, component)
     local limit, origin = pawn.InteractionRange, pawn:K2_GetActorLocation()
     if type(limit) ~= "number" or not (limit > 0 and limit <= 1000) then return false end
-    for _, point in ipairs({npc:K2_GetActorLocation(), sphere:K2_GetComponentLocation()}) do
+    for _, point in ipairs({target:K2_GetActorLocation(), component:K2_GetComponentLocation()}) do
         local distance = (point.X - origin.X)^2 + (point.Y - origin.Y)^2 + (point.Z - origin.Z)^2
         if not (distance <= limit ^ 2) then return false end
     end
@@ -135,16 +162,16 @@ local function reach(pawn, npc, sphere)
 end
 
 local function guest_context(state, phase, name)
-    local npc, sphere = placement(state)
+    local profile, npc, target, component = placement(state)
     if phase ~= "hosting" or state.server ~= false or not npc or not npc:HasAuthority() or not players
         or type(name) ~= "string" or #name > 512 then reject("host_guest_scope_unavailable") end
     local pawn, save = guest_save.exact_item_context(state, phase, name)
     local controller = valid(pawn) and pawn.Controller
     local connection = valid(controller) and controller.Player
     if not exact(pawn, pawn_class) or pawn:GetFullName() ~= name or pawn.Dead ~= false or not pawn:HasAuthority()
-        or not valid(connection) or not same(connection.Driver, state.world.NetDriver) or not same(pawn.Save, save)
+        or not target:HasAuthority() or not valid(connection) or not same(connection.Driver, state.world.NetDriver) or not same(pawn.Save, save)
         or not players.is_standing_guest(pawn, name) then reject("guest_identity_unavailable") end
-    return pawn, npc, sphere, connection
+    return pawn, profile, npc, target, component, connection
 end
 
 local function connection_identity(connection, driver)
@@ -162,19 +189,21 @@ local function connection_identity(connection, driver)
 end
 
 local function local_context(state, phase)
-    local npc, sphere = placement(state)
+    local profile, npc, target, component = placement(state)
     local detail, controller = state.local_pawn, state.controller
     local pawn = detail and detail.pawn
     if not events or phase ~= "connected" or state.server ~= true or not npc or not exact(pawn, pawn_class)
         or not valid(controller) or not controller:IsLocalController() or not pawn:IsLocallyControlled()
         or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller) or not same(pawn:GetWorld(), state.world)
         or detail.name ~= pawn:GetFullName() then return end
-    return {world = state.world, pawn = pawn, controller = controller, npc = npc, sphere = sphere, name = detail.name}
+    return {world = state.world, pawn = pawn, controller = controller, npc = npc, target = target, component = component,
+        name = detail.name, profile = profile}
 end
 
 local function same_scope(first, second)
     return first and second and same(first.world, second.world) and same(first.pawn, second.pawn)
-        and same(first.controller, second.controller) and same(first.npc, second.npc) and same(first.sphere, second.sphere)
+        and first.profile == second.profile and same(first.controller, second.controller) and same(first.npc, second.npc)
+        and same(first.target, second.target) and same(first.component, second.component)
 end
 
 local function fresh()
@@ -186,10 +215,11 @@ local function fresh()
     return stamp and stamp <= now and now <= stamp + 2
 end
 
-local function can_use(current)
+local function can_use(current, pending_response)
     local stack = current.controller.MenuStack
     return current.controller.Loading == false and stack and stack:GetArrayNum() == 0 and current.pawn.Dead == false
-        and players.is_downed(current.pawn) == false and fresh() and reach(current.pawn, current.npc, current.sphere)
+        and players.is_downed(current.pawn) == false and (pending_response or fresh())
+        and reach(current.pawn, current.target, current.component)
 end
 
 local function hide()
@@ -208,15 +238,15 @@ end
 local function show(current)
     if headless then return end
     if not session or not session.content then hide(); return end
-    local lines = {"Castaway", ""}
+    local lines = {current.profile.title, ""}
     for _, line in ipairs(session.content.lines) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
-    local choices = profiles[session.row].choices
+    local choices = session.content.ordinals
     for index, ordinal in ipairs(choices) do
         lines[#lines + 1] = (index == selected and "> " or "   ") .. session.content.choices[ordinal]
     end
-    lines[#lines + 1] = #choices > 1 and "Up / Down to select. Face Castaway and press Interact to answer."
-        or "Face Castaway and press Interact to answer."
+    lines[#lines + 1] = (#choices > 1 and "Up / Down to select. " or "") .. "Face " .. current.profile.title
+        .. " and press Interact to answer."
     local display = table.concat(lines, "\n")
     if last_text == display and valid(widget) then return end
     if not valid(widget) then
@@ -231,6 +261,7 @@ local function show(current)
         if widget:AddToPlayerScreen(31) ~= true or not widget:IsInViewport() then reject("widget_unavailable") end
         widget:SetDesiredSizeInViewport({X = 650, Y = 380})
         widget:SetPositionInViewport({X = 42, Y = 138}, false)
+        widget.TextBlock_Notes:SetAutoWrapText(true)
     end
     widget.TextBlock_Notes:SetText(FText(display))
     if widget.TextBlock_Notes:GetText():ToString() ~= display then reject("widget_readback_unverified") end
@@ -241,14 +272,14 @@ local function drain(current)
     local sequence = SilverfishTakeNativeDialogueInput(current.pawn:GetAddress())
     if not math.tointeger(sequence) or sequence < 1 or sequence >= 2^53 or (session and session.pending) then return false end
     local token, choice = "-", "-"
-    if session and session.content then token, choice = session.token, profiles[session.row].choices[selected] end
+    if session and session.content then token, choice = session.token, session.content.ordinals[selected] end
     local file = io.open(events, "ab")
     if not file then return false end
     local written = file:write(table.concat({"dialogue-input", sequence, current.name, token, choice}, "\t"), "\n")
     local closed = file:close()
     if not written or not closed then return false end
     session = session or {}
-    session.sequence, session.pending, session.token, session.expires = sequence, true, token, os.time() + 10
+    session.sequence, session.pending, session.token, session.expires = sequence, true, token, os.time() + 25
     return true
 end
 
@@ -256,8 +287,12 @@ function dialogue.sync(state, phase)
     local current = local_context(state, phase)
     if not current then if binding then dialogue.clear() end; return end
     if not same_scope(binding, current) then dialogue.clear(); binding = current end
-    local allow = can_use(current)
-    if session and (not allow or session.expires <= os.time()) then session = nil; hide() end
+    local standing, now = can_use(current, true), os.time()
+    local allow = standing and fresh()
+    if session and (not standing or session.expires <= now
+        or not allow and not session.pending and not (session.response_grace and now <= session.response_grace)) then
+        session = nil; hide()
+    end
     binding.armed = false
     if type(SilverfishSetNativeDialogueInputScope) ~= "function" or type(SilverfishTakeNativeDialogueInput) ~= "function"
         or SilverfishSetNativeDialogueInputScope(current.pawn:GetAddress(), allow == true) ~= true then
@@ -265,7 +300,7 @@ function dialogue.sync(state, phase)
     end
     binding.armed = allow
     if allow and session and session.content and not session.pending and move ~= 0 then
-        selected = ((selected - 1 + move) % #profiles[session.row].choices) + 1
+        selected = ((selected - 1 + move) % #session.content.ordinals) + 1
         if not pcall(show, current) then hide() end
     end
     move = 0
@@ -275,38 +310,54 @@ end
 local function host_command(fields, state, phase)
     host_report = nil
     local action, name = fields[2], fields[3]
-    if #fields ~= 3 then reject("arguments_unqualified") end
-    local pawn, npc, sphere, connection = guest_context(state, phase, name)
+    local commit = action == "native-dialogue-commit"
+    if #fields ~= (commit and 12 or 3) then reject("arguments_unqualified") end
+    local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
     if action == "native-dialogue-approach" then
         if not (headless and fixtures) then reject("approach_unavailable") end
-        local location = npc:K2_GetActorLocation()
-        for _, offset in ipairs({{115, 0}, {-115, 0}, {0, 115}, {0, -115}}) do
-            if pawn:K2_TeleportTo({X = location.X + offset[1], Y = location.Y + offset[2], Z = location.Z + 20},
-                                  pawn:K2_GetActorRotation()) and reach(pawn, npc, sphere) then
+        local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
+        local offsets = profile == mosby and {{-115, 0}, {-115, 95}, {-115, -95}, {0, 145}, {0, -145}, {115, 0}}
+            or {{115, 0}, {-115, 0}, {0, 115}, {0, -115}}
+        for _, offset in ipairs(offsets) do
+            if pawn:K2_TeleportTo({X = location.X + offset[1], Y = location.Y + offset[2], Z = floor + 20},
+                                  pawn:K2_GetActorRotation()) and reach(pawn, target, component) then
                 pawn:ForceNetUpdate()
-                return "exact Castaway approach verified"
+                return "exact " .. profile.title .. " approach verified"
             end
         end
         reject("approach_blocked")
     end
-    if not reach(pawn, npc, sphere) then reject("guest_outside_stock_reach") end
-    local rows, controller = catalog(state)
-    host_report = {world = state.world, pawn = pawn, name = name, npc = npc, controller = controller, rows = rows,
-        connection = connection_identity(connection, state.world.NetDriver)}
-    return "exact stock Castaway dialogue read"
+    if not reach(pawn, target, component) then reject("guest_outside_stock_reach") end
+    local identity = connection_identity(connection, state.world.NetDriver)
+    local progress, context, effect_name = nil, nil, "read"
+    if profile.progress then progress, context = profile.progress(state) end
+    local rows, controller = catalog(state, profile, progress)
+    if commit then
+        local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
+        local effect = profile.effects and profile.effects[row] and profile.effects[row][ordinal]
+        if not effect or not effect.effect or not rows[row].choices[ordinal] or identity ~= fields[6]
+            or not profile.accepts_progress_fields(progress, fields, 7) then reject("commit_scope_changed") end
+        progress = profile.commit(context, effect, progress)
+        local checked, updated = pcall(catalog, state, profile, progress)
+        if not checked then error("mutation_unverified_native_dialogue_catalog:" .. tostring(updated), 0) end
+        rows, effect_name = updated, effect.effect
+    end
+    host_report = {profile = profile, world = state.world, pawn = pawn, name = name, npc = npc, target = target,
+        controller = controller, rows = rows, connection = identity, progress = progress, effect = effect_name}
+    return "exact stock " .. profile.title .. " dialogue verified"
 end
 
 local function stock_press(current)
-    local pawn, sphere = current.pawn, current.sphere
+    local pawn, component = current.pawn, current.component
     local camera = pawn.Camera
     if not exact(camera, "/Script/Engine.CameraComponent") or not same(camera:GetOwner(), pawn) then
         reject("fixture_camera_unavailable")
     end
     local original = camera.RelativeRotation
     original = {Pitch = original.Pitch, Yaw = original.Yaw, Roll = original.Roll}
-    local eye, center = camera:K2_GetComponentLocation(), sphere:K2_GetComponentLocation()
-    local radius = sphere:GetScaledSphereRadius()
-    if type(radius) ~= "number" or not (radius > 0 and radius <= 200) then reject("fixture_sphere_unqualified") end
+    local eye, center = camera:K2_GetComponentLocation(), component:K2_GetComponentLocation()
+    local radius = current.profile == mosby and component:GetScaledBoxExtent().Z or component:GetScaledSphereRadius()
+    if type(radius) ~= "number" or not (radius > 0 and radius <= 200) then reject("fixture_component_unqualified") end
     local pressed, failure = pcall(function()
         for _, lift in ipairs({0, 0.4, -0.4, 0.75}) do
             local x, y, z = center.X - eye.X, center.Y - eye.Y, center.Z - eye.Z + radius * lift
@@ -315,7 +366,7 @@ local function stock_press(current)
                 camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(z, horizontal)),
                     Yaw = math.deg(math.atan(y, x)), Roll = 0}, false, {}, true)
                 pawn:LookTrace()
-                if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, sphere) then
+                if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, component) then
                     local accepted, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
                     if accepted ~= true or reason ~= "stock_started_consumed" or not drain(current) then
                         reject("fixture_input_unverified:" .. tostring(reason))
@@ -341,10 +392,12 @@ end
 
 function dialogue.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-dialogue-read" or action == "native-dialogue-approach" then return host_command(fields, state, phase) end
+    if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit" then
+        return host_command(fields, state, phase)
+    end
     if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" then return end
     local current = local_context(state, phase)
-    if not same_scope(current, binding) or not can_use(current) then reject("client_scope_unavailable") end
+    if not same_scope(current, binding) or not can_use(current, action == "native-dialogue-render") then reject("client_scope_unavailable") end
     if action == "native-dialogue-stock-fixture" then
         local target = fields[3]
         if not headless or #fields ~= 3 or type(SilverfishProbeNativeInteractInput) ~= "function"
@@ -355,12 +408,12 @@ function dialogue.command(fields, state, phase)
         else
             if not session or not session.content or session.pending then reject("fixture_choice_unavailable") end
             local index
-            for i, ordinal in ipairs(profiles[session.row].choices) do if tostring(ordinal) == target then index = i end end
+            for i, ordinal in ipairs(session.content.ordinals) do if tostring(ordinal) == target then index = i end end
             if not index then reject("fixture_choice_unavailable") end
             selected = index
         end
         stock_press(current)
-        return "exact stock Castaway Interact verified"
+        return "exact stock " .. current.profile.title .. " Interact verified"
     end
 
     local sequence, row, token = tonumber(fields[3]), fields[4], fields[5]
@@ -369,41 +422,59 @@ function dialogue.command(fields, state, phase)
     if row == "refused" and token == "-" and #fields == 5 then
         session = nil
         hide()
-        return "exact Castaway pending response dismissed"
+        return "exact pending dialogue response dismissed"
     end
-    local following = root
-    if session.content then following = profiles[session.row].next[profiles[session.row].choices[selected]] end
+    local profile, following = current.profile, current.profile.root
+    if session.content then following = profile.rows[session.row].next[session.content.ordinals[selected]] end
     local content
     if row == "-" then
         if following ~= false or token ~= "-" or #fields ~= 5 then reject("render_unqualified") end
     else
-        local profile = profiles[row]
-        if row ~= following or not profile or not token or #token ~= 32 or not token:match("^[0-9a-f]+$")
-            or #fields ~= 5 + profile.lines + #profile.choices then reject("render_unqualified") end
-        content = {lines = {}, choices = {}}
-        for index = 1, profile.lines do content.lines[index] = text(fields[5 + index]) end
-        for index, ordinal in ipairs(profile.choices) do content.choices[ordinal] = text(fields[5 + profile.lines + index]) end
+        local spec = profile.rows[row]
+        if row ~= following or not spec or not token or #token ~= 32 or not token:match("^[0-9a-f]+$") then reject("render_unqualified") end
+        local ordinals, start = spec.choices, 5
+        if profile == mosby then
+            local encoded, previous = fields[6], 0
+            if not encoded or #encoded > 15 then reject("render_choices_unqualified") end
+            ordinals, start = {}, 6
+            for raw in (encoded .. ","):gmatch("([^,]*),") do
+                local ordinal = math.tointeger(tonumber(raw))
+                if not ordinal or tostring(ordinal) ~= raw or ordinal <= previous or spec.next[ordinal] == nil then
+                    reject("render_choices_unqualified")
+                end
+                ordinals[#ordinals + 1], previous = ordinal, ordinal
+            end
+        end
+        if #fields ~= start + spec.lines + #ordinals or #ordinals < 1 then reject("render_unqualified") end
+        content = {lines = {}, choices = {}, ordinals = ordinals}
+        for index = 1, spec.lines do content.lines[index] = text(fields[start + index]) end
+        for index, ordinal in ipairs(ordinals) do content.choices[ordinal] = text(fields[start + spec.lines + index]) end
     end
-    session = {sequence = sequence, row = row, token = token, expires = os.time() + 30, content = content}
+    local now = os.time()
+    session = {sequence = sequence, row = row, token = token, expires = now + 30, response_grace = now + 2, content = content}
     selected = 1
     show(current)
-    return "exact Castaway dialogue shown"
+    return "exact " .. profile.title .. " dialogue shown"
 end
 
 function dialogue.rows(state, phase, status_row)
     local result = {}
-    if host_report and phase == "hosting" and state.map == map and same(host_report.world, state.world)
-        and valid(host_report.pawn) and valid(host_report.npc) and valid(host_report.controller) then
-        result[1] = status_row("native-dialogue-stock", map, host_report.npc:GetFullName(), host_report.controller:GetFullName(),
+    if host_report and phase == "hosting" and state.map == host_report.profile.map and same(host_report.world, state.world)
+        and valid(host_report.pawn) and valid(host_report.target) and valid(host_report.npc) and valid(host_report.controller) then
+        local profile = host_report.profile
+        result[1] = status_row("native-dialogue-stock", profile.map, host_report.npc:GetFullName(), host_report.controller:GetFullName(),
             host_report.name, host_report.connection)
-        for _, name in ipairs({root, story}) do
+        if host_report.progress then
+            result[#result + 1] = profile.progress_row(host_report.name, host_report.progress, host_report.effect, status_row)
+        end
+        for _, name in ipairs(profile.row_order) do
             local row = host_report.rows[name]
             for index, line in ipairs(row.lines) do result[#result + 1] = status_row("native-dialogue-line", name, index, line) end
-            for _, ordinal in ipairs(profiles[name].choices) do
-                result[#result + 1] = status_row("native-dialogue-choice", name, ordinal, row.choices[ordinal])
+            for _, ordinal in ipairs(profile.rows[name].choices) do
+                if row.choices[ordinal] then result[#result + 1] = status_row("native-dialogue-choice", name, ordinal, row.choices[ordinal]) end
             end
         end
-    elseif binding and phase == "connected" and state.map == map and same(binding.world, state.world)
+    elseif binding and phase == "connected" and state.map == binding.profile.map and same(binding.world, state.world)
         and state.local_pawn and same(state.local_pawn.pawn, binding.pawn) then
         local status = session and (session.pending and "pending" or session.content and "open" or "closed")
             or binding.armed and "armed" or "waiting"

@@ -21,6 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_dialogue, native_downed_markers
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
+from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
@@ -639,7 +640,7 @@ class Bridge:
             _, serial, pawn, token, choice = fields
             if (serial.isascii() and serial.isdigit() and len(serial) <= 16 and 0 < (sequence := int(serial)) < 2**53
                     and pawn.startswith("Player_FP_C ") and len(pawn) <= 512
-                    and ((token, choice) == ("-", "-") or choice in ("1", "3") and native_dialogue.valid_token(token))):
+                    and ((token, choice) == ("-", "-") or choice in native_dialogue.ORDINALS and native_dialogue.valid_token(token))):
                 events.append((sequence, pawn, token, choice))
         return events
 
@@ -770,7 +771,7 @@ class Bridge:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
-            dialogue_frame, dialogue_lines, dialogue_choices = None, [], []
+            dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
             matrix_rows, marker_rows = [], []
             marker_frame = None
             malformed_markers = False
@@ -790,6 +791,9 @@ class Bridge:
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
+                elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
+                    with contextlib.suppress(ValueError):
+                        data[native_smg_hold.KEY] = native_smg_hold.parse(fields)
                 elif fields[0] == "player" and len(fields) >= 6:
                     data["player_effects"][fields[1]] = {
                         "state": fields[2], "crouched": fields[3] == "1",
@@ -935,17 +939,22 @@ class Bridge:
                 elif fields[0] == "native-dialogue-view" and len(fields) == 6:
                     pawn, state, serial, row, token = fields[1:]
                     sequence = int(serial)
-                    has_row = row in native_dialogue.ROWS and native_dialogue.valid_token(token)
+                    profile = native_dialogue.PROFILES.get(data.get("map"))
+                    has_row = profile and row in profile.rows and native_dialogue.valid_token(token)
                     if (not pawn.startswith("Player_FP_C ") or len(pawn) > 512 or not 0 <= sequence < 2**53
                             or state not in ("waiting", "armed", "pending", "open", "closed")
                             or not (has_row or (row, token) == ("-", "-")) or (state == "open" and not has_row)
                             or (has_row and state not in ("pending", "open"))):
-                        raise ValueError("Invalid local Castaway dialogue view")
+                        raise ValueError("Invalid local stock dialogue view")
                     data["native_dialogue_view"] = dict(pawn=pawn, state=state, sequence=sequence, row=row, token=token)
                 elif fields[0] == "native-dialogue-stock":
                     if dialogue_frame is not None:
-                        raise ValueError("Duplicate stock Castaway dialogue frame")
+                        raise ValueError("Duplicate stock dialogue frame")
                     dialogue_frame = fields
+                elif fields[0] == "native-dialogue-progress":
+                    if dialogue_progress is not None:
+                        raise ValueError("Duplicate stock dialogue progress")
+                    dialogue_progress = fields
                 elif fields[0] == "native-dialogue-line":
                     dialogue_lines.append(fields)
                 elif fields[0] == "native-dialogue-choice":
@@ -1516,10 +1525,10 @@ class Bridge:
                         data["native_authored_pickup"] = placed[source]
                     if source in intents:
                         data["native_authored_pickup_interaction"] = intents[source]
-                if dialogue_frame or dialogue_lines or dialogue_choices:
-                    if not dialogue_frame or data.get("state") != "hosting" or data.get("map") != native_dialogue.OBSERVATORY:
-                        raise ValueError("Stock Castaway dialogue frame has no qualified listen world")
-                    data["native_dialogue_stock"] = native_dialogue.parse_stock(dialogue_frame, dialogue_lines, dialogue_choices)
+                if dialogue_frame or dialogue_progress or dialogue_lines or dialogue_choices:
+                    if not dialogue_frame or len(dialogue_frame) != 6 or data.get("state") != "hosting" or data.get("map") != dialogue_frame[1]:
+                        raise ValueError("Stock dialogue frame has no qualified listen world")
+                    data["native_dialogue_stock"] = native_dialogue.parse_stock(dialogue_frame, dialogue_lines, dialogue_choices, dialogue_progress)
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))

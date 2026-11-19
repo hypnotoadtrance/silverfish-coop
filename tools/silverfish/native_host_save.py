@@ -9,11 +9,12 @@ import uuid
 
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
-from .travel import BLACK_MARKET, BOROUGH
+from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE
 
 
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+CQC_DROP_SOURCE = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 
 
 def new_slot() -> str:
@@ -114,7 +115,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     members = {"host", *checkpoint["characters"]}
     for guid, roll in enemy_rolls.items():
         if (not valid_guid(guid) or type(roll) is not dict or roll.get("guid") != guid
-                or roll.get("map") != "/Game/Classes/Maps/PlaytestMap_01"
+                or (roll.get("map") != "/Game/Classes/Maps/PlaytestMap_01"
+                    and (roll.get("map"), roll.get("bandit")) != (DEAD_BRIDGE, CQC_DROP_SOURCE))
                 or roll.get("class_path") != "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
                 or type(roll.get("quantity")) is not int or not 3 <= roll["quantity"] <= 9
                 or not isinstance(roll.get("position"), list) or len(roll["position"]) != 3

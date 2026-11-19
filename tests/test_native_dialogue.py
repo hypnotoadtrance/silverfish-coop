@@ -2,11 +2,12 @@ import tempfile
 import time
 import unittest
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_dialogue as dialogue
+from tools.silverfish import native_dialogue as dialogue, party
 from tools.silverfish.runtime import Bridge
 
 
@@ -110,13 +111,120 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(bridge.snapshot())
 
             events = directory / "native-dialogue-events"
-            events.write_text(f"dialogue-input\t1\t{pawn}\t-\t-\ndialogue-input\t2\t{pawn}\t{'a' * 32}\t2\n"
+            events.write_text(f"dialogue-input\t1\t{pawn}\t-\t-\ndialogue-input\t2\t{pawn}\t{'a' * 32}\t7\n"
                               f"dialogue-input\t3\t{pawn}\t{'a' * 32}\t3", encoding="utf-8")
             self.assertEqual(bridge.native_dialogue_requests(), [(1, pawn, "-", "-")])
             with events.open("ab") as stream:
                 stream.write(b"\n")
             self.assertEqual(bridge.native_dialogue_requests(), [(3, pawn, "a" * 32, "3")])
             self.assertEqual(bridge.native_dialogue_requests(), [])
+
+
+class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.profile = dialogue.PROFILES[dialogue.SCIENTIST_SHOP]
+        self.game = {"state": "hosting", "map": self.profile.map}
+        self.members = {guest: {"connected": True, "pawn": f"Player_FP_C {guest}"} for guest in ("first", "second")}
+        state = party.new_party()
+        for guest in self.members:
+            party.add_player(state, guest)
+        self.host = SimpleNamespace(native_recipients=lambda: self.members, party=state, control=SimpleNamespace(generation="host-generation", event=Mock()),
+                                    zone_epoch="first-epoch", last_game=self.game, last_seen=time.monotonic(), native_profile=True,
+                                    native_zones=True, native_guest=True, transitioning=False, stopping=False, native_checkpoint_unsafe=False)
+        self.progress = dict(zip(dialogue.PROGRESS_KEYS, (0, 0, 0, None, 250, 2)))
+        self.checkpoints = []
+        self.writes = []
+        self.host.checkpoint_native = AsyncMock(side_effect=self.checkpoint)
+        self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.stock))
+        self.sessions = dialogue.DialogueSessions()
+
+    async def checkpoint(self, _bridge, proposed=None):
+        self.checkpoints.append((self.progress.copy(), deepcopy(proposed if proposed else self.host.party)))
+        return len(self.checkpoints)
+
+    async def stock(self, command, pawn, *arguments, timeout):
+        effect = "read"
+        connection = f"NetConnection {pawn}@1"
+        if command == dialogue.COMMIT:
+            row, ordinal, identity, *before = arguments
+            self.assertTrue(self.host.transitioning and self.host.native_checkpoint_unsafe)
+            self.assertEqual((identity, before), (connection, ["-" if self.progress[key] is None else str(self.progress[key])
+                                                              for key in dialogue.PROGRESS_KEYS]))
+            effect = dialogue.EFFECTS[(row, int(ordinal))]
+            key = "quest_step" if effect == "stone_maze_issued" else effect
+            self.assertIn(self.progress[key], (0, None))
+            self.progress[key] = 1
+            self.writes.append(effect)
+        else:
+            self.assertEqual(command, dialogue.READ)
+        frame = ["native-dialogue-stock", self.profile.map, self.profile.npc, self.profile.controller, pawn, connection]
+        progress = ["native-dialogue-progress", self.profile.map, pawn,
+                    *("-" if self.progress[key] is None else str(self.progress[key]) for key in dialogue.PROGRESS_KEYS), effect]
+        lines = [["native-dialogue-line", row, str(index), f"line {index}"]
+                 for row, (count, _) in self.profile.rows.items() for index in range(1, count + 1)]
+        choices = [["native-dialogue-choice", row, str(index), f"choice {index}"] for row in self.profile.rows
+                   for index in dialogue.available_ordinals(self.profile, row, self.progress)]
+        return {**self.game, "native_dialogue_stock": dialogue.parse_stock(frame, lines, choices, progress)}
+
+    async def act(self, guest, reply=None, ordinal=None, operation=None):
+        action, target = (dialogue.OPEN, dialogue.MOSBY) if reply is None else (dialogue.CHOOSE, f"{reply['token']}@{ordinal}")
+        return (await self.sessions.act(self.host, self.bridge, guest, action, target, operation or uuid.uuid4().hex))["native_dialogue"]
+
+    async def test_qualified_topics_and_shared_issue_checkpoint_only_once(self):
+        first = await self.act("first", await self.act("first"), 4)
+        second = await self.act("second", await self.act("second"), 4)
+        self.assertEqual([choice["ordinal"] for choice in first["choices"]], [1, 3])
+        with self.assertRaisesRegex(ValueError, "native_dialogue_choice_unavailable"):
+            await self.act("first", first, 6)
+        anomaly = await self.act("first", first, 3)
+        self.assertEqual((anomaly["row"], anomaly["effect"], anomaly["revision"]), (dialogue.ANOMALIES, "topic_eather_drill", 2))
+        self.assertEqual((self.checkpoints[0][0]["topic_eather_drill"], self.checkpoints[1][0]["topic_eather_drill"]), (0, 1))
+        with self.assertRaisesRegex(ValueError, "native_dialogue_choice_unavailable"):
+            await self.act("second", second, 5)
+        other_anomaly = await self.act("second", second, 3)
+        self.assertEqual(other_anomaly["effect"], "topic_already_known")
+        first = await self.act("first", anomaly, 1)
+        second = await self.act("second", other_anomaly, 1)
+        self.assertEqual([choice["ordinal"] for choice in first["choices"]], [1, 3, 5])
+        drill = await self.act("first", first, 5)
+        other_drill = await self.act("second", second, 5)
+        first = await self.act("first", await self.act("first", drill, 1), 6)
+        second = await self.act("second", await self.act("second", other_drill, 1), 6)
+        self.assertEqual((first["row"], second["row"]), (dialogue.OFFER, dialogue.OFFER))
+        operation = uuid.uuid4().hex
+        issued = await self.act("first", first, 2, operation)
+        self.assertEqual((issued["state"], issued["effect"], issued["progress"]["quest_step"]), ("closed", "stone_maze_issued", 1))
+        self.assertEqual(await self.act("first", first, 2, operation), issued)
+        self.assertEqual((await self.act("second", second, 2))["effect"], "stone_maze_already_present")
+        record = {"quest_id": dialogue.MOSBY_QUEST, "step": 1, "actor": "first"}
+        self.assertEqual(self.checkpoints[-1][1]["native_quests"][dialogue.MOSBY_QUEST], record)
+        self.assertEqual(self.writes, ["topic_eather_drill", "topic_drill_data", "stone_maze_issued"])
+        self.assertEqual(len(self.checkpoints), 6)
+
+        saved_progress, saved_party = self.checkpoints[-1]
+        self.progress = saved_progress.copy()
+        self.host.party, self.host.control.generation = party.load_party(saved_party), "restarted-generation"
+        self.sessions = dialogue.DialogueSessions()
+        with self.assertRaisesRegex(ValueError, "native_dialogue_choice_expired"):
+            await self.act("first", first, 2, operation)
+        restarted = await self.act("second")
+        self.assertEqual(restarted["progress"], dict(zip(dialogue.PROGRESS_KEYS, (1, 1, 0, 1, 250, 2))))
+        self.assertEqual(self.host.party["native_quests"][dialogue.MOSBY_QUEST], record)
+
+    async def test_unverified_mosby_mutation_stops_before_a_second_checkpoint(self):
+        questions = await self.act("first", await self.act("first"), 4)
+
+        async def failed(command, pawn, *arguments, timeout):
+            if command == dialogue.COMMIT:
+                raise RuntimeError("mutation_unverified_native_dialogue_mosby:Topic_EatherDrill")
+            return await self.stock(command, pawn, *arguments, timeout=timeout)
+
+        self.bridge.command.side_effect = failed
+        with self.assertRaisesRegex(RuntimeError, "mutation_unverified_native_dialogue_mosby"):
+            await self.act("first", questions, 3)
+        self.assertEqual(len(self.checkpoints), 1)
+        self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
+        self.assertFalse(self.host.transitioning)
 
 
 if __name__ == "__main__":

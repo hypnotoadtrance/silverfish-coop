@@ -60,6 +60,7 @@ local vitals = require("vitals")
 local wallet = require("wallet")
 local weapon_inventory = require("weapon_inventory")
 local native_guest_weapon = require("native_guest_weapon")
+local native_guest_smg_hold = require("native_guest_smg_hold")
 local native_guest_npc = require("native_guest_npc")
 local native_guest_reload_input = require("native_guest_reload_input")
 local native_guest_primary_input = require("native_guest_primary_input")
@@ -795,6 +796,7 @@ local function run_command(fields, state, current_phase)
         or native_shop_view.command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
         or native_guest_weapon.command(fields, state, current_phase)
+        or native_guest_smg_hold.command(fields, state, current_phase)
         or native_guest_npc.command(fields, state, current_phase)
         or native_guest_reload_input.command(fields, state, current_phase)
         or native_guest_primary_input.command(fields, state, current_phase)
@@ -928,6 +930,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_campaign_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_weapon.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_smg_hold.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

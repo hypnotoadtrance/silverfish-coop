@@ -40,6 +40,7 @@ _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
+    "native-dialogue-choose": 20.0,
     "native-authored-pickup-claim": 20.0,
     "native-finite-shop-list": 15.0,
     "native-finite-shop-buy": 15.0,

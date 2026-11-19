@@ -65,6 +65,14 @@ local function read(pawn, watched)
 end
 
 function npc.rows(state, phase, status_row)
+    local aim = aim_fixture
+    if state.map ~= map and aim and same(state.world, aim.world) then
+        local _, watched = enemy_loot.watched_cqc(state, phase, aim.name, true)
+        if same(watched, aim.guest) then
+            return { status_row("native-bandit-aim", state.map, aim.name, watched:GetFullName(),
+                aim.distance, aim.yaw, aim.pitch, aim.component) }
+        end
+    end
     local pawn = active(state, phase)
     if not pawn or type(SilverfishReadNativeBandit) ~= "function" then return {} end
     local watched = authority_guest(state, phase)
@@ -83,7 +91,6 @@ function npc.rows(state, phase, status_row)
     end
     local rows = { status_row("native-bandit", map, phase, pawn:GetFullName(), watched and watched:GetFullName() or "-",
         table.unpack(report, 1, report.n)) }
-    local aim = aim_fixture
     if aim and phase == "hosting" and report[5] == aim.name and report[12] == 1
         and same(state.world, aim.world) and same(watched, aim.guest) then
         rows[#rows + 1] = status_row("native-bandit-aim", map, aim.name, watched:GetFullName(),
@@ -259,10 +266,10 @@ end
 local function exact_watch(state, phase, host, name)
     if not enemy_loot_fixture or type(SilverfishReadNativeEnemyLoot) ~= "function" then return false end
     local row = enemy_loot.rows(state, phase, table.pack)[1]
-    if not row or row[1] ~= "native-enemy-loot" or row[2] ~= map or row[3] ~= name or row[4] ~= "watching" then
+    if not row or row[1] ~= "native-enemy-loot" or row[2] ~= state.map or row[3] ~= name or row[4] ~= "watching" then
         return false
     end
-    -- The native reader also rechecks the unique current host/guest and live Bandit binding.
+    -- The native reader also rechecks the current pair and exact stock enemy binding.
     local live = table.pack(SilverfishReadNativeEnemyLoot(host:GetAddress()))
     return (live.n == 15 or live.n == 23) and live[1] == "watching"
 end
@@ -271,7 +278,7 @@ local function fire_aimed_weapon(state, phase, name, guid)
     local called, proof = pcall(function()
         guest_weapon.command({ "", "native-guest-weapon-fire", name, guid }, state, phase)
         for _, row in ipairs(guest_weapon.rows(state, phase, table.pack)) do
-            if row[1] == "native-guest-weapon" and row[2] == map and row[3] == "fire"
+            if row[1] == "native-guest-weapon" and row[2] == state.map and row[3] == "fire"
                 and row[4] == name and row[5] == guid then return row end
         end
     end)
@@ -286,9 +293,9 @@ local function fire_aimed_weapon(state, phase, name, guid)
     return true
 end
 
-local function bandit_aim(state, phase, host, guest, before, name, guid)
+local function bandit_aim(state, phase, host, guest, before, name, guid, tracked)
     aim_fixture = nil
-    local bandit = stock_bandit(state, before, name)
+    local bandit = tracked or stock_bandit(state, before, name)
     local detail = state.guests[1]
     local controller = detail.controller_object
     local qualified, detached = guest_save.exact_item_context(state, phase, detail.name)
@@ -417,6 +424,20 @@ function npc.command(fields, state, phase)
     local action = fields[2]
     if action ~= "native-bandit-position" and action ~= "native-bandit-spawn" and action ~= "native-bandit-client-spawner-probe"
         and action ~= "native-bandit-aim-fixture" and action ~= "native-bandit-shot-fixture" then return end
+    if state.map ~= map and (action == "native-bandit-aim-fixture" or action == "native-bandit-shot-fixture") then
+        local name, guid = fields[3], fields[5]
+        local host, guest, exact = enemy_loot.watched_cqc(state, phase, name)
+        if not fixtures or not exact then error("native_bandit_shot_watch_required", 0) end
+        if action == "native-bandit-shot-fixture" then
+            if #fields ~= 5 or fields[4] ~= guest:GetFullName() or type(guid) ~= "string" or #guid ~= 32
+                or guid:find("[^0-9A-F]") or not guid:find("[^0]") then
+                error("native_bandit_shot_exact_guest_and_weapon_required", 0)
+            end
+        elseif #fields ~= 3 then
+            error("The stock enemy aim requires one exact live actor name", 0)
+        end
+        return bandit_aim(state, phase, host, guest, nil, name, guid, exact)
+    end
     local pawn = active(state, phase)
     if not pawn or type(SilverfishReadNativeBandit) ~= "function" then error("The staged Playtest Bandit scope is unavailable", 0) end
     local source, arrow = source_in(state.world)

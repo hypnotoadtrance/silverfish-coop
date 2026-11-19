@@ -35,8 +35,14 @@ namespace
 
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto world_path = STR("/Game/Classes/Maps/PlaytestMap_01.PlaytestMap_01");
+    constexpr auto cqc_world_path = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
     constexpr auto npc_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto bandit_path = STR("/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C");
+    constexpr auto cqc_path = STR("/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C");
+    constexpr auto cqc_actor_path =
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0");
+    constexpr auto army_shotgun_path = STR("/Game/Classes/Weapons/Wep_ShotGun_Army.Wep_ShotGun_Army_C");
+    constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
@@ -358,6 +364,7 @@ namespace
         U::FFrame* loot_frame{};
         Clock::time_point until{};
         std::uint64_t generation{};
+        bool dead_bridge{};
     };
 
     Scope scope;
@@ -400,6 +407,24 @@ namespace
         return state.generation == generation.load(std::memory_order_acquire) && authority(npc, world) &&
             local_roster(state) && object(npc, STR("As Game Instance FP")) == state.instance.Get() &&
             static_cast<U::AActor*>(npc)->GetLevel() == object(world, STR("PersistentLevel"));
+    }
+
+    bool cqc_ammunition(U::UObject* npc, U::UObject* world)
+    {
+        auto* weapon = object(npc, STR("Weapon_Ranged"));
+        auto* army = find<U::UClass>(army_shotgun_path);
+        auto* shell = find<U::UClass>(shell_path);
+        auto* configured = field<U::FClassProperty>(npc, STR("AmmoItem_Class"));
+        auto* ammo_type = field<U::FStructProperty>(weapon, STR("AmmoType"));
+        auto* type = find<U::UScriptStruct>(ammo_type_path);
+        auto* ammo_item = field<U::FClassProperty>(type, STR("Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"));
+        const auto* item_base = find<U::UClass>(item_path);
+        return army && shell && item_base && authority(weapon, world) && weapon->GetClassPrivate() == army &&
+            configured && configured->GetObjectPropertyValue(configured->ContainerPtrToValuePtr<void>(npc)) == shell &&
+            ammo_type && type && ammo_type->GetStruct().Get() == type && ammo_item &&
+            ammo_item->GetMetaClass().Get() == item_base && ammo_item->GetOffset_Internal() == 0x10 &&
+            ammo_item->GetObjectPropertyValue(ammo_item->ContainerPtrToValuePtr<void>(
+                ammo_type->ContainerPtrToValuePtr<void>(weapon))) == shell;
     }
 
     U::UFunction* script(U::UClass* type, const U::TCHAR* path, const U::TCHAR* name, int count)
@@ -487,35 +512,42 @@ namespace
 
     std::string_view bind(Scope& next, Address host, Address guest, Address actor)
     {
-        auto* world = find<U::UWorld>(world_path);
         auto* pawn_type = find<U::UClass>(pawn_path);
-        auto* npc_type = find<U::UClass>(bandit_path);
+        auto* bandit_type = find<U::UClass>(bandit_path);
+        auto* cqc_type = find<U::UClass>(cqc_path);
+        auto* cqc = find<U::AActor>(cqc_actor_path);
         auto* store = find<U::UClass>(save_path);
         auto* controller = find<U::UClass>(controller_path);
         auto* instance = find<U::UClass>(instance_path);
         auto* local = find<U::UClass>(STR("/Script/Engine.LocalPlayer"));
         auto* connection = find<U::UClass>(STR("/Script/Engine.NetConnection"));
-        auto* owner = object(world, STR("OwningGameInstance"));
-        if (!live(world) || !pawn_type || !npc_type || !store || !controller || !instance || !local || !connection ||
-            !live(owner) || owner->GetClassPrivate() != instance) return "stock_enemy_loot_classes_unavailable";
+        if (!pawn_type || !store || !controller || !instance || !local || !connection)
+            return "stock_enemy_loot_classes_unavailable";
         U::UObject* home{};
         U::UObject* peer{};
-        U::UObject* bandit{};
+        U::UObject* enemy{};
         U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
             if (address(candidate) == host && candidate->GetClassPrivate() == pawn_type) home = candidate;
             if (address(candidate) == guest && candidate->GetClassPrivate() == pawn_type) peer = candidate;
-            if (address(candidate) == actor && candidate->GetClassPrivate() == npc_type) bandit = candidate;
-            return home && peer && bandit ? RC::LoopAction::Break : RC::LoopAction::Continue;
+            if (address(candidate) == actor && (candidate->GetClassPrivate() == bandit_type ||
+                (candidate == cqc && candidate->GetClassPrivate() == cqc_type))) enemy = candidate;
+            return home && peer && enemy ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
+        next.dead_bridge = enemy && enemy == cqc;
+        auto* world = find<U::UWorld>(next.dead_bridge ? cqc_world_path : world_path);
+        auto* owner = object(world, STR("OwningGameInstance"));
+        if (!live(world) || !live(owner) || owner->GetClassPrivate() != instance)
+            return "stock_enemy_loot_classes_unavailable";
         next.world = world;
         next.driver = object(world, STR("NetDriver"));
         next.instance = owner;
-        next.npc = bandit;
+        next.npc = enemy;
         next.generation = generation.load(std::memory_order_acquire);
-        if (!authority(bandit, world) || !boolean(bandit, STR("Alive"), true) || !boolean(bandit, STR("Initialized"), true) ||
+        if (!authority(enemy, world) || !boolean(enemy, STR("Alive"), true) || !boolean(enemy, STR("Initialized"), true) ||
             !set_participant(next.host, home, controller, store, local) ||
             !set_participant(next.guest, peer, controller, store, connection) || !current(next))
             return "stock_enemy_loot_authority_or_roster_unavailable";
+        if (next.dead_bridge && !cqc_ammunition(enemy, world)) return "stock_dead_bridge_cqc_loadout_unavailable";
         next.bounty.name = U::FName{STR("Bounty"), U::FNAME_Find};
         return bind_schema(next) ? std::string_view{} : "stock_enemy_loot_blueprint_schema_unavailable";
     }
@@ -590,6 +622,7 @@ namespace
             Clock::now() >= scope.until || !current(scope)) return;
         if (node == scope.schema.deal)
         {
+            if (scope.dead_bridge && !cqc_ammunition(object_receiver, scope.world.Get())) return;
             prepare_hit(object_receiver, frame);
             return;
         }
@@ -866,8 +899,12 @@ namespace silverfish::native_enemy_loot
     bool qualify_escrow_claimant(Address pawn, Address save, Address stock, shared_loot::EscrowOwner& claimant)
     {
         if (!available()) return false;
-        auto* world = find<U::UWorld>(world_path);
-        return shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, claimant);
+        for (const auto* path : {world_path, cqc_world_path})
+        {
+            auto* world = find<U::UWorld>(path);
+            if (live(world) && shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, claimant)) return true;
+        }
+        return false;
     }
 
     bool verified_ammo_roll(Address bandit, Address ammo, shared_loot::EscrowOwner& claimant, U::UObject*& actor,

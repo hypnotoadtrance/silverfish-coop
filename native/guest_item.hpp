@@ -8,4 +8,5 @@ namespace RC::LuaMadeSimple
 namespace silverfish::native_guest_item
 {
     void register_lua(RC::LuaMadeSimple::Lua& lua);
+    void shutdown();
 }

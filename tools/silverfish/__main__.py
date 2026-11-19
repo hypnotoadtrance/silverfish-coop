@@ -139,6 +139,7 @@ def parser() -> argparse.ArgumentParser:
         "native-weapon-roundtrip",
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
+        "native-guest-smg-hold-fixture",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
@@ -176,11 +177,11 @@ def parser() -> argparse.ArgumentParser:
     ])
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
-    action.add_argument("--amount", type=int, help="controlled damage amount for fixture tests")
+    action.add_argument("--amount", type=int, help="damage amount or SMG release round for fixture tests")
     action.add_argument("--kind", choices=sorted(SEED_KINDS), help="stock weapon class for a headless weapon seed")
     action.add_argument("--x", type=float, help="normalized world X movement")
     action.add_argument("--y", type=float, help="normalized world Y movement")
-    action.add_argument("--milliseconds", type=int, help="movement duration, from 50 to 1000")
+    action.add_argument("--milliseconds", type=int, help="controlled movement or SMG hold duration")
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
