@@ -1320,13 +1320,15 @@ class Bridge:
                             and data.get("state") == "hosting" and len(proof) <= 64
                             and proof.isascii() and proof.islower() and proof.replace("_", "").isalpha()):
                         data["native_campaign_flayer_projectile_status"] = proof
-                elif fields[0] == "native-campaign-flayer-shot-aim" and len(fields) == 5:
-                    area, victim, shooter, reach = fields[1:]
+                elif fields[0] == "native-campaign-flayer-shot-aim" and len(fields) in (5, 6):
+                    area, victim, shooter, reach = fields[1:5]
+                    stage = fields[5] if len(fields) == 6 else "applied"
                     reach = _finite(reach)
                     if (area != "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P" or data.get("map") != area
-                            or data.get("state") != "hosting" or reach is None or not 300 <= reach <= 660):
+                            or data.get("state") != "hosting" or not (stage == "armed" and reach is None
+                            or stage == "applied" and reach is not None and 300 <= reach <= 660)):
                         raise ValueError("Invalid exact stock Flayer shooting fixture")
-                    data["native_campaign_flayer_shot_aim"] = dict(map=area, victim=victim, shooter=shooter, reach=reach)
+                    data["native_campaign_flayer_shot_aim"] = dict(map=area, victim=victim, shooter=shooter, reach=reach, state=stage)
                 elif fields[0] == "native-campaign-npc-approach-geometry" and len(fields) == 8:
                     data["native_campaign_npc_approach_geometry"] = {
                         "map": fields[1], "member": fields[2], "sweep": _finite(fields[3]),

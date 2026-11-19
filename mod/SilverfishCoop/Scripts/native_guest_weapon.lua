@@ -6,6 +6,8 @@ local cqc = require("native_enemy_loot_registry")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local flayer_fixture = fixtures and headless and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer"
+    and require("native_campaign_npc")
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
@@ -98,7 +100,27 @@ function guest_weapon.command(fields, state, phase)
 
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
     local seed_variant = seed_profile and { fields[5] } or {}
-    local ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid, table.unpack(seed_variant))
+    local restore, refusal
+    if action == "fire" and flayer_fixture then
+        local checked
+        checked, restore, refusal = pcall(flayer_fixture.before_guest_fire, state, phase, name, guid)
+        if not checked then restore, refusal = nil, "stock_flayer_shot_ticket_check_failed" end
+    end
+    local ok, status, first, second, fifth, sixth
+    if refusal then
+        ok, status = false, refusal
+    elseif restore then
+        local result = table.pack(pcall(invoke, pawn_address, save_address, guid))
+        if not pcall(restore) then
+            ok, status = false, "mutation_unverified_stock_flayer_shot_pose_restore"
+        elseif not result[1] then
+            ok, status = false, "mutation_unverified_stock_flayer_shot_native_fire"
+        else
+            ok, status, first, second, fifth, sixth = table.unpack(result, 2, result.n)
+        end
+    else
+        ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid, table.unpack(seed_variant))
+    end
     local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after
     if action == "fire" then projectiles = fifth end
     if action == "reload" then before, after, reserve_before, reserve_after = first, second, fifth, sixth end

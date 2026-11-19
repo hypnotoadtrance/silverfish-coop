@@ -31,7 +31,7 @@ local trace_color = { R = 0, G = 0, B = 0, A = 0 }
 local approach_radius, readback_tolerance = 4000, 60
 local flayer_sweep, flayer_sweep_margin = 350, 25
 local flayer_angles = { 0, 30, -30, 50, -50 }
-local active, approach, refresh, shot_aim
+local active, approach, refresh, shot_aim, shot_ticket
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -46,7 +46,7 @@ local function exact(object, path)
 end
 
 function campaign_npc.clear()
-    active, approach, refresh, shot_aim = nil, nil, nil, nil
+    active, approach, refresh, shot_aim, shot_ticket = nil, nil, nil, nil, nil
     if enabled and type(SilverfishClearCampaignNpc) == "function" then SilverfishClearCampaignNpc() end
 end
 
@@ -64,10 +64,13 @@ local function paired(state, phase)
     local host = state.local_pawn
     local guest = state.guests and #state.guests == 1 and state.guests[1]
     if phase ~= "hosting" or state.map ~= map or not state.listening or state.server ~= false or state.clients ~= 1
-        or not valid(state.world) or not controlled(host, state.world, true)
-        or not same(host.controller_object, state.controller) or not controlled(guest, state.world, false)
-        or same(host.pawn, guest.pawn) or players.is_downed(host.pawn) ~= false
-        or not players.is_standing_guest(guest.pawn, guest.name) then return end
+        or not valid(state.world) then return nil, "listen_world" end
+    if not controlled(host, state.world, true) or not same(host.controller_object, state.controller) then
+        return nil, "host_authority"
+    end
+    if not controlled(guest, state.world, false) or same(host.pawn, guest.pawn) then return nil, "guest_authority" end
+    if players.is_downed(host.pawn) ~= false then return nil, "host_not_standing" end
+    if not players.is_standing_guest(guest.pawn, guest.name) then return nil, "guest_not_standing" end
     local driver, remote = state.world.NetDriver, guest.controller_object
     local connection = remote.Player
     local connection_class = StaticFindObject("/Script/Engine.NetConnection")
@@ -75,11 +78,14 @@ local function paired(state, phase)
         or not valid(connection) or not valid(connection_class) or not connection:IsA(connection_class)
         or not same(connection.Driver, driver) or not same(connection.PlayerController, remote)
         or not same(connection.OwningActor, remote) or (valid(remote.NetConnection) and not same(remote.NetConnection, connection))
-        or driver.ClientConnections:GetArrayNum() ~= 1 or not same(driver.ClientConnections[1], connection) then return end
-    local enrolled, saved = guest_save.exact_item_context(state, phase, guest.name)
-    if same(enrolled, guest.pawn) and same(saved, guest.pawn.Save) and not same(saved, host.pawn.Save) then
+        or driver.ClientConnections:GetArrayNum() ~= 1 or not same(driver.ClientConnections[1], connection) then
+        return nil, "guest_connection"
+    end
+    local verified, enrolled, saved = pcall(guest_save.exact_item_context, state, phase, guest.name)
+    if verified and same(enrolled, guest.pawn) and same(saved, guest.pawn.Save) and not same(saved, host.pawn.Save) then
         return host, guest, saved
     end
+    return nil, "guest_detached_save"
 end
 
 local function stock_member(world, local_pawn, name)
@@ -127,6 +133,14 @@ local function rotation(value)
     if value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) then
         return { Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll }
     end
+end
+
+local function same_rotation(actual, expected)
+    if not actual then return false end
+    for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+        if math.abs((actual[axis] - expected[axis] + 180) % 360 - 180) > 0.15 then return false end
+    end
+    return true
 end
 
 local function distance(first, second)
@@ -306,21 +320,35 @@ local function place_pair(world, host, guest, target, cohort)
     error("stock_husk_approach_no_safe_floor_pair", 0)
 end
 
+local function light_pistol(state, pawn)
+    local weapon = pawn.EquipedItem
+    if exact(weapon, "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C") and weapon:HasAuthority()
+        and not weapon:IsActorBeingDestroyed() and same(weapon:GetWorld(), state.world) and same(weapon:GetOwner(), pawn)
+        and same(weapon:GetInstigator(), pawn) and same(weapon.User, pawn) and same(weapon.Player_Ref, pawn)
+        and weapon.HeldByPlayer == true and pawn.IsWeaponBlocked == false then return weapon end
+end
+
+local function verified_pistol_guid(guest, detached, guid)
+    if type(guid) ~= "string" or not guid:match("^[0-9A-F]+$") or #guid ~= 32 or not guid:find("[^0]")
+        or type(SilverfishInspectNativeGuestWeapon) ~= "function" then return false end
+    local checked, equipped, status, live, stored = pcall(SilverfishInspectNativeGuestWeapon,
+        guest.pawn:GetAddress(), detached:GetAddress(), guid)
+    return checked and equipped == true and status == "equipped" and finite(live) and live >= 2 and live == stored
+end
+
 local function flayer_projectile_aim(state, host, guest, target, cohort)
     local pawn, controller = guest.pawn, guest.controller_object
-    local weapon, camera = pawn.EquipedItem, pawn.Camera
+    local weapon, camera = light_pistol(state, pawn), pawn.Camera
     local muzzle = valid(weapon) and weapon.Arrow_Muzzle
     local capsule = target.CapsuleComponent
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local original = placement(pawn)
-    if not original or not valid(trace) or not exact(weapon, "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")
-        or not weapon:HasAuthority() or not same(weapon:GetWorld(), state.world) or not same(weapon:GetOwner(), pawn)
-        or not same(weapon:GetInstigator(), pawn) or not same(weapon.User, pawn) or not same(weapon.Player_Ref, pawn)
-        or weapon.HeldByPlayer ~= true or target.Alive ~= true
+    if not original or not valid(trace) or not valid(weapon) or target.Alive ~= true
         or not exact(camera, "/Script/Engine.CameraComponent") or not same(camera:GetOwner(), pawn)
         or not exact(muzzle, "/Script/Engine.ArrowComponent") or not same(muzzle:GetOwner(), weapon)
-        or not exact(capsule, "/Script/Engine.CapsuleComponent") or not same(capsule:GetOwner(), target)
-        or pawn.IsWeaponBlocked ~= false then error("stock_flayer_shot_exact_pistol_or_components_unqualified", 0) end
+        or not exact(capsule, "/Script/Engine.CapsuleComponent") or not same(capsule:GetOwner(), target) then
+        error("stock_flayer_shot_exact_pistol_or_components_unqualified", 0)
+    end
     local control_pose, eye_pose, muzzle_pose = rotation(controller:GetControlRotation()),
         rotation(camera.RelativeRotation), rotation(muzzle.RelativeRotation)
     local anchor = point(capsule:K2_GetComponentLocation())
@@ -375,20 +403,57 @@ local function flayer_projectile_aim(state, host, guest, target, cohort)
             end
         end
     end)
-    if applied and result then return result end
-    if moved then
+    local function restore_pose()
+        if not moved then return end
         local restored, located = pcall(function()
+            if not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, controller)
+                or not same(pawn.Camera, camera) or not same(pawn.EquipedItem, weapon) then return false end
             local found = pawn:K2_TeleportTo(original.origin, original.facing)
             controller:SetControlRotation(control_pose)
             camera:K2_SetRelativeRotation(eye_pose, false, {}, true)
             muzzle:K2_SetRelativeRotation(muzzle_pose, false, {}, true)
             pawn:ForceNetUpdate()
             return found == true and at(pawn, original.origin, 18)
+                and same_rotation(rotation(pawn:K2_GetActorRotation()), original.facing)
+                and same_rotation(rotation(controller:GetControlRotation()), control_pose)
+                and same_rotation(rotation(camera.RelativeRotation), eye_pose)
+                and same_rotation(rotation(muzzle.RelativeRotation), muzzle_pose)
         end)
         if not restored or not located then error("mutation_unverified_stock_flayer_shot_pose_restore", 0) end
     end
+    if applied and result then return result, restore_pose end
+    restore_pose()
     if not applied then error("stock_flayer_shot_probe_failed: " .. tostring(result), 0) end
     error(("stock_flayer_shot_no_stock_lane floors=%d rays=%d"):format(floors, rays), 0)
+end
+
+function campaign_npc.before_guest_fire(state, phase, name, guid)
+    local ticket = shot_ticket
+    if not ticket then return end
+    shot_ticket, shot_aim = nil, nil
+    if not fixture or view ~= "flayer" or phase ~= "hosting" or state.map ~= map or not valid(state.world)
+        or ticket.world ~= state.world:GetAddress() or os.time() > ticket.expires then
+        return nil, "stock_flayer_shot_ticket_expired"
+    end
+    local host, guest, detached = paired(state, phase)
+    if not host then return nil, "stock_flayer_shot_pair_" .. guest end
+    if (name ~= ticket.shooter or name ~= guest.name or guid ~= ticket.guid or guest.pawn:GetAddress() ~= ticket.pawn
+        or guest.controller_object:GetAddress() ~= ticket.controller or detached:GetAddress() ~= ticket.detached
+        or guest.controller_object.Player:GetAddress() ~= ticket.connection) then
+        return nil, "stock_flayer_shot_ticket_owner_changed"
+    end
+    local weapon = light_pistol(state, guest.pawn)
+    local target, cohort = stock_member(state.world, host.pawn, ticket.victim)
+    if not valid(weapon) or weapon:GetAddress() ~= ticket.weapon or not verified_pistol_guid(guest, detached, guid) then
+        return nil, "stock_flayer_shot_ticket_equipment_changed"
+    end
+    if not target or target:GetAddress() ~= ticket.target then return nil, "stock_flayer_shot_ticket_member_changed" end
+    local posed, reach, restore = pcall(flayer_projectile_aim, state, host, guest, target, cohort)
+    if not posed then return nil, tostring(reach) end
+    return function()
+        restore()
+        shot_aim = {world = ticket.world, victim = ticket.victim, shooter = name, reach = reach, state = "applied"}
+    end
 end
 
 function campaign_npc.command(fields, state, phase)
@@ -405,19 +470,28 @@ function campaign_npc.command(fields, state, phase)
         return "stock Husk director result reported"
     end
     if fields[2] ~= "native-campaign-npc-approach" then return end
-    local projectile = #fields == 4 and fields[4] == "projectile"
+    local projectile = #fields == 5 and fields[4] == "projectile"
     if not fixture or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
         or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end
     approach = nil
+    if projectile then shot_ticket, shot_aim = nil, nil end
     local host, guest, detached = paired(state, phase)
-    if not host then error("stock_husk_approach_exact_pair_unavailable", 0) end
+    if not host then
+        error(projectile and "stock_flayer_shot_pair_" .. guest or "stock_husk_approach_exact_pair_unavailable", 0)
+    end
     local target, cohort = stock_member(state.world, host.pawn, fields[3])
     if not target then error("stock_husk_approach_cohort_member_unavailable", 0) end
     if projectile then
-        shot_aim = nil
-        local reach = flayer_projectile_aim(state, host, guest, target, cohort)
-        shot_aim = {world = state.world:GetAddress(), victim = fields[3], shooter = guest.name, reach = reach}
-        return "stock light pistol shot lane verified"
+        local weapon = light_pistol(state, guest.pawn)
+        if not valid(weapon) or not verified_pistol_guid(guest, detached, fields[5]) then
+            error("stock_flayer_shot_exact_equipped_guid_required", 0)
+        end
+        shot_ticket = {world = state.world:GetAddress(), shooter = guest.name, victim = fields[3], guid = fields[5],
+            pawn = guest.pawn:GetAddress(), controller = guest.controller_object:GetAddress(), detached = detached:GetAddress(),
+            connection = guest.controller_object.Player:GetAddress(), target = target:GetAddress(),
+            weapon = weapon:GetAddress(), expires = os.time() + 8}
+        shot_aim = {world = shot_ticket.world, victim = shot_ticket.victim, shooter = shot_ticket.shooter, state = "armed"}
+        return "exact stock light pistol shot fixture armed"
     end
     local first, second = placement(host.pawn), placement(guest.pawn)
     if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
@@ -486,6 +560,14 @@ local function read_rows(state, phase, status_row)
     local rows = family_rows(state, pawn, host, status_row, view, "native-campaign-npc")
     if #rows == 0 then return rows end
     active = state.world:GetAddress()
+    if shot_ticket then
+        local guest = state.guests and #state.guests == 1 and state.guests[1]
+        local controller = guest and guest.controller_object
+        local connection = valid(controller) and controller.Player
+        if os.time() > shot_ticket.expires or shot_ticket.world ~= active or not guest or not valid(guest.pawn)
+            or guest.pawn:GetAddress() ~= shot_ticket.pawn or not valid(connection)
+            or connection:GetAddress() ~= shot_ticket.connection then shot_ticket, shot_aim = nil, nil end
+    end
     local secondary = view == "flayer" and "husk" or "flayer"
     for _, row in ipairs(family_rows(state, pawn, host, status_row, secondary, "native-campaign-npc-" .. secondary)) do
         rows[#rows + 1] = row
@@ -524,7 +606,8 @@ local function read_rows(state, phase, status_row)
             rows[#rows + 1] = status_row("native-campaign-flayer-projectile", state.map, table.unpack(hit, 1, hit.n))
         end
         if shot_aim and shot_aim.world == active then
-            rows[#rows + 1] = status_row("native-campaign-flayer-shot-aim", state.map, shot_aim.victim, shot_aim.shooter, shot_aim.reach)
+            rows[#rows + 1] = status_row("native-campaign-flayer-shot-aim", state.map, shot_aim.victim, shot_aim.shooter,
+                shot_aim.reach or "-", shot_aim.state)
         end
     end
     if host and approach and approach.world == active and state.local_pawn.name == approach.host

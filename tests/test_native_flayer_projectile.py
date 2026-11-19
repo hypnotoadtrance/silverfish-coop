@@ -42,3 +42,14 @@ class NativeFlayerProjectileTests(unittest.TestCase):
         self.assertIsNone(self.read((*valid[:-1], "24.75")))
         self.assertIsNone(self.read((*valid[:-2], "0", "180")))
         self.assertIsNone(self.read((*valid[:5], f"OtherBullet {LEVEL}OtherBullet_1", *valid[6:])))
+
+    def test_fixture_arming_and_atomic_placement_differ(self):
+        base = ("native-campaign-flayer-shot-aim", MAP, VICTIM, SHOOTER)
+        key = "native_campaign_flayer_shot_aim"
+        armed = self.read((*base, "-", "armed"))[key]
+        applied = self.read((*base, "421", "applied"))[key]
+        self.assertEqual((armed["state"], armed["reach"]), ("armed", None))
+        self.assertEqual((applied["state"], applied["reach"]), ("applied", 421))
+        self.assertIsNone(self.read((*base, "421", "armed")))
+        self.assertIsNone(self.read((*base, "-", "applied")))
+        self.assertIsNone(self.read((*base, "421", "unknown")))

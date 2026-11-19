@@ -14,7 +14,7 @@ import time
 import uuid
 
 from live_multi_smoke import saved_hashes
-from live_guest_held_fire_smoke import wait_event
+from live_guest_held_fire_smoke import events
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -503,15 +503,30 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 attempts.append({"target": target, "refusal": reply["error"]})
                 continue
             aim = reply["native_campaign_flayer_shot_aim"]
-            assert (aim["map"], aim["victim"], aim["shooter"]) == (MAP, target, guest_pawn), aim
+            assert (aim["map"], aim["victim"], aim["shooter"], aim["state"], aim["reach"]) == (
+                MAP, target, guest_pawn, "armed", None), aim
             start = max((hit["sequence"] for hit in status(host).get("game", {}).get(
                 "native_campaign_flayer_projectile_hits", [])), default=0)
             press = (await command("action", *secondary, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
             attempt = {"aim": aim, "stock_input": press}
             attempts.append(attempt)
             assert (press["map"], press["pawn"], press["guid"], press["stock_wrappers"]) == (MAP, client_pawn, guid, 2), press
-            event = await wait_event(guest, "native_guest_primary_input", lambda row:
-                row.get("sequence") == press["sequence"] and row.get("generation") == client_generation)
+            event = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                candidates = events(guest, "native_guest_primary_input") + events(guest, "native_guest_primary_input_rejected")
+                event = next((row for row in reversed(candidates) if row.get("sequence") == press["sequence"]
+                              and row.get("generation") == client_generation), None)
+                if event:
+                    break
+                await asyncio.sleep(0.1)
+            if not event:
+                raise RuntimeError(f"No ordinary stock primary receipt for sequence {press['sequence']}")
+            if event["event"] == "native_guest_primary_input_rejected":
+                attempt["refusal"] = event.get("reason", "missing reason")
+                if str(attempt["refusal"]).startswith(FLAYER_SHOT_REFUSAL):
+                    continue
+                raise RuntimeError(f"The staged stock Flayer pistol tap was refused: {attempt['refusal']}")
             shot = attempt["authoritative_shot"] = event["native_guest_weapon"]
             assert (shot["map"], shot["pawn"], shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
                 MAP, guest_pawn, guid, magazine, magazine - 1, 1), shot
@@ -525,6 +540,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline:
                 current, viewer = status(host), status(guest)
+                placement = current.get("game", {}).get("native_campaign_flayer_shot_aim", {})
+                if (placement.get("state"), placement.get("victim"), placement.get("shooter")) == ("applied", target, guest_pawn):
+                    attempt["shooting_pose"] = placement
                 if diagnostic := current.get("game", {}).get("native_campaign_flayer_projectile_status"):
                     attempt["observer"] = diagnostic
                 if hit := hit_from_tap(current):
@@ -533,10 +551,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     snapshot = frames()
                     if proved(current, viewer, snapshot):
                         assert target in snapshot["host"]["members"], snapshot
+                        assert "shooting_pose" in attempt, attempt
                         evidence["stock_flayer_guest_projectile_hit"] = hit
                         return current, viewer, snapshot
                 await asyncio.sleep(0.1)
             attempt["outcome"] = "no_exact_nonlethal_hit_observed"
+            assert "shooting_pose" in attempt, attempt
         raise RuntimeError("No ordinary guest pistol tap verified the exact stock Flayer HP debit")
 
     try:

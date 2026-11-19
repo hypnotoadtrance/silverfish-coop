@@ -2205,22 +2205,24 @@ class Host:
                     if mode is not None and (type(mode) is not int or mode != 1
                                              or not target.startswith("NPC_Flayer_C ")):
                         raise ValueError("Choose an exact observed Flayer for the stock projectile fixture")
-                    arguments = (target, "projectile") if mode == 1 else (target,)
-                    try:
-                        self.last_game = await bridge.command(action, *arguments, timeout=6)
-                    except RuntimeError as error:
-                        if mode == 1 and str(error).startswith("mutation_unverified_"):
-                            self.native_checkpoint_unsafe = self.stopping = True
-                        raise
+                    arguments = (target,)
+                    if mode == 1:
+                        guest = self.last_game.get("pawns", {}).get("guest", {}).get("name")
+                        weapon = self.last_game.get("native_guest_equipped_weapons", {}).get(guest, {})
+                        guid = weapon.get("guid")
+                        if weapon.get("kind") != "light-pistol" or not native_gold.valid_guid(guid):
+                            raise ValueError("The exact guest must have a verified stock Light Pistol equipped")
+                        arguments = (target, "projectile", guid)
+                    self.last_game = await bridge.command(action, *arguments, timeout=6)
                     self.last_seen = time.monotonic()
                     if mode == 1:
                         key = "native_campaign_flayer_shot_aim"
                         proof = self.last_game.get(key, {})
                         guest = self.last_game.get("pawns", {}).get("guest", {}).get("name")
-                        if not guest or (proof.get("map"), proof.get("victim"), proof.get("shooter")) != (
-                                CROSSROADS, target, guest):
-                            self.native_checkpoint_unsafe = self.stopping = True
-                            raise RuntimeError("The stock Flayer shooting fixture did not verify its exact actor and guest")
+                        if not guest or (proof.get("map"), proof.get("victim"), proof.get("shooter"), proof.get("state")) != (
+                                CROSSROADS, target, guest, "armed"):
+                            self.stopping = True
+                            raise RuntimeError("The stock Flayer shooting ticket did not verify its exact actor and guest")
                     else:
                         key = "native_campaign_npc_approach"
                         proof = self.last_game.get(key, {})
