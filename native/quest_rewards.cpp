@@ -44,6 +44,7 @@ namespace
     constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
     constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
+    constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto quest_path = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
@@ -662,6 +663,7 @@ namespace
     constexpr ObjectiveQuest computer_board_objective{"computer_board", PartyWorld::scientist, STR("Clt_ComputerBoard"), board_item_path, 800};
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
+    constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
 
     template <const ObjectiveQuest& Quest>
     int stage_objective(const Lua& lua)
@@ -971,6 +973,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<computer_board_objective>);
     lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
+    lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
     lua.register_function("SilverfishCaptureWireRewards", capture<false>);
     lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
     lua.register_function("SilverfishGrantWireRewards", grant<false>);

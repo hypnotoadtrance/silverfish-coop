@@ -153,8 +153,9 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             evidence["stock_xp_setup"] = await action(host, "native-turret-photo-xp-fixture")
 
         async def collect_pickup():
-            await action(host, "native-authored-pickup-approach", "--target", "guest")
-            interaction = (await action(guest, "native-authored-pickup-fixture"))["native_authored_pickup_interaction"]
+            selected = ("--pickup-source", source)
+            await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
+            interaction = (await action(guest, "native-authored-pickup-fixture", *selected))["native_authored_pickup_interaction"]
             assert interaction["source"] == source and interaction["entry"] == "fixture", interaction
             claim = (await action(guest, "native-authored-pickup-claim", "--target", source))["native_authored_pickup_claim"]
             assert (claim["source"], claim["map"], claim["actor"], claim["owner"]) == (source, pickup_map, pickup_actor, character), claim

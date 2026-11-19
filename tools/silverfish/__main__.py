@@ -131,7 +131,7 @@ def parser() -> argparse.ArgumentParser:
         "native-dream-stone-position", "native-dream-stone-fixture",
         "native-return-to-rest", "native-dream-nothing-position",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
-        "native-authored-pickup-claim", "native-authored-pickup-fixture", "native-authored-pickup-approach",
+        "native-authored-pickup-claim", "native-authored-pickup-fixture", "native-authored-pickup-stock-fixture", "native-authored-pickup-approach",
         "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
         "native-broker-grant-manifest",
         "native-broker-drill-issue-fixture", "native-broker-drill-seed-fixture", "native-broker-drill-inspect",
@@ -157,6 +157,7 @@ def parser() -> argparse.ArgumentParser:
         "native-computer-board-preflight", "native-computer-board-approach",
         "native-coup-report-preflight", "native-coup-report-approach",
         "native-depot-documents-preflight", "native-depot-documents-approach",
+        "native-brandy-preflight", "native-brandy-approach",
         "native-meet-broker-preflight", "native-meet-broker-approach",
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-inventory-list",
@@ -182,6 +183,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
     action.add_argument("--exit-actor", help="select the exact stock actor when an entrance has multiple pads")
+    action.add_argument("--pickup-source", help="select the exact placed pickup for a headless pickup fixture")
     action.add_argument("--item-guid", help="exact secondary item GUID for a fixture")
     return cli
 
@@ -250,6 +252,9 @@ async def execute(opts):
         raise ValueError("--kind applies only to the headless native guest weapon seed")
     if opts.exit_actor is not None and (not opts.entrance or opts.action not in ("native-exit-position", "native-exit-wall-probe")):
         raise ValueError("--exit-actor requires --entrance and a headless exit position or wall probe")
+    if opts.pickup_source is not None and opts.action not in ("native-authored-pickup-approach", "native-authored-pickup-fixture",
+                                                             "native-authored-pickup-stock-fixture"):
+        raise ValueError("--pickup-source applies only to the headless placed pickup fixtures")
     retained = {}
     for value in opts.keep or ():
         item, separator, count = value.partition("=")
@@ -260,7 +265,7 @@ async def execute(opts):
                         amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
                         retained=retained if opts.action == "keep" else None,
                         exit_position=opts.exit_position, entrance=opts.entrance, exit_actor=opts.exit_actor,
-                        item_guid=opts.item_guid, kind=opts.kind)
+                        item_guid=opts.item_guid, kind=opts.kind, pickup_source=opts.pickup_source)
 
 
 def main() -> int:

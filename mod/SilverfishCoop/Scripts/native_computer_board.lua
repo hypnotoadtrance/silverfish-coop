@@ -5,7 +5,9 @@ local library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default_
 local characters_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local boards = {
+    [1] = {map = black_market, actor = "BountyBoard_BP_C_0", global_contracts = true},
     [4] = {map = scientist, actor = "BountyBoard_BP_C_2"},
     [5] = {map = wire.map, actor = "BountyBoard_BP_C_3"},
     [10] = {map = scav_bar, actor = "BountyBoard_BP_C_2", global_contracts = true},
@@ -36,11 +38,20 @@ local recipes = {
         redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
         stage_objective = "SilverfishStageDepotDocumentsObjective",
     },
+    ["native-brandy"] = {
+        id = "Clt_Brandy", title = "Fine Vintage", fault = "brandy",
+        objective_path = "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C",
+        cash = 900, difficulty = 3, fail_on_death = false, redeem = 1,
+        offered_boards = {1, 3}, scoped_boards = {1}, factions = {8}, reputation = {[8] = 15},
+        reputation_flags = {[8] = "Rep_Freelancer"}, advantage = {}, no_track_flag = true,
+        redeem_map = black_market, wrong_board = "black_market_redemption_required",
+        stage_objective = "SilverfishStageBrandyObjective",
+    },
 }
 local operations = {}
 for prefix, spec in pairs(recipes) do
     spec.prefix, spec.boards = prefix, {}
-    for _, id in ipairs(spec.offered_boards) do
+    for _, id in ipairs(spec.scoped_boards or spec.offered_boards) do
         local board = boards[id]
         local world = board.map .. "." .. board.map:match("([^/]+)$")
         local path = world .. ":PersistentLevel." .. board.actor

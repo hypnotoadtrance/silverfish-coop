@@ -6,7 +6,7 @@ import uuid
 
 from . import native_computer_board, native_turret_photo, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BOROUGH, SCAV_BAR, SCIENTIST_SHOP
+from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
 HEARTBEAT = "native-wire-board-heartbeat"
 FIXTURE = "native-wire-board-fixture"
@@ -21,6 +21,7 @@ QUESTS = {
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id}),
+    BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id}),
 }
 PREFLIGHTS = {
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),

@@ -45,13 +45,13 @@ local function active(phase)
     return phase == "hosting" or phase == "connected"
 end
 
-local function write_interaction(pawn)
+local function write_interaction(pawn, pickup_source)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
     local file = io.open(input_file, "ab")
     if not file then return end
     input_sequence = input_sequence + 1
-    local target = native_bag_projection.focused_target(pawn) or native_authored_pickup.focused_target(pawn)
+    local target = pickup_source or native_bag_projection.focused_target(pawn)
     file:write("interact\t", tostring(input_sequence), target and "\t" .. target or "", "\n")
     file:close()
 end
@@ -72,6 +72,11 @@ local function sync_native_interact(phase)
         return
     end
     native_interact_address = address
+    for _ = 1, 8 do
+        local source = native_authored_pickup.take_press(pawn)
+        if not source then break end
+        write_interaction(pawn, source)
+    end
     for _ = 1, 8 do
         local sequence, matched = SilverfishTakeNativeInteractPress(address)
         if matched ~= address or type(sequence) ~= "number" or sequence < 1 then break end

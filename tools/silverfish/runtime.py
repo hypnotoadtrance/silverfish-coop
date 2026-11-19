@@ -17,7 +17,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from .native_authored_pickup import SOURCES as AUTHORED_PICKUP_SOURCES
+from . import native_authored_pickup
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
@@ -28,7 +28,7 @@ from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
 
 REPO = Path(__file__).resolve().parents[2]
-AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in AUTHORED_PICKUP_SOURCES)
+AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
 WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
@@ -1148,11 +1148,19 @@ class Bridge:
                         "render_event": int(fields[8]),
                     }
                 elif fields[0] == "native-authored-pickup" and len(fields) == 6:
-                    data["native_authored_pickup"] = {"source": fields[1], "map": fields[2], "actor": fields[3],
-                                                      "class_path": fields[4], "state": fields[5]}
+                    source, area, actor, item_class, state = fields[1:]
+                    placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})
+                    if (source in placed or native_authored_pickup.SOURCES.get(source) != (area, actor, item_class)
+                            or state not in ("available", "claimed")):
+                        raise ValueError("Invalid authored pickup status")
+                    placed[source] = {"source": source, "map": area, "actor": actor, "class_path": item_class, "state": state}
                 elif fields[0] == "native-authored-pickup-interaction" and len(fields) == 6:
-                    data["native_authored_pickup_interaction"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
-                                                                  "sequence": int(fields[4]), "entry": fields[5]}
+                    source, area, pawn, serial, entry = fields[1:]
+                    intents = data.setdefault(native_authored_pickup.INTERACTIONS_KEY, {})
+                    if (source in intents or source not in native_authored_pickup.MAP_SOURCES.get(area, ())
+                            or not pawn or not 0 < int(serial) < 2**53 or entry not in ("fixture", "stock")):
+                        raise ValueError("Invalid authored pickup interaction status")
+                    intents[source] = {"source": source, "map": area, "pawn": pawn, "sequence": int(serial), "entry": entry}
                 elif fields[0] == "native-authored-pickup-claim" and len(fields) == 9:
                     data["native_authored_pickup_claim"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
                                                             "ok": fields[4] == "1", "applied": fields[5] == "1",
@@ -1427,6 +1435,17 @@ class Bridge:
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
             if data.get("schema") == 1 and "state" in data:
+                placed = data.get(native_authored_pickup.SOURCES_KEY, {})
+                intents = data.get(native_authored_pickup.INTERACTIONS_KEY, {})
+                configured = native_authored_pickup.MAP_SOURCES.get(data.get("map"), ())
+                if any(source not in configured for source in placed) or intents.keys() - placed.keys():
+                    raise ValueError("Authored pickup status does not match the current world")
+                if len(configured) == 1:
+                    source = configured[0]
+                    if source in placed:
+                        data["native_authored_pickup"] = placed[source]
+                    if source in intents:
+                        data["native_authored_pickup_interaction"] = intents[source]
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))

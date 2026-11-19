@@ -1977,17 +1977,17 @@ class Host:
                 elif action == native_authored_pickup.ACTION:
                     result = await native_authored_pickup.claim(self, bridge, "host", request.get("target"),
                                                                request.get("operation_id") or path.stem)
-                elif action == "native-authored-pickup-fixture" and self.fixtures:
-                    self.last_game = await bridge.command(action, timeout=5)
-                    result = {"native_authored_pickup_interaction": self.last_game.get("native_authored_pickup_interaction", {})}
-                elif (action == "native-authored-pickup-approach" and self.fixtures
-                      and self.last_game.get("map") in native_authored_pickup.MAP_SOURCES):
+                elif action in native_authored_pickup.FIXTURE_ENTRIES and self.fixtures:
+                    source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
+                    self.last_game = await bridge.command(action, source, timeout=5)
+                    result = native_authored_pickup.fixture_proof(self.last_game, source, native_authored_pickup.FIXTURE_ENTRIES[action])
+                elif action == native_authored_pickup.APPROACH and self.fixtures:
+                    source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
                     character = self.roles().get(request.get("target") or "guest")
                     pawn = native_inventory_death.owner_pawns(self).get(character)
                     if not pawn:
                         raise ValueError("Choose an enrolled participant for the placed pickup fixture")
-                    source = native_authored_pickup.MAP_SOURCES[self.last_game["map"]]
-                    self.last_game = await bridge.command(action, pawn, timeout=5)
+                    self.last_game = await bridge.command(action, pawn, source, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"pawn": pawn, "actor": native_authored_pickup.SOURCES[source][1]}
                 elif action == "native-interaction-fixture":
@@ -2231,12 +2231,9 @@ class Host:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action in native_computer_board.PREFLIGHTS and request.get("target") is None:
                     result = await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.PREFLIGHTS[action])
-                elif action == native_computer_board.COUP_REPORT.command("approach") and self.fixtures:
+                elif action in native_computer_board.AUTHORED_APPROACHES and self.fixtures:
                     actor = request.get("target") or "host"
-                    result = await native_computer_board.approach(self, bridge, actor, spec=native_computer_board.COUP_REPORT)
-                elif action == native_computer_board.DEPOT_DOCUMENTS.command("approach") and self.fixtures:
-                    actor = request.get("target") or "host"
-                    result = await native_computer_board.approach(self, bridge, actor, spec=native_computer_board.DEPOT_DOCUMENTS)
+                    result = await native_computer_board.approach(self, bridge, actor, spec=native_computer_board.AUTHORED_APPROACHES[action])
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
                     result = await native_meet_broker.preflight(self, bridge, "host")
                 elif action == native_meet_broker.APPROACH and self.fixtures:
@@ -3667,9 +3664,10 @@ class Client:
                 elif action == "native-bag-projection-fixture":
                     self.last_game = await self.bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": self.last_game.get("native_bag_projection_interaction", {})}
-                elif action == "native-authored-pickup-fixture":
-                    self.last_game = await self.bridge.command(action, timeout=5)
-                    result = {"native_authored_pickup_interaction": self.last_game.get("native_authored_pickup_interaction", {})}
+                elif action in native_authored_pickup.FIXTURE_ENTRIES:
+                    source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
+                    self.last_game = await self.bridge.command(action, source, timeout=5)
+                    result = native_authored_pickup.fixture_proof(self.last_game, source, native_authored_pickup.FIXTURE_ENTRIES[action])
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)

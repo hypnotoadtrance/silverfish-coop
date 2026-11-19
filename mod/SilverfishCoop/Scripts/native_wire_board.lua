@@ -7,8 +7,9 @@ local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
-local report, depot = "Clt_CoupReport_01", "DepotDocs"
+local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
 local function board_profile(area, level, suffix, id, quests, display_global)
     local world = area .. "." .. level
     local path = world .. ":PersistentLevel.BountyBoard_BP_C_" .. suffix
@@ -19,9 +20,10 @@ local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot}, true),
+    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy}, true),
 }
 local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
-    [report] = "Northern Passage", [depot] = "Depot Documents"}
+    [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -63,6 +65,11 @@ local contract_prompt = {
         offer = "Recover the documents from the depot office.\nInteract again to accept the contract.",
         missing = "Bring the depot documents in your backpack.\nInteract to check the contract again.",
         ready = "Turn in the documents for 1,300 shared cash.\nInteract again to turn them in.",
+    },
+    [brandy] = {
+        offer = "Find the sealed Paladin Brandy in the City.\nInteract again to accept the contract.",
+        missing = "Bring the sealed bottle in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the bottle for 900 shared cash.\nInteract again to turn it in.",
     },
 }
 local rendered_states = {

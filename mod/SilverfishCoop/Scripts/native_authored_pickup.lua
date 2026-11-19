@@ -1,5 +1,6 @@
 local pickup = {}
 local guest_save = require("guest_save")
+local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -12,28 +13,40 @@ local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local profiles = {
-    [observatory] = {
+    {
+        map = observatory,
         source = "observatory-comp-board",
         path = observatory .. ".Observitory_P:PersistentLevel.Item_CompBoard_C_2",
         class = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C",
         name = "Item_CompBoard_C",
         approach = { { -115, 0 }, { 115, 0 } },
     },
-    [city] = {
+    {
+        map = city,
         source = "city-copper-wire",
         path = city .. ".City_01_P:PersistentLevel.Item_CopperWire_C_3",
         class = "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C",
         name = "Item_CopperWire_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
-    [dead_end] = {
+    {
+        map = city,
+        source = "city-paladin-brandy",
+        path = city .. ".City_01_P:PersistentLevel.Item_VintageWine_C_1",
+        class = "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C",
+        name = "Item_VintageWine_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = dead_end,
         source = "dead-end-coup-report",
         path = dead_end .. ".DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
         class = "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C",
         name = "Note_DeadEnd_01_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
-    [depot] = {
+    {
+        map = depot,
         source = "railyard-depot-documents",
         path = depot .. ".RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
         class = "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C",
@@ -41,6 +54,12 @@ local profiles = {
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }
+local map_profiles = {}
+for _, profile in ipairs(profiles) do
+    local entries = map_profiles[profile.map] or {}
+    entries[#entries + 1] = profile
+    map_profiles[profile.map] = entries
+end
 
 local binding, report
 
@@ -69,23 +88,32 @@ function pickup.update(state, phase)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
     local host = phase == "hosting" and state.server == false
-    local profile = profiles[state.map]
-    if not enabled or not profile or not state.listening or not valid(pawn)
+    local placements = map_profiles[state.map]
+    if not enabled or not placements or not state.listening or not valid(pawn)
         or (not host and (phase ~= "connected" or state.server ~= true))
         or type(SilverfishSetNativeAuthoredPickupScope) ~= "function" then
         if binding then pickup.clear() end
         return false
     end
-    local ok, reason = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host)
-    if not ok then
-        if binding then pickup.clear() end
-        return false, reason
-    end
-    if not binding or binding.profile ~= profile or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
-        binding = { pawn = pawn, world = state.world, profile = profile }
+    if not binding or binding.placements ~= placements or binding.host ~= host
+        or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
+        binding = {pawn = pawn, world = state.world, host = host, placements = placements}
         report = nil
     end
-    return true
+    local active, reason = {}, nil
+    for _, profile in ipairs(placements) do
+        local ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source)
+        if ok == true then active[profile.source] = profile else reason = detail end
+    end
+    binding.active = active
+    return next(active) ~= nil, reason
+end
+
+local function select_profile(requested)
+    if requested == nil and #binding.placements == 1 then requested = binding.placements[1].source end
+    local profile = binding.active[requested]
+    if not profile then error("authored_pickup_exact_source_required", 0) end
+    return profile
 end
 
 local function owner(state, phase, name)
@@ -104,13 +132,13 @@ local function owner(state, phase, name)
     return pawn, save, statics
 end
 
-local function claim(fields, state, phase)
+local function claim(fields, state, phase, profile)
     local name, slot = fields[3], fields[4]
-    if #fields ~= 4 or phase ~= "hosting" or not exact_slot(slot) or type(SilverfishCaptureNativeAuthoredPickup) ~= "function"
+    if phase ~= "hosting" or not exact_slot(slot) or type(SilverfishCaptureNativeAuthoredPickup) ~= "function"
         or type(SilverfishVerifyNativeAuthoredPickup) ~= "function" or type(SilverfishRecoverNativeInventoryBag) ~= "function" then
         error("authored_pickup_claim_arguments", 0)
     end
-    report = { action = "claim", pawn = name, slot = slot, ok = false, applied = false }
+    report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false}
     local pawn, save, statics = owner(state, phase, name)
     local save_class = StaticFindObject(save_path)
     if not valid(pawn) or not valid(save_class) or statics:DoesSaveGameExist(slot, 0) then
@@ -122,7 +150,7 @@ local function claim(fields, state, phase)
         report.status = "authored_pickup_escrow_create_failed"
         return "authored loose pickup reported"
     end
-    local ok, reason, item = SilverfishCaptureNativeAuthoredPickup(pawn:GetAddress(), save:GetAddress(), scratch:GetAddress())
+    local ok, reason, item = SilverfishCaptureNativeAuthoredPickup(pawn:GetAddress(), save:GetAddress(), scratch:GetAddress(), profile.source)
     if not ok or not guid(item) then
         report.status = tostring(reason)
         return "authored loose pickup reported"
@@ -132,7 +160,7 @@ local function claim(fields, state, phase)
         return "authored loose pickup reported"
     end
     local restored = statics:LoadGameFromSlot(slot, 0)
-    if not valid(restored) or not SilverfishVerifyNativeAuthoredPickup(scratch:GetAddress(), restored:GetAddress()) then
+    if not valid(restored) or not SilverfishVerifyNativeAuthoredPickup(scratch:GetAddress(), restored:GetAddress(), profile.source) then
         report.status = "authored_pickup_escrow_roundtrip_failed"
         return "authored loose pickup reported"
     end
@@ -144,19 +172,28 @@ local function claim(fields, state, phase)
     return "authored loose pickup reported"
 end
 
+local arguments = {
+    ["native-authored-pickup-project"] = 3,
+    ["native-authored-pickup-claim"] = 4,
+    ["native-authored-pickup-fixture"] = 2,
+    ["native-authored-pickup-stock-fixture"] = 2,
+    ["native-authored-pickup-approach"] = 3,
+}
+
 function pickup.command(fields, state, phase)
     local action = fields[2]
-    if action ~= "native-authored-pickup-project" and action ~= "native-authored-pickup-claim"
-        and action ~= "native-authored-pickup-fixture" and action ~= "native-authored-pickup-approach" then return end
+    local count = arguments[action]
+    if not count then return end
+    if #fields ~= count and #fields ~= count + 1 then error("authored_pickup_arguments", 0) end
     local ok, reason = pickup.update(state, phase)
     if not ok then error(reason or "authored_pickup_scope_unavailable", 0) end
-    if action == "native-authored-pickup-claim" then return claim(fields, state, phase) end
+    local profile = select_profile(fields[count + 1])
+    if action == "native-authored-pickup-claim" then return claim(fields, state, phase, profile) end
     if action == "native-authored-pickup-approach" then
-        if #fields ~= 3 or phase ~= "hosting" or not fixtures or not host_fixtures then
+        if phase ~= "hosting" or not fixtures or not host_fixtures then
             error("The stock loose pickup positioning fixture is unavailable", 0)
         end
         local pawn = owner(state, phase, fields[3])
-        local profile = binding.profile
         local actor = StaticFindObject(profile.path)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= profile.name .. " " .. profile.path
             or not same(actor:GetWorld(), state.world) then
@@ -174,38 +211,45 @@ function pickup.command(fields, state, phase)
     end
     if action == "native-authored-pickup-project" then
         local state_word = fields[3]
-        if #fields ~= 3 or (state_word ~= "available" and state_word ~= "claimed")
+        if (state_word ~= "available" and state_word ~= "claimed")
             or type(SilverfishProjectNativeAuthoredPickup) ~= "function" then error("authored_pickup_project_arguments", 0) end
-        local projected, detail = SilverfishProjectNativeAuthoredPickup(state_word == "claimed")
+        local projected, detail = SilverfishProjectNativeAuthoredPickup(state_word == "claimed", profile.source)
         if not projected then error(detail, 0) end
         return "authored loose pickup projection verified"
     end
-    if #fields ~= 2 or not fixtures or (phase == "hosting" and not host_fixtures)
-        or type(SilverfishProbeNativeAuthoredPickup) ~= "function" then error("authored_pickup_fixture_unavailable", 0) end
-    local intercepted, detail = SilverfishProbeNativeAuthoredPickup()
+    if not fixtures or (phase == "hosting" and not host_fixtures) then error("authored_pickup_fixture_unavailable", 0) end
+    if action == "native-authored-pickup-stock-fixture" then return stock_input_fixture.press(state, phase, profile) end
+    if type(SilverfishProbeNativeAuthoredPickup) ~= "function" then error("authored_pickup_fixture_unavailable", 0) end
+    local intercepted, detail = SilverfishProbeNativeAuthoredPickup(profile.source)
     if not intercepted then error(detail, 0) end
     return "authored loose pickup stock interaction intercepted"
 end
 
-function pickup.focused_target(pawn)
-    if binding and same(pawn, binding.pawn) and type(SilverfishFocusedNativeAuthoredPickup) == "function"
-        and SilverfishFocusedNativeAuthoredPickup(pawn:GetAddress()) then return binding.profile.source end
+function pickup.take_press(pawn)
+    if not binding or not same(pawn, binding.pawn) or type(SilverfishTakeNativeAuthoredPickupPress) ~= "function" then return end
+    local source = SilverfishTakeNativeAuthoredPickupPress(pawn:GetAddress())
+    if binding.active[source] then return source end
 end
 
 function pickup.rows(state, phase, status_row)
     local qualified = pickup.update(state, phase)
     if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return {} end
-    local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup()
-    if not active then return {} end
-    local profile = binding.profile
-    local rows = { status_row("native-authored-pickup", profile.source, state.map, profile.name .. " " .. profile.path,
-        profile.class, claimed and "claimed" or "available") }
-    if sequence > 0 then
-        rows[#rows + 1] = status_row("native-authored-pickup-interaction", profile.source, state.map,
-            state.local_pawn.name, sequence, fixture and "fixture" or "stock")
+    local rows = {}
+    for _, profile in ipairs(binding.placements) do
+        if binding.active[profile.source] then
+            local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup(profile.source)
+            if active then
+                rows[#rows + 1] = status_row("native-authored-pickup", profile.source, state.map,
+                    profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available")
+                if sequence > 0 then
+                    rows[#rows + 1] = status_row("native-authored-pickup-interaction", profile.source, state.map,
+                        state.local_pawn.name, sequence, fixture and "fixture" or "stock")
+                end
+            end
+        end
     end
     if report and phase == "hosting" then
-        rows[#rows + 1] = status_row("native-authored-pickup-claim", profile.source, state.map, report.pawn,
+        rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
     end
     return rows

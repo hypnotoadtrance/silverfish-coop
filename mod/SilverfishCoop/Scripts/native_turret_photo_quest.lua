@@ -8,13 +8,17 @@ local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local scav_world = scav_bar .. ".Shop_ScavBar_P"
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local black_market_world = black_market .. ".Shop_BlackMarket_01"
 local bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local world_names = { [borough] = borough .. ".Borough", [scientist] = scientist .. ".Shop_Scientist_01",
     [bridge] = bridge .. ".DeadBridge_P" }
 local boards = {
     [borough] = {path = world_names[borough] .. ":PersistentLevel.BountyBoard_BP_C_3", kind = 5},
     [scientist] = {path = world_names[scientist] .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 4},
-    [scav_bar] = {path = scav_world .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 10, display_global = true},
+    [scav_bar] = {path = scav_world .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 10, display_global = true, world = scav_world},
+    [black_market] = {path = black_market_world .. ":PersistentLevel.BountyBoard_BP_C_0", kind = 1,
+        display_global = true, world = black_market_world},
 }
 local turret_prefix = world_names[bridge] .. ":PersistentLevel.Turret_MechGun_01_BP_C_"
 local targets = { ["turret-13"] = turret_prefix .. "13", ["turret-15"] = turret_prefix .. "15" }
@@ -147,7 +151,8 @@ local function read_flag(instance, name)
 end
 
 local function actor_context(state, phase, name, listing_offers)
-    local world_name = world_names[state.map] or listing_offers and state.map == scav_bar and scav_world
+    local placement = listing_offers and boards[state.map]
+    local world_name = world_names[state.map] or placement and placement.world
     local world, host = state.world, state.local_pawn
     if not enabled or phase ~= "hosting" or state.listening ~= true or state.server ~= false or not world_name
         or not valid(world) or world:GetFullName() ~= "World " .. world_name or not host

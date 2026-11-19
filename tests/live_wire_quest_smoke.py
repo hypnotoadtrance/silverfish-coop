@@ -208,8 +208,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
         await launch("join", profile, "guest", "--headless", "--native-zones", "--invite", invite["invite_file"], *input_flags)
         await roster(area)
         if turn_in:
-            await action(campaign, "native-authored-pickup-approach", "--target", "guest")
-            interaction = (await action(profile, "native-authored-pickup-fixture"))["native_authored_pickup_interaction"]
+            await action(campaign, "native-authored-pickup-approach", "--target", "guest", "--pickup-source", WIRE)
+            interaction = (await action(profile, "native-authored-pickup-fixture", "--pickup-source", WIRE))["native_authored_pickup_interaction"]
             assert (interaction["source"], interaction["map"], interaction["entry"]) == (WIRE, CITY, "fixture"), interaction
             await action(profile, "native-authored-pickup-claim", "--target", WIRE)
             owned = await wait(guest_run, lambda state: WIRE in state.get("gameplay", {}).get("native_authored_pickups", {}))

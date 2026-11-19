@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BOROUGH, SCAV_BAR, SCIENTIST_SHOP
+from .travel import BLACK_MARKET, BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
 
 QUEST_ID = "Clt_ComputerBoard"
@@ -14,6 +14,7 @@ START = "native-computer-board-start"
 APPROACH = "native-computer-board-approach"
 TURN_IN = "native-computer-board-turn-in"
 BOARDS = {
+    BLACK_MARKET: f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0",
     BOROUGH: native_wire_quest.BOARD,
     SCIENTIST_SHOP: f"BountyBoard_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2",
     SCAV_BAR: f"BountyBoard_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.BountyBoard_BP_C_2",
@@ -52,9 +53,13 @@ COUP_REPORT = CollectionContract("Clt_CoupReport_01", "native-coup-report", "Nor
 DEPOT_DOCUMENTS = CollectionContract("DepotDocs", "native-depot-documents", "Depot Documents", SCAV_BAR,
                                      "scav_bar_redemption_required", 1300, frozenset({"8"}), "consumed_documents",
                                      native_authored_pickup.DEPOT_DOCUMENTS, frozenset({SCAV_BAR}))
-CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS)}
+BRANDY = CollectionContract("Clt_Brandy", "native-brandy", "Fine Vintage", BLACK_MARKET,
+                            "black_market_redemption_required", 900, frozenset({"8"}), "consumed_brandy",
+                            native_authored_pickup.CITY_BRANDY, frozenset({BLACK_MARKET}))
+CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY)}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
+AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source}
 
 
 def _scope(host, actor: str, spec: CollectionContract, *, turning_in: bool = False) -> tuple[str, str]:

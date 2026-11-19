@@ -12,6 +12,7 @@ SOURCE = "observatory-comp-board"
 ACTOR = f"Item_CompBoard_C {OBSERVATORY}.Observitory_P:PersistentLevel.Item_CompBoard_C_2"
 ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
+CITY_BRANDY = "city-paladin-brandy"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
@@ -19,29 +20,60 @@ SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
                 "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
+    CITY_BRANDY: (CITY, f"Item_VintageWine_C {CITY}.City_01_P:PersistentLevel.Item_VintageWine_C_1",
+                  "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
     COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
     DEPOT_DOCUMENTS: (RAIL_YARD, f"Documents_DepotOffice_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
                       "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
 }
-MAP_SOURCES = {area: source for source, (area, _, _) in SOURCES.items()}
+MAP_SOURCES: dict[str, list[str]] = {}
+for source, (area, _, _) in SOURCES.items():
+    MAP_SOURCES.setdefault(area, []).append(source)
 ACTION = "native-authored-pickup-claim"
 STATE_KEY = "native_authored_pickups"
+SOURCES_KEY = "native_authored_pickup_sources"
+INTERACTIONS_KEY = "native_authored_pickup_interactions"
+APPROACH = "native-authored-pickup-approach"
+FIXTURE = "native-authored-pickup-fixture"
+STOCK_FIXTURE = "native-authored-pickup-stock-fixture"
+FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
+
+
+def select_source(area: str | None, requested: str | None) -> str:
+    sources = MAP_SOURCES.get(area, ())
+    if requested is None and len(sources) == 1:
+        return sources[0]
+    if isinstance(requested, str) and requested in sources:
+        return requested
+    raise party.RuleError("authored_pickup_exact_source_required")
+
+
+def _displayed(game: dict, source: str) -> dict:
+    area, actor, item_class = SOURCES[source]
+    row = game.get(SOURCES_KEY, {}).get(source, {})
+    if (row.get("source"), row.get("map"), row.get("actor"), row.get("class_path")) == (source, area, actor, item_class):
+        return row
+    return {}
+
+
+def fixture_proof(game: dict, source: str, entry: str = "fixture") -> dict:
+    row = game.get(INTERACTIONS_KEY, {}).get(source, {})
+    if (row.get("entry"), row.get("map"), row.get("source"), row.get("pawn")) != (
+            entry, SOURCES[source][0], source, game.get("pawns", {}).get("local", {}).get("name")):
+        raise RuntimeError("The stock pickup fixture did not report the selected source and pawn")
+    return {"native_authored_pickup_interaction": row}
 
 
 async def project(service, bridge, pickups: dict) -> None:
-    game = service.last_game
-    source = MAP_SOURCES.get(game.get("map"))
-    if source is None:
-        return
-    desired = "claimed" if source in pickups else "available"
-    observed = game.get("native_authored_pickup", {})
-    if (observed.get("source"), observed.get("state"), desired) != (source, "available", "claimed"):
-        return
-    snapshot = await bridge.command("native-authored-pickup-project", desired, timeout=5)
-    if snapshot.get("native_authored_pickup", {}).get("state") != desired:
-        raise RuntimeError("The game did not verify the consumed placed pickup projection")
-    service.last_game = snapshot
+    area, phase = service.last_game.get("map"), service.last_game.get("state")
+    for source in MAP_SOURCES.get(area, ()):
+        if source not in pickups or _displayed(service.last_game, source).get("state") != "available":
+            continue
+        snapshot = await bridge.command("native-authored-pickup-project", "claimed", source, timeout=5)
+        if (snapshot.get("map"), snapshot.get("state"), _displayed(snapshot, source).get("state")) != (area, phase, "claimed"):
+            raise RuntimeError("The game did not verify the exact consumed placed pickup projection")
+        service.last_game = snapshot
 
 
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
@@ -50,8 +82,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     area, actor, item_class = SOURCES[target]
     if (not host.native_zones or host.native_profile is None or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
-            or host.last_game.get("map") != area or time.monotonic() - host.last_seen > 3
-            or host.last_game.get("native_authored_pickup", {}).get("source") != target):
+            or host.last_game.get("map") != area or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_authored_pickup_unavailable")
     fingerprint = [ACTION, target, None]
     for receipt in host.party["receipts"].get(character, []):
@@ -61,6 +92,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
+    if _displayed(host.last_game, target).get("state") != "available":
+        raise party.RuleError("native_authored_pickup_unavailable")
     if (host.party["wipe"] is not None or character in host.party["pending_spawns"]
             or host.party["players"].get(character, {}).get("downed")):
         raise party.RuleError("native_authored_pickup_owner_unavailable")
@@ -75,7 +108,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(ACTION, pawn, slot, timeout=7)
+        snapshot = await bridge.command(ACTION, pawn, slot, target, timeout=7)
         report = snapshot.get("native_authored_pickup_claim", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or tuple(report.get(key) for key in ("source", "map", "pawn", "slot")) != (target, area, pawn, slot)):

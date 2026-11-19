@@ -1,4 +1,5 @@
 #include "authored_pickup.hpp"
+#include "interaction_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +36,7 @@ namespace
 
     struct Profile
     {
+        std::string_view source;
         const U::TCHAR* world;
         const U::TCHAR* actor;
         const U::TCHAR* item_class;
@@ -44,28 +46,39 @@ namespace
 
     constexpr std::array profiles{
         Profile{
+            "observatory-comp-board",
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Item_CompBoard_C_2"),
             STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"),
             -5680.476689, -849.040347, 128.496287, 11,
         },
         Profile{
+            "city-copper-wire",
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CopperWire_C_3"),
             STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
             1299.7165908306, 3418.79597614179, 1239.49197257439, 11,
         },
         Profile{
+            "dead-end-coup-report",
             STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1"),
             STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
             63519.2477725694, 36406.1978875462, 849.5514682383, 9,
         },
         Profile{
+            "railyard-depot-documents",
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1"),
             STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
             3297.7888314760, -24282.0923970261, 990.5693125502, 9,
+        },
+        Profile{
+            "city-paladin-brandy",
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_VintageWine_C_1"),
+            STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
+            -571.3226728526, -8316.4123004860, -199.9998970174, 1,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -147,22 +160,24 @@ namespace
 
     bool headless() { return env("SILVERFISH_COOP_HEADLESS"); }
 
+    struct Observation
+    {
+        Clock::time_point expires{};
+        std::uint64_t sequence{};
+        bool fixture{}, input_pending{};
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr world, pawn, actor, box, controller, driver;
         const Profile* profile{};
         bool host{}, claimed{}, original_collision{}, original_hidden{};
-    } scope;
+        Observation observed{};
+    };
 
-    struct Observation
-    {
-        Clock::time_point expires{};
-        std::uint64_t sequence{};
-        bool fixture{};
-    } observed;
-
+    std::array<Scope, profiles.size()> scopes{};
     std::uint64_t sequence{};
-    bool fixture_call{};
+    Scope* fixture_scope{};
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
@@ -198,12 +213,19 @@ namespace
         return server_prop && (state.host ? !server && role(controller) == 3 : connection(driver, server));
     }
 
-    const Profile* profile_for(U::UWorld* world)
+    Scope* select_source(const Lua& lua)
     {
-        if (!live(world)) return nullptr;
-        const auto path = world->GetPathName();
-        const auto match = std::ranges::find_if(profiles, [&path](const auto& profile) { return path == profile.world; });
-        return match != profiles.end() ? &*match : nullptr;
+        if (!lua.is_string()) return nullptr;
+        const auto source = lua.get_string();
+        const auto match = std::ranges::find_if(profiles, [&source](const Profile& profile) { return profile.source == source; });
+        return match == profiles.end() ? nullptr : &scopes[static_cast<std::size_t>(match - profiles.begin())];
+    }
+
+    Scope* actor_scope(U::UObject* actor)
+    {
+        if (!actor) return nullptr;
+        const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
+        return match != scopes.end() && local_scope(*match) ? &*match : nullptr;
     }
 
     bool exact_source(U::UObject* actor, U::UObject* world, const Profile& profile)
@@ -254,7 +276,7 @@ namespace
         return function;
     }
 
-    bool available()
+    bool available(const Scope& scope)
     {
         auto* actor = scope.actor.Get();
         return !scope.claimed && local_scope(scope) && exact_source(actor, scope.world.Get(), *scope.profile) &&
@@ -262,7 +284,7 @@ namespace
             boolean(actor, STR("bHidden"), false);
     }
 
-    bool set_visibility(bool claimed)
+    bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
         if (!local_scope(scope) || !exact_source(actor, scope.world.Get(), *scope.profile)) return false;
@@ -272,11 +294,11 @@ namespace
         actor->SetActorEnableCollision(collision);
         if (actor->GetActorEnableCollision() != collision || !boolean(actor, STR("bHidden"), hidden)) return false;
         scope.claimed = claimed;
-        if (claimed) observed = {};
+        if (claimed) scope.observed = {};
         return true;
     }
 
-    void clear()
+    void clear(Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
         if (scope.claimed && live(actor) && boolean(actor, STR("bActorIsBeingDestroyed"), false))
@@ -284,45 +306,53 @@ namespace
             actor->SetActorHiddenInGame(scope.original_hidden);
             actor->SetActorEnableCollision(scope.original_collision);
         }
+        if (fixture_scope == &scope) fixture_scope = nullptr;
         scope = {};
-        observed = {};
-        fixture_call = false;
     }
 
-    bool admit_input(U::UObject* pawn, U::UObject* hit)
+    void clear()
     {
-        return pawn && pawn == scope.pawn.Get() && hit && hit == scope.box.Get() && available() &&
+        for (auto& scope : scopes) clear(scope);
+    }
+
+    bool admit_input(const Scope& scope, U::UObject* pawn, U::UObject* hit)
+    {
+        return pawn && pawn == scope.pawn.Get() && hit && hit == scope.box.Get() && available(scope) &&
             boolean(pawn, STR("Dead"), false) && in_range(pawn, scope.actor.Get());
     }
 
     void intercept(Iteration& call, U::UObject* context, U::UFunction* function, const void* args, U::FFrame* frame)
     {
-        if (!ready() || !context || !function || call.OriginalFunctionCallPrevented() || !scope.actor.Get()) return;
+        if (!ready() || !context || !function || call.OriginalFunctionCallPrevented()) return;
         static const U::FName interact_name{STR("SendInteractionToActor")};
         static const U::FName put_name{STR("PutInInventory")};
         static const U::FName pickup_name{STR("PickUp_Object")};
         static const U::FName add_name{STR("AddItemToInventory")};
         const auto name = function->GetFName();
         if (name != interact_name && name != put_name && name != pickup_name && name != add_name) return;
-        auto* source = scope.actor.Get();
         if (name == add_name)
         {
-            if (function == find<U::UFunction>(add_path) && context == object(scope.world.Get(), STR("OwningGameInstance")) &&
-                read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args) == source) call.PreventOriginalFunctionCall();
+            if (function != find<U::UFunction>(add_path)) return;
+            const auto* scope = actor_scope(read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args));
+            if (scope && context == object(scope->world.Get(), STR("OwningGameInstance"))) call.PreventOriginalFunctionCall();
             return;
         }
-        if (context != source || function->GetOuterPrivate() != find<U::UClass>(base_class)) return;
+        auto* scope = actor_scope(context);
+        if (!scope || function->GetOuterPrivate() != find<U::UClass>(base_class)) return;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented() || name != interact_name || function != interaction()) return;
 
         auto* pawn = read(field<U::FObjectProperty>(function, STR("Player")), args);
         auto* hit = read(field<U::FObjectProperty>(function, STR("HitComponent")), args);
-        if (!admit_input(pawn, hit)) return;
+        if (!admit_input(*scope, pawn, hit)) return;
         auto* caller = frame ? frame->PreviousFrame() : nullptr;
-        const bool fixture = !frame && fixture_call;
-        const bool stock = caller && caller->Object() == pawn && caller->Node() == find<U::UFunction>(pawn_script) &&
-            object(pawn, STR("InteractionTarget_Component")) == hit && boolean(pawn, STR("Holding_Interact"), true);
-        if (fixture || stock) observed = {Clock::now() + std::chrono::seconds(4), ++sequence, fixture};
+        const bool fixture = !frame && fixture_scope == scope;
+        const bool valid_caller = !frame ||
+            (caller && caller->Object() == pawn && caller->Node() == find<U::UFunction>(pawn_script));
+        const bool stock = !fixture && valid_caller && object(pawn, STR("InteractionTarget_Component")) == hit &&
+            boolean(pawn, STR("Holding_Interact"), true) &&
+            silverfish::native_interaction_input::consume_current_press(pawn);
+        if (fixture || stock) scope->observed = {Clock::now() + std::chrono::seconds(4), ++sequence, fixture, stock};
     }
 
     U::UObject* live_address(Address pointer, U::UClass* type)
@@ -337,9 +367,9 @@ namespace
         return result;
     }
 
-    bool authorized(U::UObject* pawn, U::UObject* target)
+    bool authorized(const Scope& scope, U::UObject* pawn, U::UObject* target)
     {
-        if (!scope.host || !available() || !exact(pawn, pawn_path) || role(pawn) != 3 ||
+        if (!scope.host || !available(scope) || !exact(pawn, pawn_path) || role(pawn) != 3 ||
             !exact(target, save_path) || object(pawn, STR("Save")) != target || !boolean(pawn, STR("Dead"), false) ||
             role(scope.actor.Get()) != 3 || !in_range(pawn, scope.actor.Get())) return false;
         auto* world = scope.world.Get();
@@ -490,61 +520,76 @@ namespace
 
     int set_scope(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2))
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_bool(2))
             return result(lua, false, "authored_pickup_scope_arguments");
         const auto ptr = static_cast<Address>(lua.get_integer());
         const auto host = lua.get_bool();
+        auto* selected = select_source(lua);
+        if (!selected) return result(lua, false, "authored_pickup_source_unknown");
+        auto& scope = *selected;
         if (address(scope.pawn.Get()) == ptr && host == scope.host && local_scope(scope))
             return result(lua, true, "authored_pickup_scope_bound");
-        clear();
+        clear(scope);
         auto* pawn = live_address(ptr, find<U::UClass>(pawn_path));
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
-        const auto* profile = profile_for(world);
-        auto* actor = profile ? find<U::AActor>(profile->actor) : nullptr;
+        const auto& profile = profiles[static_cast<std::size_t>(selected - scopes.data())];
+        if (!live(world) || world->GetPathName() != profile.world)
+            return result(lua, false, "authored_pickup_source_world_unavailable");
+        auto* actor = find<U::AActor>(profile.actor);
         auto* box = source_box(actor);
-        if (!profile || !box || !exact_source(actor, world, *profile) || !interaction() ||
+        if (!box || !exact_source(actor, world, profile) || !interaction() ||
             !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
             return result(lua, false, "authored_pickup_stock_actor_unavailable");
         Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
-            profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
+            &profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
         if (!local_scope(next)) return result(lua, false, "authored_pickup_local_controller_unavailable");
         scope = next;
         return result(lua, true, "authored_pickup_scope_bound");
     }
 
-    int focus(const Lua& lua)
+    int take_press(const Lua& lua)
     {
-        auto* pawn = ready() ? scope.pawn.Get() : nullptr;
-        const auto qualified = pawn && lua.get_stack_size() == 1 && lua.is_integer() &&
-            static_cast<Address>(lua.get_integer()) == address(pawn) &&
-            admit_input(pawn, object(pawn, STR("InteractionTarget_Component")));
-        lua.set_bool(qualified);
+        if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer()) return 0;
+        const auto pawn = static_cast<Address>(lua.get_integer());
+        const auto now = Clock::now();
+        Scope* selected{};
+        for (auto& scope : scopes)
+        {
+            if (!scope.observed.input_pending || now >= scope.observed.expires || address(scope.pawn.Get()) != pawn ||
+                !available(scope)) continue;
+            if (!selected || scope.observed.sequence < selected->observed.sequence) selected = &scope;
+        }
+        if (!selected) return 0;
+        selected->observed.input_pending = false;
+        lua.set_string(selected->profile->source);
         return 1;
     }
 
     int project(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 1 || !lua.is_bool()) return result(lua, false, "authored_pickup_project_arguments");
+        if (!ready() || lua.get_stack_size() != 2 || !lua.is_bool()) return result(lua, false, "authored_pickup_project_arguments");
         const auto claimed = lua.get_bool();
-        const bool verified = set_visibility(claimed);
+        auto* scope = select_source(lua);
+        const bool verified = scope && set_visibility(*scope, claimed);
         return result(lua, verified, verified ? "authored_pickup_projected" : "authored_pickup_projection_unverified");
     }
 
     int status(const Lua& lua)
     {
-        const bool active = ready() && local_scope(scope) && exact_source(scope.actor.Get(), scope.world.Get(), *scope.profile);
-        const bool emitted = active && Clock::now() < observed.expires;
+        auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
+        const bool active = scope && local_scope(*scope) && exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile);
+        const bool emitted = active && Clock::now() < scope->observed.expires;
         lua.set_bool(active);
-        lua.set_bool(active && scope.claimed);
-        lua.set_integer(emitted ? static_cast<std::int64_t>(observed.sequence) : 0);
-        lua.set_bool(emitted && observed.fixture);
+        lua.set_bool(active && scope->claimed);
+        lua.set_integer(emitted ? static_cast<std::int64_t>(scope->observed.sequence) : 0);
+        lua.set_bool(emitted && scope->observed.fixture);
         return 4;
     }
 
     int capture(const Lua& lua)
     {
         std::array<Address, 3> supplied{};
-        if (!ready() || lua.get_stack_size() != supplied.size())
+        if (!ready() || lua.get_stack_size() != supplied.size() + 1)
             return result(lua, false, "authored_pickup_capture_arguments");
         for (auto& pointer : supplied)
         {
@@ -552,16 +597,17 @@ namespace
             pointer = static_cast<Address>(lua.get_integer());
             if (!pointer) return result(lua, false, "authored_pickup_capture_arguments");
         }
+        const auto* scope = select_source(lua);
         RowSchema rows;
         auto* pawn = live_address(supplied[0], find<U::UClass>(pawn_path));
         auto* target = object(pawn, STR("Save"));
-        if (address(target) != supplied[1] || !authorized(pawn, target))
+        if (!scope || address(target) != supplied[1] || !authorized(*scope, pawn, target))
             return result(lua, false, "authored_pickup_exact_claimant_unavailable");
         if (!rows.bind()) return result(lua, false, "authored_pickup_inventory_schema_unavailable");
         auto* scratch = isolated(supplied[2], rows);
         if (!scratch || scratch == target) return result(lua, false, "authored_pickup_isolated_escrow_required");
         Guid guid{};
-        const std::string_view detail = convert(rows, pawn, scope.actor.Get(), scratch, guid);
+        const std::string_view detail = convert(rows, pawn, scope->actor.Get(), scratch, guid);
         if (detail != "captured") return result(lua, false, detail);
         result(lua, true, detail);
         lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
@@ -570,14 +616,15 @@ namespace
 
     int verify_escrow(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2))
             return result(lua, false, "authored_pickup_verify_arguments");
         const auto initial = static_cast<Address>(lua.get_integer());
         const auto reloaded = static_cast<Address>(lua.get_integer());
+        const auto* scope = select_source(lua);
         RowSchema rows;
-        if (initial == reloaded || !available() || !scope.host || !rows.bind())
+        if (!scope || initial == reloaded || !available(*scope) || !scope->host || !rows.bind())
             return result(lua, false, "authored_pickup_verify_schema_unavailable");
-        auto* item_class = find<U::UClass>(scope.profile->item_class);
+        auto* item_class = find<U::UClass>(scope->profile->item_class);
         auto* first = isolated(initial, rows);
         auto* second = isolated(reloaded, rows);
         if (!first || !second) return result(lua, false, "authored_pickup_isolated_escrow_required");
@@ -590,18 +637,19 @@ namespace
 
     int probe(const Lua& lua)
     {
-        if (!ready() || !headless() || (scope.host && !env("SILVERFISH_COOP_NATIVE_FIXTURES")) ||
-            lua.get_stack_size() != 0 || !admit_input(scope.pawn.Get(), scope.box.Get()))
+        auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
+        if (!scope || fixture_scope || !headless() || (scope->host && !env("SILVERFISH_COOP_NATIVE_FIXTURES")) ||
+            !admit_input(*scope, scope->pawn.Get(), scope->box.Get()))
             return result(lua, false, "authored_pickup_fixture_unavailable");
         auto* fn = interaction();
         if (!fn) return result(lua, false, "authored_pickup_fixture_schema_unavailable");
-        auto* actor = scope.actor.Get();
+        auto* actor = scope->actor.Get();
         const auto before = sequence;
-        std::array arguments{scope.pawn.Get(), scope.box.Get()};
-        fixture_call = true;
+        std::array arguments{scope->pawn.Get(), scope->box.Get()};
+        fixture_scope = scope;
         actor->ProcessEvent(fn, arguments.data());
-        fixture_call = false;
-        const bool ok = sequence == before + 1 && observed.fixture && available();
+        fixture_scope = nullptr;
+        const bool ok = sequence == before + 1 && scope->observed.fixture && available(*scope);
         return result(lua, ok, ok ? "authored_pickup_stock_event_vetoed" : "authored_pickup_fixture_unverified");
     }
 
@@ -644,7 +692,7 @@ namespace silverfish::native_authored_pickup
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
-        lua.register_function("SilverfishFocusedNativeAuthoredPickup", focus);
+        lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);

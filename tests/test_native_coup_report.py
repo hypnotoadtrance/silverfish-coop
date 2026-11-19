@@ -58,7 +58,9 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
         self.host = SimpleNamespace(
             party=state, native_profile=profile, fixtures=False, native_zones=True, native_guest=True,
             transitioning=False, stopping=False, native_checkpoint_unsafe=False, last_seen=time.monotonic(),
-            last_game={"state": "hosting", "map": DEAD_END, "native_authored_pickup": {"source": SOURCE}},
+            last_game={"state": "hosting", "map": DEAD_END, native_authored_pickup.SOURCES_KEY: {SOURCE: {
+                "source": SOURCE, "map": DEAD_END, "actor": NOTE, "class_path": NOTE_CLASS, "state": "available",
+            }}},
             roles=lambda: {"host": "host", "guest": GUEST},
             native_recipients=lambda: {GUEST: {"pawn": PAWN, "connected": True}},
             checkpoint_native=AsyncMock(return_value=5), control=Mock(),
@@ -76,7 +78,8 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
         area = snapshot["map"]
         if operation == native_authored_pickup.ACTION:
             self.assertEqual(area, DEAD_END)
-            slot, = arguments
+            slot, source = arguments
+            self.assertEqual(source, SOURCE)
             path = native_host_save.slot_path(self.host.native_profile, slot)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"GVAS exact Dead End note")
