@@ -36,6 +36,7 @@ DATA = {
 SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
 FLAYER_REPLAY_SHA = "8f17247a7b18f3e91ba33ec6c4bd72d711935a2217667a5933e8713084e93c95"
 FLAYER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999494537]
+FLAYER_GEOMETRY_REFUSAL = "stock_flayer_approach_no_verified_position "
 
 
 def seed_flayer_replay(source: Path, destination: Path) -> dict:
@@ -78,6 +79,20 @@ def verify_flayer_restore(run: Path, server: dict, seed: dict) -> dict:
             or pawn.get("health") != seed["spawn"]["health"]):
         raise AssertionError({"restore": observed, "host_pawn": pawn, "replay": seed})
     return {"receipt": observed, "pawn": pawn}
+
+
+async def approach_stock_flayer(members, approach, attempts: list[dict]) -> str:
+    """Use the original cohort and allow one interval for stock movement."""
+    for index, member in enumerate((*members, *members)):
+        if index == len(members):
+            await asyncio.sleep(1.25)
+        reply = await approach(member)
+        attempts.append({"target": member, "reply": reply})
+        if reply.get("ok") is True:
+            return member
+        if not str(reply.get("error", "")).startswith(FLAYER_GEOMETRY_REFUSAL):
+            raise RuntimeError(f"The staged stock Flayer approach failed: {reply}")
+    raise RuntimeError(f"No verified stock melee position for the original Flayer cohort: {attempts}")
 
 
 def status(run: Path) -> dict:
@@ -330,7 +345,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 evidence.setdefault("first_client_local_birth_frame", frame)
         return current
 
-    async def command(*arguments):
+    async def command(*arguments, allow_flayer_geometry_refusal=False):
         process = await asyncio.create_subprocess_exec(
             *cli, *arguments, cwd=REPO, env=environment, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW,
@@ -342,9 +357,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 process.kill()
             await process.wait()
             raise
+        reply = json.loads(output) if output and (not process.returncode or allow_flayer_geometry_refusal) else {}
+        if (allow_flayer_geometry_refusal and reply.get("ok") is False
+                and str(reply.get("error", "")).startswith(FLAYER_GEOMETRY_REFUSAL)):
+            return reply
         if process.returncode:
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
-        reply = json.loads(output)
         if not reply.get("ok"):
             raise RuntimeError(f"{arguments} failed: {reply.get('error', 'missing success response')}")
         return reply
@@ -451,8 +469,17 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             before, _, natural = await wait(f"No stock {family} cohort and enrolled pair appeared", ready)
             evidence["before_approach"] = {"host": natural["host"], "guest": natural["guest"]}
             host_pawn, guest_pawn = approach_pair(before)
-            target = natural["host"]["members"][0]
-            await command("action", *primary, "native-campaign-npc-approach", "--target", target)
+            members = natural["host"]["members"]
+            if flayer_combat:
+                async def stock_approach(member):
+                    return await command("action", *primary, "native-campaign-npc-approach", "--target", member,
+                                         allow_flayer_geometry_refusal=True)
+
+                attempts = evidence["flayer_approach_attempts"] = []
+                target = await approach_stock_flayer(members, stock_approach, attempts)
+            else:
+                target = members[0]
+                await command("action", *primary, "native-campaign-npc-approach", "--target", target)
 
             def approached(server, client, snapshot):
                 move = (snapshot["host"] or {}).get("approach", {})

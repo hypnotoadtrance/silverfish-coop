@@ -199,12 +199,13 @@ local function forward_melee_trace(trace, target, guest, location)
     local found = trace:LineTraceSingle(target, start, location, 0, false, {}, 0, hit, true, trace_color, trace_color, 0)
     hit = hit.OutHit or hit
     if found ~= true or hit.bBlockingHit ~= true then return "clear" end
-    if hit.bStartPenetrating == true then return "start_penetrating" end
     local component = hit.Component and hit.Component:Get()
-    if not valid(component) or not same(component:GetOwner(), guest.pawn) then return "other_hit" end
+    local component_name = valid(component) and component:GetFullName() or "-"
+    if hit.bStartPenetrating == true then return "start_penetrating", component_name end
+    if not valid(component) or not same(component:GetOwner(), guest.pawn) then return "other_hit", component_name end
     local collision = component:GetCollisionEnabled()
     if collision ~= 1 and collision ~= 3 then return "guest_collision_unqualified" end
-    return "guest_hit", component:GetFullName()
+    return "guest_hit", component_name
 end
 
 local function place_pair(world, host, guest, target, cohort)
@@ -222,7 +223,7 @@ local function place_pair(world, host, guest, target, cohort)
         end
         local heading = math.atan(facing.Y, facing.X)
         for _, offset in ipairs(flayer_angles) do angles[#angles + 1] = heading + math.rad(offset) end
-        diagnostics = { floors = 0, placements = 0, trace = "not_tried" }
+        diagnostics = { floors = 0, placements = 0, penetrations = 0, obstructions = 0, trace = "not_tried" }
     else
         for step = 0, 11 do angles[#angles + 1] = step * math.pi / 6 end
     end
@@ -252,6 +253,11 @@ local function place_pair(world, host, guest, target, cohort)
                         if flayer then
                             diagnostics.placements = diagnostics.placements + 1
                             diagnostics.trace, diagnostics.component = forward_melee_trace(trace, target, guest, guest_at)
+                            if diagnostics.trace == "start_penetrating" then
+                                diagnostics.penetrations = diagnostics.penetrations + 1
+                            elseif diagnostics.trace == "other_hit" then
+                                diagnostics.obstructions = diagnostics.obstructions + 1
+                            end
                             if diagnostics.trace ~= "guest_hit" then return end
                         end
                         return host_at, guest_at
@@ -277,8 +283,9 @@ local function place_pair(world, host, guest, target, cohort)
         end
     end
     if diagnostics then
-        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d trace=%s",
-            diagnostics.floors, diagnostics.placements, diagnostics.trace), 0)
+        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d penetrations=%d obstructions=%d trace=%s component=%s origin=(%.1f,%.1f,%.1f)",
+            diagnostics.floors, diagnostics.placements, diagnostics.penetrations, diagnostics.obstructions,
+            diagnostics.trace, diagnostics.component or "-", anchor.X, anchor.Y, anchor.Z), 0)
     end
     error("stock_husk_approach_no_safe_floor_pair", 0)
 end
