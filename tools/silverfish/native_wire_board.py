@@ -6,7 +6,7 @@ import uuid
 
 from . import native_computer_board, native_turret_photo, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BOROUGH, SCIENTIST_SHOP
+from .travel import BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
 HEARTBEAT = "native-wire-board-heartbeat"
 FIXTURE = "native-wire-board-fixture"
@@ -16,16 +16,19 @@ BOARD = native_wire_quest.BOARD
 BOARDS = native_computer_board.BOARDS
 MAPS = frozenset(BOARDS)
 COUP_REPORT = native_computer_board.COUP_REPORT
+DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 QUESTS = {
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID}),
+    SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id}),
 }
 PREFLIGHTS = {
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
-    native_computer_board.QUEST_ID: (native_computer_board.PREFLIGHT, "native_computer_board"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
-    COUP_REPORT.quest_id: (COUP_REPORT.command("preflight"), COUP_REPORT.key),
+    **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
+HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered",
+                 *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
 
 
 def fixture_selection(area, target):
@@ -120,8 +123,7 @@ class WireBoardView:
         try:
             proof = (await action(verb, operation, None)).get(report, {})
         except (RuntimeError, ValueError) as error:
-            if quest != QUEST and str(error) in {"stock_turret_photo_quest_not_offered", "stock_computer_board_quest_not_offered",
-                                                "stock_coup_report_quest_not_offered"}:
+            if quest != QUEST and str(error) in HIDDEN_OFFERS:
                 return "not_offered"
             raise
         expected_quest = proof.get("id") if quest == QUEST else proof.get("quest")
@@ -141,15 +143,13 @@ class WireBoardView:
             return "completed"
         if quest == native_turret_photo.QUEST_ID:
             return "ready" if step == last else "missing"
-        if quest == COUP_REPORT.quest_id:
-            if proof.get("can_turn_in") is not True or area != BOROUGH:
-                raise RuntimeError("The host board report has an unexpected redemption location")
-            return "ready" if proof.get("objective_qualified") is True else "missing"
-        if proof.get("can_turn_in") is not (area == SCIENTIST_SHOP):
+        spec = native_computer_board.CONTRACTS[quest]
+        if proof.get("can_turn_in") is not (area == spec.redeem_map):
             raise RuntimeError("The host board report has an unexpected redemption location")
-        if area != SCIENTIST_SHOP:
+        if area != spec.redeem_map:
             return "elsewhere"
-        return "ready" if valid_guid(proof.get("objective_guid")) else "missing"
+        qualified = proof.get("objective_qualified") is True if spec.pickup_source else valid_guid(proof.get("objective_guid"))
+        return "ready" if qualified else "missing"
 
     @staticmethod
     def _wire_status(proof):

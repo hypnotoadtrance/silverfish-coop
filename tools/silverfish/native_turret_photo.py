@@ -20,9 +20,11 @@ HOST_EQUIP_FIXTURE = "native-host-camera-equip-fixture"
 ACTIONS = {PREFLIGHT: "preflight", "native-turret-photo-start": "start", CAPTURE: "capture", CAPTURE_FIXTURE: "capture",
            "native-turret-photo-turn-in": "turn_in", XP_FIXTURE: "xp_fixture", HOST_AIM_FIXTURE: "aim_fixture"}
 TARGETS = {"turret-13", "turret-15"}
-BOARDS = native_computer_board.BOARDS
+BOARDS = {area: native_computer_board.BOARDS[area] for area in native_computer_board.BOROUGH_SCIENTIST_BOARDS}
+CATALOG_BOARDS = native_computer_board.BOARDS
 SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, native_computer_board.QUEST_ID,
              native_computer_board.COUP_REPORT.quest_id}
+EXPERIMENTAL = {native_computer_board.DEPOT_DOCUMENTS.quest_id}
 
 
 def _pawn(host, character, area):
@@ -67,20 +69,24 @@ async def offers(host, bridge, character, offset):
                                or len(offset) > 3 or int(offset) > 128):
         raise party.RuleError("native_bounty_board_offset_invalid")
     area = host.last_game.get("map")
-    if area not in BOARDS:
+    if area not in CATALOG_BOARDS:
         raise party.RuleError("native_bounty_board_unavailable")
     pawn = _pawn(host, character, area)
     snapshot = await bridge.command(BOARD_LIST, pawn, timeout=5)
     proof = snapshot.get("native_bounty_board", {})
     catalog = snapshot.get("native_bounty_offers", {})
     if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("board")) != (
-            "hosting", area, area, pawn, BOARDS[area]
+            "hosting", area, area, pawn, CATALOG_BOARDS[area]
     ) or "board" not in catalog or catalog.get("sequence") != snapshot.get("sequence"):
         raise RuntimeError("The native board did not verify the current stock offers")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     rows = native_quest_catalog.page(catalog, f"board@{int(offset or 0)}", board=True)
     for quest in rows["quests"]:
-        quest["co_op"] = "verified" if quest["id"] in SUPPORTED else "unqualified"
+        identifier = quest["id"]
+        if identifier in EXPERIMENTAL:
+            quest["co_op"] = "experimental"
+        else:
+            quest["co_op"] = "verified" if identifier in SUPPORTED else "unqualified"
     return {"native_bounty_board": {**proof, **rows}}
 
 

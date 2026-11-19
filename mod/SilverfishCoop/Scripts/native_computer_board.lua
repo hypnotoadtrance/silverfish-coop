@@ -4,19 +4,19 @@ local wire = require("native_wire_quest")
 local library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local characters_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
-local function board_profile(map, level, actor, id, quest_id)
-    local world = map .. "." .. level
-    local path = world .. ":PersistentLevel." .. actor
-    return {map = map, world_path = world, board_path = path, board_name = "BountyBoard_BP_C " .. path,
-        board_id = id, quest_id = quest_id}
-end
+local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local boards = {
+    [4] = {map = scientist, actor = "BountyBoard_BP_C_2"},
+    [5] = {map = wire.map, actor = "BountyBoard_BP_C_3"},
+    [10] = {map = scav_bar, actor = "BountyBoard_BP_C_2", global_contracts = true},
+}
 local recipes = {
     ["native-computer-board"] = {
         id = "Clt_ComputerBoard", title = "Computer Board", fault = "computer_board",
         objective_path = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C",
         cash = 800, difficulty = 0, fail_on_death = false, redeem = 4,
         offered_boards = {4, 5}, factions = {2, 4, 5}, reputation = {[2] = 50, [4] = -5, [5] = -5},
-        advantage = 35, redeem_map = scientist, wrong_board = "scientist_redemption_required",
+        advantage = {[2] = 35}, redeem_map = scientist, wrong_board = "scientist_redemption_required",
         stage_objective = "SilverfishStageComputerBoardObjective",
     },
     ["native-coup-report"] = {
@@ -24,15 +24,32 @@ local recipes = {
         objective_path = "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C",
         cash = 1200, difficulty = 3, fail_on_death = false, redeem = 5,
         offered_boards = {5, 4}, factions = {2, 5}, reputation = {[2] = 60, [5] = -100},
-        advantage = 50, redeem_map = wire.map, wrong_board = "borough_redemption_required",
+        advantage = {[2] = 50}, redeem_map = wire.map, wrong_board = "borough_redemption_required",
         stage_objective = "SilverfishStageCoupReportObjective",
     },
+    ["native-depot-documents"] = {
+        id = "DepotDocs", title = "Depot Documents", fault = "depot_documents",
+        objective_path = "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C",
+        cash = 1300, difficulty = 3, fail_on_death = false, redeem = 10,
+        offered_boards = {10}, factions = {8}, reputation = {[8] = 25}, reputation_flags = {[8] = "Rep_Freelancer"},
+        advantage = {}, no_track_flag = true,
+        redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
+        stage_objective = "SilverfishStageDepotDocumentsObjective",
+    },
 }
-for _, spec in pairs(recipes) do
-    spec.boards = {
-        [wire.map] = board_profile(wire.map, "Borough", "BountyBoard_BP_C_3", 5, spec.id),
-        [scientist] = board_profile(scientist, "Shop_Scientist_01", "BountyBoard_BP_C_2", 4, spec.id),
-    }
+local operations = {}
+for prefix, spec in pairs(recipes) do
+    spec.prefix, spec.boards = prefix, {}
+    for _, id in ipairs(spec.offered_boards) do
+        local board = boards[id]
+        local world = board.map .. "." .. board.map:match("([^/]+)$")
+        local path = world .. ":PersistentLevel." .. board.actor
+        spec.boards[board.map] = {map = board.map, world_path = world, board_path = path, board_name = "BountyBoard_BP_C " .. path,
+            board_id = id, quest_id = spec.id, global_contracts = board.global_contracts}
+    end
+    for _, action in ipairs({"preflight", "approach", "start", "turn-in"}) do
+        operations[prefix .. "-" .. action] = {spec = spec, action = action}
+    end
 end
 local keys = {
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
@@ -54,6 +71,7 @@ local keys = {
     rep = "ReputationGain_86_DA02B32344A59A6C236B848B22520EEC",
     advantage = "Advantage_Faction_100_F1B0B60547EEC0A936CFECB9BE005CE2",
     ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F",
+    track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774",
 }
 local last
 
@@ -75,26 +93,35 @@ local function wire_check(spec, fn, ...)
     return table.unpack(result, 2, result.n)
 end
 
+local function exact_map(values, expected)
+    if not values then return false end
+    local size = 0
+    for key, value in pairs(expected) do
+        if not values:Contains(key) or values:Find(key):get() ~= value then return false end
+        size = size + 1
+    end
+    return #values == size
+end
+
 local function recipe(spec, row)
     if not row then refuse(spec, "quest_row_unavailable") end
     local boards, objective, rep, advantage = row[keys.boards], row[keys.objective], row[keys.rep], row[keys.advantage]
-    local ping = row[keys.ping]
+    local ping, track = row[keys.ping], row[keys.track]
     if type(ping) == "userdata" then ping = ping:ToString() end
+    if type(track) == "userdata" then track = track:ToString() end
     if row[keys.final] ~= 2 or row[keys.cash] ~= spec.cash or row[keys.xp] ~= 1 or row[keys.redeem] ~= spec.redeem
         or row[keys.kind] ~= 2 or row[keys.difficulty] ~= spec.difficulty
         or row[keys.fail] ~= spec.fail_on_death or row[keys.global] ~= true
         or row[keys.consume] ~= true or count(row[keys.items]) ~= 0 or count(row[keys.quests]) ~= 0
         or not row[keys.prereq] or #row[keys.prereq] ~= 0 or not row[keys.flags] or #row[keys.flags] ~= 0
-        or ping ~= "None" or count(boards) ~= 2 or boards[1] ~= spec.offered_boards[1] or boards[2] ~= spec.offered_boards[2]
+        or ping ~= "None" or spec.no_track_flag and track ~= "None" and track ~= "" or count(boards) ~= #spec.offered_boards
         or count(objective) ~= 1 or not valid(objective[1])
         or objective[1]:GetFullName() ~= "BlueprintGeneratedClass " .. spec.objective_path
-        or not rep or #rep ~= #spec.factions or not advantage or #advantage ~= 1 or not advantage:Contains(2)
-        or advantage:Find(2):get() ~= spec.advantage then refuse(spec, "quest_recipe_unqualified") end
-    for _, faction in ipairs(spec.factions) do
-        if not rep:Contains(faction) or rep:Find(faction):get() ~= spec.reputation[faction] then
-            refuse(spec, "quest_reputation_unqualified")
-        end
+        or not exact_map(advantage, spec.advantage) then refuse(spec, "quest_recipe_unqualified") end
+    for index, board_id in ipairs(spec.offered_boards) do
+        if boards[index] ~= board_id then refuse(spec, "quest_recipe_unqualified") end
     end
+    if not exact_map(rep, spec.reputation) then refuse(spec, "quest_reputation_unqualified") end
     return objective[1]
 end
 
@@ -109,7 +136,8 @@ local function reputation(spec, context)
         library:Compose_FactionRep_FlagName(faction, context.host, out)
         local key = out.Name
         local name = type(key) == "userdata" and key:ToString()
-        if not name or key:GetComparisonIndex() == 0 or seen[name] or not name:match("^Rep_[%w_]+$") then
+        if not name or key:GetComparisonIndex() == 0 or seen[name] or not name:match("^Rep_[%w_]+$")
+            or spec.reputation_flags and spec.reputation_flags[faction] ~= name then
             refuse(spec, "reputation_flag_unqualified")
         end
         seen[name] = true
@@ -187,11 +215,9 @@ end
 
 function contract.command(fields, state, phase)
     local operation = fields[2]
-    if type(operation) ~= "string" then return end
-    local prefix, action = operation:match("^(native%-computer%-board)%-(.+)$")
-    if not prefix then prefix, action = operation:match("^(native%-coup%-report)%-(.+)$") end
-    local spec = recipes[prefix]
-    if not spec or (action ~= "preflight" and action ~= "start" and action ~= "approach" and action ~= "turn-in") then return end
+    local request = operations[operation]
+    if not request then return end
+    local spec, action = request.spec, request.action
     last = nil
     local profile, name = spec.boards[state.map], fields[3]
     if not profile or #fields ~= (action == "turn-in" and 5 or 3) then refuse(spec, "arguments_unqualified") end
@@ -229,7 +255,7 @@ function contract.command(fields, state, phase)
         after = redeem(spec, context, before, objective, identity, owner)
     end
     last = {operation = operation, context = context, profile = profile, pawn = name, before = before, after = after,
-        guid = identity or "-", owner = owner or "-", spec = spec, prefix = prefix}
+        guid = identity or "-", owner = owner or "-", spec = spec, prefix = spec.prefix}
     return "verified stock " .. spec.title .. " contract"
 end
 

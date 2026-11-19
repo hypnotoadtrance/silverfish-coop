@@ -52,7 +52,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-turret-photo-shutter": 20.0,
 }
 _QUEST_ACTIONS = {"native-quest-start", "native-quest-objective", "native-quest-turnin"}
-_CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Clt_CoupReport_01", "Jmr_FloodPlains"}
+_CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Clt_CoupReport_01", "DepotDocs", "Jmr_FloodPlains"}
 _MAX_CERTIFICATE = 8192
 _ADMISSION_TIMEOUT = 8.0
 _IDLE_TIMEOUT = 12.0

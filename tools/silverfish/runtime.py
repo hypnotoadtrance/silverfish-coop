@@ -18,6 +18,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from .native_authored_pickup import SOURCES as AUTHORED_PICKUP_SOURCES
+from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
@@ -887,16 +888,15 @@ class Bridge:
                     data["native_turret_photo"] = photo
                 elif fields[0] == "native-bounty-board" and len(fields) == 4:
                     data["native_bounty_board"] = dict(zip(("map", "pawn", "board"), fields[1:]))
-                elif fields[0] in ("native-computer-board", "native-coup-report") and len(fields) == 15 and fields[14] in ("0", "1"):
+                elif fields[0] in COLLECTION_PREFIXES and len(fields) == 15 and fields[14] in ("0", "1"):
                     proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
                     for name, value in zip(("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after"), fields[6:12]):
                         proof[name] = None if value == "-" else int(value)
                     proof.update(objective_guid=fields[12], objective_owner=fields[13], can_turn_in=fields[14] == "1", reputation={})
-                    data[fields[0].replace("-", "_")] = proof
-                elif fields[0] in ("native-computer-board-reputation", "native-coup-report-reputation") and len(fields) == 4:
-                    quest = fields[0].removesuffix("-reputation").replace("-", "_")
-                    if quest in data and fields[1] in (("2", "5") if quest == "native_coup_report" else ("2", "4", "5")):
-                        data[quest]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                    data[COLLECTION_PREFIXES[fields[0]].key] = proof
+                elif fields[0].endswith("-reputation") and len(fields) == 4 and (spec := COLLECTION_PREFIXES.get(fields[0].removesuffix("-reputation"))):
+                    if spec.key in data and fields[1] in spec.factions:
+                        data[spec.key]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
                 elif fields[0] == "native-meet-broker" and len(fields) == 13:
                     proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")

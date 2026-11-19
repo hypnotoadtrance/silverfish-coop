@@ -6,12 +6,15 @@ local players = require("players")
 local id, final_step, cash_reward, xp_reward = "Photo_DB_Turrets", 3, 700, 1
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local scav_world = scav_bar .. ".Shop_ScavBar_P"
 local bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local world_names = { [borough] = borough .. ".Borough", [scientist] = scientist .. ".Shop_Scientist_01",
     [bridge] = bridge .. ".DeadBridge_P" }
 local boards = {
     [borough] = {path = world_names[borough] .. ":PersistentLevel.BountyBoard_BP_C_3", kind = 5},
     [scientist] = {path = world_names[scientist] .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 4},
+    [scav_bar] = {path = scav_world .. ":PersistentLevel.BountyBoard_BP_C_2", kind = 10, display_global = true},
 }
 local turret_prefix = world_names[bridge] .. ":PersistentLevel.Turret_MechGun_01_BP_C_"
 local targets = { ["turret-13"] = turret_prefix .. "13", ["turret-15"] = turret_prefix .. "15" }
@@ -143,8 +146,9 @@ local function read_flag(instance, name)
     return result.Found and result.Value or 0, result.Found
 end
 
-local function actor_context(state, phase, name)
-    local world_name, world, host = world_names[state.map], state.world, state.local_pawn
+local function actor_context(state, phase, name, listing_offers)
+    local world_name = world_names[state.map] or listing_offers and state.map == scav_bar and scav_world
+    local world, host = state.world, state.local_pawn
     if not enabled or phase ~= "hosting" or state.listening ~= true or state.server ~= false or not world_name
         or not valid(world) or world:GetFullName() ~= "World " .. world_name or not host
         or not exact(host.pawn, pawn_class) or not same(host.controller_object, state.controller)
@@ -182,7 +186,7 @@ local function board_for(context, inspect_offer_only)
         or board:GetFullName() ~= "BountyBoard_BP_C " .. placement.path or not same(board:GetWorld(), context.world)
         or not same(board["As Game Instance FP"], context.instance) or not board:HasAuthority()
         or board:IsActorBeingDestroyed() or board.TurnIn_ID ~= placement.kind or board.BountyBoard_RedeemableHere ~= true
-        or board.Display_GlobalContracts ~= false or board.AcceptAllGlobalContracts ~= true
+        or board.Display_GlobalContracts ~= (placement.display_global == true) or board.AcceptAllGlobalContracts ~= true
         or board.ShowAllContracts ~= false then fail("board_unqualified") end
     local box = board.Box
     if not exact(box, "/Script/Engine.BoxComponent") or not same(box:GetOwner(), board) then fail("board_box_unqualified") end
@@ -364,7 +368,7 @@ function photo.command(command, state, phase)
         if #command ~= 3 or type(command[3]) ~= "string" or #command[3] > 512 or command[3]:find("%c") then
             fail("board_arguments_unqualified")
         end
-        local context = actor_context(state, phase, command[3])
+        local context = actor_context(state, phase, command[3], true)
         local board = board_for(context)
         board:Configure_Stock()
         if not board.Contracts or not same(context.host.Save, context.save) or not same(context.pawn.Save, context.own_save) then

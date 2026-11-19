@@ -10,6 +10,7 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
+local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local profiles = {
     [observatory] = {
         source = "observatory-comp-board",
@@ -30,6 +31,13 @@ local profiles = {
         path = dead_end .. ".DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
         class = "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C",
         name = "Note_DeadEnd_01_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    [depot] = {
+        source = "railyard-depot-documents",
+        path = depot .. ".RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
+        class = "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C",
+        name = "Documents_DepotOffice_BP_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

@@ -6,19 +6,22 @@ local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
-local report = "Clt_CoupReport_01"
-local function board_profile(area, level, suffix, id, quests)
+local report, depot = "Clt_CoupReport_01", "DepotDocs"
+local function board_profile(area, level, suffix, id, quests, display_global)
     local world = area .. "." .. level
     local path = world .. ":PersistentLevel.BountyBoard_BP_C_" .. suffix
-    return {map = area, world = "World " .. world, path = path, name = "BountyBoard_BP_C " .. path, id = id, quests = quests}
+    return {map = area, world = "World " .. world, path = path, name = "BountyBoard_BP_C " .. path,
+        id = id, quests = quests, display_global = display_global == true}
 end
 local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer}),
+    [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot}, true),
 }
 local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
-    [report] = "Northern Passage"}
+    [report] = "Northern Passage", [depot] = "Depot Documents"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -55,6 +58,11 @@ local contract_prompt = {
         offer = "Recover the report at Dead End.\nInteract again to accept the contract.",
         missing = "Bring the Dead End report in your backpack.\nInteract to check the contract again.",
         ready = "Turn in the report for 1,200 shared cash.\nInteract again to turn it in.",
+    },
+    [depot] = {
+        offer = "Recover the documents from the depot office.\nInteract again to accept the contract.",
+        missing = "Bring the depot documents in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the documents for 1,300 shared cash.\nInteract again to turn them in.",
     },
 }
 local rendered_states = {
@@ -104,7 +112,7 @@ local function current_context(state, phase)
     local board = StaticFindObject(profile.path)
     if not exact(board, board_class) or board:GetFullName() ~= profile.name or not same(board:GetWorld(), world)
         or board:IsActorBeingDestroyed() or board.TurnIn_ID ~= profile.id or board.BountyBoard_RedeemableHere ~= true
-        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= false
+        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= profile.display_global
         or board.ShowAllContracts ~= false then return end
     local box = board.Box
     if not exact(box, box_class) or not same(box:GetOwner(), board) then return end

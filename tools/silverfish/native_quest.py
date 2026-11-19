@@ -50,12 +50,10 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
     if target == native_turret_photo.QUEST_ID and verb in ("native-quest-start", "native-quest-turnin"):
         action = "native-turret-photo-start" if verb == "native-quest-start" else "native-turret-photo-turn-in"
         return await native_turret_photo.advance(host, bridge, actor, action)
-    if target == native_computer_board.QUEST_ID and verb in ("native-quest-start", "native-quest-turnin"):
+    collection = native_computer_board.CONTRACTS.get(target) if isinstance(target, str) else None
+    if collection and verb in ("native-quest-start", "native-quest-turnin"):
         operation = native_computer_board.start if verb == "native-quest-start" else native_computer_board.turn_in
-        return await operation(host, bridge, actor)
-    if target == native_computer_board.COUP_REPORT.quest_id and verb in ("native-quest-start", "native-quest-turnin"):
-        operation = native_computer_board.start if verb == "native-quest-start" else native_computer_board.turn_in
-        return await operation(host, bridge, actor, spec=native_computer_board.COUP_REPORT)
+        return await operation(host, bridge, actor, spec=collection)
     if target == native_flood_jammer.QUEST_ID:
         if verb not in ("native-quest-start", "native-quest-turnin"):
             raise party.RuleError("native_flood_jammer_requires_the_authored_objective")

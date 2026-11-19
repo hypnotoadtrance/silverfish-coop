@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from . import native_authored_pickup, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BOROUGH, SCIENTIST_SHOP
+from .travel import BOROUGH, SCAV_BAR, SCIENTIST_SHOP
 
 
 QUEST_ID = "Clt_ComputerBoard"
@@ -16,9 +16,11 @@ TURN_IN = "native-computer-board-turn-in"
 BOARDS = {
     BOROUGH: native_wire_quest.BOARD,
     SCIENTIST_SHOP: f"BountyBoard_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2",
+    SCAV_BAR: f"BountyBoard_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.BountyBoard_BP_C_2",
 }
 FACTIONS = {"2", "4", "5"}
 STEPS = {None, 1, 2, -10}
+BOROUGH_SCIENTIST_BOARDS = frozenset({BOROUGH, SCIENTIST_SHOP})
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class CollectionContract:
     factions: frozenset[str]
     consumed_field: str
     pickup_source: str | None = None
+    board_maps: frozenset[str] = BOROUGH_SCIENTIST_BOARDS
 
     @property
     def key(self) -> str:
@@ -46,14 +49,21 @@ COMPUTER_BOARD = CollectionContract(QUEST_ID, "native-computer-board", "Computer
 COUP_REPORT = CollectionContract("Clt_CoupReport_01", "native-coup-report", "Northern Passage", BOROUGH,
                                  "borough_redemption_required", 1200, frozenset({"2", "5"}), "consumed_note",
                                  native_authored_pickup.COUP_REPORT)
+DEPOT_DOCUMENTS = CollectionContract("DepotDocs", "native-depot-documents", "Depot Documents", SCAV_BAR,
+                                     "scav_bar_redemption_required", 1300, frozenset({"8"}), "consumed_documents",
+                                     native_authored_pickup.DEPOT_DOCUMENTS, frozenset({SCAV_BAR}))
+CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS)}
+PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
+PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
 
 
-def _scope(host, actor: str, spec: CollectionContract) -> tuple[str, str]:
+def _scope(host, actor: str, spec: CollectionContract, *, turning_in: bool = False) -> tuple[str, str]:
     player = host.party["players"].get(actor)
     area = host.last_game.get("map")
+    available_boards = BOARDS if turning_in else spec.board_maps
     if (not host.native_profile or not host.native_zones or not host.native_guest or host.transitioning
             or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
-            or host.last_game.get("state") != "hosting" or area not in BOARDS
+            or host.last_game.get("state") != "hosting" or area not in available_boards
             or time.monotonic() - host.last_seen > 3 or not player or player["downed"]
             or actor in host.party["pending_spawns"]):
         raise party.RuleError(f"{spec.key}_unavailable")
@@ -136,7 +146,7 @@ async def turn_in(host, bridge, actor: str, *, spec: CollectionContract = COMPUT
 
 
 async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning_in: bool) -> dict:
-    pawn, area = _scope(host, actor, spec)
+    pawn, area = _scope(host, actor, spec, turning_in=turning_in)
     refusal = "stock_" + spec.key.removeprefix("native_") + "_"
     if turning_in and area != spec.redeem_map:
         raise party.RuleError(refusal + spec.wrong_board)

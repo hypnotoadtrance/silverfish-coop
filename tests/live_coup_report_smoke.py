@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import subprocess
@@ -17,23 +18,42 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
-from tools.silverfish.native_authored_pickup import COUP_REPORT, DEAD_END, SOURCES
+from tools.silverfish import native_computer_board as collections
+from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
+from tools.silverfish.native_authored_pickup import DEAD_END, SOURCES
+from tools.silverfish.travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, RAIL_YARD
 
 
-QUEST = "Clt_CoupReport_01"
-BOROUGH = "/Game/Classes/Maps/Maps_SafeZones/Borough"
-BOARD = f"BountyBoard_BP_C {BOROUGH}.Borough:PersistentLevel.BountyBoard_BP_C_3"
-STEPS = (
-    ("NorthEast_Rail_P", "M35_End", "Level_Exit_BP_C_194"),
-    ("CrossRoads_P", "Cross_NE", "Level_Exit_BP_C_269"),
-    ("RailYard_P", "Depot_Cross_Rail", "Level_Exit_BP_C_1"),
-    ("City_01_P", "Rail_City", "Level_Exit_BP_C_220"),
-    ("Borough", "City_Borough", "Level_Exit_BP_C_388"),
+@dataclass(frozen=True)
+class CollectionSmoke:
+    name: str
+    spec: collections.CollectionContract
+    maps: tuple[str, ...]
+    reputation: dict[str, tuple[str, int]]
+
+    def routes(self) -> tuple[AuthoredRoute, ...]:
+        routes = []
+        for source, destination in zip(self.maps, self.maps[1:]):
+            matches = [route for route in AUTHORED_ROUTES if (route.source, route.destination) == (source, destination)]
+            if len(matches) != 1:
+                raise ValueError(f"Choose one exact stock departure from {source} to {destination}")
+            routes.append(matches[0])
+        return tuple(routes)
+
+
+NORTHERN_PASSAGE = CollectionSmoke(
+    "coup-report", collections.COUP_REPORT, (DEAD_END, NORTHEAST_RAIL, CROSSROADS, RAIL_YARD, CITY, BOROUGH),
+    {"2": ("Rep_Commune", 60), "5": ("Rep_Coup", -100)},
 )
 
 
-async def exercise(work, vanilla_saved, *, board_input=False):
-    name = "coup-report-" + uuid.uuid4().hex[:8]
+async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASSAGE):
+    spec = plan.spec
+    quest, redemption, source = spec.quest_id, spec.redeem_map, spec.pickup_source
+    pickup_map, pickup_actor, pickup_class = SOURCES[source]
+    board = collections.BOARDS[redemption]
+    routes = plan.routes()
+    name = plan.name + "-" + uuid.uuid4().hex[:8]
     root = work / "campaigns" / name
     run, client_run = root / "run", work / "clients" / name / "run"
     run.mkdir(parents=True)
@@ -97,64 +117,94 @@ async def exercise(work, vanilla_saved, *, board_input=False):
         member = save["characters"][character]["state"]["native_guest_save"]
         assert owner["slot"] != member["slot"] and member["character_id"] == character, member
         directory = native_host_save.directory(root / "game-user")
-        wanted = ("Player_Cash", "Player_Xp", "Rep_Commune", "Rep_Coup")
+        wanted = ("Player_Cash", "Player_Xp", *(flag for flag, _ in plan.reputation.values()))
         balances = {}
         for role, frame in (("host", owner), ("guest", member)):
-            flags = stock_flags(directory, frame, BOROUGH)
+            flags = stock_flags(directory, frame, redemption)
             balances[role] = {key: flags.get(key, 0) for key in wanted}
         return balances
 
     async def board_state(*states):
         saved = await wait(client_run, lambda s: (row := s.get("game", {}).get("native_wire_board", {}))
-                           and row.get("map") == BOROUGH and row.get("board") == BOARD and row.get("state") in states)
+                           and row.get("map") == redemption and row.get("board") == board and row.get("state") in states)
         return saved["game"]["native_wire_board"]
 
     async def board_press(expected):
-        pressed = (await action(guest, "native-wire-board-fixture", "--target", QUEST))["native_wire_board"]
-        assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (BOROUGH, BOARD, QUEST, expected), pressed
+        pressed = (await action(guest, "native-wire-board-fixture", "--target", quest))["native_wire_board"]
+        assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (redemption, board, quest, expected), pressed
         evidence.setdefault("board_presses", []).append(pressed)
 
     async def committed_quest(step):
         def record(state):
-            return state.get("campaign", {}).get("world", {}).get("party", {}).get("native_quests", {}).get(QUEST, {})
+            return state.get("campaign", {}).get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
 
         saved = await wait(run, lambda state: record(state).get("step") == step)
         return record(saved)
 
     try:
-        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", DEAD_END, *host_flags)
+        start_area = plan.maps[0]
+        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", start_area, *host_flags)
         ready = await wait(run, lambda s: s.get("state") == "hosting")
-        invitation = await command("invite", *host, "--name", "Dead End note tester", "--character", "Courier")
+        invitation = await command("invite", *host, "--name", f"{spec.title} tester", "--character", "Courier")
         character = invitation["character_id"]
         peer = await launch(guest, "guest", "join", *guest, "--headless", "--native-zones", "--invite", invitation["invite_file"])
-        current = await paired(DEAD_END)
-        await action(host, "native-authored-pickup-approach", "--target", "guest")
-        interaction = (await action(guest, "native-authored-pickup-fixture"))["native_authored_pickup_interaction"]
-        assert interaction["source"] == COUP_REPORT and interaction["entry"] == "fixture", interaction
-        claim = (await action(guest, "native-authored-pickup-claim", "--target", COUP_REPORT))["native_authored_pickup_claim"]
-        guid = claim["guid"]
-        row = (await inventory(guest))[guid]
-        assert (row["class_path"], row["quantity"], row["source"]) == (SOURCES[COUP_REPORT][2], 1, "backpack"), row
-        assert guid not in await inventory(host)
-        evidence["stock_pickup"] = {"interaction": interaction, "claim": claim, "inventory": row}
+        current = await paired(start_area)
+        if start_area == BOROUGH:
+            evidence["stock_xp_setup"] = await action(host, "native-turret-photo-xp-fixture")
 
-        for world, entrance, actor in STEPS:
-            destination = BOROUGH if world == "Borough" else f"/Game/Classes/Maps/Maps_OverWorld/{world}"
-            evidence["pending_route"] = (current["game"]["map"], destination, entrance, actor)
-            endpoint = ("--entrance", entrance, "--exit-actor", actor)
-            for role in ("host", "guest"):
-                await action(host, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
-            await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
-            current = await paired(destination, (current["generation"], current["zone_epoch"]))
+        async def collect_pickup():
+            await action(host, "native-authored-pickup-approach", "--target", "guest")
+            interaction = (await action(guest, "native-authored-pickup-fixture"))["native_authored_pickup_interaction"]
+            assert interaction["source"] == source and interaction["entry"] == "fixture", interaction
+            claim = (await action(guest, "native-authored-pickup-claim", "--target", source))["native_authored_pickup_claim"]
+            assert (claim["source"], claim["map"], claim["actor"], claim["owner"]) == (source, pickup_map, pickup_actor, character), claim
+            guid = claim["guid"]
+            row = (await inventory(guest))[guid]
+            assert (row["class_path"], row["quantity"], row["source"]) == (pickup_class, 1, "backpack"), row
+            assert guid not in await inventory(host)
+            evidence["stock_pickup"] = {"interaction": interaction, "claim": claim, "inventory": row}
+            return guid
+
+        guid = await collect_pickup() if start_area == pickup_map else None
+        for route in routes:
+            evidence["pending_route"] = (route.source, route.destination, route.entrance, route.actor)
+            endpoint = ("--entrance", route.entrance)
+            if route.kind == "door":
+                for role in ("host", "guest"):
+                    await action(host, "native-door-position", "--target", role, "--exit-position", "near", *endpoint)
+                await action(host, "native-door-probe", "--target", "host", *endpoint)
+            else:
+                endpoint += ("--exit-actor", route.actor)
+                for role in ("host", "guest"):
+                    await action(host, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
+                await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
+            current = await paired(route.destination, (current["generation"], current["zone_epoch"]))
             evidence["routes"].append(evidence.pop("pending_route"))
+            if route.destination == pickup_map and guid is None:
+                guid = await collect_pickup()
 
-        await action(host, "native-coup-report-approach", "--target", character)
-        refused = await action(guest, "native-quest-start", "--target", QUEST, accepted=False)
-        assert "not_offered" in refused["error"], refused
-        evidence["before_host_xp"] = refused["error"]
-        await action(host, "native-turret-photo-xp-fixture")
-        offered = (await action(guest, "native-coup-report-preflight"))["native_coup_report"]
-        assert offered["board"] == BOARD and offered["step_after"] is None, offered
+        assert guid is not None and current["game"]["map"] == redemption
+        await action(host, spec.command("approach"), "--target", character)
+        if start_area != BOROUGH and redemption == BOROUGH:
+            refused = await action(guest, "native-quest-start", "--target", quest, accepted=False)
+            assert "not_offered" in refused["error"], refused
+            evidence["before_host_xp"] = refused["error"]
+            await action(host, "native-turret-photo-xp-fixture")
+        offered = (await action(guest, spec.command("preflight")))[spec.key]
+        assert offered["board"] == board and offered["step_after"] is None and offered["xp_before"] >= 3, offered
+        offset = 0
+        while offset is not None:
+            catalog = (await action(guest, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
+            assert (catalog["board"], catalog["offset"]) == (board, offset), catalog
+            offers = {row["id"]: row["co_op"] for row in catalog["quests"]}
+            if quest in offers:
+                assert offers[quest] in ("experimental", "verified"), catalog
+                evidence["stock_catalog"] = {"board": catalog["board"], "co_op": offers[quest]}
+                break
+            next_offset = catalog["next_offset"]
+            assert next_offset is None or offset < next_offset <= 128, catalog
+            offset = next_offset
+        assert "stock_catalog" in evidence, catalog
         if board_input:
             await board_state("armed", "focused")
             await board_press("loading")
@@ -162,9 +212,9 @@ async def exercise(work, vanilla_saved, *, board_input=False):
             await board_press("starting")
             accepted = await committed_quest(1)
         else:
-            accepted = await action(guest, "native-quest-start", "--target", QUEST)
-        assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (QUEST, 1, character), accepted
-        active = (await action(guest, "native-coup-report-preflight"))["native_coup_report"]
+            accepted = await action(guest, "native-quest-start", "--target", quest)
+        assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
+        active = (await action(guest, spec.command("preflight")))[spec.key]
         assert (active["step_after"], active["objective_guid"], active["objective_owner"]) == (1, guid, "guest"), active
         reputation = active["reputation"]
         evidence["effective_stock_reputation_before"] = {faction: row["before"] for faction, row in reputation.items()}
@@ -175,18 +225,19 @@ async def exercise(work, vanilla_saved, *, board_input=False):
             await board_press("redeeming")
             redeemed = await committed_quest(-10)
         else:
-            redeemed = await action(guest, "native-quest-turnin", "--target", QUEST)
-        assert (redeemed["step"], redeemed["cash"], redeemed["xp"]) == (-10, 1200, 1), redeemed
+            redeemed = await action(guest, "native-quest-turnin", "--target", quest)
+        assert (redeemed["step"], redeemed["cash"], redeemed["xp"]) == (-10, spec.cash, 1), redeemed
         assert set(redeemed["recipients"]) == {"host", character}, redeemed
-        assert (redeemed["consumed_note"], redeemed["objective_owner"]) == (guid, character), redeemed
+        assert (redeemed[spec.consumed_field], redeemed["objective_owner"]) == (guid, character), redeemed
         assert guid not in await inventory(guest) and guid not in await inventory(host)
         after = await stock_balances()
-        assert after["host"] == dict(before["host"], Player_Cash=before["host"]["Player_Cash"] + 1200,
-                                     Player_Xp=before["host"]["Player_Xp"] + 1, Rep_Commune=reputation["2"]["before"] + 60,
-                                     Rep_Coup=reputation["5"]["before"] - 100), after
+        expected_reputation = {flag: reputation[faction]["before"] + delta
+                               for faction, (flag, delta) in plan.reputation.items()}
+        assert after["host"] == dict(before["host"], Player_Cash=before["host"]["Player_Cash"] + spec.cash,
+                                     Player_Xp=before["host"]["Player_Xp"] + 1, **expected_reputation), after
         assert after["guest"] == dict(before["guest"], Player_Xp=before["guest"]["Player_Xp"] + 1), after
         evidence.update(stock_turn_in=redeemed, stock_after=after)
-        assert (await action(guest, "native-quest-turnin", "--target", QUEST))["effect"] == "native_quest_already_settled"
+        assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"
 
         await stop(host, authority)
         await stop(guest, peer)
@@ -194,9 +245,9 @@ async def exercise(work, vanilla_saved, *, board_input=False):
         await wait(run, lambda s: s.get("state") == "hosting" and s.get("generation") != ready["generation"])
         renewed = await action(host, "refresh-invite", "--target", invitation["guest_id"])
         await launch(guest, "guest-restart", "join", *guest, "--headless", "--native-zones", "--invite", renewed["invite_file"])
-        restarted = await paired(BOROUGH)
+        restarted = await paired(redemption)
         assert guid not in await inventory(guest) and await stock_balances() == after
-        assert (await action(guest, "native-quest-turnin", "--target", QUEST))["effect"] == "native_quest_already_settled"
+        assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"
         evidence.update(verified=True, restarted_generation=restarted["generation"])
     except BaseException as error:
         evidence["failure"] = str(error)
@@ -212,7 +263,7 @@ async def exercise(work, vanilla_saved, *, board_input=False):
                     await proc.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == original
         evidence["verified"] = evidence["verified"] and evidence["original_saves_verified"]
-        (run / "live-coup-report-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        (run / f"live-{plan.name}-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         assert evidence["original_saves_verified"], "Original single-player saves changed"
 
