@@ -3,6 +3,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from tools.silverfish import party
 from tools.silverfish.multi_host import MultiHost
 from tools.silverfish.service import Client, Host
 
@@ -67,3 +68,28 @@ class GuestInputIdentityTests(unittest.IsolatedAsyncioTestCase):
         await Client.service_reload_input(second, True)
         self.assertEqual(first.gameplay_action.await_count, 1)
         self.assertNotEqual(first.gameplay_action.await_args.args[1], second.gameplay_action.await_args.args[1])
+
+
+class NativeRespawnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_offline_wipe_participant_heals_after_joining_host_in_later_zone(self):
+        saved = party.new_party()
+        saved["pending_spawns"]["scout"] = {"map": "rest", "location": [9, 8, 7], "at_native_rest": True}
+        current = {"map": "later", "pawns": {"guest": {"health": 0, "max_health": 250, "location": [1, 2, 3]}}}
+        restored = {"map": "later", "pawns": {"guest": {**current["pawns"]["guest"], "health": 250}}}
+        binding = object()
+        host = SimpleNamespace(party=saved, last_game=current, native_guest=True,
+                               roles=lambda: {"guest": "scout"}, role_pawn=lambda _role: ("guest", binding),
+                               checkpoint=Mock(), checkpoint_native=AsyncMock())
+        bridge = SimpleNamespace(restore=AsyncMock(side_effect=[None, restored]))
+
+        await Host.apply_pending_spawns(host, bridge)
+        self.assertIn("scout", host.party["pending_spawns"])
+        host.checkpoint_native.assert_not_awaited()
+
+        await Host.apply_pending_spawns(host, bridge)
+        bridge.restore.assert_awaited_with("guest", {"location": [1, 2, 3], "health": 250}, binding=binding,
+                                           respawning=True)
+        self.assertIs(host.last_game, restored)
+        self.assertEqual(host.party["pending_spawns"], {})
+        host.checkpoint_native.assert_awaited_once_with(bridge, host.party, require_guest_frames=frozenset({"scout"}))
+        host.checkpoint.assert_not_called()

@@ -1,14 +1,18 @@
 import json
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_save, native_inventory_wipe as native_wipe
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish import native_host_save, native_inventory_death, native_inventory_wipe as native_wipe, party
+from tools.silverfish.service import Host
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
-class NativeInventoryWipeTests(unittest.TestCase):
+class NativeInventoryWipeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.profile = Path(self.enterContext(tempfile.TemporaryDirectory()))
         native_host_save.directory(self.profile).mkdir(parents=True)
@@ -148,3 +152,113 @@ class NativeInventoryWipeTests(unittest.TestCase):
         guest_path.write_bytes(b"GVAS" + bytes(33))
         with self.assertRaisesRegex(native_wipe.InventoryWipeError, "invalid_native_frame"):
             native_wipe.plan(self.profile, draft, {})
+
+    async def test_wipe_waits_for_guest_grace_then_finishes_with_exact_offline_generation(self):
+        state = party.new_party()
+        rest = {"map": CROSSROADS, "location": [0, 0, 0]}
+        state["checkpoint"] = rest
+        roster = tuple(self.frames)
+        for actor in roster:
+            party.add_player(state, actor)
+            state["players"][actor]["downed"] = True
+        state["wipe"] = party.begin_when_all_down(state, roster, {"host": rest}, time.time() - 180)
+        campaign = {"world": {"native_host_save": self.frames["host"]}, "leases": [{"character_id": self.guest}],
+                    "characters": [{"character_id": self.guest, "state": {"native_guest_save": self.frames[self.guest]}}]}
+        recipients = {}
+        host = SimpleNamespace(
+            party=state, native_guest=True, native_zones=True, native_profile=self.profile,
+            allowed_maps={CROSSROADS}, fixtures=False, transitioning=False, native_checkpoint_unsafe=False,
+            last_game={"map": CROSSROADS, "pawns": {"local": {"name": "authority-host"}},
+                       "native_rules": {"extraction_mode": 1, "items_kept_on_death": 1, "drop_bone_pile": 1}},
+            store=SimpleNamespace(status=lambda: campaign), control=SimpleNamespace(event=Mock()),
+            checkpoint=Mock(), checkpoint_native=AsyncMock(return_value=1), native_recipients=lambda: recipients,
+            dream_isolated=lambda _: False, stock_wipe_arrival=AsyncMock(return_value=rest),
+        )
+        censuses = {row["slot"]: row for row in self.censuses().values()}
+        replacement = self.frame()
+        lease_during_preparation = False
+
+        async def read_census(_, _bridge, frame):
+            self.assertTrue(host.transitioning)
+            return censuses[frame["slot"]]
+
+        async def prepare(_, _bridge, partition):
+            self.assertTrue(host.transitioning)
+            if partition["source"].get("character_id") == self.guest:
+                self.assertEqual(partition["source"], self.frames[self.guest])
+                self.assertCountEqual(partition["dropped"], [self.guid(1), self.guid(6)])
+                if lease_during_preparation:
+                    campaign["leases"].append({"character_id": self.guest})
+            return {"replacement": replacement, "bag": None}
+
+        async def expire_during_capture(_bridge, *, require_guest_frames):
+            self.assertTrue(host.transitioning)
+            self.assertEqual(require_guest_frames, frozenset({self.guest}))
+            recipients.clear()
+            campaign["leases"].clear()
+            raise RuntimeError("The checkpoint would omit a newly modified detached guest save")
+
+        with (patch.object(native_inventory_death.native_inventory, "read_complete", side_effect=read_census) as census,
+              patch.object(native_inventory_death, "prepare", side_effect=prepare),
+              patch.object(native_inventory_death, "action", return_value={"ok": True, "status": "applied"}) as apply):
+            await Host.settle_wipe(host, None, None)
+            self.assertNotIn("native", host.party["wipe"])
+            host.checkpoint_native.assert_not_awaited()
+
+            recipients[self.guest] = {"pawn": "authority-guest"}
+            host.checkpoint_native.side_effect = expire_during_capture
+            await Host.settle_wipe(host, None, None)
+            self.assertNotIn("native", host.party["wipe"])
+            self.assertFalse(host.transitioning)
+            host.checkpoint_native.reset_mock(side_effect=True)
+
+            await Host.settle_wipe(host, None, None)
+            draft = host.party["wipe"]
+            self.assertEqual(draft["roster"], sorted(roster))
+            self.assertEqual(draft["native"]["frames"][self.guest], self.frames[self.guest])
+            self.assertGreater(draft["deadline"], time.time())
+            self.assertFalse(host.transitioning)
+            host.checkpoint_native.assert_awaited_once_with(None, require_guest_frames=frozenset())
+
+            # A restarted launcher honors an expired selection deadline and retains the frozen roster.
+            host.party = json.loads(json.dumps(host.party))
+            host.party["wipe"]["deadline"] = time.time() - 1
+            lease_during_preparation = True
+            await Host.settle_wipe(host, None, None)
+            self.assertNotIn("native_committed", host.party["wipe"])
+            self.assertFalse(host.transitioning)
+            apply.assert_not_awaited()
+
+            lease_during_preparation = False
+            campaign["leases"].clear()
+            await Host.settle_wipe(host, None, None)
+
+        self.assertEqual(census.await_count, 2)
+        apply.assert_awaited_once_with(host, None, "apply", "authority-host", self.frames["host"], replacement)
+        _, inventory_commit, _ = host.checkpoint_native.await_args_list
+        self.assertEqual(inventory_commit.kwargs["require_guest_frames"], frozenset({self.guest}))
+        self.assertEqual(inventory_commit.kwargs["unleased_states"][self.guest]["native_guest_save"],
+                         dict(replacement, character_id=self.guest))
+        self.assertIsNone(host.party["wipe"])
+        self.assertEqual(set(host.party["pending_spawns"]), set(roster))
+        self.assertFalse(host.transitioning)
+
+    async def test_freeze_refuses_offline_frame_from_another_map_or_character(self):
+        live_guest = str(uuid.uuid4())
+        campaign = {"world": {"native_host_save": self.frames["host"]}, "leases": [{"character_id": live_guest}],
+                    "characters": [
+                        {"character_id": self.guest, "state": {"native_guest_save": dict(self.frames[self.guest], map=OBSERVATORY)}},
+                        {"character_id": live_guest, "state": {"native_guest_save": self.frame(live_guest)}},
+                    ]}
+        host = SimpleNamespace(last_game={"map": CROSSROADS}, store=SimpleNamespace(status=lambda: campaign),
+                               checkpoint_native=AsyncMock())
+        with patch.object(native_inventory_death.native_inventory, "read_complete") as census:
+            for invalid in (dict(self.frames[self.guest], map=OBSERVATORY),
+                            dict(self.frames[self.guest], character_id=live_guest)):
+                campaign["characters"][0]["state"]["native_guest_save"] = invalid
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(RuntimeError, "exact stock inventory"):
+                    await native_inventory_death.freeze(host, None, self.wipe_id, ["host", self.guest, live_guest],
+                                                        keep_slots=1, drop_backpacks=True,
+                                                        offline_owners=frozenset({self.guest}))
+                host.checkpoint_native.assert_awaited_with(None, require_guest_frames=frozenset({live_guest}))
+                census.assert_not_awaited()

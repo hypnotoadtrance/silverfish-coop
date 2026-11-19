@@ -1582,25 +1582,42 @@ class Host:
                     raise RuntimeError("The exact host stock wipe retention setting is unavailable")
                 drops = fixture["drop_backpacks"] if configured is not None else (
                     rules.get("drop_bone_pile") == 1 or (self.fixtures and fixture["drop_backpacks"]))
-                if not set(draft["roster"]).issubset(native_inventory_death.owner_pawns(self)):
+                owners = native_inventory_death.owner_pawns(self)
+                guests = frozenset(draft["roster"]) - {"host"}
+                leased = native_inventory_death.leased_characters(self.store.status()) & guests
+                if not owners["host"] or any(bool(owners.get(actor)) != (actor in leased) for actor in guests):
                     return
-                frozen = await native_inventory_death.freeze(
-                    self, bridge, draft["id"], draft["roster"], keep_slots=slots, drop_backpacks=drops,
-                    lose_slot=extraction and configured is None and rules.get("lose_slot_per_death") == 1,
-                )
-                candidate = party.load_party(self.party)
-                candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops,
-                                         deadline=time.time() + (30 if slots else 0))
-                self.checkpoint(candidate)
-                self.party = candidate
-                draft = self.party["wipe"]
-                now = time.time()
+                was_transitioning = self.transitioning
+                self.transitioning = True
+                try:
+                    frozen = await native_inventory_death.freeze(
+                        self, bridge, draft["id"], draft["roster"], keep_slots=slots, drop_backpacks=drops,
+                        lose_slot=extraction and configured is None and rules.get("lose_slot_per_death") == 1,
+                        offline_owners=guests - leased,
+                    )
+                    candidate = party.load_party(self.party)
+                    candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops,
+                                             deadline=time.time() + (30 if slots else 0))
+                    self.checkpoint(candidate)
+                    self.party = candidate
+                    draft = self.party["wipe"]
+                    now = time.time()
+                except native_inventory_death.WipeOwnersChanged:
+                    return
+                finally:
+                    self.transitioning = was_transitioning
         result = wipe.finish_wipe(draft, now)
         if result is None:
             return
         checkpoint = result["checkpoint"]
-        if draft.get("native") and not await native_inventory_death.settle(self, bridge, draft):
-            return
+        if draft.get("native"):
+            was_transitioning = self.transitioning
+            self.transitioning = True
+            try:
+                if not await native_inventory_death.settle(self, bridge, draft):
+                    return
+            finally:
+                self.transitioning = was_transitioning
         if self.dream_isolated(self.last_game) and native_dream.visit(self.party):
             await self.advance_dream(bridge, transport, wiped=True)
             if native_dream.visit(self.party):
@@ -1634,8 +1651,8 @@ class Host:
             name, binding = self.role_pawn(role)
             if not spot or name not in self.last_game.get("pawns", {}):
                 continue
-            if spot["map"] != self.last_game.get("map"):
-                # The locked checkpoint has been superseded by a later zone.
+            native_respawn = self.native_guest and bool(spot.get("at_native_rest"))
+            if spot["map"] != self.last_game.get("map") and not native_respawn:
                 candidate = party.load_party(self.party)
                 candidate["pending_spawns"].pop(actor, None)
                 self.checkpoint(candidate)
@@ -1646,21 +1663,24 @@ class Host:
                     body = self.last_game["pawns"][name]
                     if body["health"] is None or body.get("max_health") is None:
                         continue
-                    location = body["location"] if spot.get("at_native_rest") else spot["location"]
+                    # A late return uses the current safe spawn, including after later travel.
+                    location = body["location"] if native_respawn else spot["location"]
                     if any(axis is None for axis in location):
                         continue
                     spot = {"location": location, "health": body["max_health"]}
-                state = await bridge.restore(name, spot, binding=binding,
-                                             respawning=self.party["pending_spawns"][actor].get("at_native_rest", False))
+                state = await bridge.restore(name, spot, binding=binding, respawning=native_respawn)
             except (OSError, RuntimeError) as error:
                 self.control.event("respawn_placement_pending", actor=actor, reason=str(error))
+                continue
+            if native_respawn and not state:
                 continue
             if state:
                 self.last_game = state
                 self.last_seen = time.monotonic()
             candidate = party.load_party(self.party)
             candidate["pending_spawns"].pop(actor, None)
-            await self.checkpoint_native(bridge, candidate)
+            require_guest_frames = frozenset({actor}) if native_respawn and actor != "host" else frozenset()
+            await self.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames)
             self.party = candidate
 
     def _invitation_address(self, address) -> str:

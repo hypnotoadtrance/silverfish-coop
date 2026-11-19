@@ -9,12 +9,38 @@ from . import native_host_save, native_inventory, native_inventory_wipe, party
 from .runtime import write_text
 
 
+class WipeOwnersChanged(RuntimeError):
+    """A wipe participant changed lease state during inventory checkpointing."""
+
+
+def leased_characters(campaign: dict) -> set[str]:
+    return {lease["character_id"] for lease in campaign["leases"]}
+
+
 async def freeze(host, bridge, wipe_id: str, roster: list[str], *, keep_slots: int, drop_backpacks: bool,
-                 lose_slot: bool = False) -> dict:
-    await host.checkpoint_native(bridge)
+                 lose_slot: bool = False, offline_owners: frozenset[str] = frozenset()) -> dict:
+    source = host.last_game["map"]
+    guests = frozenset(roster) - {"host"}
+    if not offline_owners <= guests:
+        raise RuntimeError("Only absent guest characters can use their durable wipe source")
+    live_guests = guests - offline_owners
+    if leased_characters(host.store.status()) & guests != live_guests:
+        raise WipeOwnersChanged("The party's native wipe leases changed before capture")
+    try:
+        await host.checkpoint_native(bridge, require_guest_frames=live_guests)
+    except RuntimeError as error:
+        if leased_characters(host.store.status()) & guests != live_guests:
+            raise WipeOwnersChanged("The party's native wipe leases changed during capture") from error
+        raise
     campaign = host.store.status()
+    if leased_characters(campaign) & guests != live_guests:
+        raise WipeOwnersChanged("The party's native wipe leases changed during capture")
     frames = {actor: native_inventory.saved_frame(host, campaign, actor) for actor in roster}
-    if any(frame is None or frame["map"] != host.last_game["map"] for frame in frames.values()):
+    if host.last_game["map"] != source or any(
+        not isinstance(frame, dict) or frame.get("map") != source
+        or frame.get("character_id") != (None if actor == "host" else actor)
+        for actor, frame in frames.items()
+    ):
         raise RuntimeError("The party's exact stock inventory generations are unavailable")
     inventories = {actor: await native_inventory.read_complete(host, bridge, frame) for actor, frame in frames.items()}
     return await asyncio.to_thread(native_inventory_wipe.freeze, host.native_profile, wipe_id, roster, frames,
@@ -77,12 +103,17 @@ async def settle(host, bridge, draft: dict) -> bool:
         return True
     owners = owner_pawns(host)
     campaign = host.store.status()
-    leases = {entry["character_id"] for entry in campaign["leases"]}
-    if not owners["host"] or any(not owners.get(actor) and actor in leases for actor in stock["roster"]):
+    roster = set(stock["roster"])
+    leases = leased_characters(campaign) & roster
+    if not owners["host"] or any(bool(owners.get(actor)) != (actor in leases) for actor in roster - {"host"}):
         return False
     choices = {actor: list(retained) for actor, retained in draft["choices"].items()}
     plan = await asyncio.to_thread(native_inventory_wipe.plan, host.native_profile, stock, choices)
     prepared = {actor: await prepare(host, bridge, partition) for actor, partition in plan["owners"].items()}
+    current_owners = owner_pawns(host)
+    if (leased_characters(host.store.status()) & roster != leases
+            or any(current_owners.get(actor) != owners.get(actor) for actor in roster)):
+        return False
     candidate = party.load_party(host.party)
     candidate["wipe"]["native_committed"] = plan["receipt"]
     bags = candidate.setdefault("native_backpacks", {})
