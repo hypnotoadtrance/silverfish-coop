@@ -390,14 +390,21 @@ local function nexus_rail_pocket(world, world_name, center, normal, sign)
     local component_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
     if not valid(component_class) then error("Gold Nexus Rail crypt static mesh component class missing", 0) end
     local components = portal:K2_GetComponentsByClass(component_class)
-    local count = components and components:GetArrayNum()
+    local representation = type(components)
+    if representation == "userdata" and type(components.type) == "function" then representation = components:type() end
+    -- UE4SS UFunction array returns are one-based Lua tables; direct TArray userdata also implements length.
+    local count = (representation == "table" or representation == "TArray") and #components or nil
     if not finite(count) or count < 2 or count > 24 then
-        error("Gold Nexus Rail crypt component census unavailable: " .. tostring(count), 0)
+        error(string.format("Gold Nexus Rail crypt component census unavailable (type %s, count %s)",
+            representation, tostring(count)), 0)
     end
     local crypt, cube
     local names = {}
     for index = 1, count do
         local component = components[index]
+        if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
+            component = component:get()
+        end
         if valid(component) then
             local name = component:GetFullName()
             names[#names + 1] = name:match("[^.]+$") or name
