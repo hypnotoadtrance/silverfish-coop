@@ -8,6 +8,20 @@
 
 namespace silverfish::guest_weapon_profiles
 {
+    struct BallAmmo
+    {
+        int caliber;
+        const RC::CharType* row;
+        const RC::CharType* item;
+        const RC::CharType* projectile;
+        int fixture_units;
+    };
+
+    inline constexpr BallAmmo nine_mm_ball{0, STR("9mm_Ball"),
+        STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C"), 9};
+    inline constexpr BallAmmo forty_five_ball{1, STR("45Cal_Ball"),
+        STR("/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Magnum.Projectile_Pistol_Magnum_C"), 10};
+
     struct Profile
     {
         std::string_view kind;
@@ -17,17 +31,21 @@ namespace silverfish::guest_weapon_profiles
         int burst_length;
         double fire_rate;
         bool require_default_payload;
+        const BallAmmo* ammo;
     };
 
     inline constexpr std::array firearms{
-        Profile{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"), false, 0, 0, 0.0, false},
-        Profile{"smg-standard", STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"), true, 30, 0, 0.075, false},
-        Profile{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"), true, 0, 0, 0.0, false},
-        Profile{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"), true, 14, 1, 0.05, false},
-        Profile{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"), false, 0, 0, 0.0, false},
-        Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true},
-        Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true},
-        Profile{"pistol-02", STR("/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C"), true, 12, 1, 0.1, true},
-        Profile{"tac-pistol", STR("/Game/Classes/Weapons/Wep_TacPistol.Wep_TacPistol_C"), true, 18, 1, 0.07, true},
+        Profile{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"), false, 0, 0, 0.0, false, nullptr},
+        Profile{"smg-standard", STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"), true, 30, 0, 0.075, false, &nine_mm_ball},
+        Profile{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"), true, 0, 0, 0.0, false, nullptr},
+        Profile{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"), true, 14, 1, 0.05, false, &nine_mm_ball},
+        Profile{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"), false, 0, 0, 0.0, false, nullptr},
+        Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball},
+        Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball},
+        Profile{"pistol-02", STR("/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C"), true, 12, 1, 0.1, true, &nine_mm_ball},
+        Profile{"tac-pistol", STR("/Game/Classes/Weapons/Wep_TacPistol.Wep_TacPistol_C"), true, 18, 1, 0.07, true, &nine_mm_ball},
+        Profile{"1911", STR("/Game/Classes/Weapons/Wep_1911.Wep_1911_C"), true, 8, 1, 0.1, true, &forty_five_ball},
+        Profile{"1911-fancy", STR("/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C"), true, 8, 1, 0.1, true, &forty_five_ball},
+        Profile{"heavy-pistol", STR("/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C"), true, 12, 1, 0.15, true, &forty_five_ball},
     };
 }

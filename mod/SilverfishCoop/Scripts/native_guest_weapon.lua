@@ -7,7 +7,6 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
-local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -83,7 +82,11 @@ function guest_weapon.command(fields, state, phase)
         guid = equipped
     end
     if fixture then
-        local path = action == "seed-ammo" and ammo_path or seed_profile or weapon_profiles.paths.smg
+        local path = seed_profile or weapon_profiles.paths.smg
+        if action == "seed-ammo" then
+            local readable, _, held_kind = pcall(equipped_guid, pawn, detached)
+            path = (headless and readable and weapon_profiles.ammo[held_kind]) or weapon_profiles.default_ammo
+        end
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) end
     end

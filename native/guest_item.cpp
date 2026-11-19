@@ -16,6 +16,7 @@
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/Engine/UDataTable.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -48,9 +49,6 @@ namespace
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
-    constexpr auto ammo_fixture_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
-    constexpr auto ball_projectile_path =
-        STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto projectile_path =
@@ -400,9 +398,9 @@ namespace
         auto* caliber = field<Unreal::FByteProperty>(weapon, STR("Caliber"));
         auto* cost = field<Unreal::FIntProperty>(weapon, STR("AmmoCost_PerShot"));
         auto* rate = field<Unreal::FDoubleProperty>(weapon, STR("FireRate"));
-        return magazine && magazine->GetPropertyValueInContainer(weapon) == profile.capacity &&
+        return profile.ammo && magazine && magazine->GetPropertyValueInContainer(weapon) == profile.capacity &&
             burst && burst->GetPropertyValueInContainer(weapon) == profile.burst_length &&
-            caliber && caliber->GetPropertyValueInContainer(weapon) == 0 &&
+            caliber && caliber->GetPropertyValueInContainer(weapon) == profile.ammo->caliber &&
             cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
             rate && rate->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
             field<Unreal::FObjectProperty>(weapon, STR("InputIntercept")) && !object(weapon, STR("InputIntercept")) &&
@@ -420,6 +418,34 @@ namespace
                 row_field->ContainerPtrToValuePtr<void>(inventory.item));
     }
 
+    Unreal::UDataTable* stock_ammo_table()
+    {
+        auto* object = find<Unreal::UObject>(ammo_table_path);
+        auto* klass = find<Unreal::UClass>(STR("/Script/Engine.DataTable"));
+        auto* row = find<Unreal::UScriptStruct>(ammo_type_path);
+        if (!live(object) || !klass || object->GetClassPrivate() != klass || !row) return nullptr;
+        auto* table = static_cast<Unreal::UDataTable*>(object);
+        return table->GetRowStruct().Get() == row ? table : nullptr;
+    }
+
+    bool ammo_item_row_matches(Unreal::UClass* ammo, const profiles::BallAmmo& profile)
+    {
+        auto* defaults = ammo ? ammo->GetClassDefaultObject().Get() : nullptr;
+        auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
+        auto* caliber = field<Unreal::FByteProperty>(defaults, STR("Caliber"));
+        auto* table = field<Unreal::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* name = field<Unreal::FNameProperty>(handle_type, STR("RowName"));
+        auto* expected_table = stock_ammo_table();
+        const Unreal::FName expected{profile.row, Unreal::FNAME_Find};
+        if (!defaults || defaults->GetClassPrivate() != ammo || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            !handle || !handle_type || handle->GetStruct().Get() != handle_type || !table || !name || !expected_table ||
+            expected.IsNone() || !caliber || caliber->GetPropertyValueInContainer(defaults) != profile.caliber) return false;
+        const auto* row = handle->ContainerPtrToValuePtr<void>(defaults);
+        return table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row)) == expected_table &&
+            name->GetPropertyValueInContainer(row) == expected;
+    }
+
     bool ordinary_ball_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
                                Unreal::UObject* actor = nullptr)
     {
@@ -427,12 +453,20 @@ namespace
         auto* defaults = context.weapon->GetClassDefaultObject().Get();
         if (!mounted_payload_matches(defaults, inventory)) return false;
         if (!actor) return true;
-        // The approved receiver's cooked defaults contain WeaponData_Struct for 9mm_Ball
-        // without underbarrel data. Compare both the owned payload and the full mounted ammo row.
+        // The approved receiver's own WeaponData_Struct contains the exact row handle
+        // without underbarrel data. SetAmmoType resolves it only after the actor is equipped.
         auto* ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
-        return mounted_payload_matches(actor, inventory) && ammo &&
-            ammo->GetStruct().Get() == find<Unreal::UScriptStruct>(ammo_type_path) &&
-            ammo->Identical(ammo->ContainerPtrToValuePtr<void>(actor), ammo->ContainerPtrToValuePtr<void>(defaults));
+        auto* type = find<Unreal::UScriptStruct>(ammo_type_path);
+        if (!profile->ammo || !type || !ammo || ammo->GetStruct().Get() != type ||
+            !mounted_payload_matches(actor, inventory)) return false;
+        const void* expected = ammo->ContainerPtrToValuePtr<void>(defaults);
+        if (profile->ammo != &profiles::nine_mm_ball)
+        {
+            auto* table = stock_ammo_table();
+            const Unreal::FName row{profile->ammo->row, Unreal::FNAME_Find};
+            expected = table && !row.IsNone() ? table->FindRowUnchecked(row) : nullptr;
+        }
+        return expected && ammo->Identical(ammo->ContainerPtrToValuePtr<void>(actor), expected);
     }
 
     Unreal::UClass* qualified_weapon(Unreal::UObject* item_class)
@@ -555,14 +589,14 @@ namespace
         }
     };
 
-    int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class, bool ammo_fixture)
+    int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class,
+             const profiles::BallAmmo* ammo_fixture)
     {
         if (inventory.item && !ammo_fixture) return result(lua, true, "present");
         auto* source = item_class->GetClassDefaultObject().Get();
         auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
-        constexpr auto ammo_fixture_size = 9;
-        const auto units = ammo_fixture ? ammo_fixture_size : magazine_fixture;
+        const auto units = ammo_fixture ? ammo_fixture->fixture_units : magazine_fixture;
         if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
             (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) : capacity < units))
             return result(lua, false, "stock_guest_weapon_seed_schema_unavailable");
@@ -754,13 +788,15 @@ namespace
         return Unreal::Cast<Unreal::UClass>(item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(data)));
     }
 
-    bool stock_ball_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
+    bool stock_ball_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile,
+                          const profiles::BallAmmo* profile)
     {
-        if (!ammo || ammo != find<Unreal::UClass>(ammo_fixture_path) ||
-            !projectile || projectile != find<Unreal::UClass>(ball_projectile_path)) return false;
+        if (!profile || !ammo || ammo != find<Unreal::UClass>(profile->item) ||
+            !projectile || projectile != find<Unreal::UClass>(profile->projectile)) return false;
         auto* data = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
         auto* caliber = data ? field<Unreal::FByteProperty>(data->GetStruct().Get(), ammo_caliber_name) : nullptr;
-        return caliber && caliber->GetPropertyValueInContainer(data->ContainerPtrToValuePtr<void>(actor)) == 0;
+        return caliber && caliber->GetPropertyValueInContainer(data->ContainerPtrToValuePtr<void>(actor)) == profile->caliber &&
+            (profile == &profiles::nine_mm_ball || ammo_item_row_matches(ammo, *profile));
     }
 
     bool nagant_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
@@ -871,7 +907,7 @@ namespace
         if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
                         shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
                         (nagant && !nagant_round(actor, mounted_ammo(actor), projectile)) ||
-                        (stock_ball && !stock_ball_round(actor, mounted_ammo(actor), projectile))))
+                        (stock_ball && !stock_ball_round(actor, mounted_ammo(actor), projectile, stock_ball->ammo))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
         Unreal::FWeakObjectPtr held_actor;
@@ -1010,7 +1046,7 @@ namespace
         AmmoStackSchema stack_schema;
         if (!stack_schema.read(ammo_class, inventory) ||
             (nagant && !nagant_round(actor, ammo_class, single_stock_projectile(actor))) ||
-            (stock_ball && !stock_ball_round(actor, ammo_class, single_stock_projectile(actor))))
+            (stock_ball && !stock_ball_round(actor, ammo_class, single_stock_projectile(actor), stock_ball->ammo)))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
 
         const auto before = rounds->GetPropertyValueInContainer(actor);
@@ -1125,6 +1161,30 @@ namespace
                             before, observed, reserve_before, reserve_after);
     }
 
+    const profiles::BallAmmo* reserve_fixture_profile(const Context& context)
+    {
+        auto* held = object(context.pawn, STR("EquipedItem"));
+        const auto* profile = held ? stock_ball_magazine(held->GetClassPrivate()) : nullptr;
+        if (!env("SILVERFISH_COOP_HEADLESS") || !profile || profile->ammo == &profiles::nine_mm_ball)
+            return &profiles::nine_mm_ball;
+
+        Context receiver = context;
+        Inventory inventory;
+        if (!locate(context, inventory).empty()) return nullptr;
+        const auto slot = inventory.selected->GetPropertyValueInContainer(context.save);
+        Unreal::FScriptArrayHelper equipment(
+            inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        if (slot < 0 || slot >= equipment.Num()) return nullptr;
+        receiver.guid = inventory.identity(equipment.GetRawPtr(slot));
+        receiver.weapon = qualified_weapon(held->GetClassPrivate());
+        Inventory selected;
+        if (receiver.guid == Guid{} || !receiver.weapon || !locate(receiver, selected).empty() ||
+            equipped(receiver, selected) != held || !ordinary_ball_payload(profile, receiver, selected, held) ||
+            !stock_ball_round(held, mounted_ammo(held), single_stock_projectile(held), profile->ammo))
+            return nullptr;
+        return profile->ammo;
+    }
+
     template <Operation operation>
     int run(const Lua& lua)
     {
@@ -1146,13 +1206,19 @@ namespace
         Inventory inventory;
         if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo)
         {
-            const auto path = operation == Operation::SeedAmmo ? ammo_fixture_path : seed_variant;
+            const profiles::BallAmmo* reserve = nullptr;
+            if constexpr (operation == Operation::SeedAmmo)
+            {
+                reserve = reserve_fixture_profile(context);
+                if (!reserve) return fail("stock_guest_ammo_fixture_profile_unqualified");
+            }
+            const auto path = reserve ? reserve->item : seed_variant;
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class)))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
                                                              : "stock_guest_weapon_class_unavailable");
             if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
-            return seed(lua, context, inventory, expected_class, operation == Operation::SeedAmmo);
+            return seed(lua, context, inventory, expected_class, reserve);
         }
         if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
         if (!inventory.item) return fail("owned_guest_weapon_guid_required");

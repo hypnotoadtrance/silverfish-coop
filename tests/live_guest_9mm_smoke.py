@@ -1,4 +1,4 @@
-"""Verify original primary and reload inputs with exact stock 9mm weapons."""
+"""Verify original primary and reload inputs with exact stock Ball ammo weapons."""
 
 import argparse
 import asyncio
@@ -13,7 +13,7 @@ from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.silverfish.guest_weapon_profiles import FIREARMS
+from tools.silverfish.guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
@@ -22,7 +22,9 @@ DEFAULT_WEAPONS = ("light-pistol-suppressed", "smg-standard")
 
 
 async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
-    name = "stock-9mm-" + uuid.uuid4().hex[:8]
+    uses_45 = any(WEAPONS[kind].ball_magazine.ammo == FORTY_FIVE_BALL for kind in kinds)
+    prefix = "stock-45-ball" if uses_45 else "stock-9mm"
+    name = prefix + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     client = ("--profile", name)
     run = work / "campaigns" / name / "run"
@@ -78,12 +80,19 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
     try:
         authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", OBSERVATORY, *host_flags)
         await wait(run, lambda s: s.get("state") == "hosting")
-        invitation = await ask("invite", *host, "--name", "Stock 9mm tester", "--character", "Gunsmith")
+        invitation = await ask("invite", *host, "--name", "Stock weapon tester", "--character", "Gunsmith")
         guest = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         first = await enroll()
+        reserve_45 = 0
         for kind in kinds:
             profile = WEAPONS[kind]
             capacity = profile.ball_magazine.capacity
+            ammo = profile.ball_magazine.ammo
+            check_wrong_ammo = ammo == FORTY_FIVE_BALL and "nonmatching_reserve" not in evidence
+            if check_wrong_ammo:
+                nonmatching_guid = uuid.uuid4().hex.upper()
+                nonmatching = await action(host, "native-guest-weapon-seed-ammo", "--item-guid", nonmatching_guid)
+                assert nonmatching["native_guest_weapon"]["guid"] == nonmatching_guid, nonmatching
             guid = uuid.uuid4().hex.upper()
             seeded = (await action(host, "native-guest-weapon-seed", "--kind", kind, "--item-guid", guid))["native_guest_weapon"]
             assert seeded["guid"] == guid and seeded["stored_ammo"] == 7, seeded
@@ -103,6 +112,11 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             refused = await ask("action", *client, "native-guest-weapon-fire", "--target", guid, success=False)
             assert refused["error"] == "guest_weapon_preloaded_magazine_required", refused
 
+            if check_wrong_ammo:
+                wrong_ammo = await ask("action", *client, "native-guest-weapon-reload", "--target", guid, success=False)
+                assert wrong_ammo["error"] == "no_matching_guest_ammo", wrong_ammo
+                evidence["nonmatching_reserve"] = {"guid": nonmatching_guid, "refused": wrong_ammo["error"]}
+
             reserve_guid = uuid.uuid4().hex.upper()
             reserve = (await action(host, "native-guest-weapon-seed-ammo", "--item-guid", reserve_guid))["native_guest_weapon"]
             assert reserve["guid"] == reserve_guid, reserve
@@ -111,9 +125,15 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             assert (refilled["guid"], refilled["before"]) == (guid, 0), refilled
             assert 0 < refilled["after"] <= capacity, refilled
             assert refilled["after"] == refilled["reserve_before"] - refilled["reserve_after"], refilled
+            if ammo == FORTY_FIVE_BALL:
+                reserve_45 += ammo.fixture_units
+                assert refilled["reserve_before"] == reserve_45, refilled
+                assert refilled["after"] == min(reserve_45, capacity), refilled
+                reserve_45 -= refilled["after"]
             evidence["weapons"][kind] = {"class_path": profile.path,
                                          "guid": guid, "scope": kind, "shots": shots, "empty": empty,
-                                         "stock_reload": refilled, "reserve_guid": reserve_guid}
+                                         "stock_reload": refilled, "reserve_guid": reserve_guid,
+                                         "ammo_row": ammo.row, "ammo_item": ammo.item_path}
         await stop(host, authority)
         await stop(client, guest)
         await launch(host, "host-restart", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)
@@ -140,7 +160,7 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
                         await process.wait()
         if originals is not None:
             evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        (run / "live-stock-9mm-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        (run / f"live-{prefix}-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         if originals is not None:
             assert evidence["original_saves_verified"], "The original single-player directory changed during the test"

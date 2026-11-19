@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import generate_guest_weapon_registry, native_guest_consumable, native_guest_weapon, party
+from tools.silverfish import (
+    generate_guest_weapon_registry, guest_weapon_profiles, native_guest_consumable, native_guest_weapon, party,
+)
 
 
 class NativeGuestWeaponProfilesTests(unittest.TestCase):
@@ -25,6 +27,20 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             self.assertIn(kind, native_guest_weapon.SEED_KINDS)
         self.assertNotIn("pistol-long", native_guest_weapon.PRIMARY_KINDS)
         self.assertNotIn("1911-02", native_guest_weapon.PRIMARY_KINDS)
+
+    def test_exact_45_ball_profiles_only(self):
+        ammo = guest_weapon_profiles.FORTY_FIVE_BALL
+        self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units),
+                         (1, "45Cal_Ball", "Ammo_Magnum_BP", "Projectile_Pistol_Magnum", 10))
+        firearms = {
+            profile.kind: (profile.blueprint, profile.ball_magazine.capacity, profile.ball_magazine.burst_length)
+            for profile in guest_weapon_profiles.FIREARMS
+            if profile.ball_magazine and profile.ball_magazine.ammo == ammo
+        }
+        self.assertEqual(firearms, {
+            "1911": ("Wep_1911", 8, 1), "1911-fancy": ("Wep_1911_Fancy", 8, 1),
+            "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
+        })
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
