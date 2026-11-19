@@ -80,8 +80,13 @@ async def verify(work, vanilla, both):
         previous = first["game"].get(volume.RECOVERED, {}).get(victim["name"], {}).get("sequence", 0)
         drop = await action(authority, volume.FIXTURE, "--target", role)
         assert (drop.get("pawn"), drop.get("volume"), drop.get("state")) == (victim["name"], volume.VOLUME, "falling"), drop
-        down = await wait(run, lambda value: value.get("game", {}).get("player_effects", {}).get(victim_slot, {}).get("state") == "downed"
-            and value["game"].get(volume.RECOVERED, {}).get(victim["name"], {}).get("sequence", 0) > previous)
+        def downed_projection(value):
+            game = value.get("game", {})
+            effects = game.get("player_effects", {}).get(victim_slot, {})
+            return ((effects.get("state"), effects.get("crouched"), effects.get("jump_velocity")) == ("downed", True, 0)
+                    and game.get(volume.RECOVERED, {}).get(victim["name"], {}).get("sequence", 0) > previous)
+
+        down = await wait(run, downed_projection)
         report = down["game"][volume.KEY]
         recovery = down["game"][volume.RECOVERED][victim["name"]]
         assert (down["game"]["map"], down["zone_epoch"], down["generation"], down["game"]["native_roster"]) == (
