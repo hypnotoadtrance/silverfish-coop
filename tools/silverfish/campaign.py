@@ -134,13 +134,14 @@ class CampaignStore:
     state survive a host restart. Connection leases live only in memory.
     """
 
-    def __init__(self, directory, *, clock=time.monotonic, verify_world=None):
+    def __init__(self, directory, *, clock=time.monotonic, verify_world=None, verify_checkpoint=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "campaign.json"
         self.previous_path = self.directory / "campaign.previous.json"
         self._clock = clock
         self._verify_world = verify_world
+        self._verify_checkpoint = verify_checkpoint
         self._mutex = threading.RLock()
         self._lease_by_id: dict[str, _Lease] = {}
         self._lease_by_guest: dict[str, _Lease] = {}
@@ -220,6 +221,8 @@ class CampaignStore:
         data = self._read(path)
         if self._verify_world is not None:
             self._verify_world(data["world"])
+        if self._verify_checkpoint is not None:
+            self._verify_checkpoint(data)
         return data
 
     @staticmethod

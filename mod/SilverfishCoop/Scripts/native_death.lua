@@ -428,6 +428,15 @@ function native_death.rows(state, phase, status_row)
             last_damage.before, last_damage.after, last_damage.host_before, last_damage.host_after,
             last_damage.binding_restored and 1 or 0, last_damage.sequence)
     end
+    local guest = scope_records.guest
+    if guest and valid(guest.pawn) and type(SilverfishReadNativeFallStatus) == "function" then
+        local ready, _, address, changes, starts, landings, forwarded, mode, elapsed, speed, original, ticks, reason =
+            SilverfishReadNativeFallStatus()
+        if address == guest.pawn:GetAddress() then
+            rows[#rows + 1] = status_row("native-fall", ready and "ready" or "arming", guest.pawn:GetFullName(),
+                changes, starts, landings, forwarded, mode, elapsed, speed, original, ticks and 1 or 0, reason)
+        end
+    end
     for slot, record in pairs(slots) do
         local pawn = record.pawn
         if valid(pawn) and pawn:HasAuthority() and type(pawn.Dead) == "boolean" then

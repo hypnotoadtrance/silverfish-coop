@@ -55,14 +55,49 @@ def verify(profile: Path, world: dict) -> dict | None:
     saved = world.get("native_host_save")
     if saved is None:
         return None
+    verify_record(profile, saved)
+    if saved["map"] != world.get("map"):
+        raise CampaignFormatError("The host save generation is for a different campaign map")
+    return saved
+
+
+def verify_record(profile: Path, saved: dict) -> None:
     if (type(saved) is not dict or set(saved) != {"slot", "map", "size", "sha256"}
-            or not isinstance(saved["map"], str) or saved["map"] != world.get("map")
+            or not isinstance(saved["map"], str) or not saved["map"].startswith("/Game/Classes/Maps/")
             or type(saved["size"]) is not int or not isinstance(saved["sha256"], str)
             or not SHA256.fullmatch(saved["sha256"])):
         raise CampaignFormatError("The campaign's Unreal save reference is invalid")
     if record(profile, saved["slot"], saved["map"]) != saved:
         raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
-    return saved
+
+
+def guest_record(profile: Path, saved: dict, character_id: str) -> dict:
+    if type(saved) is not dict or saved.get("character_id") != character_id:
+        raise CampaignFormatError("The Unreal save generation does not belong to this character")
+    frame = {key: value for key, value in saved.items() if key != "character_id"}
+    verify_record(profile, frame)
+    return frame
+
+
+def references(checkpoint: dict) -> list[dict]:
+    world = checkpoint["world"]
+    host = [world["native_host_save"]] if world.get("native_host_save") else []
+    guest = [record["state"]["native_guest_save"] for record in checkpoint["characters"].values()
+             if record["state"].get("native_guest_save")]
+    return host + guest
+
+
+def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
+    host = verify(profile, checkpoint["world"])
+    slots = {host["slot"]} if host else set()
+    for character_id, character in checkpoint["characters"].items():
+        saved = character["state"].get("native_guest_save")
+        if saved is None:
+            continue
+        frame = guest_record(profile, saved, character_id)
+        if frame["slot"] in slots:
+            raise CampaignFormatError("Two campaign owners reference the same Unreal save generation")
+        slots.add(frame["slot"])
 
 
 def prune(profile: Path, keep: set[str]) -> None:

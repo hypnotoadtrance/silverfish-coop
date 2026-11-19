@@ -29,6 +29,13 @@ RUIN_FIELDS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
 NORTHEAST_RAIL = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 SLUMS = "/Game/Classes/Maps/Maps_OverWorld/Slums_P"
 CITY = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+SCAV_BAR = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+SHOPKEEP = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+BOROUGH = "/Game/Classes/Maps/Maps_SafeZones/Borough"
+BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+SCIENTIST_SHOP = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+FOREST = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"
+LAKE = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
 RED_DESTINATIONS = (CISTERN, LAB_E206, EAST_WING, OLD_PIPES, SLUMS_TUNNEL, SCI_TUNNEL, SUBWAY,
                     UTILITY_TUNNELS, TRASH_PIT)
 AUTHORED_EXITS = {
@@ -52,6 +59,13 @@ AUTHORED_EXITS = {
     (NORTHEAST_RAIL, CROSSROADS): "Cross_NE",
     (SLUMS, RAIL_YARD): "Slum_Depot",
     (CITY, RAIL_YARD): "Rail_City",
+    (SCAV_BAR, SLUMS): "Bar_Slums",
+    (SHOPKEEP, NORTHEAST_RAIL): "ShopKeep",
+    (BOROUGH, CITY): "City_Borough",
+    (BLACK_MARKET, LAKE): "BlackMarket",
+    (LAKE, CROSSROADS): "Lake_Cave",
+    (SCIENTIST_SHOP, RUIN_FIELDS): "Market_Flood",
+    (FOREST, CROSSROADS): "CR_Forest",
 }
 AUTHORED_MAPS = frozenset({EXCHANGE} | {map_name for pair in AUTHORED_EXITS for map_name in pair})
 TRAVEL_RADIUS_UU = 1500

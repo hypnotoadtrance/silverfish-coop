@@ -103,11 +103,13 @@ def parser() -> argparse.ArgumentParser:
         "native-gold-seed", "native-gold-inspect", "native-gold-use-probe", "native-gold-action-probe",
         "native-blue-seed", "native-blue-inspect", "native-blue-use-probe", "native-blue-rest-fixture",
         "native-red-seed", "native-red-inspect", "native-red-use-probe",
+        "native-green-seed", "native-green-inspect", "native-green-use-probe",
         "native-stardust-seed", "native-stardust-inspect", "native-stardust-use-probe", "native-dream-power-fixture",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
         "native-weapon-roundtrip",
         "native-shop-approach", "native-shop-buy",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
+        "native-fall-position", "native-fall-return",
         "native-door-position", "native-door-probe",
         "native-transport-probe",
     ])

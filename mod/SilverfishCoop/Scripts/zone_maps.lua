@@ -19,6 +19,13 @@ local ruin_fields = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
 local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local slums = "/Game/Classes/Maps/Maps_OverWorld/Slums_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
+local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local scientist_shop = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
+local forest = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"
+local lake = "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
 
 return {
     [playtest_1] = { fixture = "Level_Exit_BP_C_0", destination = playtest_2 },
@@ -32,6 +39,7 @@ return {
             Nexus_CrossRoads = "LevelExit_Spawn_BP_C_278", Obsv_Etr = "LevelExit_Spawn_BP_C_2",
             Depot_Cross_Rail = "LevelExit_Spawn_BP_C_1", CR_RF = "LevelExit_Spawn_BP_C_273",
             Cross_NE = "LevelExit_Spawn_BP_C_276",
+            CR_Forest = "LevelExit_Spawn_BP_C_277", Lake_Cave = "LevelExit_Spawn_BP_C_274",
         },
         secondary = {
             fixture = "Level_Exit_BP_C_2", destination = observatory, entrance = "Obsv_Etr",
@@ -104,19 +112,46 @@ return {
     },
     [ruin_fields] = {
         fixture = "Level_Exit_BP_C_1", destination = crossroads, entrance = "CR_RF",
-        door_arrivals = { RgEast_Flood = "Dungeon_TransitionDoor_BP_C_1" },
+        door_arrivals = { RgEast_Flood = "Dungeon_TransitionDoor_BP_C_1", Market_Flood = "Dungeon_TransitionDoor_BP_C_2" },
     },
     [northeast_rail] = {
         fixture = "Level_Exit_BP_C_269", destination = crossroads, entrance = "Cross_NE",
-        door_arrivals = { NE_Pipe = "Dungeon_TransitionDoor_BP_C_3" },
+        door_arrivals = { NE_Pipe = "Dungeon_TransitionDoor_BP_C_3", ShopKeep = "Dungeon_TransitionDoor_BP_C_2" },
         other_arrivals = { M35_Maw = "LevelExit_Spawn_BP_C_704" },
     },
     [slums] = {
         fixture = "Level_Exit_BP_C_0", destination = rail_yard, entrance = "Slum_Depot",
-        door_arrivals = { Slums_GreenLine = "Dungeon_TransitionDoor_BP_C_1" },
+        door_arrivals = { Slums_GreenLine = "Dungeon_TransitionDoor_BP_C_1", Bar_Slums = "Dungeon_TransitionDoor_BP_C_2" },
     },
     [city] = {
         fixture = "Level_Exit_BP_C_1", destination = rail_yard, entrance = "Rail_City",
         door_arrivals = { Subway = "Dungeon_TransitionDoor_BP_C_2" },
+        other_arrivals = { City_Borough = "LevelExit_Spawn_BP_C_388" },
+    },
+    [scav_bar] = {
+        entrance = "Bar_Slums",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_2", destination = slums, entrance = "Bar_Slums" },
+    },
+    [shopkeep] = {
+        entrance = "ShopKeep",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = northeast_rail, entrance = "ShopKeep" },
+    },
+    [borough] = {
+        fixture = "Level_Exit_BP_C_1", destination = city, entrance = "City_Borough",
+    },
+    [black_market] = {
+        entrance = "BlackMarket",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = lake, entrance = "BlackMarket" },
+    },
+    [scientist_shop] = {
+        entrance = "Market_Flood",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_2", destination = ruin_fields, entrance = "Market_Flood" },
+    },
+    [forest] = {
+        fixture = "Level_Exit_BP_C_1", destination = crossroads, entrance = "CR_Forest",
+    },
+    [lake] = {
+        fixture = "Level_Exit_BP_C_2", destination = crossroads, entrance = "Lake_Cave",
+        door_arrivals = { BlackMarket = "Dungeon_TransitionDoor_BP_C_1" },
     },
 }

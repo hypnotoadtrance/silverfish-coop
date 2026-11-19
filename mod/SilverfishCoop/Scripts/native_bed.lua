@@ -139,17 +139,7 @@ local function stock_placement(map, world, actor, profile, instance)
     return { X = location.X, Y = location.Y, Z = location.Z + 50 }, alternate:K2_GetActorRotation(), "alternate", points
 end
 
-function bed.arrival(state, phase, rest)
-    local pawn, controller, world, instance = host_context(state, phase)
-    local profile = profiles[state.map]
-    if type(rest) ~= "table" or rest.destination ~= state.map or not profile or type(rest.fallback) ~= "boolean"
-        or (rest.fallback and (rest.destination ~= observatory or rest.bed_id ~= ""))
-        or (not rest.fallback and rest.bed_id ~= expected_id(profile)) then
-        error("The requested arrival is outside the qualified stock rest catalog", 0)
-    end
-    local actor = rest_actor(state.map, world, profile)
-    local id = qualify_id(actor, profile)
-    local target, rotation, placement, points = stock_placement(state.map, world, actor, profile, instance)
+function bed.place_host(pawn, controller, world, target, rotation, placement)
     if not finite(target.X) or not finite(target.Y) or not finite(target.Z)
         or not finite(rotation.Pitch) or not finite(rotation.Yaw) or not finite(rotation.Roll) then
         error("The stock rest arrival transform is invalid", 0)
@@ -173,6 +163,21 @@ function bed.arrival(state, phase, rest)
         or not finite(location.X) or not finite(location.Y) or not finite(location.Z) then
         error("The stock rest arrival position could not be read back", 0)
     end
+    return location
+end
+
+function bed.arrival(state, phase, rest)
+    local pawn, controller, world, instance = host_context(state, phase)
+    local profile = profiles[state.map]
+    if type(rest) ~= "table" or rest.destination ~= state.map or not profile or type(rest.fallback) ~= "boolean"
+        or (rest.fallback and (rest.destination ~= observatory or rest.bed_id ~= ""))
+        or (not rest.fallback and rest.bed_id ~= expected_id(profile)) then
+        error("The requested arrival is outside the qualified stock rest catalog", 0)
+    end
+    local actor = rest_actor(state.map, world, profile)
+    local id = qualify_id(actor, profile)
+    local target, rotation, placement, points = stock_placement(state.map, world, actor, profile, instance)
+    local location = bed.place_host(pawn, controller, world, target, rotation, placement)
     return { destination = state.map, bed_id = id, fallback = rest.fallback, actor = actor:GetFullName(),
         placement = placement, points = points, min_safe_rep = profile.min_safe_rep,
         x = location.X, y = location.Y, z = location.Z }

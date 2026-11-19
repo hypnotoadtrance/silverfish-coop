@@ -199,8 +199,9 @@ def qualified_authored_routes(work: Path) -> bool:
             and native_death_backend(work, metadata) == "cpp")
 
 
-def staged_script(work: Path, name: str) -> bool:
-    return ((work / "stage" / SHIPPING).parent / "ue4ss" / "Mods" / "SilverfishCoop" / "Scripts" / name).is_file()
+def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
+    path = (work / "stage" / SHIPPING).parent / "ue4ss" / "Mods" / "SilverfishCoop" / "Scripts" / name
+    return path.is_file() and (marker is None or marker in path.read_text(encoding="utf-8"))
 
 
 def staged_build(work: Path) -> str:
@@ -320,7 +321,7 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
-        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0, "red": 0}
+        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0, "red": 0, "green": 0}
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -458,7 +459,7 @@ class Bridge:
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],
                         "item": fields[4], "entry": fields[5], "reason": fields[6],
                     }
-                elif fields[0] in ("native-gold", "native-blue", "native-red") and len(fields) == 6:
+                elif fields[0] in ("native-gold", "native-blue", "native-red", "native-green") and len(fields) == 6:
                     data[fields[0].replace("-", "_")] = {
                         "operation": fields[1], "state": fields[2], "map": fields[3],
                         "pawn": fields[4], "guid": fields[5],
@@ -466,6 +467,17 @@ class Bridge:
                 elif fields[0] == "native-blue-route" and len(fields) == 5:
                     data["native_blue_route"] = {
                         "source": fields[1], "destination": fields[2], "bed": fields[3], "pawn": fields[4],
+                    }
+                elif fields[0] == "native-green-options" and len(fields) == 5:
+                    data["native_green_options"] = {
+                        "source": fields[1], "pawn": fields[2], "destinations": fields[3].split("|"),
+                        "reputation": {int(group): int(rank) for group, rank in
+                                       (entry.split(":") for entry in fields[4].split("|"))},
+                    }
+                elif fields[0] == "native-green-arrival" and len(fields) == 7:
+                    data["native_green_arrival"] = {
+                        "destination": fields[1], "actor": fields[2], "placement": fields[3],
+                        "location": [_finite(value) for value in fields[4:7]],
                     }
                 elif fields[0] == "native-blue-arrival" and len(fields) == 10:
                     data["native_blue_arrival"] = {
@@ -536,6 +548,13 @@ class Bridge:
                         "backend": fields[4] if len(fields) >= 5 else "overlay",
                         "scope": fields[5] if len(fields) >= 6 and fields[5] else None,
                     }
+                elif fields[0] == "native-fall" and len(fields) == 13:
+                    data["native_fall"] = {
+                        "state": fields[1], "pawn": fields[2], "mode_changes": int(fields[3]), "starts": int(fields[4]),
+                        "landings": int(fields[5]), "forwarded": int(fields[6]), "mode": int(fields[7]),
+                        "elapsed": _finite(fields[8]), "vertical_speed": _finite(fields[9]),
+                        "original_fall_time": _finite(fields[10]), "actor_tick": fields[11] == "1", "reason": fields[12],
+                    }
                 elif fields[0] == "native-scene" and len(fields) == 18:
                     keys = ("active_map", "saved_level", "entrance", "rest_level", "bed", "instance_seed",
                             "game_seconds", "weather_offset", "ongoing_storm", "artifact_area_count",
@@ -559,6 +578,11 @@ class Bridge:
                     data["native_host_save"] = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
                         "seed": int(fields[5]), "backpack_count": int(fields[6]), "equipment_count": int(fields[7]),
+                    }
+                elif fields[0] == "native-guest-save-frame" and len(fields) == 7:
+                    data["native_guest_save_frame"] = {
+                        "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
+                        "backpack_count": int(fields[5]), "equipment_count": int(fields[6]),
                     }
                 elif fields[0] == "native-roster-state" and len(fields) == 5:
                     roster = data.setdefault("native_roster", {"connections": []})

@@ -7,6 +7,8 @@ local native_bed = require("native_bed")
 local native_blue = require("native_blue")
 local native_death = require("native_death")
 local native_dream = require("native_dream")
+local native_green = require("native_green")
+local native_green_cube = require("native_cubes").new("green")
 local native_hazard = require("native_hazard")
 local native_host_save = require("native_host_save")
 local native_inventory = require("native_inventory")
@@ -56,6 +58,7 @@ local acknowledged_message = ""
 local sequence = 0
 local tick_queued = false
 local last_blue_route, last_blue_arrival, last_dream_route, last_dream_arrival
+local last_green_options, last_green_arrival
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -320,12 +323,14 @@ local function run_command(fields, state, current_phase)
         local destination_route = zone_maps[argument]
         local red = #fields == 5 and fields[4] == "red" and destination_route
             and destination_route.other_arrivals and destination_route.other_arrivals.Red_Tes
+        local green = #fields == 5 and fields[4] == "green" and native_green.supports(argument)
         local dream_departure = argument == exchange and #fields == 5 and fields[4] == "stardust"
         local dream_return = state.map == exchange and #fields == 4 and fields[4] == "stardust-return"
             and blue_destinations[argument]
         if not supported_map(argument) or argument == state.map
             or (argument == exchange and not dream_departure) or (state.map == exchange and not dream_return)
-            or (not (blue or red or dream_departure or dream_return) and #fields ~= (argument == gold_nexus and 4 or 3)) then
+            or (not (blue or red or green or dream_departure or dream_return)
+                and #fields ~= (argument == gold_nexus and 4 or 3)) then
             error("Expected a different qualified co-op map", 0)
         end
         if role ~= "host" or current_phase ~= "hosting" then
@@ -339,6 +344,9 @@ local function run_command(fields, state, current_phase)
         end
         if red and not native_red.authorize_travel(fields[5], state, current_phase) then
             error("Red Cube travel requires the exact host inventory debit", 0)
+        end
+        if green and not native_green_cube.authorize_travel(fields[5], state, current_phase) then
+            error("Green Cube travel requires the exact host inventory debit", 0)
         end
         if dream_departure and not native_stardust.authorize_travel(fields[5], state, current_phase) then
             error("Exchange travel requires the recorded Stardust debit", 0)
@@ -384,6 +392,30 @@ local function run_command(fields, state, current_phase)
             error("Same-map Red Cube arrival requires the exact host inventory debit", 0)
         end
         return native_zone.position_arrival(state, current_phase, "Red_Tes")
+    elseif command == "native-green-options" then
+        last_green_options = nil
+        local host = native_transport.scoped_host(state, current_phase)
+        if #fields ~= 3 or not host or host.name ~= argument then
+            error("Green Cube eligibility requires the exact authoritative host pawn", 0)
+        end
+        local destinations, reputation = native_green.source(state, current_phase)
+        local ranks = {}
+        for _, faction in ipairs({ 2, 8, 4, 5 }) do
+            ranks[#ranks + 1] = tostring(faction) .. ":" .. tostring(reputation[faction].relationship)
+        end
+        last_green_options = { map = state.map, pawn = host.name, destinations = table.concat(destinations, "|"),
+            ranks = table.concat(ranks, "|") }
+        return "stock Green Cube eligibility verified"
+    elseif command == "native-green-arrival" then
+        last_green_arrival = nil
+        if (#fields ~= 3 and #fields ~= 4) or argument ~= state.map or not native_green.supports(argument) then
+            error("Green Cube arrival requires a qualified current map", 0)
+        end
+        if #fields == 4 and not native_green_cube.authorize_travel(fields[4], state, current_phase) then
+            error("Same-map Green Cube arrival requires the exact host inventory debit", 0)
+        end
+        last_green_arrival = native_green.arrival(state, current_phase)
+        return "qualified stock Green Cube arrival"
     elseif command == "native-dream-route" then
         last_dream_route = nil
         local host = native_transport.scoped_host(state, current_phase)
@@ -454,6 +486,7 @@ local function run_command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
         or native_blue.command(fields, state, current_phase)
         or native_red.command(fields, state, current_phase)
+        or native_green_cube.command(fields, state, current_phase)
         or native_stardust.command(fields, state, current_phase)
         or loot.command(fields, state, current_phase)
         or vitals.command(fields, state, current_phase)
@@ -499,6 +532,8 @@ local function write_status(state, current_phase, failure)
     end
     local guest_save_row = guest_save.row(status_row)
     if guest_save_row then rows[#rows + 1] = guest_save_row end
+    local guest_frame = guest_save.frame_row(status_row)
+    if guest_frame then rows[#rows + 1] = guest_frame end
     if not failure then
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -513,6 +548,16 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_red.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_green_cube.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        if last_green_options and last_green_options.map == state.map then
+            local options = last_green_options
+            rows[#rows + 1] = status_row("native-green-options", options.map, options.pawn, options.destinations, options.ranks)
+        end
+        if last_green_arrival and last_green_arrival.destination == state.map then
+            local arrival = last_green_arrival
+            rows[#rows + 1] = status_row("native-green-arrival", arrival.destination, arrival.actor, arrival.placement,
+                arrival.x, arrival.y, arrival.z)
+        end
         for _, row in ipairs(native_roster.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dream.rows(status_row)) do rows[#rows + 1] = row end
@@ -595,6 +640,7 @@ local function tick()
     native_transport.sync(state, current_phase)
     native_blue.sync(state, current_phase)
     native_red.sync(state, current_phase)
+    native_green_cube.sync(state, current_phase)
     native_stardust.sync(state, current_phase)
     native_dream.sync(state, current_phase)
     local fields = read_command()
@@ -605,7 +651,7 @@ local function tick()
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
         if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival"
-            or fields[2] == "native-blue-arrival" or fields[2] == "native-red-arrival"
+            or fields[2] == "native-blue-arrival" or fields[2] == "native-red-arrival" or fields[2] == "native-green-arrival"
             or fields[2] == "native-dream-arrival" or fields[2] == "restore" then
             state, current_phase = observe_session()
             if not state then return end

@@ -11,10 +11,12 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, native_blue, native_dream, native_gold, native_host_save, native_quest, native_red, party, wipe
+from . import link, native_blue, native_dream, native_gold, native_green, native_host_save, native_quest, native_red, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
+from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
+from .native_roster import RosterEnrollment
 from .travel import AUTHORED_EXITS, AUTHORED_MAPS, CROSSROADS, EXCHANGE, GOLD_NEXUS, PLAYTEST_MAPS, travel_decision
 from .runtime import (Bridge, MAP, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
@@ -29,6 +31,7 @@ CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent")
 STARDUST_RESULTS = {"inspect": ("present", "absent"), "seed": ("seeded", "present"),
                     "debit": ("removed", "decremented", "already_debited"),
                     "restore": ("restored", "present"), "use-probe": ("requested",)}
+DRAW_CUBES = {"red": native_red, "green": native_green}
 
 
 def _identity(directory: Path):
@@ -54,7 +57,7 @@ def _pawn(state: dict, role: str) -> dict:
 
 
 def pending_cube(state: dict) -> tuple[str, dict] | None:
-    pending = [(cube, receipt) for cube, module in (("gold", native_gold), ("blue", native_blue), ("red", native_red))
+    pending = [(cube, receipt) for cube, module in (("gold", native_gold), ("blue", native_blue), *DRAW_CUBES.items())
                if (receipt := module.ledger(state)["pending"])]
     if len(pending) > 1:
         raise ValueError("The campaign has two pending item transports")
@@ -85,7 +88,8 @@ class Host:
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
                  bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
                  native_backend: str | None, native_events: bool, native_guest: bool, native_zones: bool = False,
-                 authored_zones: bool = False, native_zone_walls: bool = False, native_profile: Path | None = None):
+                 authored_zones: bool = False, native_zone_walls: bool = False, native_profile: Path | None = None,
+                 verify_native_roster: bool = False, persist_native_guest: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -105,12 +109,15 @@ class Host:
         self.native_zones = native_zones
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
+        self.persist_native_guest = persist_native_guest
+        self.enrollment = RosterEnrollment() if verify_native_roster else None
         self.allowed_maps = AUTHORED_MAPS if authored_zones else PLAYTEST_MAPS
         self.next_native_heartbeat = 0.0
         self.next_zone_heartbeat = 0.0
         self.native_guest_health = None
         self.native_guest_position = None
         self.hazard_origin = None
+        self.fall_origin = None
         self.native_pickup = NativePickup()
         self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
@@ -154,13 +161,20 @@ class Host:
             and self.guest["disconnected"] is not None
             and time.monotonic() - self.guest["disconnected"] >= DEFAULT_RECONNECT_GRACE
         )
+        enrollment = None
+        if self.enrollment:
+            enrollment = self.enrollment.reserve(request["guest_id"], request["character_id"], self.last_game)
+            if enrollment.state not in ("reserved", "pending", "bound"):
+                return {"accepted": False, "reason": "native_roster_unavailable"}
         try:
             active = self.store.activate(request["guest_id"], request["credential"], request["character_id"])
         except CampaignError:
+            if enrollment and enrollment.state == "reserved":
+                self.enrollment.cancel(enrollment.reservation.id)
             return {"accepted": False, "reason": "guest_or_character_unavailable"}
         saved = active["character"]["state"]
         if after_grace:
-            saved = {"health": saved.get("health")} if self.native_guest else {}
+            saved = {key: saved[key] for key in ("health", "native_guest_save") if key in saved} if self.native_guest else {}
         self.guest = {
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
             "character_id": active["character"]["character_id"], "disconnected": None,
@@ -191,10 +205,12 @@ class Host:
         with contextlib.suppress(OSError):
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
 
-    def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None) -> int:
+    def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
+                   guest_record: dict | None = None) -> int:
         if self.last_game.get("state") != "hosting":
             raise RuntimeError("Wait for the host map to finish loading")
-        world = self.store.status()["world"]
+        status = self.store.status()
+        world = status["world"]
         world.update({
             "map": self.last_game["map"], "host": _pawn(self.last_game, "local"),
             "party": self.party if proposed_party is None else proposed_party,
@@ -220,10 +236,43 @@ class Host:
         if self.native_guest and self.last_game.get("native_guest_save", {}).get("pawn") != self.guest_pawn:
             guest = {}
         active = self.guest and any(
-            lease["character_id"] == self.guest["character_id"] for lease in self.store.status()["leases"]
+            lease["character_id"] == self.guest["character_id"] for lease in status["leases"]
         )
+        if guest and active and self.guest_pawn:
+            character_id = self.guest["character_id"]
+            prior = next((entry["state"].get("native_guest_save") for entry in status["characters"]
+                          if entry["character_id"] == character_id), None)
+            frame = guest_record or prior
+            if frame:
+                if frame.get("character_id") != character_id:
+                    raise RuntimeError("The native checkpoint belongs to a different guest character")
+                guest["native_guest_save"] = frame
         changes = {self.guest["lease_id"]: guest} if guest and active and self.guest_pawn else {}
         return self.store.checkpoint(world, changes)
+
+    def saved_native_guest(self) -> dict | None:
+        if not self.guest:
+            return None
+        return next((entry["state"].get("native_guest_save") for entry in self.store.status()["characters"]
+                     if entry["character_id"] == self.guest["character_id"]), None)
+
+    async def capture_native_guest(self, bridge: Bridge) -> dict | None:
+        if (not self.persist_native_guest or not self.native_profile or not self.guest or not self.guest_pawn
+                or self.last_game.get("native_guest_save", {}).get("pawn") != self.guest_pawn
+                or self.last_game.get("pawns", {}).get("guest", {}).get("name") != self.guest_pawn):
+            return None
+        slot = native_host_save.new_slot()
+        source = self.last_game["map"]
+        snapshot = await bridge.command("native-guest-save-capture", self.guest_pawn, slot, timeout=7)
+        proof = snapshot.get("native_guest_save_frame", {})
+        if (proof.get("state") != "captured" or proof.get("slot") != slot or proof.get("map") != source
+                or proof.get("pawn") != self.guest_pawn or snapshot.get("state") != "hosting"
+                or snapshot.get("map") != source):
+            raise RuntimeError("The game did not verify the exact detached guest save generation")
+        frame = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, source, flush=True)
+        self.last_game = snapshot
+        self.last_seen = time.monotonic()
+        return dict(frame, character_id=self.guest["character_id"])
 
     async def checkpoint_native(self, bridge: Bridge, proposed_party: dict | None = None) -> int:
         if self.native_profile is None:
@@ -241,10 +290,11 @@ class Host:
         record = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, source, flush=True)
         self.last_game = snapshot
         self.last_seen = time.monotonic()
-        revision = self.checkpoint(proposed_party, native_record=record)
+        guest_record = await self.capture_native_guest(bridge)
+        revision = self.checkpoint(proposed_party, native_record=record, guest_record=guest_record)
         try:
-            previous = read_json(self.store.previous_path)["world"].get("native_host_save", {})
-            keep = {slot, previous.get("slot", "")}
+            keep = {entry["slot"] for path in (self.store.path, self.store.previous_path)
+                    for entry in native_host_save.references(read_json(path))}
             native_host_save.prune(self.native_profile, keep)
         except (OSError, KeyError, ValueError) as error:
             self.control.event("native_host_save_prune_deferred", reason=str(error))
@@ -347,21 +397,24 @@ class Host:
 
     async def switch_zone(self, bridge: Bridge, transport, destination: str, entrance: str | None,
                           roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None,
-                          dream_plan: dict | None = None, red_plan: dict | None = None) -> dict:
+                          dream_plan: dict | None = None, random_plan: tuple[str, dict] | None = None) -> dict:
         current = self.last_game["map"]
         guest = _pawn(self.last_game, "guest")
         self.control.event("zone_travel_requested", source=current, destination=destination)
         if (self.native_profile is not None or self.native_guest and guest.get("health") is not None) and not (
-            gold_guid or blue_plan or dream_plan or red_plan
+            gold_guid or blue_plan or dream_plan or random_plan
         ):
             await self.checkpoint_native(bridge)
         try:
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
-            if red_plan:
-                authorization = ("red", red_plan["guid"])
+            if random_plan:
+                cube, itinerary = random_plan
+                authorization = (cube, itinerary["guid"])
             returning = dream_plan and dream_plan["phase"] == "returning"
             if dream_plan:
                 authorization = ("stardust-return",) if returning else ("stardust", dream_plan["guid"])
+            if self.enrollment:
+                self.enrollment.begin_travel()
             await bridge.command("travel", destination, *authorization)
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
@@ -380,6 +433,8 @@ class Host:
                                                             "bed": dream_plan["return_bed"]})
             elif blue_plan:
                 observed = await self.blue_arrival(bridge, blue_plan)
+            elif random_plan and cube == "green":
+                observed = await self.green_arrival(bridge, destination)
             elif entrance:
                 observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
                 if observed.get("map") != destination or observed.get("state") != "hosting":
@@ -388,6 +443,10 @@ class Host:
                 await transport.refresh_game_routes()
             self.last_game = observed
             self.last_seen = time.monotonic()
+            if self.enrollment and "guest" in roles and self.guest:
+                reservation = self.enrollment.reserve(self.guest["guest_id"], roles["guest"], self.last_game)
+                if reservation.state != "reserved":
+                    raise RuntimeError(f"The destination could not reserve the native guest ({reservation.reason})")
             if dream_plan:
                 await self.ensure_dream_stack(bridge, dream_plan)
             self.zone_epoch = uuid.uuid4().hex
@@ -396,11 +455,13 @@ class Host:
             self.marker_ready = False
             if self.guest:
                 self.guest["restore"] = {"health": guest.get("health")} if self.native_guest else {}
+                if frame := self.saved_native_guest():
+                    self.guest["restore"]["native_guest_save"] = frame
             candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
             if blue_plan:
                 candidate = native_blue.arrive(self.party, blue_plan["guid"], observed["map"])
-            if red_plan:
-                candidate = native_red.arrive(self.party, red_plan["guid"], observed["map"])
+            if random_plan:
+                candidate = DRAW_CUBES[cube].arrive(self.party, itinerary["guid"], observed["map"])
             if dream_plan:
                 candidate = native_dream.finished(self.party) if returning else native_dream.arrived(self.party, time.time())
             revision = await self.checkpoint_native(bridge, candidate)
@@ -596,67 +657,103 @@ class Host:
                 raise RuntimeError("The guest could not be placed by the host's verified arrival")
 
     async def activate_red(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
-        if (not self.native_zones or self.stopping or self.transitioning or request.source not in native_red.SOURCES
+        return await self.activate_random_cube(bridge, transport, request, "red")
+
+    async def activate_green(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
+        return await self.activate_random_cube(bridge, transport, request, "green")
+
+    async def activate_random_cube(self, bridge: Bridge, transport, request: native_gold.GoldRequest, cube: str) -> dict:
+        module = DRAW_CUBES[cube]
+        if (not self.native_zones or self.stopping or self.transitioning or request.source not in RANDOM_CUBE_SOURCES
                 or self.last_game.get("map") != request.source or self.last_game.get("state") != "hosting"
                 or request.entry not in native_gold.INVENTORY_ENTRIES or not native_gold.valid_guid(request.guid)
                 or self.last_game.get("pawns", {}).get("local", {}).get("name") != request.pawn):
-            return {"ok": False, "error": "red_scope_unavailable"}
-        if request.guid in native_red.ledger(self.party)["spent"]:
-            return {"ok": False, "error": "red_already_spent"}
+            return {"ok": False, "error": f"{cube}_scope_unavailable"}
+        if request.guid in module.ledger(self.party)["spent"]:
+            return {"ok": False, "error": f"{cube}_already_spent"}
         if pending_cube(self.party) or native_dream.visit(self.party):
             return {"ok": False, "error": "item_travel_pending"}
         if self.party["players"]["host"]["downed"]:
             return {"ok": False, "error": "actor_downed"}
         self.transitioning = True
         try:
-            snapshot, item = await self.checked_cube(bridge, "red", "inspect", request.guid)
+            snapshot, item = await self.checked_cube(bridge, cube, "inspect", request.guid)
             if item["state"] != "present":
-                return {"ok": False, "error": "red_item_unavailable"}
+                return {"ok": False, "error": f"{cube}_item_unavailable"}
+            eligible = ()
+            if cube == "green":
+                snapshot = await bridge.command("native-green-options", request.pawn, timeout=4)
+                proof = snapshot.get("native_green_options", {})
+                if (snapshot.get("state") != "hosting" or snapshot.get("map") != request.source
+                        or proof.get("source") != request.source or proof.get("pawn") != request.pawn):
+                    raise RuntimeError("The active host's Green Cube candidates could not be verified")
+                eligible = native_green.candidates(proof.get("reputation", {}))
+                if tuple(proof.get("destinations", ())) != eligible:
+                    raise RuntimeError("The native Green Cube draw set did not match stock reputation rules")
             self.last_game = snapshot
             self.last_seen = time.monotonic()
             # Check the full roster before making the one stock-weighted draw.
             if refusal := self.travel_refusal(request.source, self.roles(), staying=True):
                 return refusal
-            candidate = native_red.begin(self.party, request.guid, request.source, native_red.draw())
+            destination = native_green.draw(eligible) if cube == "green" else native_red.draw()
+            candidate = module.begin(self.party, request.guid, request.source, destination)
             await self.checkpoint_native(bridge, candidate)
             self.party = candidate
-            return await self.resume_red(bridge, transport, recovery=False)
+            return await self.resume_random_cube(bridge, transport, cube, recovery=False)
         finally:
             self.transitioning = False
 
     async def resume_red(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
-        pending = native_red.ledger(self.party)["pending"]
+        return await self.resume_random_cube(bridge, transport, "red", recovery=recovery)
+
+    async def resume_green(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
+        return await self.resume_random_cube(bridge, transport, "green", recovery=recovery)
+
+    async def resume_random_cube(self, bridge: Bridge, transport, cube: str, *, recovery: bool) -> dict:
+        module = DRAW_CUBES[cube]
+        pending = module.ledger(self.party)["pending"]
         try:
             if (not pending or not self.native_zones or self.last_game.get("map") != pending["source"]
                     or pending["destination"] not in self.allowed_maps):
-                raise RuntimeError("The committed Red Cube draw is out of scope")
+                raise RuntimeError(f"The committed {cube} cube draw is out of scope")
             guid, destination = pending["guid"], pending["destination"]
-            snapshot, item = await self.checked_cube(bridge, "red", "debit", guid)
+            snapshot, item = await self.checked_cube(bridge, cube, "debit", guid)
             if item["state"] != "removed" and not recovery:
-                raise RuntimeError("The committed Red Cube could not be removed from the active inventory")
+                raise RuntimeError(f"The committed {cube} cube could not be removed from the active inventory")
             self.last_game = snapshot
             self.last_seen = time.monotonic()
             roles = self.roles()
             if destination != pending["source"]:
-                result = await self.switch_zone(bridge, transport, destination, native_red.ARRIVAL, roles,
-                                                red_plan=pending)
+                result = await self.switch_zone(bridge, transport, destination, module.ARRIVAL, roles,
+                                                random_plan=(cube, pending))
             else:
-                arrival = await bridge.command("native-red-arrival", destination, guid, timeout=6)
+                arrival = (await self.green_arrival(bridge, destination, guid) if cube == "green" else
+                           await bridge.command("native-red-arrival", destination, guid, timeout=6))
                 if arrival.get("state") != "hosting" or arrival.get("map") != destination:
-                    raise RuntimeError("The same-map Red Cube arrival belongs to the wrong world")
+                    raise RuntimeError("The same-map cube arrival belongs to the wrong world")
                 await self.place_party_in_zone(bridge, roles, arrival)
-                candidate = native_red.arrive(self.party, guid, destination)
+                candidate = module.arrive(self.party, guid, destination)
                 revision = await self.checkpoint_native(bridge, candidate)
                 self.party = candidate
-                result = {"ok": True, "map": destination, "entrance": native_red.ARRIVAL, "revision": revision,
+                result = {"ok": True, "map": destination, "entrance": module.ARRIVAL, "revision": revision,
                           "travel_epoch": self.zone_epoch, "in_zone": True}
         except (OSError, RuntimeError, ValueError):
             self.stopping = True
             raise
         with contextlib.suppress(OSError):
-            self.control.event("red_travel_recovered" if recovery else "red_travel_completed", guid=guid,
+            self.control.event(f"{cube}_travel_recovered" if recovery else f"{cube}_travel_completed", guid=guid,
                                debit=item["state"], **result)
         return result
+
+    async def green_arrival(self, bridge: Bridge, destination: str, guid: str | None = None) -> dict:
+        snapshot = await bridge.command("native-green-arrival", destination, *((guid,) if guid else ()), timeout=6)
+        arrival = snapshot.get("native_green_arrival", {})
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != destination
+                or arrival.get("destination") != destination or not arrival.get("actor")
+                or arrival.get("placement") not in ("arrow", "alternate", "start")
+                or len(arrival.get("location", [])) != 3 or None in arrival["location"]):
+            raise RuntimeError("The Green Cube stock arrival could not be verified")
+        return snapshot
 
     @staticmethod
     def dream_isolated(game: dict) -> bool:
@@ -999,6 +1096,32 @@ class Host:
                 continue
         self.control.event("safe_spawn_unavailable", character_id=self.guest["character_id"])
 
+    async def enrolled_pawn(self, pawn: dict | None, transport) -> dict | None:
+        if self.enrollment is None:
+            return pawn
+        if self.guest is None:
+            return None
+        guest_id = self.guest["guest_id"]
+        result = self.enrollment.observe(self.last_game)
+        if result.state == "bound":
+            binding = result.assignment
+            self.control.event("native_guest_enrolled", guest_id=binding.guest_id, driver=binding.driver,
+                               connection_id=binding.connection_id, pawn=binding.pawn)
+        elif result.state == "aborted" and result.reservation and result.reservation.guest_id == guest_id:
+            self.control.event("native_guest_enrollment_aborted", guest_id=guest_id, reason=result.reason)
+            self.disconnected(guest_id)
+            await transport.release_guest(guest_id)
+        elif (result.reason == "known_connection_missing" and not self.last_game.get("remote_clients")
+              and self.enrollment.retire(guest_id, self.last_game).state == "released"):
+            self.guest_pawn = None
+            if self.guest["disconnected"] is None:
+                self.enrollment.reserve(guest_id, self.guest["character_id"], self.last_game)
+        binding = self.enrollment.assignments.get(guest_id)
+        if (not pawn or not binding or binding.pawn != pawn["name"] or binding.controller != pawn["controller"]
+                or result.state in ("aborted", "blocked")):
+            return None
+        return pawn
+
     async def observe(self, bridge: Bridge, transport) -> None:
         state = bridge.snapshot()
         if state is not None:
@@ -1006,7 +1129,9 @@ class Host:
                 self.last_seen = time.monotonic()
             self.last_game = state
         party.add_player(self.party, "host")
-        pawn = self.last_game.get("pawns", {}).get("guest")
+        pawn = await self.enrolled_pawn(self.last_game.get("pawns", {}).get("guest"), transport)
+        if not pawn and "guest" in self.last_game.get("pawns", {}) and self.enrollment:
+            self.last_game["pawns"].pop("guest")
         bound_pawn = self.last_game.get("native_guest_save", {}).get("pawn")
         lease_active = self.guest and (self.guest["disconnected"] is None
                                        or time.monotonic() - self.guest["disconnected"] < DEFAULT_RECONNECT_GRACE)
@@ -1021,9 +1146,23 @@ class Host:
                 saved_health = self.native_guest_health[2]
             health = "-" if saved_health is None else str(saved_health)
             self.native_pickup.invalidate()
-            snapshot = await bridge.command("native-guest-bind", pawn["name"], health, timeout=4)
+            frame = self.guest["restore"].get("native_guest_save")
+            arguments = ()
+            if frame:
+                if not self.persist_native_guest or self.native_profile is None:
+                    raise RuntimeError("This guest character requires the staged native save bridge")
+                verified = await asyncio.to_thread(native_host_save.guest_record, self.native_profile, frame,
+                                                   self.guest["character_id"])
+                arguments = (verified["slot"],)
+            snapshot = await bridge.command("native-guest-bind", pawn["name"], health, *arguments, timeout=7)
             if snapshot.get("native_guest_save", {}).get("pawn") != pawn["name"]:
                 raise RuntimeError("The guest's independent native save could not be verified")
+            if frame:
+                proof = snapshot.get("native_guest_save_frame", {})
+                if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]
+                        or proof.get("pawn") != pawn["name"]):
+                    raise RuntimeError("The guest's exact persisted stock save generation could not be verified")
+                self.control.event("native_guest_save_restored", character_id=self.guest["character_id"], **proof)
             self.last_game = snapshot
             self.last_seen = time.monotonic()
         if pawn and self.guest and pawn["name"] != self.guest_pawn:
@@ -1051,6 +1190,11 @@ class Host:
             expired = time.monotonic() - self.guest["disconnected"] >= DEFAULT_RECONNECT_GRACE
             if expired and not self.last_game.get("remote_clients", 0):
                 expired_guest = self.guest
+                if self.enrollment:
+                    reservation = self.enrollment.pending
+                    if reservation and reservation.guest_id == expired_guest["guest_id"]:
+                        self.enrollment.cancel(reservation.id)
+                    self.enrollment.retire(expired_guest["guest_id"], self.last_game)
                 await transport.release_guest(expired_guest["guest_id"])
                 if self.guest is expired_guest:
                     self.guest = None
@@ -1116,6 +1260,26 @@ class Host:
                     result = {"native_friendly_fire": snapshot.get("native_friendly_fire")}
                 elif action in ("native-hazard-position", "native-hazard-start", "native-hazard-return"):
                     result = await self.native_hazard(bridge, action)
+                elif action == "native-fall-position" and self.native_guest and self.fixtures:
+                    guest = self.last_game.get("pawns", {}).get("guest", {})
+                    scope = self.last_game.get("native_fall", {})
+                    if (self.last_game.get("map") != MAP or not self.guest_pawn or guest.get("name") != self.guest_pawn
+                            or scope.get("state") != "ready" or scope.get("pawn") != self.guest_pawn
+                            or not guest.get("health") or guest["health"] <= 0 or self.fall_origin):
+                        raise ValueError("The staged enrolled guest fall fixture is unavailable")
+                    x, y, z = guest["location"]
+                    await bridge.restore("guest", {"location": [x, y, z + 6500]})
+                    self.fall_origin = (self.guest_pawn, [x, y, z])
+                    result = {"pawn": self.guest_pawn, "height_uu": 6500, "before": scope}
+                elif action == "native-fall-return" and self.native_guest and self.fixtures:
+                    character = self.roles().get("guest")
+                    if (self.last_game.get("map") != MAP or not self.fall_origin or self.fall_origin[0] != self.guest_pawn
+                            or not character or not self.party["players"][character]["downed"]):
+                        raise ValueError("The fall fixture can only return its exact downed guest")
+                    self.last_game = await bridge.restore("guest", {"location": self.fall_origin[1]})
+                    self.last_seen = time.monotonic()
+                    self.fall_origin = None
+                    result = {"native_fall_guest_returned": True}
                 elif action in ("vitals-probe", "vitals-reset") and self.fixtures:
                     snapshot = await bridge.command(action, timeout=4)
                     result = {"native_vitals_probe": snapshot.get("native_vitals_probe")}
@@ -1166,7 +1330,8 @@ class Host:
                 elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
                                  "native-gold-action-probe", "native-blue-seed", "native-blue-inspect",
                                  "native-blue-use-probe", "native-red-seed", "native-red-inspect",
-                                 "native-red-use-probe")
+                                 "native-red-use-probe", "native-green-seed", "native-green-inspect",
+                                 "native-green-use-probe")
                       and self.native_zones and self.fixtures and GOLD_NEXUS in self.allowed_maps):
                     _, cube, operation = action.split("-", 2)
                     _, item = await self.checked_cube(bridge, cube, operation, request.get("target"))
@@ -1267,7 +1432,7 @@ class Host:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
         for cube, activate in (("gold", self.activate_gold), ("blue", self.activate_blue),
-                               ("red", self.activate_red), ("stardust", self.activate_stardust)):
+                               ("red", self.activate_red), ("green", self.activate_green), ("stardust", self.activate_stardust)):
             for request in bridge.native_cube_requests(cube):
                 try:
                     result = await activate(bridge, transport, request)
@@ -1352,7 +1517,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("--native-guest requires --fixtures and --native-events")
     profile = directory / "game-user"
     with Control(directory / "run") as control, CampaignStore(
-        directory / "save", verify_world=lambda world: native_host_save.verify(profile, world),
+        directory / "save", verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
     ) as store:
         old_world = store.status()["world"]
         if start_zone and old_world.get("map") not in (None, start_zone):
@@ -1363,7 +1528,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
-        native_profile = profile if authored and staged_script(work, "native_host_save.lua") else None
+        persist_guest = native_guest and staged_script(work, "guest_save.lua", "native-guest-save-frame")
+        native_profile = profile if (authored or persist_guest) and staged_script(work, "native_host_save.lua") else None
         native_record = old_world.get("native_host_save")
         if native_record and native_profile is None:
             raise ValueError("Restage the current mod to restore this campaign's native host save")
@@ -1424,7 +1590,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             controller = Host(store, control, game_build, identity, bind, port, fixtures, death_rules,
                               native_backend=native_backend, native_events=native_events, native_guest=native_guest,
                               native_zones=native_zones, authored_zones=authored, native_zone_walls=native_zone_walls,
-                              native_profile=native_profile)
+                              native_profile=native_profile, verify_native_roster=staged_script(work, "native_roster.lua"),
+                              persist_native_guest=persist_guest)
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
@@ -1440,7 +1607,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 controller.last_game = restored
                 controller.last_seen = time.monotonic()
             if pending:
-                resume = {"gold": controller.resume_gold, "blue": controller.resume_blue, "red": controller.resume_red}[pending[0]]
+                methods = {"gold": controller.resume_gold, "blue": controller.resume_blue,
+                           "red": controller.resume_red, "green": controller.resume_green}
+                resume = methods[pending[0]]
                 await resume(bridge, None, recovery=True)
             if dream and dream["phase"] == "departing":
                 await controller.depart_dream(bridge, None, recovery=True)
@@ -1502,7 +1671,7 @@ def load_invite(file: Path, build: str) -> dict:
 async def open_admission(transport, invite: dict, request: dict, *, timeout: float,
                          queue: bool = False, on_wait=None) -> dict:
     """Retry only bounded, authenticated waiting states reported by the host."""
-    windows = {"guest_already_connected": 2.0}
+    windows = {"guest_already_connected": 2.0, "native_roster_unavailable": 5.0}
     if queue:
         windows.update(travel_in_progress=25.0, wipe_in_progress=35.0)
     started = time.monotonic()

@@ -44,3 +44,18 @@ class NativeHostSaveTests(unittest.TestCase):
         self.assertTrue(native_host_save.slot_path(self.profile, previous["slot"]).is_file())
         self.assertTrue(native_host_save.slot_path(self.profile, current["slot"]).is_file())
         self.assertEqual(user_slot.read_text(encoding="ascii"), "configuration")
+
+    def test_child_frame_cannot_reference_host_or_a_different_character(self):
+        host = self.frame(CROSSROADS)
+        guest = self.frame(OBSERVATORY)
+        character = "39a5fe21-f076-4112-bc50-d13c917d225b"
+        state = {"native_guest_save": dict(guest, character_id=character)}
+        checkpoint = {"world": {"map": CROSSROADS, "native_host_save": host},
+                      "characters": {character: {"state": state}}}
+        native_host_save.verify_checkpoint(self.profile, checkpoint)
+        state["native_guest_save"] = dict(host, character_id=character)
+        with self.assertRaisesRegex(CampaignFormatError, "same Unreal save generation"):
+            native_host_save.verify_checkpoint(self.profile, checkpoint)
+        state["native_guest_save"] = dict(guest, character_id="different")
+        with self.assertRaisesRegex(CampaignFormatError, "does not belong"):
+            native_host_save.verify_checkpoint(self.profile, checkpoint)

@@ -1,11 +1,13 @@
 #include "zone_exit.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -47,6 +49,7 @@ namespace
     constexpr auto northeast_world = STR("/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P.NorthEast_Rail_P");
     constexpr auto slums_world = STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P");
     constexpr auto city_world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P");
+    constexpr auto lake_world = STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P");
     constexpr auto exchange_world = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P");
     constexpr auto exchange_actor = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P:PersistentLevel.Dream_CountDown_BP_C_1");
     constexpr auto dream_power_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:Send_PowerSignal");
@@ -56,6 +59,7 @@ namespace
     constexpr auto ttl = std::chrono::seconds(2);
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
+    constexpr std::size_t max_remote_players = 4;
 
     struct DoorRoute
     {
@@ -114,11 +118,47 @@ namespace
         Route{northeast_world, STR("Level_Exit_BP_C_269"), crossroads_world, STR("Cross_NE")},
         Route{slums_world, STR("Level_Exit_BP_C_0"), railway_world, STR("Slum_Depot")},
         Route{city_world, STR("Level_Exit_BP_C_1"), railway_world, STR("Rail_City")},
+        Route{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_2"), slums_world, STR("Bar_Slums")}},
+        Route{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), northeast_world, STR("ShopKeep")}},
+        Route{STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"), STR("Level_Exit_BP_C_1"),
+              city_world, STR("City_Borough")},
+        Route{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), lake_world, STR("BlackMarket")}},
+        Route{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_2"), ruins_world, STR("Market_Flood")}},
+        Route{STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"), STR("Level_Exit_BP_C_1"),
+              crossroads_world, STR("CR_Forest")},
+        Route{lake_world, STR("Level_Exit_BP_C_2"), crossroads_world, STR("Lake_Cave")},
     };
 
     std::atomic<std::uint64_t> generation{};
     std::atomic<bool> installed{};
     std::array<Hook::GlobalCallbackId, 2> callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+
+    struct RemotePlayer
+    {
+        Unreal::FWeakObjectPtr pawn;
+        Unreal::FWeakObjectPtr controller;
+        Unreal::FWeakObjectPtr connection;
+    };
+
+    struct GameRoster
+    {
+        std::array<RemotePlayer, max_remote_players> remotes;
+        std::size_t count{};
+        Unreal::FWeakObjectPtr driver;
+        Unreal::FObjectProperty* world_driver{};
+        Unreal::FObjectProperty* server_connection{};
+        Unreal::FArrayProperty* client_connections{};
+        Unreal::FObjectProperty* connection_entry{};
+        Unreal::FObjectProperty* pawn_controller{};
+        Unreal::FObjectProperty* controller_player{};
+        Unreal::FObjectProperty* controller_pawn{};
+
+        [[nodiscard]] std::span<const RemotePlayer> players() const { return {remotes.data(), count}; }
+    };
 
     struct Scope
     {
@@ -128,7 +168,7 @@ namespace
         bool accepting{};
         bool request_latched{};
         Unreal::FWeakObjectPtr local;
-        Unreal::FWeakObjectPtr remote;
+        GameRoster roster;
         Unreal::FWeakObjectPtr fixture;
         Unreal::FWeakObjectPtr world;
         Unreal::FWeakObjectPtr instance;
@@ -198,6 +238,13 @@ namespace
         return reinterpret_cast<Address>(object);
     }
 
+    bool live_object(Unreal::UObject* object)
+    {
+        constexpr auto excluded = static_cast<Unreal::EObjectFlags>(
+            Unreal::RF_ClassDefaultObject | Unreal::RF_ArchetypeObject | Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
+        return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
+    }
+
     template <typename Object>
     Object* find(const RC::CharType* path)
     {
@@ -206,25 +253,83 @@ namespace
 
     bool live_game_roster(const Scope& current)
     {
+        const auto& roster = current.roster;
         auto* world = current.world.Get();
-        auto* driver = read_object(field<Unreal::FObjectProperty>(world, STR("NetDriver")), world);
-        if (!driver) return false;
-        auto* server_field = field<Unreal::FObjectProperty>(driver, STR("ServerConnection"));
-        auto* clients_field = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
-        if (!server_field || !clients_field || (read_object(server_field, driver) != nullptr) == current.host)
+        auto* driver = roster.driver.Get();
+        if (!world || !live_object(driver) || read_object(roster.world_driver, world) != driver ||
+            (read_object(roster.server_connection, driver) != nullptr) == current.host)
         {
             return false;
         }
         if (!current.host) return true;
 
-        auto* remote = current.remote.Get();
-        Unreal::FScriptArrayHelper clients(clients_field, clients_field->ContainerPtrToValuePtr<void>(driver));
-        if (!remote) return clients.Num() == 0;
-        if (clients.Num() != 1) return false;
-        auto* controller = read_object(field<Unreal::FObjectProperty>(remote, STR("Controller")), remote);
-        auto* player = read_object(field<Unreal::FObjectProperty>(controller, STR("Player")), controller);
-        auto* connection = Unreal::CastField<Unreal::FObjectProperty>(clients_field->GetInner());
-        return player && player == read_object(connection, clients.GetRawPtr(0));
+        const auto players = roster.players();
+        Unreal::FScriptArrayHelper clients(roster.client_connections, roster.client_connections->ContainerPtrToValuePtr<void>(driver));
+        if (clients.Num() != static_cast<int>(players.size())) return false;
+        std::array<Unreal::UObject*, max_remote_players> connections{};
+        for (int index = 0; index < clients.Num(); ++index)
+        {
+            auto* connection = read_object(roster.connection_entry, clients.GetRawPtr(index));
+            if (!live_object(connection) || std::find(connections.begin(), connections.end(), connection) != connections.end())
+            {
+                return false;
+            }
+            connections[static_cast<std::size_t>(index)] = connection;
+        }
+        for (const auto& remote : players)
+        {
+            auto* pawn = remote.pawn.Get();
+            auto* controller = remote.controller.Get();
+            auto* connection = remote.connection.Get();
+            if (!live_object(pawn) || !live_object(controller) || !live_object(connection) || actor_world(pawn) != world ||
+                current.role->GetPropertyValueInContainer(pawn) != 3 ||
+                read_object(roster.pawn_controller, pawn) != controller || read_object(roster.controller_pawn, controller) != pawn ||
+                read_object(roster.controller_player, controller) != connection)
+            {
+                return false;
+            }
+            const auto match = std::find(connections.begin(), connections.end(), connection);
+            if (match == connections.end()) return false;
+            *match = nullptr;
+        }
+        return true;
+    }
+
+    bool bind_game_roster(Scope& scope)
+    {
+        auto& roster = scope.roster;
+        auto* world = scope.world.Get();
+        roster.world_driver = field<Unreal::FObjectProperty>(world, STR("NetDriver"));
+        auto* driver = read_object(roster.world_driver, world);
+        if (!live_object(driver)) return false;
+        roster.driver = driver;
+        roster.server_connection = field<Unreal::FObjectProperty>(driver, STR("ServerConnection"));
+        roster.client_connections = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
+        if (!roster.server_connection || !roster.client_connections) return false;
+        roster.connection_entry = Unreal::CastField<Unreal::FObjectProperty>(roster.client_connections->GetInner());
+        if (!roster.connection_entry) return false;
+        if (!roster.count) return live_game_roster(scope);
+
+        auto* player_controller = find<Unreal::UClass>(STR("/Script/Engine.PlayerController"));
+        auto* net_connection = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
+        roster.pawn_controller = field<Unreal::FObjectProperty>(scope.pawn_class, STR("Controller"));
+        roster.controller_player = field<Unreal::FObjectProperty>(player_controller, STR("Player"));
+        roster.controller_pawn = field<Unreal::FObjectProperty>(player_controller, STR("Pawn"));
+        if (!net_connection || !roster.pawn_controller || !roster.controller_player || !roster.controller_pawn) return false;
+        for (auto& remote : std::span{roster.remotes}.first(roster.count))
+        {
+            auto* pawn = remote.pawn.Get();
+            auto* controller = read_object(roster.pawn_controller, pawn);
+            auto* connection = read_object(roster.controller_player, controller);
+            if (!live_object(controller) || !controller->IsA(player_controller) || !live_object(connection) ||
+                !connection->IsA(net_connection))
+            {
+                return false;
+            }
+            remote.controller = controller;
+            remote.connection = connection;
+        }
+        return live_game_roster(scope);
     }
 
     bool is_local_pawn(Unreal::UObject* pawn)
@@ -247,15 +352,17 @@ namespace
 
     bool allows_distance(const Scope& current, Unreal::UObject* local)
     {
-        auto* remote = current.remote.Get();
-        if (!remote) return true;
-        if (actor_world(remote) != current.world.Get() ||
-            current.role->GetPropertyValueInContainer(remote) != 3)
+        for (const auto& player : current.roster.players())
         {
-            return false;
+            auto* remote = player.pawn.Get();
+            if (!remote || actor_world(remote) != current.world.Get() || current.role->GetPropertyValueInContainer(remote) != 3)
+            {
+                return false;
+            }
+            const auto squared = distance_squared(local, remote);
+            if (!std::isfinite(squared) || squared > max_distance_squared) return false;
         }
-        const auto squared = distance_squared(local, remote);
-        return std::isfinite(squared) && squared <= max_distance_squared;
+        return true;
     }
 
     bool matches_target(Unreal::UObject* exit, Unreal::FSoftObjectProperty* level, Unreal::FStrProperty* entrance_tag,

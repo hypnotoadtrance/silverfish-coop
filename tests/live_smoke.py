@@ -23,6 +23,7 @@ options.add_argument("--native-inventory", action="store_true", help="exercise n
 options.add_argument("--native-guest", action="store_true", help="exercise persistent scoped native guest damage and revive")
 options.add_argument("--native-pair", action="store_true", help="also down and revive the native host")
 options.add_argument("--native-hazard", action="store_true", help="exercise a real stock poison gas hazard")
+options.add_argument("--native-fall", action="store_true", help="exercise the stock authoritative guest landing path")
 options.add_argument("--native-zones", action="store_true", help="exercise a stock overlap at the staged exit")
 options.add_argument("--native-walls", action="store_true", help="verify swept physical exit collision")
 options.add_argument("--authored-zone", action="store_true", help="start from CrossRoads and take the stock DeadBridge exit")
@@ -32,10 +33,12 @@ options.add_argument("--native-transport", action="store_true", help="verify pre
 options.add_argument("--native-gold", action="store_true", help="exercise a Golden Cube round trip and its durable charge")
 options.add_argument("--native-blue", action="store_true", help="exercise Blue Cube fallback and same-map stock rest travel")
 options.add_argument("--native-red", action="store_true", help="exercise Red Cube party travel and its durable random destination")
+options.add_argument("--native-green", action="store_true", help="exercise Green Cube reputation, party arrival and restart")
 options.add_argument("--native-stardust", action="store_true", help="exercise the stock Stardust visit and timed return")
 options.add_argument("--dream-early", action="store_true", help="send the stock Exchange power signal during a Stardust visit")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
 options.add_argument("--native-host-save", action="store_true", help="verify the whole host-save generation and native inventory")
+options.add_argument("--native-guest-save", action="store_true", help="verify a distinct guest stock save and native inventory")
 options.add_argument("--native-roster", action="store_true", help="verify the host's native connection and pawn identity")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
@@ -54,6 +57,8 @@ if args.native_pair and not args.native_guest:
     options.error("--native-pair requires --native-guest")
 if args.native_hazard and not args.native_pair:
     options.error("--native-hazard requires --native-pair")
+if args.native_fall and not args.native_pair:
+    options.error("--native-fall requires --native-pair")
 if args.native_pickup and not args.native_guest:
     options.error("--native-pickup requires --native-guest")
 if args.native_weapon and not args.native_guest:
@@ -77,9 +82,11 @@ if args.native_gold and (not args.native_zones or args.authored_zone or args.nat
 if args.native_blue and (not args.native_zones or args.authored_zone or args.native_door
                          or args.observatory_zone or args.native_gold):
     options.error("--native-blue requires --native-zones and its own authored route")
-if args.native_red and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
-                                                     args.native_gold, args.native_blue, args.native_stardust))):
-    options.error("--native-red requires --native-zones and its own authored route")
+random_cube = "red" if args.native_red else "green" if args.native_green else None
+if random_cube and (not args.native_zones or args.native_red and args.native_green
+                    or any((args.authored_zone, args.native_door, args.observatory_zone,
+                            args.native_gold, args.native_blue, args.native_stardust))):
+    options.error(f"--native-{random_cube} requires --native-zones and its own authored route")
 if args.observatory_zone and (not args.native_zones or args.authored_zone or args.native_door):
     options.error("--observatory-zone requires --native-zones and its own authored route")
 if args.native_stardust and (not args.native_zones or args.authored_zone or args.native_door
@@ -89,6 +96,8 @@ if args.dream_early and not args.native_stardust:
     options.error("--dream-early requires --native-stardust")
 if args.native_host_save and not args.native_stardust:
     options.error("--native-host-save uses the Stardust stock inventory fixture")
+if args.native_guest_save and not (args.native_guest and args.native_pickup):
+    options.error("--native-guest-save uses the native guest stock pickup fixture")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -320,18 +329,49 @@ async def blue_action(operation, guid, map_name, state, pawn=None):
     return report
 
 
-def red_ledger(status):
-    return status.get("campaign", {}).get("world", {}).get("party", {}).get("red_transport") or {}
+def random_cube_ledger(status, cube):
+    return status.get("campaign", {}).get("world", {}).get("party", {}).get(f"{cube}_transport") or {}
 
 
-async def red_action(operation, guid, map_name, state, pawn):
-    reply = await command("action", "--campaign", campaign, f"native-red-{operation}", "--target", guid)
-    report = reply["native_red"]
+async def random_cube_action(cube, operation, guid, map_name, state, pawn):
+    reply = await command("action", "--campaign", campaign, f"native-{cube}-{operation}", "--target", guid)
+    report = reply[f"native_{cube}"]
     assert report == {"operation": operation, "state": state, "map": map_name, "pawn": pawn, "guid": guid}, report
     return report
 
 
-async def red_cube_travel(character_id, host_session):
+def verify_green_options(proof, pawn):
+    from tools.silverfish.native_green import ALWAYS, REPUTATION_LEVELS
+
+    ranks = proof["reputation"]
+    assert proof["source"] == crossroads and proof["pawn"] == pawn, proof
+    assert set(ranks) == {"2", "4", "5", "8"} and all(type(rank) is int and 0 <= rank <= 6 for rank in ranks.values()), proof
+    expected = ALWAYS + tuple(map_name for map_name, faction in REPUTATION_LEVELS if ranks[str(faction)] in (0, 1, 2))
+    assert tuple(proof["destinations"]) == expected, proof
+    return expected
+
+
+def verify_green_arrival(proof, destination):
+    markers = {
+        "Shop_ScavBar_P": {"arrow": "SavePoint_BP_C_1"},
+        "Shop_ShopKeep_P": {"start": "PlayerStart_1"},
+        "Borough": {"arrow": "SavePoint_BP_C_1", "alternate": "LevelExit_Spawn_BP_C_1"},
+        "Shop_BlackMarket_01": {"start": "PlayerStart_1"},
+        "Observitory_P": {"arrow": "SavePoint_BP_C_3", "alternate": "LevelExit_Spawn_BP_C_1"},
+        "Shop_Scientist_01": {"start": "PlayerStart_2"},
+        "DeadBridge_P": {"arrow": "SavePoint_BP_C_1", "alternate": "LevelExit_Spawn_BP_C_4"},
+        "Forest_01_P": {"start": "PlayerStart_2"},
+    }
+    basename = destination.rsplit("/", 1)[1]
+    placement = proof["placement"]
+    actor_class = {"arrow": "SavePoint_BP_C", "alternate": "LevelExit_Spawn_BP_C", "start": "PlayerStart"}
+    assert proof["destination"] == destination and placement in markers[basename], proof
+    actor = markers[basename][placement]
+    assert proof["actor"] == f"{actor_class[placement]} {destination}.{basename}:PersistentLevel.{actor}", proof
+    assert len(proof["location"]) == 3 and all(math.isfinite(axis) for axis in proof["location"]), proof
+
+
+async def random_cube_travel(cube, character_id, host_session):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tools.silverfish.travel import RED_DESTINATIONS, TRAVEL_RADIUS_UU
 
@@ -348,63 +388,77 @@ async def red_cube_travel(character_id, host_session):
     assert initial["generation"] == host_session, initial
     pawn = initial["game"]["pawns"]["local"]["name"]
     guid = uuid.uuid4().hex.upper()
-    await red_action("seed", guid, crossroads, "seeded", pawn)
+    await random_cube_action(cube, "seed", guid, crossroads, "seeded", pawn)
 
     entrance = "Obsv_Etr"
     await position_for_native_exit("host", "near", entrance=entrance)
     await position_for_native_exit("guest", "far", entrance=entrance)
     distant = await wait(run, lambda status: ready(status, crossroads) and separation(status) > TRAVEL_RADIUS_UU)
-    await red_action("use-probe", guid, crossroads, "requested", pawn)
-    denied = await wait_campaign_event("native_red_request", guid)
+    await random_cube_action(cube, "use-probe", guid, crossroads, "requested", pawn)
+    denied = await wait_campaign_event(f"native_{cube}_request", guid)
     refusal = denied["result"]
     assert denied["source"] == crossroads and denied["entry"] == "use_held_item", denied
     assert (not refusal["ok"] and refusal["error"] == "travel_blocked"
             and {"id": character_id, "reason": "too_far"} in refusal["blockers"]), denied
-    await red_action("inspect", guid, crossroads, "present", pawn)
-    untouched = await wait(run, lambda status: ready(status, crossroads))
-    assert untouched["zone_epoch"] == distant["zone_epoch"] and red_ledger(untouched) == red_ledger(initial), untouched
-    note("red_cube_rejection_preserves_stock_item", {"guid": guid, "blockers": refusal["blockers"]})
+    await random_cube_action(cube, "inspect", guid, crossroads, "present", pawn)
+    untouched = await wait(run, lambda status: ready(status, crossroads)
+                           and (cube == "red" or status["game"].get("native_green_options")))
+    assert untouched["zone_epoch"] == distant["zone_epoch"], untouched
+    assert random_cube_ledger(untouched, cube) == random_cube_ledger(initial, cube), untouched
+    refusal_note = {"guid": guid, "blockers": refusal["blockers"]}
+    destinations, arrival_tag = RED_DESTINATIONS, "Red_Tes"
+    if cube == "green":
+        options_proof = untouched["game"]["native_green_options"]
+        destinations, arrival_tag = verify_green_options(options_proof, pawn), "Bed"
+        refusal_note["options"] = options_proof
+    note(f"{cube}_cube_rejection_preserves_stock_item", refusal_note)
 
     await position_for_native_exit("guest", "near", entrance=entrance)
     await wait(run, lambda status: ready(status, crossroads) and separation(status) <= TRAVEL_RADIUS_UU)
-    await red_action("use-probe", guid, crossroads, "requested", pawn)
-    approved = await wait_campaign_event("native_red_request", guid, after=denied["sequence"])
+    await random_cube_action(cube, "use-probe", guid, crossroads, "requested", pawn)
+    approved = await wait_campaign_event(f"native_{cube}_request", guid, after=denied["sequence"])
     result = approved["result"]
     assert approved["source"] == crossroads and approved["entry"] == "use_held_item", approved
-    assert result["ok"] and result["map"] in RED_DESTINATIONS and result["entrance"] == "Red_Tes", approved
+    assert result["ok"] and result["map"] in destinations and result["entrance"] == arrival_tag, approved
     destination = result["map"]
-    completed = await wait_campaign_event("red_travel_completed", guid)
-    assert (completed["ok"] and completed["map"] == destination and completed["entrance"] == "Red_Tes"
+    completed = await wait_campaign_event(f"{cube}_travel_completed", guid)
+    assert (completed["ok"] and completed["map"] == destination and completed["entrance"] == arrival_tag
             and completed["debit"] == "removed"
             and completed["travel_epoch"] == result["travel_epoch"] != distant["zone_epoch"]), completed
     settled = {"pending": None, "spent": {guid: "arrived"}}
-    arrived = await wait(run, lambda status: ready(status, destination) and red_ledger(status) == settled)
+    arrived = await wait(run, lambda status: ready(status, destination) and random_cube_ledger(status, cube) == settled
+                         and (cube == "red" or status["game"].get("native_green_arrival")))
     assert arrived["zone_epoch"] == result["travel_epoch"], arrived
     peer = await wait(client_run, lambda status: status.get("state") == "connected"
                       and status.get("game", {}).get("map") == destination)
     assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
-    await red_action("inspect", guid, destination, "absent", arrived["game"]["pawns"]["local"]["name"])
-    note("red_cube_moves_party_to_rolled_stock_destination", {
+    await random_cube_action(cube, "inspect", guid, destination, "absent", arrived["game"]["pawns"]["local"]["name"])
+    arrival_note = {
         "guid": guid, "map": destination, "entrance": completed["entrance"], "debit": completed["debit"],
         "character_id": character_id, "host_session": host_session,
-    })
+    }
+    if cube == "green":
+        arrival = arrived["game"]["native_green_arrival"]
+        verify_green_arrival(arrival, destination)
+        arrival_note["arrival"] = arrival
+    note(f"{cube}_cube_moves_party_to_rolled_stock_destination", arrival_note)
     return guid, destination
 
 
-async def verify_red_cube_restart(guid, destination, character_id, host_session):
+async def verify_random_cube_restart(cube, guid, destination, character_id, host_session):
     resumed = await wait(run, lambda status: party_in_zone(status, destination)
                          and status.get("generation") == host_session
                          and status["game"].get("native_transport", {}).get("state") == "ready")
-    assert red_ledger(resumed) == {"pending": None, "spent": {guid: "arrived"}}, resumed
-    await red_action("inspect", guid, destination, "absent", resumed["game"]["pawns"]["local"]["name"])
+    assert random_cube_ledger(resumed, cube) == {"pending": None, "spent": {guid: "arrived"}}, resumed
+    await random_cube_action(cube, "inspect", guid, destination, "absent", resumed["game"]["pawns"]["local"]["name"])
     peer = await wait(client_run, lambda status: status.get("state") == "connected"
                       and status.get("game", {}).get("map") == destination)
     assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
     report = await command("events", "--campaign", campaign, "--tail", "100")
     completions = [event for event in report["events"] if event.get("guid") == guid
-                   and event["event"] in ("red_travel_completed", "red_travel_recovered")]
-    assert len(completions) == 1 and completions[0]["event"] == "red_travel_completed", completions
-    note("red_cube_destination_and_single_debit_survive_restart", {
+                   and event["event"] in (f"{cube}_travel_completed", f"{cube}_travel_recovered")]
+    assert len(completions) == 1 and completions[0]["event"] == f"{cube}_travel_completed", completions
+    note(f"{cube}_cube_destination_and_single_debit_survive_restart", {
         "guid": guid, "map": destination, "character_id": character_id, "host_session": host_session,
     })
 
@@ -792,7 +846,7 @@ async def smoke():
         if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
         authored_route = any((args.authored_zone, args.native_door, args.native_gold,
-                              args.native_blue, args.native_red, args.native_stardust, args.observatory_zone))
+                              args.native_blue, random_cube, args.native_stardust, args.observatory_zone))
         initial_zone = ["--start-zone", crossroads] if authored_route else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
@@ -970,6 +1024,23 @@ async def smoke():
             assert abs(native_health - hit["guest_before"] * 0.10) < 1, revived["game"]["pawns"]
             note("same_native_pawn_revived_in_place", {"guest_health": native_health,
                                                       "host_health": hit["host_before"], "pawn": original_guest})
+            if args.native_fall:
+                await wait(run, lambda state: state["game"].get("native_fall", {}).get("state") == "ready")
+                authority = ("action", "--campaign", campaign)
+                lift = await command(*authority, "native-fall-position")
+                landed = await wait(run, lambda state: state["game"].get("native_fall", {}).get("landings", 0)
+                                    > lift["before"]["landings"] and state["gameplay"]["players"]["guest"]["downed"],
+                                    timeout=20)
+                proof = landed["game"]["native_fall"]
+                assert proof["pawn"] == original_guest == lift["pawn"], proof
+                assert proof["forwarded"] == lift["before"]["forwarded"] + 1, proof
+                assert proof["elapsed"] > 0.5 and proof["vertical_speed"] < -1200 and not proof["actor_tick"], proof
+                assert landed["game"]["pawns"]["local"]["health"] == hit["host_before"]
+                assert not landed["game"]["native_dead_flags"]["guest"]
+                await command(*authority, "native-fall-return")
+                assert (await command(*authority, "interact", "--target", chosen))["effect"] == "revive"
+                await wait(run, lambda state: state["game"]["pawns"]["guest"]["health"] == native_health)
+                note("stock_guest_fall_downs_only_the_enrolled_pawn", proof)
             if args.native_hazard:
                 authority = ("action", "--campaign", campaign)
                 await command(*authority, "native-hazard-position")
@@ -1138,8 +1209,8 @@ async def smoke():
         elif args.native_blue:
             blue_receipts = await blue_cube_travel(chosen, guest["host_session"])
             expected_map = observatory
-        elif args.native_red:
-            red_guid, expected_map = await red_cube_travel(chosen, guest["host_session"])
+        elif random_cube:
+            cube_guid, expected_map = await random_cube_travel(random_cube, chosen, guest["host_session"])
         elif args.native_stardust:
             stardust_receipt = await stardust_visit(chosen, guest["host_session"])
             expected_map = observatory
@@ -1278,9 +1349,11 @@ async def smoke():
             assert snapshot["world"]["map"] == observatory
             assert snapshot["world"]["party"]["blue_transport"] == {"pending": None, "spent": blue_receipts}
             assert snapshot["world"]["native_rest"] == {"destination": observatory, "bed": observatory_bed}
-        if args.native_red:
+        if random_cube:
             assert snapshot["world"]["map"] == expected_map
-            assert snapshot["world"]["party"]["red_transport"] == {"pending": None, "spent": {red_guid: "arrived"}}
+            assert snapshot["world"]["party"][f"{random_cube}_transport"] == {
+                "pending": None, "spent": {cube_guid: "arrived"},
+            }
         if args.native_stardust:
             assert snapshot["world"]["map"] == observatory
             assert snapshot["world"]["party"]["last_stardust_visit"] == stardust_receipt
@@ -1290,7 +1363,7 @@ async def smoke():
         note("isolated_checkpoint", {"revision": saved["revision"],
                                      "character_location": saved_character["state"]["location"]})
         await stop(host, "--campaign", campaign)
-        if args.native_seed or args.native_host_save:
+        if args.native_seed or args.native_host_save or args.native_guest_save:
             shutdown_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         if args.native_seed:
             seed = shutdown_checkpoint["world"]["native_observation"]["native_scene"]["instance_seed"]
@@ -1302,6 +1375,15 @@ async def smoke():
             contents = saved_path.read_bytes()
             assert contents.startswith(b"GVAS") and len(contents) == frame["size"], frame
             assert hashlib.sha256(contents).hexdigest() == frame["sha256"], frame
+        if args.native_guest_save:
+            detached_frame = shutdown_checkpoint["characters"][chosen]["state"]["native_guest_save"]
+            host_frame = shutdown_checkpoint["world"]["native_host_save"]
+            assert detached_frame["character_id"] == chosen and detached_frame["map"] == expected_map, detached_frame
+            assert detached_frame["slot"] != host_frame["slot"], (host_frame, detached_frame)
+            path = run.parent / "game-user" / "Saved" / "SaveGames" / (detached_frame["slot"] + ".sav")
+            contents = path.read_bytes()
+            assert contents.startswith(b"GVAS") and len(contents) == detached_frame["size"], detached_frame
+            assert hashlib.sha256(contents).hexdigest() == detached_frame["sha256"], detached_frame
         host_restart = await start("host", "--campaign", campaign, "--port", str(port), "--headless", *fixtures)
         restored = await wait(run, lambda state: state.get("state") == "hosting" and
                               state.get("generation") != host_status["generation"])
@@ -1340,6 +1422,16 @@ async def smoke():
                                        .get("native_inventory_projected", []))
             note("stock_bandage_restored_after_restart", {"guid": awarded["guid"],
                                                           "pawn": restored_item["game"]["native_guest_save"]["pawn"]})
+            if args.native_guest_save:
+                events = await command("events", "--campaign", campaign, "--tail", "100")
+                proof = next(entry for entry in events["events"] if entry["event"] == "native_guest_save_restored"
+                             and entry["generation"] == restored["generation"])
+                assert proof["slot"] == detached_frame["slot"] and proof["character_id"] == chosen, proof
+                assert proof["pawn"] == restored_item["game"]["pawns"]["guest"]["name"], proof
+                assert proof["state"] == "restored" and proof["backpack_count"] >= 1, proof
+                note("detached_guest_native_inventory_survives_in_its_own_save", {
+                    "frame": detached_frame, "proof": proof, "item_guid": awarded["guid"],
+                })
         if args.native_quest_flow:
             restored_quest = await wait(run, lambda state: state["game"].get("native_quest", {})
                                         .get("state") == "completed" and state["game"].get("native_wallet") == expected_wallet)
@@ -1359,8 +1451,8 @@ async def smoke():
             note("gameplay_survives_host_restart", {"winner": winner, "guest_health": expected_health})
         if args.native_gold:
             await golden_cube_return(gold_guid, chosen, restored["generation"])
-        if args.native_red:
-            await verify_red_cube_restart(red_guid, expected_map, chosen, restored["generation"])
+        if random_cube:
+            await verify_random_cube_restart(random_cube, cube_guid, expected_map, chosen, restored["generation"])
         if args.native_blue:
             resumed = await wait(run, lambda status: party_in_zone(status, observatory)
                                  and status["game"].get("native_transport", {}).get("state") == "ready")
