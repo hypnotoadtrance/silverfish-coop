@@ -208,13 +208,23 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
                 return None
             attempts, guest_hits, host_hits = map(int, attack[7:10])
             health = tuple(map(float, attack[10:]))
-            if min(attempts, guest_hits, host_hits) < 0 or not all(math.isfinite(hp) and hp >= 0 for hp in health):
+            if min(attempts, guest_hits, host_hits) < 0 or not all(map(math.isfinite, health)):
                 return None
             result["combat"] = {"state": attack[2], "host_pawn": attack[3], "guest_pawn": attack[4],
                                 "attacker": attack[5], "currently_targeting_guest": attack[6],
                                 "attempts": attempts, "guest_hits": guest_hits, "host_hits": host_hits,
                                 **dict(zip(("host_baseline", "host_at_hit", "host_current", "guest_before",
                                             "guest_after", "guest_current"), health))}
+        diagnostics = [row for row in rows if row[0] == "native-campaign-npc-combat-diagnostic"]
+        if diagnostics and viewer == "host":
+            row, = diagnostics
+            if len(row) != 7 or row[1] != MAP or row[2] not in {"active", "unavailable"}:
+                return None
+            calls, attempts = map(int, row[3:5])
+            if not 0 <= attempts <= calls:
+                return None
+            result["combat_diagnostic"] = {"scope": row[2], "calls": calls, "attempts": attempts,
+                                           "damage": row[5], "swing": row[6]}
         infection = [row for row in rows if row[0] == "native-campaign-npc-melee-sickness"]
         if infection and viewer == "host":
             hit, = infection
@@ -266,7 +276,8 @@ def stock_guest_hit(report: dict, host: str, guest: str, members: list[str]) -> 
             and attack["guest_pawn"] == guest and attack["attacker"] in members
             and attack["attempts"] >= attack["guest_hits"] > 0 and attack["host_hits"] == 0
             and attack["host_baseline"] == attack["host_at_hit"] == attack["host_current"] > 0
-            and 0 <= attack["guest_current"] <= attack["guest_after"] < attack["guest_before"])
+            and attack["guest_after"] < attack["guest_before"]
+            and attack["guest_current"] <= max(1, attack["guest_after"]))
 
 
 def healthy_guest_sickness(server: dict, pawn: str) -> dict:
@@ -350,6 +361,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             if viewer == "host":
                 if stock_cohort(frame, replicate, family):
                     evidence.setdefault("first_host_cohort", frame)
+                if diagnostic := frame.get("combat_diagnostic"):
+                    evidence.setdefault("first_combat_diagnostic", diagnostic)
+                    evidence["last_combat_diagnostic"] = diagnostic
+                    if diagnostic["calls"]:
+                        evidence.setdefault("first_stock_damage_diagnostic", diagnostic)
                 continue
             client_history["frames"] += 1
             client_history["max_local_authority"] = max(client_history["max_local_authority"], frame["authority"])

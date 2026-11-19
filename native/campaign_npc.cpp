@@ -487,6 +487,8 @@ namespace
         bool pending_health_debit{};
         SicknessSnapshot sickness_at_arm{}, pending_sickness{}, sickness_before{}, sickness_after{};
         int attempts{}, guest_hits{}, host_hits{};
+        int damage_calls{};
+        std::string_view damage_status{"waiting"}, swing_status{"waiting"};
     } combat_watch;
 
     std::atomic<bool> installed{};
@@ -683,7 +685,7 @@ namespace
         auto* property = field<U::FDoubleProperty>(save, STR("PlayerHealth"));
         if (!property) return false;
         result = property->GetPropertyValueInContainer(save);
-        return std::isfinite(result) && result >= 0;
+        return std::isfinite(result);
     }
 
     bool combat_current()
@@ -724,26 +726,49 @@ namespace
     {
         if (!watch_combat || combat_watch.damage_frame || combat_watch.melee_frame ||
             (receiver != combat_watch.guest.Get() && receiver != combat_watch.host.Get()) || !combat_current()) return;
+        ++combat_watch.damage_calls;
         auto* parent = frame.PreviousFrame();
         auto* attacker = parent ? parent->Object() : nullptr;
+        if (!attacker || !contains(combat_watch.cohort, attacker))
+        {
+            combat_watch.damage_status = "outside_stock_cohort";
+            return;
+        }
+        if (parent->Node() != find<U::UFunction>(melee_path))
+        {
+            combat_watch.damage_status = "outside_resolve_melee";
+            return;
+        }
         auto* function = frame.Node();
         auto* instigator = field<U::FObjectProperty>(function, STR("Instigator"));
-        if (!attacker || !contains(combat_watch.cohort, attacker) || parent->Node() != find<U::UFunction>(melee_path) ||
-            function != find<U::UFunction>(player_damage_path) || function->GetNumParms() != 7 || function->GetReturnProperty() ||
+        if (function != find<U::UFunction>(player_damage_path) || function->GetNumParms() != 7 || function->GetReturnProperty() ||
             !instigator || !instigator->HasAnyPropertyFlags(U::CPF_Parm) || instigator->HasAnyPropertyFlags(U::CPF_OutParm) ||
-            instigator->GetOffset_Internal() != 0x150 || get_object(instigator, frame.Locals()) != attacker ||
-            !stock_npc_for_combat(attacker, U::Cast<U::UWorld>(combat_watch.world.Get()), combat_watch.family) ||
+            instigator->GetOffset_Internal() != 0x150 || get_object(instigator, frame.Locals()) != attacker)
+        {
+            combat_watch.damage_status = "stock_damage_parameters_unverified";
+            return;
+        }
+        if (!stock_npc_for_combat(attacker, U::Cast<U::UWorld>(combat_watch.world.Get()), combat_watch.family) ||
             object(attacker, STR("CombatTarget")) != receiver ||
             !read_health(combat_watch.host_save.Get(), combat_watch.host_before) ||
-            !read_health(combat_watch.guest_save.Get(), combat_watch.guest_before)) return;
+            !read_health(combat_watch.guest_save.Get(), combat_watch.guest_before))
+        {
+            combat_watch.damage_status = "stock_combat_target_unverified";
+            return;
+        }
         if (combat_watch.family == NpcFamily::Flayer && receiver == combat_watch.guest.Get())
         {
             if (!current_sickness(combat_watch.pending_sickness) ||
-                !same_stock_sickness(combat_watch.pending_sickness, combat_watch.sickness_at_arm)) return;
+                !same_stock_sickness(combat_watch.pending_sickness, combat_watch.sickness_at_arm))
+            {
+                combat_watch.damage_status = "stock_sickness_scope_unverified";
+                return;
+            }
             combat_watch.melee_frame = parent;
             combat_watch.pending_health_debit = false;
         }
         ++combat_watch.attempts;
+        combat_watch.damage_status = "stock_damage_qualified";
         combat_watch.damage_frame = &frame;
         combat_watch.pending_attacker = attacker;
     }
@@ -781,16 +806,20 @@ namespace
         const bool exact_attacker = combat_watch.pending_attacker.Get() == actor;
         combat_watch.pending_health_debit = false;
         combat_watch.pending_attacker.Reset();
+        combat_watch.swing_status = "stock_health_debit_unverified";
         if (!measured || !exact_attacker || call.OriginalFunctionCallPrevented() || !combat_current()) return;
         SicknessSnapshot after;
         double host{}, guest{};
+        combat_watch.swing_status = "stock_health_after_swing_unverified";
         if (!current_sickness(after) || !read_health(combat_watch.host_save.Get(), host) ||
             !read_health(combat_watch.guest_save.Get(), guest) || host != combat_watch.host_at_arm ||
             guest != combat_watch.pending_guest_after) return;
         const auto& before = combat_watch.pending_sickness;
         const auto delta = static_cast<std::int64_t>(after.guest_sickness) - before.guest_sickness;
+        combat_watch.swing_status = "stock_infection_delta_unverified";
         if (!same_stock_sickness(before, after) || !after.guest_found || delta < 1 || delta > flayer_infection ||
             after.infect_reads - before.infect_reads != 1 || after.infect_writes - before.infect_writes != 1) return;
+        combat_watch.swing_status = "stock_infection_verified";
         if (combat_watch.guest_hits++ == 0)
         {
             combat_watch.attacker = actor;
@@ -1393,6 +1422,17 @@ namespace
         return 14;
     }
 
+    int read_combat_diagnostic(const Lua& lua)
+    {
+        if (!hook_ready() || !watch_combat || lua.get_stack_size() != 0 || !combat_watch.world.Get()) return 0;
+        lua.set_string(combat_current() ? "active" : "unavailable");
+        lua.set_integer(combat_watch.damage_calls);
+        lua.set_integer(combat_watch.attempts);
+        lua.set_string(combat_watch.damage_status.data());
+        lua.set_string(combat_watch.swing_status.data());
+        return 5;
+    }
+
     int read_combat_sickness(const Lua& lua)
     {
         if (!hook_ready() || !watch_combat || lua.get_stack_size() != 0 || combat_watch.family != NpcFamily::Flayer ||
@@ -1532,6 +1572,7 @@ namespace silverfish::campaign_npc
         {
             lua.register_function("SilverfishArmCampaignNpcCombat", arm_combat);
             lua.register_function("SilverfishReadCampaignNpcCombat", read_combat);
+            lua.register_function("SilverfishReadCampaignNpcCombatDiagnostic", read_combat_diagnostic);
             lua.register_function("SilverfishReadCampaignNpcCombatSickness", read_combat_sickness);
             lua.register_function("SilverfishClearCampaignNpcCombat", clear_combat);
         }

@@ -407,6 +407,12 @@ local function read_rows(state, phase, status_row)
             for index = 1, receipt.n do if receipt[index] == "" then receipt[index] = "-" end end
             rows[#rows + 1] = status_row("native-campaign-npc-combat", map, table.unpack(receipt, 1, receipt.n))
         end
+        if type(SilverfishReadCampaignNpcCombatDiagnostic) == "function" then
+            local diagnostic = table.pack(SilverfishReadCampaignNpcCombatDiagnostic())
+            if diagnostic.n == 5 then
+                rows[#rows + 1] = status_row("native-campaign-npc-combat-diagnostic", map, table.unpack(diagnostic))
+            end
+        end
         if view == "flayer" and type(SilverfishReadCampaignNpcCombatSickness) == "function" then
             local infection = table.pack(SilverfishReadCampaignNpcCombatSickness())
             if infection.n == 13 then
