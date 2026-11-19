@@ -26,8 +26,11 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
-local keys = {up = "Up", down = "Down", enter = "Enter", back = "BackSpace"}
-local page_size, max_offers, max_money = 8, 128, 2147483647
+local keys = {up = "Up", down = "Down", enter = "Enter", back = "BackSpace",
+    ["page-up"] = "PageUp", ["page-down"] = "PageDown"}
+local ordinary_keys = {"back", "up", "down", "enter"}
+local paged_keys = {"back", "page-up", "page-down", "up", "down", "enter"}
+local page_size, max_offers, max_money, max_sequence = 8, 128, 2147483647, 9007199254740991
 local events_path, heartbeat_path, is_downed, binding, session, widget
 local event_sequence = 0
 local lease_through = 0
@@ -132,15 +135,22 @@ function view.clear()
     lease_through = 0
 end
 
-local function emit(kind, offer)
+local function emit(kind, first, second)
+    if event_sequence >= max_sequence then return end
     local profile = session.context.profile
     local file = io.open(events_path, "ab")
-    if not file then return false end
+    if not file then return end
     event_sequence = event_sequence + 1
     local wrote = file:write(table.concat({"shop-view", event_sequence, session.sequence, kind, profile.map,
-        session.context.name, profile.actor_name, offer and offer.guid or "-", offer and offer.price or "-"}, "\t"), "\n")
+        session.context.name, profile.actor_name, first or "-", second or "-"}, "\t"), "\n")
     local closed = file:close()
-    return wrote and closed
+    return wrote and closed and event_sequence or nil
+end
+
+local function request(kind, waiting, offset, first, second)
+    local event = emit(kind, first, second)
+    session.state = event and waiting or "error"
+    session.pending_event, session.wanted_offset = event, event and offset or nil
 end
 
 local function active()
@@ -151,6 +161,7 @@ local function close()
     remove_widget()
     if not session or session.state == "closed" then return end
     session.state = "closed"
+    session.pending_event, session.wanted_offset = nil, nil
     emit("close")
 end
 
@@ -161,9 +172,9 @@ local function read_press(current)
     if active() or session and session.state == "error" then
         close()
     else
-        session = {context = current, sequence = sequence, state = "pending", total = 0, offers = {}, selection = 0}
+        session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0}
         held = {}
-        if not emit("open") then session.state = "error" end
+        request("open", "pending", 0)
     end
     return true
 end
@@ -214,7 +225,9 @@ local function show()
     local lines = {current.profile.title}
     if session.wallet then lines[#lines + 1] = "Party cash  " .. session.wallet end
     if #session.offers > 0 then
-        lines[#lines + 1] = string.format("Showing %d of %d offers", #session.offers, session.total)
+        lines[#lines + 1] = session.paging and string.format("Showing %d-%d of %d offers",
+            session.offset + 1, session.offset + #session.offers, session.total)
+            or string.format("Showing %d of %d offers", #session.offers, session.total)
         for index, offer in ipairs(session.offers) do
             lines[#lines + 1] = string.format("%s %s  x%d  %d", index == session.selection and ">" or " ",
                 offer.name, offer.quantity, offer.price)
@@ -228,11 +241,14 @@ local function show()
             offer.quantity, offer.name, offer.price)
     elseif session.state == "buying" then
         lines[#lines + 1] = "Purchase pending"
+    elseif session.state == "paging" then
+        lines[#lines + 1] = "Checking the next stock page"
     elseif session.state == "error" then
         lines[#lines + 1] = "Merchant unavailable. Backspace or interact to close."
     else
         if offer and offer.price > session.wallet then lines[#lines + 1] = "This offer exceeds party cash." end
         lines[#lines + 1] = "Up / Down selects. Enter buys. Backspace closes."
+        if session.paging and session.total > page_size then lines[#lines + 1] = "Page Up / Page Down changes page." end
     end
     local text = table.concat(lines, "\n")
     widget.TextBlock_Notes:SetText(FText(text))
@@ -247,10 +263,13 @@ local function choose(action)
         local offer = session.offers[session.selection]
         if action == "enter" and offer and offer.price <= session.wallet then
             if session.state == "confirming" then
-                session.state = emit("buy", offer) and "buying" or "error"
+                request("buy", "buying", session.offset, offer.guid, offer.price)
             else
                 session.state = "confirming"
             end
+        elseif session.paging and (action == "page-up" or action == "page-down") then
+            local offset = session.offset + (action == "page-up" and -page_size or page_size)
+            if offset >= 0 and offset < session.total then request("page", "paging", offset, session.offset, offset) end
         elseif (action == "up" or action == "down") and offer then
             local direction = action == "up" and -1 or 1
             session.selection = math.min(#session.offers, math.max(1, session.selection + direction))
@@ -263,7 +282,7 @@ end
 local function poll_keys()
     if not session or not valid(widget) or session.state == "closed" or not can_open(session.context) then return end
     local changed
-    for _, action in ipairs({"back", "up", "down", "enter"}) do
+    for _, action in ipairs(session.paging and paged_keys or ordinary_keys) do
         if not input_names[action] then
             local name = FName(keys[action], EFindName.FNAME_Find)
             if name:GetComparisonIndex() == 0 then error("The stock merchant input key did not resolve", 0) end
@@ -277,10 +296,10 @@ local function poll_keys()
     if changed then choose(changed) end
 end
 
-local function offers(fields, total)
-    if #fields - 7 ~= math.min(page_size, total) then return nil end
+local function offers(fields, first, offset, total)
+    if #fields - first + 1 ~= math.min(page_size, total - offset) then return nil end
     local list, seen = {}, {}
-    for index = 8, #fields do
+    for index = first, #fields do
         local guid, path, quantity, price = fields[index]:match("^([0-9A-F]+)|(/Game/[%w_./%-]+)|(%d+)|(%d+)$")
         local name = path and #path <= 512 and path:match("%.([%w_%-]+)_C$")
         quantity, price = integer(quantity, max_money), integer(price, max_money)
@@ -304,7 +323,7 @@ local function fixture(current, action)
         current.pawn.InteractionTarget_Component = valid(original) and original or nil
         if not invoked or not ok or reason ~= "stock_started_consumed" or current.controller.MenuStack:GetArrayNum() ~= 0
             or not read_press(current) then error("The stock merchant key did not publish one isolated shop press", 0) end
-    elseif keys[action] and session and valid(widget) then
+    elseif keys[action] and session and valid(widget) and (session.paging or (action ~= "page-up" and action ~= "page-down")) then
         choose(action)
     else
         error("The staged merchant input is unavailable", 0)
@@ -314,31 +333,49 @@ end
 
 function view.command(fields, state, phase)
     local operation = fields[2]
-    if operation ~= "native-shop-view-render" and operation ~= "native-shop-view-unavailable"
+    local page_render = operation == "native-shop-view-render-page"
+    local unavailable = operation == "native-shop-view-unavailable"
+    if operation ~= "native-shop-view-render" and not page_render and not unavailable
         and operation ~= "native-shop-view-fixture" then return end
     local current = context(state, phase)
     if not current or not same_context(current, binding) or not can_open(current) or not in_reach(current) then
         error("The exact standing merchant guest is unavailable", 0)
     end
     if operation == "native-shop-view-fixture" and #fields == 3 then return fixture(current, fields[3]) end
-    local sequence = integer(fields[3], 9007199254740991)
-    if not same_context(current, session and session.context) or sequence ~= session.sequence or fields[4] ~= current.profile.map
-        or (session.state ~= "pending" and session.state ~= "buying") then
+    local sequence = integer(fields[3], max_sequence)
+    local tokened = page_render or (unavailable and #fields == 5)
+    local event = tokened and integer(fields[page_render and 4 or 5], max_sequence)
+    local map = fields[page_render and 5 or 4]
+    if not same_context(current, session and session.context) or sequence ~= session.sequence or map ~= current.profile.map
+        or (session.state ~= "pending" and session.state ~= "buying" and session.state ~= "paging")
+        or (tokened and (not event or event ~= session.pending_event)) or (session.paging and not tokened) then
         error("The authenticated merchant view has expired", 0)
     end
-    if operation == "native-shop-view-unavailable" and #fields == 4 then
-        session.state, session.offers, session.total, session.selection = "error", {}, 0, 0
-        session.wallet = nil
+    if unavailable and (#fields == 4 or #fields == 5) then
+        session.state, session.offers, session.total, session.selection, session.offset = "error", {}, 0, 0, 0
+        session.wallet, session.render_event = nil, nil
     else
-        local balance, total = integer(fields[6], max_money), integer(fields[7], max_offers)
-        local catalog = total and offers(fields, total)
-        if operation ~= "native-shop-view-render" or fields[5] ~= current.profile.actor_name or not balance or not catalog then
+        local first = page_render and 10 or 8
+        local balance, total = integer(fields[first - 2], max_money), integer(fields[first - 1], max_offers)
+        local offset = 0
+        if page_render then
+            offset = integer(fields[7], max_offers)
+            local last = total and (math.max(0, total - 1) // page_size) * page_size
+            if not offset or not last or offset ~= math.min(session.wanted_offset, last) then
+                error("The authenticated merchant page does not match the requested offset", 0)
+            end
+        end
+        local catalog = total and offers(fields, first, offset, total)
+        if (not page_render and operation ~= "native-shop-view-render")
+            or fields[page_render and 6 or 5] ~= current.profile.actor_name or not balance or not catalog then
             error("The authenticated merchant catalog is unavailable", 0)
         end
         session.wallet, session.total, session.offers = balance, total, catalog
         session.state, session.selection = "ready", #catalog > 0 and 1 or 0
+        session.paging, session.offset, session.render_event = page_render, offset, event or nil
         held = {}
     end
+    session.pending_event, session.wanted_offset = nil, nil
     local ok, failure = pcall(show)
     if not ok then
         remove_widget()
@@ -354,7 +391,9 @@ function view.rows(state, phase, status_row)
         or not same(state.world, current.world) then return {} end
     local offer = session.offers[session.selection]
     return {status_row("native-shop-view", session.state, session.sequence, current.profile.map, current.name, current.profile.actor_name,
-        session.wallet or "-", session.total, #session.offers, session.selection, offer and offer.guid or "-", offer and offer.price or "-")}
+        session.wallet or "-", session.total, #session.offers, session.selection, offer and offer.guid or "-", offer and offer.price or "-"),
+        status_row("native-shop-view-page", session.sequence, current.profile.map, current.name, current.profile.actor_name,
+            session.offset, session.pending_event or 0, session.wanted_offset or session.offset, session.render_event or 0)}
 end
 
 function view.start(bridge, downed)

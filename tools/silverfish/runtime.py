@@ -546,7 +546,7 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy")
+            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "page")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
                             for value in fields[1:3])
                     and all(len(value) <= 512 for value in fields[4:])):
@@ -1079,6 +1079,12 @@ class Bridge:
                         "wallet": None if fields[6] == "-" else int(fields[6]), "total": int(fields[7]),
                         "visible": int(fields[8]), "selection": int(fields[9]),
                         "guid": None if fields[10] == "-" else fields[10], "price": None if fields[11] == "-" else int(fields[11]),
+                    }
+                elif fields[0] == "native-shop-view-page" and len(fields) == 9:
+                    data["native_shop_view_page"] = {
+                        "sequence": int(fields[1]), "map": fields[2], "pawn": fields[3], "actor": fields[4],
+                        "offset": int(fields[5]), "pending_event": int(fields[6]), "wanted_offset": int(fields[7]),
+                        "render_event": int(fields[8]),
                     }
                 elif fields[0] == "native-authored-pickup" and len(fields) == 6:
                     data["native_authored_pickup"] = {"source": fields[1], "map": fields[2], "actor": fields[3],

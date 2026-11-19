@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
                native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
-               native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_turret_photo,
+               native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, party, wipe)
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
@@ -2927,6 +2927,7 @@ class Client:
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
+        self.shop_view = native_shop_view.ShopView() if invite.get("native_shop_view") else None
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
         self.native_return_retry_allowed = False
@@ -3256,50 +3257,6 @@ class Client:
                             write_text(self.bridge.directory / heartbeat_file, heartbeat)
             await asyncio.sleep(.4)
 
-    async def service_shop_view(self, active: bool) -> None:
-        if not self.invite.get("native_shop_view"):
-            return
-        entries = self.bridge.native_shop_view_requests()
-        if not entries or not active or self.stopping or not self.host_session:
-            return
-        event, sequence, kind, area, pawn, actor, guid, raw_price = entries[-1]
-        view = self.last_game.get("native_shop_view", {})
-        expected_state = "pending" if kind == "open" else "buying"
-        if (kind == "close" or area != self.last_game.get("map") or actor != native_finite_shop.MERCHANTS.get(area)
-                or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or (view.get("map"), view.get("actor"), view.get("sequence"), view.get("state"))
-                != (area, actor, sequence, expected_state)):
-            return
-        identifier = f"{self.host_session}:{self.zone_epoch}:{pawn}:shop:{sequence}:{event}"
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, identifier).hex
-        try:
-            if kind == "buy":
-                if (not native_gold.valid_guid(guid) or not raw_price.isascii() or not raw_price.isdigit()
-                        or len(raw_price) > 10 or view.get("guid") != guid or view.get("price") != int(raw_price)):
-                    raise ValueError("The stock merchant selection did not match the displayed quote")
-                purchase = await self.gameplay_action("native-finite-shop-buy", operation, f"{guid}@{raw_price}")
-                self.control.event("native_shop_view_purchased", operation_id=operation,
-                                   **purchase)
-            response = await self.gameplay_action("native-finite-shop-list", operation, None)
-            listing = response["native_finite_shop"]
-            total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
-            if (type(total) is not int or not 0 <= total <= 128 or type(wallet) is not int
-                    or not 0 <= wallet <= native_finite_shop.MAX_PRICE or type(offers) is not list or len(offers) != total
-                    or (listing.get("map"), listing.get("actor")) != (area, actor)):
-                raise ValueError("The host returned an invalid native merchant catalog")
-            fields = tuple(f"{row['guid']}|{row['class_path']}|{row['quantity']}|{row['price']}" for row in offers[:8])
-            snapshot = await self.bridge.command("native-shop-view-render", str(sequence), area, actor, str(wallet),
-                                                 str(total), *fields, timeout=5)
-            observed = snapshot.get("native_shop_view", {})
-            if (observed.get("sequence"), observed.get("state"), observed.get("visible")) != (sequence, "ready", len(fields)):
-                raise RuntimeError("The game did not verify the authenticated merchant overlay")
-            self.last_game = snapshot
-            self.control.event("native_shop_view_rendered", operation_id=operation, sequence=sequence, total=total)
-        except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
-            self.control.event("native_shop_view_rejected", operation_id=operation, reason=str(error))
-            with contextlib.suppress(OSError, RuntimeError, ValueError):
-                await self.bridge.command("native-shop-view-unavailable", str(sequence), area, timeout=2)
-
     async def refresh_gameplay(self) -> None:
         now = time.monotonic()
         if now >= self.next_snapshot:
@@ -3451,7 +3408,7 @@ class Client:
                     result = {"native_guest_inventory_equip_view": self.last_game.get("native_guest_inventory_equip_view", {})}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")
-                    if choice not in ("open", "up", "down", "enter", "back"):
+                    if choice not in ("open", "up", "down", "enter", "back", "page-up", "page-down"):
                         raise ValueError("Select a qualified merchant fixture input")
                     self.last_game = await self.bridge.command(action, choice, timeout=5)
                     result = {"native_shop_view": self.last_game.get("native_shop_view", {})}
@@ -3547,7 +3504,8 @@ class Client:
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
             await self.service_inventory_equip(active)
-            await self.service_shop_view(active)
+            if self.shop_view:
+                await self.shop_view.sync(self, active)
             interactions = self.bridge.interactions()
             if active and not self.stopping:
                 for operation_id, target in interactions:

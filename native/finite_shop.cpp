@@ -826,7 +826,7 @@ namespace
         std::string rows;
         Offer selected;
         int index = -1, listed = 0, ammo_shelf_count = 0;
-        for (auto* inventory : {finite, shelf})
+        for (auto* inventory : {shelf, finite})
         {
             if (!inventory) continue;
             const bool gunsmith_shelf = gunsmith_ammo && inventory == shelf;
