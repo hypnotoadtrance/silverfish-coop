@@ -104,22 +104,41 @@ async def verify(work, vanilla, routes):
             leg = {"profile": asdict(route), "source_epoch": current["zone_epoch"]}
             evidence["legs"].append(leg)
 
-            await act(position, target="guest", exit_position="near", **options)
-            leg["guest_veto"] = (await act(probe, target="guest", **options))[key]
-            assert leg["guest_veto"][field] == ("guest_denied" if door else "wall"), leg
+            async def near_probe(target, label, expected, preferred=None, group=False):
+                attempts = leg.setdefault("approach_attempts", {}).setdefault(label, [])
+                alternatives = [None] if door or route.source == GOLD_NEXUS else [None, *range(1, 9)]
+                for lane in [preferred, *(lane for lane in alternatives if lane != preferred)]:
+                    attempt = {"lane": lane}
+                    attempts.append(attempt)
+                    approach = {**options, "exit_position": "near"}
+                    if lane is not None:
+                        approach["amount"] = lane
+                    for member in (target, "guest") if group else (target,):
+                        placed = await submit(run, position, target=member, **approach)
+                        if placed.get("ok") is not True:
+                            error = placed.get("error", "")
+                            if not error.endswith("No verified stock floor at the requested expanded overlap position"):
+                                raise RuntimeError(f"{position} refused with {error}")
+                            attempt["placement_failure"] = member
+                            break
+                    if "placement_failure" in attempt:
+                        continue
+                    if group and not door:
+                        await wait(run, lambda state: state.get("game", {}).get("native_zone_wall", {}).get("host_open"))
+                    observed = (await act(probe, target=target, **options))[key]
+                    attempt["probe"] = observed
+                    if observed[field] != "other":
+                        leg[label] = observed
+                        if observed[field] not in expected:
+                            raise RuntimeError(f"{route.actor} {label} returned {observed[field]}, expected {expected}")
+                        return lane
+                raise RuntimeError(f"All tested approaches to {route.actor} were obstructed")
+
+            guest_lane = await near_probe("guest", "guest_veto", ("guest_denied",) if door else ("wall",))
             await act(position, target="guest", exit_position="far", **options)
-            await act(position, target="host", exit_position="near", **options)
-            leg["distance_veto"] = (await act(probe, target="host", **options))[key]
-            assert leg["distance_veto"][field] == ("host_out_of_range" if door else "wall"), leg
-            await act(position, target="host", exit_position="near", **options)
-            await act(position, target="guest", exit_position="near", **options)
-            if not door:
-                await wait(run, lambda state: state.get("game", {}).get("native_zone_wall", {}).get("host_open"))
-            leg["group_probe"] = (await act(probe, target="host", **options))[key]
-            if door and leg["group_probe"][field] in {"host_locked", "host_requirement"}:
-                raise RuntimeError(f"The stock door {route.entrance} is gated")
-            if not door:
-                assert leg["group_probe"][field] == "clear", leg
+            host_lane = await near_probe("host", "distance_veto", ("host_out_of_range",) if door else ("wall",), guest_lane)
+            await near_probe("host", "group_probe", ("host_opening", "travel_requested") if door else ("clear",),
+                             host_lane, group=True)
             current = await paired(route.destination, current["zone_epoch"])
             journal = (run / "events.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
             event, = [entry for line in journal if line.endswith("\n") and

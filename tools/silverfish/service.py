@@ -2516,6 +2516,11 @@ class Host:
                         raise ValueError("The exit fixture pawn is unavailable")
                     arguments = [action, binding.pawn if binding else alias]
                     position = request.get("exit_position")
+                    alternate = request.get("amount")
+                    if alternate is not None and (type(alternate) is not int or not 1 <= alternate <= 8
+                                                  or not placing or position != "near" or exit_actor is None
+                                                  or self.last_game.get("map") == GOLD_NEXUS):
+                        raise ValueError("A lane from 1 through 8 requires a near position at an exact stock mainland overlap")
                     if placing:
                         if position not in ("near", "inside", "far"):
                             raise ValueError("Choose a position for the exit fixture")
@@ -2524,6 +2529,8 @@ class Host:
                         arguments.append(entrance)
                     if exit_actor is not None:
                         arguments.append(exit_actor)
+                    if alternate is not None:
+                        arguments.append(str(alternate))
                     snapshot = await bridge.command(*arguments, timeout=4)
                     if placing:
                         result = {"native_zone": snapshot.get("native_zone"), "target": target,

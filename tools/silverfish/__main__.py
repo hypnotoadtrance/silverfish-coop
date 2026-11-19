@@ -184,7 +184,7 @@ def parser() -> argparse.ArgumentParser:
     ])
     action.add_argument("--target", help="character ID, loot ID, or full destination map path")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
-    action.add_argument("--amount", type=int, help="damage amount or SMG release round for fixture tests")
+    action.add_argument("--amount", type=int, help="quantity or lane index for the selected fixture")
     action.add_argument("--kind", choices=sorted(SEED_KINDS), help="stock weapon class for a headless weapon seed")
     action.add_argument("--x", type=float, help="normalized world X movement")
     action.add_argument("--y", type=float, help="normalized world Y movement")

@@ -451,7 +451,9 @@ local function nexus_crypt_pocket(world, world_name, exit_name, center, normal, 
     end
 end
 
-local function place_expanded_overlap(state, details, route, position)
+local alternate_lanes = {-400, 400, -750, 750, -1100, 1100, -1500, 1500}
+
+local function place_expanded_overlap(state, details, route, position, alternate)
     local pawn = details.pawn
     local exit = placed_actor("Level_Exit_BP_C", route.actor, state.world)
     local exit_class = StaticFindObject("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C")
@@ -541,6 +543,8 @@ local function place_expanded_overlap(state, details, route, position)
         end
     elseif floor then
         for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(0, offset) end
+    elseif alternate then
+        add_point(depth, alternate_lanes[alternate] + assigned)
     else
         for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do add_point(depth, offset) end
     end
@@ -749,17 +753,22 @@ function zone.command(fields, state, phase)
         error("An active staged native zone host is required", 0)
     end
     local slot, position, entrance, actor = fields[3], fields[4], fields[5], fields[6]
-    if #fields < 4 or #fields > 6 or (position ~= "near" and position ~= "inside" and position ~= "far") then
+    if #fields < 4 or #fields > 7 or (position ~= "near" and position ~= "inside" and position ~= "far") then
         error("Expected native-exit-position with a pawn and near, inside, or far", 0)
     end
     local route = routes[state.map]
     if actor and (#actor > 80 or not actor:match("^Level_Exit_BP_C_%d+$") or not entrance or entrance == "") then
         error("Choose an exact stock overlap actor with its entrance tag", 0)
     end
+    local alternate = tonumber(fields[7])
+    if fields[7] and (not alternate_lanes[alternate] or not actor or position ~= "near"
+        or state.map == "/Game/Classes/Maps/Dreams/GoldNexus_P") then
+        error("An alternate lane requires an exact stock mainland overlap approached from nearby", 0)
+    end
     local authored = expanded_overlap(state.map, entrance, actor)
     if actor then
         if not authored then error("The exact authored overlap and entrance pair is unavailable", 0) end
-        return place_expanded_overlap(state, probe_player(state, slot), authored, position)
+        return place_expanded_overlap(state, probe_player(state, slot), authored, position, alternate)
     end
     local legacy = route.fixture and route.entrance == entrance and route
         or (route.secondary and route.secondary.entrance == entrance and route.secondary)
