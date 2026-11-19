@@ -118,7 +118,7 @@ async def verify(work: Path, vanilla_saved: Path):
         frames = [saved["world"]["native_host_save"], saved["characters"][character]["state"]["native_guest_save"]]
         assert frames[0]["slot"] != frames[1]["slot"] and frames[1]["character_id"] == character, frames
         root = native_host_save.directory(campaign / "game-user")
-        flags = ("SubValve_Closed", "Player_Cash", "Player_Xp", "Rep_Freelancer", "Rep_State", "Rep_Coup", "Adv_Freelancer")
+        flags = ("SubValve_Closed", "Player_Cash", "Player_Xp", "Rep_Commune", "Rep_State", "Rep_Coup", "Adv_Commune")
         return [{name: values.get(name, 0) for name in flags}
                 for values in (stock_flags(root, item, area) for item in frames)]
 
@@ -157,8 +157,8 @@ async def verify(work: Path, vanilla_saved: Path):
         replica = await wait(guest_run, lambda frame: (scene := frame.get("game", {}).get(valve.SCENE, {}))
                              and scene.get("state") == "closed" and scene.get("epoch") == current["zone_epoch"])
         live = await balances(valve.SUBWAY)
-        assert live[0] == dict(initial[0], SubValve_Closed=1, Rep_Freelancer=initial[0]["Rep_Freelancer"]+20,
-                               Adv_Freelancer=initial[0]["Adv_Freelancer"]+200), live
+        assert live[0] == dict(initial[0], SubValve_Closed=1, Rep_Commune=initial[0]["Rep_Commune"]+20,
+                               Adv_Commune=initial[0]["Adv_Commune"]+200), live
         assert live[1] == initial[1], live
         replay = await action(guest, valve.ACTIVATE, "--target", current["zone_epoch"])
         assert replay["effect"] == "native_subway_valve_already_closed", replay
@@ -185,7 +185,7 @@ async def verify(work: Path, vanilla_saved: Path):
         after = await balances(BOROUGH)
         assert after[0] == dict(live[0], Player_Xp=live[0]["Player_Xp"]+1,
                                Rep_State=quote["reputation"]["4"]["before"]-40, Rep_Coup=quote["reputation"]["5"]["before"]-50,
-                               Rep_Freelancer=quote["reputation"]["8"]["before"]+150), after
+                               Rep_Commune=quote["reputation"]["2"]["before"]+150), after
         assert after[1] == dict(live[1], Player_Xp=live[1]["Player_Xp"]+1), after
         evidence.update(stock_turn_in=result, final_flags=after)
 

@@ -600,35 +600,47 @@ local function place_expanded_overlap(state, details, route, position, alternate
     error("No verified stock floor at the requested expanded overlap position", 0)
 end
 
-local beach_leto = "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"
+local covered_door_fixtures = {
+    ["/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"] = {
+        map_name = "Beach_01_P", tag = "Beach_Leto", door = "Dungeon_TransitionDoor_BP_C_1",
+        floor = "StaticMeshActor_881", face = 1, floor_offset = { 242.25, 681.25, -11.90 }, floor_z = .414,
+        mesh = "/Game/Assets/StaticMeshes/Mesh_BuildingSets/Set_Bunker/SM_Bld_Bunker_03.SM_Bld_Bunker_03",
+    },
+    ["/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"] = {
+        map_name = "Trench_01_P", tag = "Annex_Trench", door = "Dungeon_TransitionDoor_BP_C_2",
+        floor = "StaticMeshActor_185", face = -1, floor_offset = { -750, -600, 0 }, floor_z = .125,
+        mesh = "/Game/Assets/StaticMeshes/Mesh_BuildingSets/Set_Prim/SM_Buildings_Floor_5x5_01.SM_Buildings_Floor_5x5_01",
+    },
+}
 
-local function place_at_beach_leto(state, pawn, door, library, ignore, color, origin, direction, rotation, height)
-    local level = beach_leto .. ".Beach_01_P:PersistentLevel."
-    local bunker = StaticFindObject(level .. "StaticMeshActor_881")
-    local floor = valid(bunker) and bunker.StaticMeshComponent
-    local mesh = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_BuildingSets/Set_Bunker/SM_Bld_Bunker_03.SM_Bld_Bunker_03")
+local function place_at_covered_door(state, pawn, door, library, ignore, color, origin, direction, rotation, height, profile)
+    local level = state.map .. "." .. profile.map_name .. ":PersistentLevel."
+    local floor_actor = StaticFindObject(level .. profile.floor)
+    local floor = valid(floor_actor) and floor_actor.StaticMeshComponent
+    local mesh = StaticFindObject(profile.mesh)
     local box, skin, camera = door.Box, door.SK_DungeonDoor_01, pawn.Camera
-    if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. "Dungeon_TransitionDoor_BP_C_1"
-        or math.abs(direction.X) > .01 or math.abs(direction.Y - 1) > .01 or math.abs(direction.Z) > .01
-        or not valid(bunker) or not same(bunker:GetWorld(), state.world) or not bunker:HasAuthority()
-        or bunker:IsActorBeingDestroyed() or not bunker:GetActorEnableCollision()
-        or not same(bunker:GetClass(), StaticFindObject("/Script/Engine.StaticMeshActor"))
-        or not same(floor, bunker.RootComponent) or not same(floor:GetOwner(), bunker)
-        or floor:GetFullName() ~= "StaticMeshComponent " .. level .. "StaticMeshActor_881.StaticMeshComponent0"
+    if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. profile.door
+        or math.abs(direction.X) > .01 or math.abs(direction.Y - profile.face) > .01 or math.abs(direction.Z) > .01
+        or not valid(floor_actor) or not same(floor_actor:GetWorld(), state.world) or not floor_actor:HasAuthority()
+        or floor_actor:IsActorBeingDestroyed() or not floor_actor:GetActorEnableCollision()
+        or not same(floor_actor:GetClass(), StaticFindObject("/Script/Engine.StaticMeshActor"))
+        or not same(floor, floor_actor.RootComponent) or not same(floor:GetOwner(), floor_actor)
+        or floor:GetFullName() ~= "StaticMeshComponent " .. level .. profile.floor .. ".StaticMeshComponent0"
         or not same(floor:GetClass(), StaticFindObject("/Script/Engine.StaticMeshComponent"))
         or not same(floor.StaticMesh, mesh) or floor:GetCollisionObjectType() ~= 0
         or floor:GetCollisionResponseToChannel(2) ~= 2
         or not valid(box) or not same(box:GetOwner(), door) or not valid(camera) or not same(camera:GetOwner(), pawn) then
-        error("The exact Beach_Leto door, bunker floor, or pawn camera is unavailable", 0)
+        error("The exact " .. profile.tag .. " door, floor, or pawn camera is unavailable", 0)
     end
     local base, target, initial = floor:K2_GetComponentLocation(), box:K2_GetComponentLocation(), pawn:K2_GetActorLocation()
     local interaction = pawn.InteractionRange
     local collision = floor:GetCollisionEnabled()
     if not vector(base) or not vector(target) or not vector(initial)
-        or math.abs(base.X - origin.X - 242.25) > 2 or math.abs(base.Y - origin.Y - 681.25) > 2
-        or math.abs(base.Z - origin.Z + 11.90) > 2 or (collision ~= 1 and collision ~= 3)
+        or math.abs(base.X - origin.X - profile.floor_offset[1]) > 2
+        or math.abs(base.Y - origin.Y - profile.floor_offset[2]) > 2
+        or math.abs(base.Z - origin.Z - profile.floor_offset[3]) > 2 or (collision ~= 1 and collision ~= 3)
         or not finite(interaction) or interaction < 150 or interaction > 2000 then
-        error("The exact Beach_Leto bunker geometry or interaction range changed", 0)
+        error("The exact " .. profile.tag .. " floor geometry or interaction range changed", 0)
     end
 
     local function trace(start, stop, channel, complex)
@@ -665,14 +677,14 @@ local function place_at_beach_leto(state, pawn, door, library, ignore, color, or
     local local_pawn = state.local_pawn and state.local_pawn.pawn
     local side = same(local_pawn, pawn) and 1 or -1
     local hits, reached = 0, 0
-    -- The cooked floor is 0.414 uu above the door root. Begin well below the
-    -- bunker ceiling (+292 uu), inside the chamber on the marker's +Y side.
+    -- The generic arrow-based ray starts above these two authored roofs.
+    -- Begin below the roof on the side of the floor that faces the door.
     for _, offset in ipairs({{180, 70}, {220, 85}, {145, 90}, {245, 35}, {200, 0}}) do
-        local x, y = origin.X + side * offset[2], origin.Y + offset[1]
+        local x, y = origin.X + side * offset[2], origin.Y + profile.face * offset[1]
         local hit = trace({ X = x, Y = y, Z = origin.Z + 210 }, { X = x, Y = y, Z = origin.Z - 35 }, 0, false)
         local surface = hit and hit.Component and hit.Component:Get()
         if same(surface, floor) and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= .9
-            and math.abs(hit.ImpactPoint.Z - origin.Z - .414) <= 4 then
+            and math.abs(hit.ImpactPoint.Z - origin.Z - profile.floor_z) <= 4 then
             hits = hits + 1
             local point = { X = x, Y = y, Z = hit.ImpactPoint.Z + height + 2 }
             if distance_squared(point, origin) <= 320^2 then
@@ -690,14 +702,14 @@ local function place_at_beach_leto(state, pawn, door, library, ignore, color, or
                     local restored = pawn:K2_TeleportTo(initial, rotation)
                     actual = pawn:K2_GetActorLocation()
                     if not restored or not vector(actual) or distance_squared(actual, initial) > 10^2 then
-                        error("The Beach_Leto door fixture could not restore the pawn", 0)
+                        error("The " .. profile.tag .. " door fixture could not restore the pawn", 0)
                     end
                     pawn:ForceNetUpdate()
                 end
             end
         end
     end
-    error(string.format("No verified Beach_Leto bunker door approach (%d stock floor hits, %d safe positions)", hits, reached), 0)
+    error(string.format("No verified %s door approach (%d stock floor hits, %d safe positions)", profile.tag, hits, reached), 0)
 end
 
 local function place_at_named_door(state, pawn, door, direction, rotation, distance, tag)
@@ -721,8 +733,9 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     end
     local lateral_x, lateral_y = -direction.Y, direction.X
     local far = distance > 1000
-    if headless and not far and state.map == beach_leto and tag == "Beach_Leto" then
-        return place_at_beach_leto(state, pawn, door, library, ignore, color, origin, direction, rotation, extents)
+    local profile = covered_door_fixtures[state.map]
+    if headless and not far and profile and tag == profile.tag then
+        return place_at_covered_door(state, pawn, door, library, ignore, color, origin, direction, rotation, extents, profile)
     end
     table.insert(ignore, 1, door)
     local candidates = {}

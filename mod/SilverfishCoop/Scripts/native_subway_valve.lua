@@ -38,9 +38,10 @@ local item_key = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
 local rep_key = "ReputationGain_86_DA02B32344A59A6C236B848B22520EEC"
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
-local faction_flags = {[4] = "Rep_State", [5] = "Rep_Coup", [8] = "Rep_Freelancer"}
-local reward_rep = {[4] = -40, [5] = -50, [8] = 150}
-local factions = {4, 5, 8}
+-- The cooked Factions_Enum::NewEnumerator8 is runtime ordinal 2 (Commune).
+local faction_flags = {[2] = "Rep_Commune", [4] = "Rep_State", [5] = "Rep_Coup"}
+local reward_rep = {[2] = 150, [4] = -40, [5] = -50}
+local factions = {2, 4, 5}
 local action_reply, board_reply, reward_reply, projected, fixture_reply
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -75,19 +76,31 @@ local function recipe(row)
     local art, mask = StaticFindObject(art_path), StaticFindObject(mask_path)
     local items, boards = row[item_key], row.AppearOn_Boards_95_2FDB27AE4695B9213302E5897144A531
     local tracking = row.TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774
-    if row.Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B ~= 2 or row[cash_key] ~= 0 or row[xp_key] ~= 1
-        or row.QuestType_47_1031681D471E9929E30B17985E174BBE ~= 1 or row.Difficulty_12_9F1A01AD46151E4F5F152B82C99B5D85 ~= 7
-        or row.Fail_OnDeath_9_BAADF6C6450D1EB972F6E8A33214ACE4 ~= false or row.FailPenalty_36_53777B2F407AD61DE139B3815A07F47F ~= 100
-        or row.AppearOn_GlobalBountyBoards_78_B538291F4816D684913EAA8852507698 ~= true
-        or row.RedeemAt_83_FAE34B6C471D2019508A4898E9A0080F ~= 5 or units(boards) ~= 1 or boards[1] ~= 5
-        or row.ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333 ~= false
-        or units(row.Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083) ~= 0
-        or units(row.Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9) ~= 0
-        or not row_count(row.Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F, 0)
-        or not row_count(row.PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD, 0)
-        or not row_count(row.Advantage_Faction_100_F1B0B60547EEC0A936CFECB9BE005CE2, 0)
-        or not (tracking and tracking:ToString() == "None") or not map_entries(row[rep_key], reward_rep)
-        or units(items) ~= 2 or not same(items[1], art) or not same(items[2], mask) then refuse("quest_recipe_changed") end
+    local checks = {
+        {"final_step", row.Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B, 2},
+        {"cash", row[cash_key], 0}, {"xp", row[xp_key], 1},
+        {"type", row.QuestType_47_1031681D471E9929E30B17985E174BBE, 1},
+        {"difficulty", row.Difficulty_12_9F1A01AD46151E4F5F152B82C99B5D85, 7},
+        {"fail_on_death", row.Fail_OnDeath_9_BAADF6C6450D1EB972F6E8A33214ACE4, false},
+        {"fail_penalty", row.FailPenalty_36_53777B2F407AD61DE139B3815A07F47F, 100},
+        {"global_visibility", row.AppearOn_GlobalBountyBoards_78_B538291F4816D684913EAA8852507698, true},
+        {"redeem_at", row.RedeemAt_83_FAE34B6C471D2019508A4898E9A0080F, 5},
+        {"board_count", units(boards), 1}, {"board", boards and units(boards) == 1 and boards[1] or nil, 5},
+        {"consume_items", row.ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333, false},
+        {"objective_count", units(row.Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083), 0},
+        {"followup_count", units(row.Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9), 0},
+        {"completion_flags", row_count(row.Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F, 0), true},
+        {"prerequisites", row_count(row.PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD, 0), true},
+        {"advantage", row_count(row.Advantage_Faction_100_F1B0B60547EEC0A936CFECB9BE005CE2, 0), true},
+        {"tracking_flag", tracking and tracking:ToString(), "None"},
+        {"reputation", map_entries(row[rep_key], reward_rep), true},
+        {"reward_count", units(items), 2},
+    }
+    for _, check in ipairs(checks) do
+        if check[2] ~= check[3] then refuse("quest_recipe_" .. check[1] .. "_changed:" .. tostring(check[2])) end
+    end
+    if not same(items[1], art) then refuse("quest_recipe_artifact_class_changed") end
+    if not same(items[2], mask) then refuse("quest_recipe_helmet_class_changed") end
     return art, mask
 end
 
@@ -111,7 +124,7 @@ local function progress(context)
     if step ~= "-" and step ~= 1 and step ~= 2 and step ~= -10 then refuse("quest_step_unqualified") end
     local stock = {step = step, flag = wire.stock_flag(context.instance, "SubValve_Closed"),
         cash = wire.stock_flag(context.instance, "Player_Cash"), xp = wire.stock_flag(context.instance, "Player_Xp"),
-        advantage = wire.stock_flag(context.instance, "Adv_Freelancer"), rep = {}}
+        advantage = wire.stock_flag(context.instance, "Adv_Commune"), rep = {}}
     for _, id in ipairs(factions) do
         local amount, found = wire.stock_flag(context.instance, faction_flags[id])
         stock.rep[id] = {amount = amount, found = found}
@@ -226,8 +239,8 @@ local function activate(state, phase, pawn_name, epoch)
     if not valid_id(epoch, "[^0-9a-f]") or not scene or not scene.present or not scene.control:HasAuthority()
         or not trigger or not trigger:HasAuthority() or trigger.ForceComplete ~= true or trigger.Target_QuestStep ~= 1
         or trigger.Add_QuestStep ~= 1 or not trigger.TrackedQuest or not same(trigger.TrackedQuest.DataTable, StaticFindObject(table_path))
-        or trigger.TrackedQuest.RowName:ToString() ~= board.quest_id or not map_entries(trigger.Rep_OnComplete, {[8] = 20})
-        or not map_entries(trigger.Adv_OnComplete, {[8] = 200}) or not row_count(trigger.Set_SaveFlags, 0)
+        or trigger.TrackedQuest.RowName:ToString() ~= board.quest_id or not map_entries(trigger.Rep_OnComplete, {[2] = 20})
+        or not map_entries(trigger.Adv_OnComplete, {[2] = 200}) or not row_count(trigger.Set_SaveFlags, 0)
         or type(SilverfishDispatchNativeSubwayValve) ~= "function" then refuse("exact_objective_unavailable") end
     local before = progress(context)
     if before.step ~= 1 or before.flag ~= 0 then refuse("active_objective_required") end
@@ -242,7 +255,7 @@ local function activate(state, phase, pawn_name, epoch)
     if not ok or dispatched ~= true then error("mutation_unverified_stock_subway_valve_dispatch", 0) end
     local checked, after = pcall(progress, context)
     if not checked or not matches(context) or after.step ~= 2 or after.flag ~= 1 or after.cash ~= before.cash or after.xp ~= before.xp
-        or after.advantage ~= before.advantage + 200 or not unchanged_reputation(before, after, {[8] = 20}, instances) then
+        or after.advantage ~= before.advantage + 200 or not unchanged_reputation(before, after, {[2] = 20}, instances) then
         error("mutation_unverified_stock_subway_valve_objective", 0)
     end
     action_reply = {world = context.world, pawn = pawn_name, epoch = epoch, before = before, after = after}
@@ -556,8 +569,8 @@ function valve.rows(state, phase, row)
             local before, after = objective.before, objective.after
             rows[#rows+1] = row("native-subway-valve-objective", area, "ValveSwitch_BP_C " .. valve_path,
                 "Quest_Trigger_BP_C " .. trigger_path, objective.pawn, objective.epoch, before.step, after.step,
-                before.flag, after.flag, before.cash, after.cash, before.xp, after.xp, before.rep[8].amount,
-                after.rep[8].amount, before.advantage, after.advantage)
+                before.flag, after.flag, before.cash, after.cash, before.xp, after.xp, before.rep[2].amount,
+                after.rep[2].amount, before.advantage, after.advantage)
         end
         local result = board_reply
         if result and state.map == board.map and same(result.world, state.world) then

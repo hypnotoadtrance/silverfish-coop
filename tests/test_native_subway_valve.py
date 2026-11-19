@@ -48,6 +48,8 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(party.RuleError):
             native_wire_board.fixture_selection(valve.SUBWAY, valve.QUEST)
         self.assertEqual((objective()["epoch"], objective()["flag"]), (EPOCH, 1))
+        self.assertEqual(valve.FACTIONS, {"2", "4", "5"})
+        self.assertEqual(objective()["commune_after"] - objective()["commune_before"], 20)
         fields = ["native-subway-valve-board", "turn-in", BOROUGH, BOROUGH_PAWN, valve.BOARD, "2", "-10", "1", "9", "9",
                   "7", "8", *TEMPLATE]
         self.assertEqual(valve.parse_board(fields, "hosting", BOROUGH)["bundle"], TEMPLATE)

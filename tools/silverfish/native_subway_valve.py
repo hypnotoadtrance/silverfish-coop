@@ -27,7 +27,7 @@ BOARD_KEY, OBJECTIVE, SCENE, REWARD = (KEY + "_" + part for part in ("board", "o
 FIXTURE_KEY = KEY + "_fixture"
 PENDING = KEY + "_rewards"
 INPUT = "subway-valve"
-FACTIONS = {"4", "5", "8"}
+FACTIONS = {"2", "4", "5"}
 
 
 def valid_epoch(value) -> bool:
@@ -74,7 +74,7 @@ def parse_objective(fields, phase, area):
             or rows[4] != rows[5] or rows[6] != rows[7] or rows[9] < rows[8] + 20 or rows[11] - rows[10] != 200):
         raise ValueError("Invalid stock Flood Control objective transition")
     return dict(map=area, valve=VALVE, trigger=TRIGGER, pawn=pawn, epoch=epoch, step_after=2,
-                flag=1, freelancer_before=rows[8], freelancer_after=rows[9], advantage_before=rows[10], advantage_after=rows[11])
+                flag=1, commune_before=rows[8], commune_after=rows[9], advantage_before=rows[10], advantage_after=rows[11])
 
 
 def parse_scene(fields, phase, area):
