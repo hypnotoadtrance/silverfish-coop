@@ -301,7 +301,9 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 assert (opened["state"], opened["actor"], opened["map"]) == ("opened", profile.actor, pickup_map), opened
                 clear = await wait(client_run, lambda s: stock_cabinet.observed(
                     s.get("game", {}), "projected").get("epoch") == current["zone_epoch"])
-                evidence["stock_pickup_cabinet"] = {"authority": opened, "replica": clear["game"][profile.key]}
+                replica = clear["game"][profile.key]
+                assert opened["doors"] == replica["doors"] == "open", (opened, replica)
+                evidence["stock_pickup_cabinet"] = {"authority": opened, "replica": replica}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
             if profile or plan.savlo_locker:
                 def near(state, role, point, radius):

@@ -49,6 +49,8 @@ class NativeDustCabinetTests(unittest.IsolatedAsyncioTestCase):
         frame = cabinet.frame(host)
         self.assertEqual(frame, {"map": RAIL_YARD, "actor": cabinet.ACTOR, "epoch": EPOCH, "state": "opened"})
         host.fixtures = False
+        self.assertEqual(cabinet.frame(host), frame)
+        host.native_checkpoint_unsafe = True
         self.assertEqual(cabinet.frame(host), {})
 
         projected = snapshot("connected", "projecting", epoch=EPOCH)
@@ -56,8 +58,6 @@ class NativeDustCabinetTests(unittest.IsolatedAsyncioTestCase):
                                  gameplay={cabinet.FRAME_KEY: frame, "test_fixtures": False}, server_transitioning=False,
                                  needs_travel=False, gameplay_seen=time.monotonic(), bridge=SimpleNamespace(command=AsyncMock(
                                      return_value=projected)))
-        await cabinet.project_client(client)
-        client.gameplay["test_fixtures"] = True
         client.gameplay[cabinet.FRAME_KEY]["epoch"] = "02" * 16
         await cabinet.project_client(client)
         client.gameplay[cabinet.FRAME_KEY]["epoch"] = EPOCH

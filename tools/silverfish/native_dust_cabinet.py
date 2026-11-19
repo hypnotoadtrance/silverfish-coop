@@ -84,7 +84,7 @@ def observed(game: dict, state: str) -> dict:
 
 
 def frame(host) -> dict:
-    if (host.fixtures and host.native_zones and not host.stopping and not host.transitioning
+    if (host.native_zones and not host.stopping and not host.transitioning and not host.native_checkpoint_unsafe
             and host.last_game.get("state") == "hosting" and observed(host.last_game, "opened")
             and valid_epoch(host.zone_epoch) and time.monotonic() - host.last_seen < 2.5):
         profile = PROFILES[host.last_game["map"]]
@@ -118,8 +118,7 @@ async def project_client(client) -> None:
     if not profile:
         return
     report = client.gameplay.get(frame_key(area))
-    if (not valid_epoch(epoch) or client.gameplay.get("test_fixtures") is not True
-            or client.needs_travel or client.server_transitioning or not client.host_session
+    if (not valid_epoch(epoch) or client.needs_travel or client.server_transitioning or not client.host_session
             or time.monotonic() - client.gameplay_seen >= 2.5 or game.get("state") != "connected"
             or report != {"map": area, "actor": profile.actor, "epoch": epoch, "state": "opened"}):
         return

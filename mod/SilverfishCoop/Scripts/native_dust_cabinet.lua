@@ -27,7 +27,6 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_INPUT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local client_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local projection
 
 local function valid(object)
@@ -51,9 +50,9 @@ local function angle_is(actual, expected)
     return type(actual) == "number" and math.abs((actual - expected + 180) % 360 - 180) <= 0.15
 end
 
-local function door_roll(door, expected)
+local function door_yaw(door, expected)
     local angle = door.RelativeRotation
-    return angle and angle_is(angle.Pitch, 0) and angle_is(angle.Yaw, 0) and angle_is(angle.Roll, expected)
+    return angle and angle_is(angle.Pitch, 0) and angle_is(angle.Yaw, expected) and angle_is(angle.Roll, 0)
 end
 
 local function inspect(state, phase)
@@ -121,8 +120,8 @@ local function inspect(state, phase)
         if not component(box, actor, profile, "Box", "BoxComponent") or not same(box, actor.Box)
             or not same(box:GetAttachParent(), frame) then return nil, "box_identity" end
     end
-    local closed = box and not actor.Looted and door_roll(first, 0) and door_roll(second, 0)
-    local doors_open = door_roll(first, 95) and door_roll(second, -95)
+    local closed = box and not actor.Looted and door_yaw(first, 0) and door_yaw(second, 0)
+    local doors_open = door_yaw(first, 95) and door_yaw(second, -95)
     return { actor = actor, pawn = pawn, world = state.world, box = box, host = host,
         closed = closed, box_retired = count == 0, doors_open = doors_open, looted = actor.Looted,
         first_rotation = first.RelativeRotation, second_rotation = second.RelativeRotation }
@@ -160,7 +159,7 @@ function cabinet.command(fields, state, phase)
     end
 
     local epoch = fields[3]
-    if #fields ~= 5 or not client_fixture or not scene or scene.host or not qualified_epoch(epoch)
+    if #fields ~= 5 or not scene or scene.host or not qualified_epoch(epoch)
         or fields[4] ~= profile.name or fields[5] ~= scene.pawn:GetFullName() then
         error(profile.error .. "_projection_requires_exact_client_visit:" .. (reason or "scope"), 0)
     end
@@ -190,10 +189,10 @@ function cabinet.rows(state, phase, status_row)
     local name, epoch
     if scene.closed then
         name = "closed"
-    elseif scene.host and scene.box_retired and scene.looted then
+    elseif scene.host and scene.box_retired and scene.looted and scene.doors_open then
         name = "opened"
     elseif not scene.host and not scene.looted and same_projection(scene) then
-        name, epoch = scene.box_retired and "projected" or "projecting", projection.epoch
+        name, epoch = scene.box_retired and scene.doors_open and "projected" or "projecting", projection.epoch
     else
         return {status_row(tag .. "-diagnostic", area, "stock_animation_or_box", scene.looted,
             scene.box ~= nil)}
