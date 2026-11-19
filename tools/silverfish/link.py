@@ -10,8 +10,8 @@ import logging
 import math
 import ssl
 import struct
-from collections.abc import Awaitable, Callable, Coroutine
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 __all__ = [
     "ClientLink", "HostLink", "LinkError", "ServerIdentity",
-    "load_server_identity", "make_server_identity", "start_client", "start_host",
+    "checkpoint_action_timeout", "load_server_identity", "make_server_identity", "start_client", "start_host",
 ]
 
 _ALPN = "silverfish-coop-direct/1"
@@ -39,6 +39,19 @@ _MAX_ACTION_BODY = 32 * 1024
 _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
+_CHECKPOINT_ACTION_TIMEOUTS = {
+    "native-finite-shop-list": 15.0,
+    "native-finite-shop-buy": 15.0,
+    "native-finite-shop-sale-quote": 15.0,
+    "native-finite-shop-sell": 15.0,
+    "native-guest-bandage": 15.0,
+    "native-quest-interact": 15.0,
+    "native-quest-list": 15.0,
+    "native-turret-photo-capture": 20.0,
+    "native-turret-photo-shutter": 20.0,
+}
+_QUEST_ACTIONS = {"native-quest-start", "native-quest-objective", "native-quest-turnin"}
+_CHECKPOINT_QUESTS = {"Photo_DB_Turrets", "Clt_ComputerBoard", "Jmr_FloodPlains"}
 _MAX_CERTIFICATE = 8192
 _ADMISSION_TIMEOUT = 8.0
 _IDLE_TIMEOUT = 12.0
@@ -68,6 +81,18 @@ _ACTION_ERRORS = {
     "timed_out": "host application request timed out",
     "failed": "host application request failed",
 }
+
+
+def checkpoint_action_timeout(payload: Action) -> float | None:
+    """Return the bounded request budget for a stock action that can take a checkpoint."""
+    if payload.keys() != {"action", "operation_id", "target"} or not isinstance(payload["action"], str):
+        return None
+    action, target = payload["action"], payload["target"]
+    if action == "native-quest-turnin" and target == "Clt_Wire":
+        return 22.0
+    if action in _QUEST_ACTIONS and isinstance(target, str) and target in _CHECKPOINT_QUESTS:
+        return 20.0
+    return _CHECKPOINT_ACTION_TIMEOUTS.get(action)
 
 
 class LinkError(ConnectionError):
@@ -492,6 +517,7 @@ class HostLink:
         self._guest_sockets: dict[str, asyncio.DatagramTransport] = {}
         self._protocols: dict[str, _HostProtocol] = {}
         self._native_admission: frozenset[str] | None = None
+        self._game_route_holds = 0
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
@@ -514,8 +540,17 @@ class HostLink:
         """Gate Unreal packets independently of authenticated control traffic."""
         self._native_admission = None if allowed is None else frozenset(allowed)
 
+    @contextmanager
+    def hold_game_routes(self) -> Iterator[None]:
+        """Pause gameplay UDP without altering the current admissions or control streams."""
+        self._game_route_holds += 1
+        try:
+            yield
+        finally:
+            self._game_route_holds -= 1
+
     def _native_route_permitted(self, guest_id: str) -> bool:
-        return self._native_admission is None or guest_id in self._native_admission
+        return self._game_route_holds == 0 and (self._native_admission is None or guest_id in self._native_admission)
 
     async def release_guest(self, guest_id: str) -> bool:
         """Retire a disconnected guest's cached UDP endpoint after its grace period."""
@@ -682,7 +717,7 @@ class HostLink:
         except LinkError:
             return _encode_action({"error": "invalid"})
         try:
-            async with asyncio.timeout(_ACTION_TIMEOUT):
+            async with asyncio.timeout(checkpoint_action_timeout(payload) or _ACTION_TIMEOUT):
                 result = self._request_callback(guest_id, payload)
                 if inspect.isawaitable(result):
                     result = await result

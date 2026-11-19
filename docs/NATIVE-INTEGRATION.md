@@ -102,6 +102,7 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 
 ## Pending live verification
 
+- Ordinary travel takes a fresh roster reading after the source checkpoint. The game thread rechecks each exact pawn and the 15-meter limit before opening the destination. Offline tests covered a player moving during checkpointing, a late refusal, and preservation of the current guest connections.
 - The authored travel registry covers 145 directed exits across 55 worlds. The seven Golden Nexus pads use their stock destination markers and one-step travel time. The three CrossRoads pads share an entrance tag, so headless position and wall probes require the exact pad actor.
 - The Flood Plains contract follows the placed jammer's stock damage and power-signal sequence. The adapter checks authoritative quest progress and can hide the defeated jammer on each guest. The new smoke test uses an actual guest-owned projectile and checks both stock save files after settlement.
 - The suppressed Light Pistol and standard SMG use stock 9mm Ball. Their smoke test covers full magazine depletion and reload through the original input bindings. The Gunsmith's cash counter can list the stock 200-round Ball shelf when the host's settings enable reusable stock.

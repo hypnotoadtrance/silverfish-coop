@@ -24,15 +24,17 @@ from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
-from .native_roster import RosterEnrollment
+from .native_roster import RosterEnrollment, _census
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
+                      staged_guest_controls,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
 
 
 PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
+GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
@@ -127,7 +129,7 @@ class Host:
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
                  guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
-                 wire_board_enabled: bool = False, host_camera_input: bool = False):
+                 wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -145,6 +147,7 @@ class Host:
         self.native_events = native_events
         self.native_guest = native_guest
         self.native_zones = native_zones
+        self.native_guest_controls = native_guest_controls and native_guest and native_zones and native_backend == "cpp"
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -193,6 +196,7 @@ class Host:
         self.transitioning = False
         self.awaiting_zone_guest = None
         self.expired_characters: set[str] = set()
+        self.expiry_capture_attempts: dict[str, int] = {}
         self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
         self.native_restart_attempted = 0
 
@@ -341,10 +345,12 @@ class Host:
         self.last_seen = time.monotonic()
         return dict(frame, character_id=character)
 
-    async def checkpoint_departing_guests(self, bridge: Bridge, guests: dict[str, str]) -> None:
+    async def checkpoint_departing_guests(self, bridge: Bridge, guests: dict[str, str]) -> set[str]:
         """Commit grace-expired native pawns while their old connections are still live."""
         if not guests or not self.persist_native_guest or not self.native_profile or self.native_checkpoint_unsafe:
-            return
+            return set()
+        transitioning = self.transitioning
+        committed = set()
         self.transitioning = True
         try:
             leased = {row["character_id"] for row in self.store.status()["leases"]}
@@ -365,13 +371,15 @@ class Host:
                     self.control.event("native_guest_expiry_capture_failed", character_id=character, reason=str(error))
             if detached:
                 revision = await self.checkpoint_native(bridge, unleased_states=detached)
+                committed.update(detached)
                 for character, saved in detached.items():
                     self.control.event("native_guest_expiry_checkpointed", character_id=character, revision=revision,
                                        slot=saved["native_guest_save"]["slot"])
         except (OSError, ValueError, RuntimeError) as error:
             self.control.event("native_guest_expiry_checkpoint_failed", reason=str(error))
         finally:
-            self.transitioning = False
+            self.transitioning = transitioning
+        return committed
 
     async def capture_guest_records(self, bridge: Bridge) -> dict[str, dict]:
         frame = await self.capture_native_guest(bridge)
@@ -556,6 +564,25 @@ class Host:
             return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
         return None
 
+    def travel_party_proof(self, roles: dict[str, str]) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        census = _census(self.last_game)
+        connections = {(row.controller, row.pawn): (identifier, row) for identifier, row in census.connections.items()
+                       if row.state == "ready"}
+        if len(census.connections) != len(roles) - 1 or len(connections) != len(census.connections):
+            raise ValueError("native_roster_unavailable")
+        exact_guests, characters = [], []
+        for role, character_id in roles.items():
+            if role == "host":
+                continue
+            alias, binding = self.role_pawn(role)
+            pawn = self.last_game["pawns"][alias]
+            identifier, row = connections.pop((pawn["controller"], pawn["name"]))
+            if binding and (identifier != binding.connection_id or row.name != binding.connection):
+                raise ValueError("native_roster_unavailable")
+            exact_guests.extend((identifier, row.name, row.controller, row.pawn))
+            characters.append(character_id)
+        return census.driver, tuple(exact_guests), tuple(characters)
+
     async def travel(self, bridge: Bridge, transport, destination: str, *, respawning: bool = False,
                      entrance: str | None = None) -> dict:
         if not respawning and self.item_travel_pending():
@@ -570,7 +597,8 @@ class Host:
                 return {"ok": False, "error": "authored_exit_required"}
         self.transitioning = True
         try:
-            return await self.switch_zone(bridge, transport, destination, entrance, roles)
+            return await self.switch_zone(bridge, transport, destination, entrance, roles,
+                                          recheck_party=not respawning)
         finally:
             self.transitioning = False
 
@@ -578,9 +606,12 @@ class Host:
                           roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None,
                           dream_plan: dict | None = None, random_plan: tuple[str, dict] | None = None,
                           matrix_plan: dict | None = None, authored_plan: AuthoredRoute | None = None,
-                          respawn_plan: dict | None = None, source_flushed: bool = False) -> dict:
-        current = self.last_game["map"]
+                          respawn_plan: dict | None = None, source_flushed: bool = False,
+                          recheck_party: bool = False) -> dict:
+        source_frame = self.last_game
+        current = source_frame["map"]
         guests = self.travelling_guests()
+        departure_proof = None
         self.control.event("zone_travel_requested", source=current, destination=destination)
         if self.world_flush_supported and not source_flushed:
             await self.flush_native_world(bridge)
@@ -591,6 +622,39 @@ class Host:
             gold_guid or blue_plan or dream_plan or random_plan or matrix_plan
         ):
             await self.checkpoint_native(bridge)
+        if recheck_party:
+            # Capturing the source save does not freeze the listen server's pawns.
+            saved_sequence = self.last_game["sequence"]
+            try:
+                snapshot = await bridge.wait_for(lambda game: game["sequence"] > saved_sequence,
+                                                 timeout=POSITION_MAX_AGE)
+            except TimeoutError:
+                return {"ok": False, "error": "game_snapshot_unavailable"}
+            self.last_game, self.last_seen = snapshot, time.monotonic()
+            expected_host = source_frame.get("pawns", {}).get("local", {})
+            observed_host = snapshot.get("pawns", {}).get("local", {})
+            expected_roster = source_frame.get("native_roster", {})
+            observed_roster = snapshot.get("native_roster", {})
+            if (snapshot.get("map") != current or snapshot.get("state") != "hosting"
+                    or snapshot.get("mode") != "host" or snapshot.get("server_connection") is not False
+                    or not expected_host.get("name") or not expected_host.get("controller")
+                    or observed_host.get("name") != expected_host["name"]
+                    or observed_host.get("controller") != expected_host["controller"]
+                    or (expected_roster.get("state") == "qualified"
+                        and (observed_roster.get("state"), observed_roster.get("driver"))
+                        != ("qualified", expected_roster.get("driver")))):
+                return {"ok": False, "error": "travel_source_changed"}
+            roles = self.roles()
+            if refusal := self.travel_refusal(destination, roles):
+                return refusal
+            guests = self.travelling_guests()
+            if source_frame.get("native_zone_party_guard") or snapshot.get("native_zone_party_guard"):
+                try:
+                    driver, exact_guests, characters = self.travel_party_proof(roles)
+                except (KeyError, ValueError):
+                    return {"ok": False, "error": "native_roster_unavailable"}
+                step = str(authored_plan.travel_time_step or 0) if authored_plan else "-"
+                departure_proof = (current, step, driver, observed_host["name"], observed_host["controller"], *exact_guests)
         try:
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
             if random_plan:
@@ -606,8 +670,27 @@ class Host:
                 write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             if authored_plan:
                 authorization = ("authored", str(authored_plan.travel_time_step or 0))
-            self.begin_zone_guests(transport)
-            await bridge.command("travel", destination, *authorization)
+            if departure_proof is None:
+                self.begin_zone_guests(transport)
+                await bridge.command("travel", destination, *authorization)
+            else:
+                hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
+                with hold:
+                    try:
+                        departure = await bridge.command("travel-party", destination, *departure_proof)
+                    except (OSError, RuntimeError, ValueError):
+                        self.begin_zone_guests(transport)
+                        raise
+                    message = departure.get("ack", {}).get("message")
+                    if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable"):
+                        return {"ok": False, "error": message}
+                    moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
+                    if message in moving:
+                        return {"ok": False, "error": "travel_blocked",
+                                "blockers": [{"id": moving[message], "reason": "too_far"}]}
+                    self.begin_zone_guests(transport)
+                    if message != "zone travel requested":
+                        raise RuntimeError("The game did not verify the checked party departure")
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,
@@ -689,7 +772,7 @@ class Host:
         self.transitioning = True
         try:
             return await self.switch_zone(bridge, transport, route.destination, route.entrance,
-                                          roles, authored_plan=route)
+                                          roles, authored_plan=route, recheck_party=True)
         finally:
             self.transitioning = False
 
@@ -1556,6 +1639,7 @@ class Host:
             "credential": guest["credential"], "character_id": guest["character_id"],
             "game_build": self.game_build, "protocol_version": PROTOCOL,
             "native_zones": self.native_zones, "native_zone_walls": self.native_zone_walls,
+            "native_guest_controls": self.native_guest_controls,
             "expanded_zones": self.expanded_zones,
             "native_shop_view": self.native_shop_view,
             "native_loot_input": self.native_loot_input,
@@ -1758,9 +1842,17 @@ class Host:
             expired = time.monotonic() - self.guest["disconnected"] >= DEFAULT_RECONNECT_GRACE
             if expired and self.guest["character_id"] not in self.expired_characters:
                 character = self.guest["character_id"]
-                self.expired_characters.add(character)
                 if pawn and self.guest_pawn == pawn["name"] and bound_pawn == pawn["name"]:
-                    await self.checkpoint_departing_guests(bridge, {character: pawn["name"]})
+                    committed = await self.checkpoint_departing_guests(bridge, {character: pawn["name"]})
+                    attempts = self.expiry_capture_attempts.get(character, 0) + 1
+                    if character not in committed and attempts < GUEST_EXPIRY_CAPTURE_ATTEMPTS:
+                        self.expiry_capture_attempts[character] = attempts
+                    else:
+                        self.expired_characters.add(character)
+                        self.expiry_capture_attempts.pop(character, None)
+                else:
+                    self.expired_characters.add(character)
+                    self.expiry_capture_attempts.pop(character, None)
             if expired and not self.last_game.get("remote_clients", 0):
                 expired_guest = self.guest
                 if self.enrollment:
@@ -1770,6 +1862,9 @@ class Host:
                     self.enrollment.retire(expired_guest["guest_id"], self.last_game)
                 await transport.release_guest(expired_guest["guest_id"])
                 if self.guest is expired_guest:
+                    character = expired_guest["character_id"]
+                    self.expired_characters.add(character)
+                    self.expiry_capture_attempts.pop(character, None)
                     self.guest = None
                     self.guest_pawn = None
                     self.awaiting_zone_guest = None
@@ -2398,6 +2493,13 @@ class Host:
                 self.control.event("native_death_rejected", operation_id=operation_id, reason=str(error))
         self.pending_native_deaths = pending
 
+    async def release_native_exit(self, bridge: Bridge, source: str) -> None:
+        if self.stopping or self.last_game.get("state") != "hosting" or self.last_game.get("map") != source:
+            return
+        arguments = (source,) if self.last_game.get("native_zone_party_guard") else ()
+        with contextlib.suppress(OSError, RuntimeError):
+            await bridge.command("native-exit-release", *arguments, timeout=3)
+
     async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
@@ -2419,8 +2521,8 @@ class Host:
                 self.control.event("native_authored_zone_request", sequence=sequence, source=route.source,
                                    destination=route.destination, actor=route.actor, entrance=route.entrance,
                                    kind=route.kind, travel_time_step=route.travel_time_step, result=result)
-                if not result["ok"] and not self.stopping and self.last_game.get("map") == route.source:
-                    await bridge.command("native-exit-release", timeout=3)
+                if not result["ok"]:
+                    await self.release_native_exit(bridge, route.source)
         if self.matrix_supported:
             for request in bridge.native_matrix_requests():
                 try:
@@ -2456,9 +2558,8 @@ class Host:
                 result = {"ok": False, "error": str(error)}
             self.control.event("native_zone_request", sequence=sequence, source=source, destination=destination,
                                result=result)
-            if not result["ok"] and not self.stopping and self.last_game.get("map") == source:
-                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                    await bridge.command("native-exit-release", timeout=2)
+            if not result["ok"]:
+                await self.release_native_exit(bridge, source)
 
     def should_keep_native_scope(self) -> bool:
         return bool(not self.native_guest or (
@@ -2623,6 +2724,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
+    native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
@@ -2773,6 +2875,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               guest_regen=guest_regen, guest_sickness=guest_sickness,
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
+                              native_guest_controls=native_guest_controls,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -2857,10 +2960,12 @@ def load_invite(file: Path, build: str) -> dict:
     if not all(isinstance(invite[key], str) for key in ("certificate", "guest_id", "credential", "character_id")):
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
-           ("native_zones", "native_zone_walls", "expanded_zones", "native_shop_view", "native_loot_input",
+           ("native_zones", "native_zone_walls", "native_guest_controls", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
+    if invite.get("native_guest_controls") and not invite.get("native_zones"):
+        raise ValueError("Invitation enables stock guest controls without native zones")
     return invite
 
 
@@ -3061,15 +3166,7 @@ class Client:
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained
-        timeout = 7 if action in GUEST_NATIVE_ACTIONS else 4
-        if action in (*native_finite_shop.ACTIONS, native_guest_consumable.ACTION, native_broker.INTERACT,
-                      "native-quest-list"):
-            timeout = 15
-        if action == "native-quest-turnin" and target == native_wire_quest.QUEST_ID:
-            timeout = 22
-        if action in (native_turret_photo.CAPTURE, native_turret_photo.SHUTTER) or target in (
-                native_turret_photo.QUEST_ID, native_computer_board.QUEST_ID, native_flood_jammer.QUEST_ID):
-            timeout = 20
+        timeout = link.checkpoint_action_timeout(request) or (7 if action in GUEST_NATIVE_ACTIONS else 4)
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
@@ -3084,7 +3181,7 @@ class Client:
         if (not active or self.stopping or not self.host_session or intent.get("map") != self.last_game.get("map")
                 or not pawn or self.last_game.get("pawns", {}).get("local", {}).get("name") != pawn):
             return
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}").hex
+        operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}").hex
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, "equipped")
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
@@ -3127,7 +3224,7 @@ class Client:
             self.last_primary_intent = sequence
             if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
                 continue
-            operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
+            operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
             action = native_turret_photo.SHUTTER if event_kind == "camera" else "native-guest-weapon-fire"
             event = "native_guest_camera_shutter" if event_kind == "camera" else "native_guest_primary_input"
             try:
@@ -3145,7 +3242,7 @@ class Client:
         self.last_crate_intent = sequence
         if not active or self.stopping or not self.host_session or not self.zone_epoch:
             return
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}").hex
+        operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}").hex
         try:
             result = await self.gameplay_action("native-loot-open", operation, native_loot.CRATE)
             self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, **result)
@@ -3166,7 +3263,7 @@ class Client:
                 or proof.get("state") not in ("queued", "fixture_queued")):
             return
         self.last_broker_intent = sequence
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{pawn}:broker:{sequence}").hex
+        operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{pawn}:broker:{sequence}").hex
         try:
             result = await self.gameplay_action(native_broker.INTERACT, operation, station)
             self.control.event("native_stock_broker_interaction", operation_id=operation, sequence=sequence, **result)
@@ -3181,7 +3278,7 @@ class Client:
         if (not opened or area != self.last_game.get("map")
                 or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
-        operation = uuid.uuid5(uuid.NAMESPACE_OID,
+        operation = uuid.uuid5(self.bridge.input_namespace,
                                f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}").hex
         try:
             result = await self.gameplay_action("native-inventory-list", operation, "0")
@@ -3218,7 +3315,7 @@ class Client:
                 or not native_gold.valid_guid(guid) or item_class not in native_guest_weapon.CLASS_PATHS):
             return
         identifier = f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory-equip:{sequence}"
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, identifier).hex
+        operation = uuid.uuid5(self.bridge.input_namespace, identifier).hex
         outcome = "refused"
         try:
             inspected = await self.gameplay_action("native-inventory-list", operation, "0")
@@ -3537,6 +3634,10 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
     invite = load_invite(invitation, staged_build(work))
     native_zones = native_zones or invite.get("native_zones", False)
     native_zone_walls = native_zone_walls or invite.get("native_zone_walls", False)
+    if invite.get("native_guest_controls"):
+        if not staged_guest_controls(work):
+            raise ValueError("Restage the native client for the host's stock inventory, primary, and reload controls")
+        guest_reload_input = guest_inventory_view = guest_primary_input = True
     expanded_zones = invite.get("expanded_zones", False)
     native_loot_input = invite.get("native_loot_input", False)
     broker_input = invite.get("native_broker_input", False)

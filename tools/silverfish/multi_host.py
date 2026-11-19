@@ -7,7 +7,7 @@ import time
 
 from . import link, native_host_save, party
 from .party_members import PartyMemberError, PartyMembers
-from .service import Host, POSITION_MAX_AGE, PROTOCOL, _pawn, guest_arrival_positions
+from .service import GUEST_EXPIRY_CAPTURE_ATTEMPTS, Host, POSITION_MAX_AGE, PROTOCOL, _pawn, guest_arrival_positions
 from .travel import SLATE
 
 
@@ -392,25 +392,35 @@ class MultiHost(Host):
             identifier = result.reservation.guest_id
             self.control.event("native_guest_enrollment_aborted", guest_id=identifier, reason=result.reason)
             await transport.abort_guest_route(identifier)
-        expired = self.members.expired()
-        still_bound = self.members.match_pawns(self.last_game, include_expired=True) if expired else {}
-        departing = {member.character_id: row.binding.pawn for member in expired
-                     if member.ready and member.lease_id not in self.retirement_processed
-                     and (row := still_bound.get(member.role))}
-        await self.checkpoint_departing_guests(bridge, departing)
-        self.retirement_processed = {member.lease_id for member in expired}
-        for member in self.members.expire(self.last_game):
-            if member.binding:
-                with contextlib.suppress(RuntimeError, TimeoutError):
-                    await bridge.command("native-guest-clear", member.binding.pawn, timeout=3)
-            with contextlib.suppress(link.LinkError):
-                await transport.release_guest(member.guest_id)
+        await self._retire_expired_guests(bridge, transport)
         participants = self.members.match_pawns(self.last_game)
         for member in self.members.members:
             observation = participants.get(member.role)
             if observation and not member.ready:
                 await self._attach_member(bridge, member, observation)
         self._reserve_next_return()
+
+    async def _retire_expired_guests(self, bridge, transport) -> None:
+        expired = self.members.expired()
+        still_bound = self.members.match_pawns(self.last_game, include_expired=True) if expired else {}
+        candidates = [member for member in expired if member.ready and member.binding
+                      and member.lease_id not in self.retirement_processed]
+        departing = {member.character_id: row.binding.pawn for member in candidates
+                     if (row := still_bound.get(member.role))}
+        committed = await self.checkpoint_departing_guests(bridge, departing)
+        awaiting = {}
+        for member in candidates:
+            attempts = self.expiry_capture_attempts.get(member.lease_id, 0) + 1
+            if member.character_id not in committed and attempts < GUEST_EXPIRY_CAPTURE_ATTEMPTS:
+                awaiting[member.lease_id] = attempts
+        self.expiry_capture_attempts = awaiting
+        self.retirement_processed = {member.lease_id for member in expired if member.lease_id not in awaiting}
+        for member in self.members.expire(self.last_game, awaiting_checkpoint=frozenset(awaiting)):
+            if member.binding:
+                with contextlib.suppress(RuntimeError, TimeoutError):
+                    await bridge.command("native-guest-clear", member.binding.pawn, timeout=3)
+            with contextlib.suppress(link.LinkError):
+                await transport.release_guest(member.guest_id)
 
     def deliver_native_deaths(self, bridge) -> None:
         self.pending_native_deaths.extend(bridge.native_deaths())

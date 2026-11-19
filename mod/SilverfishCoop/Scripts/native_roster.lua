@@ -60,7 +60,7 @@ local function participant(connection, world)
     local pawn = controller.Pawn
     local pawn_name = actor_name(pawn, pawn_class, world)
     if not pawn_name or not same(pawn.Controller, controller) then return "joining", name, "-" end
-    return "ready", name, pawn_name
+    return "ready", name, pawn_name, pawn
 end
 
 local function census(state)
@@ -95,13 +95,14 @@ local function census(state)
         end
         connection_addresses[address], connection_names[name] = true, true
 
-        local status, controller, pawn = participant(connection, world)
+        local status, controller, pawn, pawn_object = participant(connection, world)
         if status == "ready" then
             if ready_controllers[controller] or ready_pawns[pawn] then return nil, "participant_identity_ambiguous" end
             ready_controllers[controller], ready_pawns[pawn] = true, true
         end
         observed.guests[#observed.guests + 1] = {
             address = address, name = name, status = status, controller = controller, pawn = pawn,
+            pawn_object = pawn_object,
         }
     end
     return observed
@@ -143,6 +144,51 @@ function native_roster.rows(state, phase, status_row)
     end
     last_scope = observed
     return rows
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+function native_roster.verify_party_departure(state, phase, fields)
+    if #fields < 8 or #fields > 24 or (#fields - 8) % 4 ~= 0 then return "native_roster_unavailable" end
+    if phase ~= "hosting" or state.map ~= fields[4] or not last_scope or last_scope.id ~= fields[6] then
+        return "travel_source_changed"
+    end
+    local host = state.local_pawn
+    if not host or host.name ~= fields[7] or host.controller ~= fields[8] then return "travel_source_changed" end
+    local observed = census(state)
+    if not observed then return "native_roster_unavailable" end
+    if observed.world ~= last_scope.world or observed.driver ~= last_scope.driver
+        or observed.driver_name ~= last_scope.driver_name then
+        return "travel_source_changed"
+    end
+    if #observed.guests ~= (#fields - 8) / 4 then return "native_roster_unavailable" end
+    local indexed = {}
+    for _, guest in ipairs(observed.guests) do
+        local prior = last_scope.by_address[guest.address]
+        if not prior or prior.name ~= guest.name or guest.status ~= "ready" then return "native_roster_unavailable" end
+        indexed[prior.id] = guest
+    end
+
+    local location = host.pawn:K2_GetActorLocation()
+    if not (finite(location.X) and finite(location.Y) and finite(location.Z)) then
+        return "game_snapshot_unavailable"
+    end
+    for index = 9, #fields, 4 do
+        local id = fields[index]
+        local guest = indexed[id]
+        if not guest or guest.name ~= fields[index + 1] or guest.controller ~= fields[index + 2]
+            or guest.pawn ~= fields[index + 3] then
+            return "native_roster_unavailable"
+        end
+        indexed[id] = nil
+        local other = guest.pawn_object:K2_GetActorLocation()
+        local dx, dy, dz = other.X - location.X, other.Y - location.Y, other.Z - location.Z
+        local squared_distance = dx * dx + dy * dy + dz * dz
+        if not finite(squared_distance) then return "game_snapshot_unavailable" end
+        if squared_distance > 1500 * 1500 then return "travel_blocked:" .. ((index - 9) // 4 + 1) end
+    end
 end
 
 return native_roster

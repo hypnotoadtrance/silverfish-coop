@@ -573,14 +573,20 @@ function zone.command(fields, state, phase)
         if #fields ~= 3 then error("Expected native-exit-arrival <tag>", 0) end
         return zone.position_arrival(state, phase, fields[3])
     end
-    if name ~= "native-exit-position" and name ~= "native-exit-release" then return end
-    if not enabled or phase ~= "hosting" or not routes[state.map] or armed ~= state.map or status ~= "ready" then
-        error("An active staged native zone host is required", 0)
-    end
     if name == "native-exit-release" then
-        if #fields ~= 2 then error("Expected native-exit-release", 0) end
+        if #fields < 2 or #fields > 3 then error("Expected native-exit-release with an optional source map", 0) end
+        if not enabled or phase ~= "hosting" or not routes[state.map] or armed ~= state.map
+            or (fields[3] and fields[3] ~= state.map)
+            or type(SilverfishReleaseNativeZoneRequest) ~= "function" then
+            error("The source exit scope is unavailable", 0)
+        end
+        -- A paused current scope can still hold the rejected stock request.
         SilverfishReleaseNativeZoneRequest()
         return "native exit request released"
+    end
+    if name ~= "native-exit-position" then return end
+    if not enabled or phase ~= "hosting" or not routes[state.map] or armed ~= state.map or status ~= "ready" then
+        error("An active staged native zone host is required", 0)
     end
     local slot, position, entrance, actor = fields[3], fields[4], fields[5], fields[6]
     if #fields < 4 or #fields > 6 or (position ~= "near" and position ~= "inside" and position ~= "far") then

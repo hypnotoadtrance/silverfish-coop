@@ -136,6 +136,9 @@ class PartyMembersTests(unittest.TestCase):
         self.party.disconnect(self.first["guest_id"])
         self.now += 90
         self.assertEqual(self.party.roles(), {"host": "host", "guest2": self.second["character_id"]})
+        self.assertEqual(self.party.expire(snapshot(3, self.one, self.two),
+                                           awaiting_checkpoint=frozenset({first.member.lease_id})), ())
+        self.assertIs(self.party.get(self.first["guest_id"]), first.member)
         self.assertEqual(self.party.expire(snapshot(3, self.one, self.two)), (first.member,))
         self.assertIs(self.party.get(self.first["guest_id"]), first.member)
         self.assertEqual(self.party.expire(snapshot(4, self.two)), (first.member,))

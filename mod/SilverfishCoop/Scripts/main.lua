@@ -117,6 +117,10 @@ local function finite(number)
     return type(number) == "number" and number == number and math.abs(number) < math.huge
 end
 
+local function party_travel_guard_available()
+    return authored_routes and type(SilverfishSetNativeZoneRoster) == "function"
+end
+
 local function text_field(value)
     return (tostring(value or ""):gsub("[%c]", " "))
 end
@@ -373,6 +377,20 @@ end
 local function run_command(fields, state, current_phase)
     local command = fields[2]
     local argument = fields[3]
+
+    if command == "travel-party" then
+        if not party_travel_guard_available() then return "native_roster_unavailable" end
+        local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields)
+        if not checked then return "native_roster_unavailable" end
+        if refusal then return refusal end
+        local step = fields[5]
+        if step ~= "-" and (not expanded_routes or not math.tointeger(tonumber(step))) then
+            error("Expected the stock authored travel time step", 0)
+        end
+        command = "travel"
+        fields = { fields[1], command, argument }
+        if step ~= "-" then fields[4], fields[5] = "authored", step end
+    end
 
     if guest_save.active() and stock_save_probes[command] then
         error("Clear the managed native guest save before running a stock-save probe", 0)
@@ -851,6 +869,9 @@ local function write_status(state, current_phase, failure)
         status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0),
         status_row("native-network-timeout", state.connection_timeout or "-"),
     }
+    if role == "host" and party_travel_guard_available() then
+        rows[#rows + 1] = status_row("native-zone-party-guard", 1)
+    end
     if world_view_enabled and current_phase == "hosting" then
         if not same_object(state.world, host_world_view_world) or host_world_view_check ~= os.time() then
             local checked, view = pcall(native_world_view.observe, state, current_phase)

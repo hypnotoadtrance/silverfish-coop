@@ -197,13 +197,13 @@ class PartyMembers:
         self._sync_bindings()
         return result
 
-    def expire(self, game: dict | None) -> tuple[PartyMember, ...]:
+    def expire(self, game: dict | None, *, awaiting_checkpoint: frozenset[str] = frozenset()) -> tuple[PartyMember, ...]:
         """Return expired guests for idempotent relay release.
 
-        Keep a slot allocated while the old native connection remains present,
+        Keep a slot allocated while its save is pending or its old native connection remains present,
         then discard its live record after the qualified census proves departure.
         """
-        expired = self.expired()
+        expired = tuple(member for member in self.expired() if member.lease_id not in awaiting_checkpoint)
         for member in expired:
             pending = self.enrollment.pending
             if pending and pending.guest_id == member.guest_id:

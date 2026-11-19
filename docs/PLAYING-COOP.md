@@ -78,6 +78,8 @@ $sfCrossRoads = '/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P'
 
 Use the same invitation workflow and the campaign name `crossings`. The invitation carries the host's native travel, wall, and supported interaction settings. Keep the native feature flags for subsequent launches and omit the initial `--start-zone` when resuming after travel.
 
+Invitations from a current matched native stage also enable the guest's stock inventory, primary, and reload controls. For an older invitation, refresh it from the updated host or use the explicit guest flags below.
+
 | Option | Scope |
 | --- | --- |
 | `--native-start-preset wanderer` | Starts a fresh stock Wanderer campaign at the Observatory using Mercy rules. Add `--native-world-seed N` for a fixed initial seed from 1 to 999999. Omit `--start-zone` and the extraction switches when creating this preset. Omit the preset and seed when resuming. |
@@ -86,8 +88,8 @@ Use the same invitation workflow and the campaign name `crossings`. The invitati
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
-| Guest `--native-guest-inventory-view` | The stock inventory key opens the guest's first native inventory page. Page Up and Page Down move the selection, Home twice confirms a supported equip, and End closes it. |
-| Guest `--native-guest-primary-input --native-guest-reload-input` | Routes the qualified SMG, Light Pistol, and scoped Nagant inputs to the host. The stock primary path handles one shot per press. |
+| Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection, Home twice confirms a supported equip, and End closes it. |
+| Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock firearm and reload controls explicitly. The stock primary path handles one shot per press. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
 

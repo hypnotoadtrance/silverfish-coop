@@ -92,9 +92,12 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--headless", action="store_true")
     join.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     join.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
-    join.add_argument("--native-guest-reload-input", action="store_true", help="route stock reload input to the staged host")
-    join.add_argument("--native-guest-primary-input", action="store_true", help="route stock primary input for qualified guest weapons")
-    join.add_argument("--native-guest-inventory-view", action="store_true", help="show a read-only stock guest inventory overlay")
+    join.add_argument("--native-guest-reload-input", action="store_true",
+                      help="enable stock guest reload input explicitly for an older invitation")
+    join.add_argument("--native-guest-primary-input", action="store_true",
+                      help="enable stock guest primary input explicitly for an older invitation")
+    join.add_argument("--native-guest-inventory-view", action="store_true",
+                      help="enable the stock guest inventory overlay explicitly for an older invitation")
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")

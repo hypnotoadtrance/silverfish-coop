@@ -1,4 +1,10 @@
+import time
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.link import HostLink
+from tools.silverfish.service import Host
 
 from tools.silverfish.travel import PLAYTEST_MAPS, travel_decision
 
@@ -77,6 +83,190 @@ class TravelGateTests(unittest.TestCase):
         positions["guest"] = pawn((1501, 0, 0))
         blocked = travel_decision("host", SOURCE, SOURCE, roles, positions, allow_same_zone=True)
         self.assertEqual(blocked["blockers"], [{"id": "guest", "reason": "too_far"}])
+
+
+class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
+    def host(self, source, destination):
+        host = Host.__new__(Host)
+        host.last_game = self.frame(source, 1, 1500)
+        host.last_seen = time.monotonic()
+        host.party = {"wipe": None, "pending_spawns": {}}
+        host.allowed_maps = frozenset((source, destination))
+        host.native_profile = object()
+        host.native_guest = False
+        host.expanded_zones = True
+        host.world_flush_supported = True
+        host.transitioning = host.stopping = False
+        host.roles = Mock(return_value={"host": "host", "guest": "scout"})
+        host.item_travel_pending = Mock(return_value=False)
+        host.control = Mock()
+        host.begin_zone_guests = Mock()
+        host.flush_native_world = AsyncMock()
+
+        async def checkpoint(_bridge, _candidate=None):
+            if host.last_game["map"] != source:
+                return 2
+            host.last_game = self.frame(source, 2, 1500)
+            return 1
+
+        host.checkpoint_native = AsyncMock(side_effect=checkpoint)
+        return host
+
+    @staticmethod
+    def frame(source, sequence, distance, *, driver="d1", guarded=False):
+        guest_controller, guest_pawn = "PlayerControler_FP_C guest-controller", "Player_FP_C guest-pawn"
+        return {
+            "mode": "host", "state": "hosting", "map": source, "sequence": sequence,
+            "server_connection": False, "remote_clients": 1, "native_zone_party_guard": guarded,
+            "native_roster": {"state": "qualified", "driver": driver, "count": 1, "connections": [
+                {"state": "ready", "id": "c1", "connection": "IpConnection game-guest",
+                 "controller": guest_controller, "pawn": guest_pawn},
+            ]},
+            "pawns": {
+                "local": {"name": "host-pawn", "controller": "host-controller", "location": [0, 0, 0], "health": 100},
+                "guest": {"name": guest_pawn, "controller": guest_controller,
+                          "location": [distance, 0, 0], "health": 100},
+            },
+        }
+
+    def bridge(self, checkpoint_frame, latest_frame):
+        async def wait_for(condition, *, timeout):
+            self.assertFalse(condition(checkpoint_frame))
+            if latest_frame is None:
+                raise TimeoutError
+            self.assertTrue(condition(latest_frame))
+            return latest_frame
+
+        return Mock(command=AsyncMock(side_effect=AssertionError("Denied travel reached the game bridge")),
+                    wait_for=AsyncMock(side_effect=wait_for))
+
+    async def test_ordinary_and_authored_travel_recheck_positions_after_checkpoint(self):
+        route = AUTHORED_ROUTES[0]
+        for source, destination, plan in ((SOURCE, DESTINATION, None), (route.source, route.destination, route)):
+            with self.subTest(source=source):
+                host = self.host(source, destination)
+                bridge = self.bridge(self.frame(source, 2, 1500), self.frame(source, 3, 1501))
+                if plan:
+                    result = await host.travel_authored(bridge, None, plan)
+                else:
+                    result = await host.travel(bridge, None, destination)
+                self.assertEqual(result, {"ok": False, "error": "travel_blocked",
+                                          "blockers": [{"id": "scout", "reason": "too_far"}]})
+                host.flush_native_world.assert_awaited_once_with(bridge)
+                host.checkpoint_native.assert_awaited_once_with(bridge)
+                host.begin_zone_guests.assert_not_called()
+                bridge.command.assert_not_awaited()
+                self.assertFalse(host.transitioning)
+                self.assertFalse(host.stopping)
+
+    async def test_rejects_departure_without_fresh_same_world_census(self):
+        for latest, error in ((None, "game_snapshot_unavailable"),
+                              (self.frame(SOURCE, 3, 500, driver="d2"), "travel_source_changed"),
+                              (self.frame(DESTINATION, 3, 500), "travel_source_changed")):
+            with self.subTest(error=error, latest=latest):
+                host = self.host(SOURCE, DESTINATION)
+                bridge = self.bridge(self.frame(SOURCE, 2, 1500), latest)
+                self.assertEqual(await host.travel(bridge, None, DESTINATION), {"ok": False, "error": error})
+                host.begin_zone_guests.assert_not_called()
+                bridge.command.assert_not_awaited()
+                self.assertFalse(host.transitioning)
+                self.assertFalse(host.stopping)
+
+    async def test_guarded_departure_checks_live_party_before_retiring_and_reopens_after_accept(self):
+        route = AUTHORED_ROUTES[0]
+        for acknowledgement in ("travel_blocked:1", "zone travel requested"):
+            with self.subTest(acknowledgement=acknowledgement):
+                host = self.host(route.source, route.destination)
+                host.internal_port = 17000
+                transport = HostLink(("127.0.0.1", 17000), Mock(), None)
+                transport.restrict_game_routes({"old-guest"})
+                source = self.frame(route.source, 3, 1500, guarded=True)
+                destination = self.frame(route.destination, 4, 0, driver="d2", guarded=True)
+                bridge = self.bridge(self.frame(route.source, 2, 1500), source)
+                host.authored_arrival = AsyncMock(return_value=destination)
+
+                async def depart(*fields):
+                    self.assertEqual(fields, ("travel-party", route.destination, route.source,
+                                              str(route.travel_time_step or 0), "d1", "host-pawn", "host-controller",
+                                              "c1", "IpConnection game-guest", "PlayerControler_FP_C guest-controller",
+                                              "Player_FP_C guest-pawn"))
+                    self.assertFalse(transport._native_route_permitted("old-guest"))
+                    host.begin_zone_guests.assert_not_called()
+                    return {"ack": {"message": acknowledgement}}
+
+                async def wait_for(condition, *, timeout):
+                    if bridge.wait_for.await_count == 1:
+                        self.assertTrue(condition(source))
+                        return source
+                    self.assertTrue(condition(destination))
+                    return destination
+
+                def retire(active_transport):
+                    self.assertFalse(active_transport._native_route_permitted("old-guest"))
+                    active_transport.restrict_game_routes(set())
+
+                async def reopen(active_transport, roles, _prior):
+                    self.assertFalse(active_transport._native_route_permitted("old-guest"))
+                    self.assertEqual(roles, {"host": "host", "guest": "scout"})
+                    active_transport.restrict_game_routes({"old-guest"})
+
+                bridge.command.side_effect = depart
+                bridge.wait_for.side_effect = wait_for
+                host.begin_zone_guests.side_effect = retire
+                host.reopen_zone_guests = AsyncMock(side_effect=reopen)
+                with patch("tools.silverfish.service.verify_loopback_socket"):
+                    result = await host.travel_authored(bridge, transport, route)
+                self.assertTrue(transport._native_route_permitted("old-guest"))
+                self.assertFalse(transport._native_route_permitted("other-guest"))
+                self.assertFalse(host.transitioning)
+                self.assertFalse(host.stopping)
+                if acknowledgement == "zone travel requested":
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["map"], route.destination)
+                    self.assertIs(host.last_game, destination)
+                    self.assertEqual(result["revision"], 2)
+                    host.begin_zone_guests.assert_called_once_with(transport)
+                    host.reopen_zone_guests.assert_awaited_once()
+                else:
+                    self.assertEqual(result, {"ok": False, "error": "travel_blocked",
+                                              "blockers": [{"id": "scout", "reason": "too_far"}]})
+                    host.begin_zone_guests.assert_not_called()
+                    host.reopen_zone_guests.assert_not_awaited()
+
+    async def test_guarded_departure_rejects_unattributed_native_connection(self):
+        host = self.host(SOURCE, DESTINATION)
+        snapshot = self.frame(SOURCE, 3, 100, guarded=True)
+        snapshot["remote_clients"] = snapshot["native_roster"]["count"] = 2
+        snapshot["native_roster"]["connections"].append({
+            "state": "joining", "id": "c2", "connection": "IpConnection unknown",
+            "controller": None, "pawn": None,
+        })
+        bridge = self.bridge(self.frame(SOURCE, 2, 1500), snapshot)
+        self.assertEqual(await host.travel(bridge, None, DESTINATION),
+                         {"ok": False, "error": "native_roster_unavailable"})
+        host.begin_zone_guests.assert_not_called()
+        bridge.command.assert_not_awaited()
+
+    async def test_refused_authored_request_releases_its_source_without_requiring_a_ready_scope(self):
+        route = AUTHORED_ROUTES[0]
+        for current, expected_release in ((route.source, True), (route.destination, False)):
+            with self.subTest(current=current):
+                host = self.host(route.source, route.destination)
+                host.next_zone_heartbeat = float("inf")
+                host.matrix_supported = False
+                host.last_game = self.frame(current, 3, 100, guarded=True)
+                host.travel_authored = AsyncMock(return_value={"ok": False, "error": "native_roster_unavailable"})
+                bridge = Mock(command=AsyncMock(side_effect=RuntimeError("The source scope disappeared")),
+                              native_rest_requests=Mock(return_value=()),
+                              authored_zone_requests=Mock(return_value=((1, route),)),
+                              native_cube_requests=Mock(return_value=()),
+                              native_zone_requests=Mock(return_value=()))
+                await host.service_native_zones(bridge, None, time.monotonic())
+                if expected_release:
+                    bridge.command.assert_awaited_once_with("native-exit-release", route.source, timeout=3)
+                else:
+                    bridge.command.assert_not_awaited()
+                self.assertFalse(host.stopping)
 
 
 if __name__ == "__main__":

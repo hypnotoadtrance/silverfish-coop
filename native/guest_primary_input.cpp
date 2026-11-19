@@ -207,6 +207,7 @@ namespace
     std::uint64_t sequence{};
     std::atomic<std::uint64_t> generation{1};
     std::atomic<bool> installed{};
+    std::atomic<bool> protect_host_camera{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
     bool current_player(const LocalPlayer& seat)
@@ -294,7 +295,7 @@ namespace
         }
     };
 
-    bool matching_local_item(const Scope& current)
+    bool matching_local_item(const Scope& current, Guid* observed = nullptr)
     {
         auto* pawn = current.seat.pawn.Get();
         if (!field<U::FObjectProperty>(pawn, STR("EquipedItem")) || !field<U::FObjectProperty>(pawn, STR("HeldObject")) ||
@@ -302,7 +303,7 @@ namespace
         auto* held = object_field(pawn, STR("EquipedItem"));
         // Stock held-actor references are not replicated. An authenticated
         // server authorization can cover an otherwise empty local proxy.
-        if (!current.seat.mirrored) return !current.seat.host && held == nullptr;
+        if (!current.seat.mirrored) return !observed && !current.seat.host && held == nullptr;
         auto* item = find<U::UClass>(current.item->path);
         if (!live(held) || held != current.seat.held.Get() || !item || held->GetClassPrivate() != item ||
             object_field(held, STR("Owner")) != pawn || object_field(held, STR("Instigator")) != pawn ||
@@ -312,7 +313,7 @@ namespace
             auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
             if (!held_by_player || !held_by_player->GetPropertyValueInContainer(held) ||
                 object_field(held, STR("User")) != pawn) return false;
-            if (current.seat.host)
+            if (current.seat.host && !observed)
             {
                 auto* lens = object_field(held, STR("SceneCaptureComponent2D"));
                 auto* target = object_field(lens, STR("TextureTarget"));
@@ -337,7 +338,11 @@ namespace
         const auto index = selected->GetPropertyValueInContainer(save);
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
-        return schema.row_class(row) == item && schema.identity(row) == current.guid;
+        if (schema.row_class(row) != item) return false;
+        const auto actual = schema.identity(row);
+        if (!observed) return actual == current.guid;
+        *observed = actual;
+        return actual != Guid{};
     }
 
     bool active_photo_quest(U::UObject* save)
@@ -456,8 +461,8 @@ namespace
         return result;
     }
 
-    std::string_view bind(Scope& next, Address requested_pawn, Address requested_controller, Address requested_world,
-                          bool equipping = false)
+    std::string_view bind_player(Scope& next, U::UObject* pawn, Address requested_controller, Address requested_world,
+                                 bool equipping, Guid* observed = nullptr)
     {
         auto* pawn_type = find<U::UClass>(pawn_path);
         auto* controller_type = find<U::UClass>(controller_path);
@@ -468,13 +473,7 @@ namespace
         if (!pawn_type || !controller_type || !connection_type || !local_type ||
             !action_type || !live(action) || action->GetClassPrivate() != action_type)
             return "stock_guest_primary_classes_unavailable";
-        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
-            if (address(candidate) != requested_pawn) return RC::LoopAction::Continue;
-            if (live(candidate) && candidate->GetClassPrivate() == pawn_type) next.seat.pawn = candidate;
-            return RC::LoopAction::Break;
-        });
-        auto* pawn = next.seat.pawn.Get();
-        if (!pawn) return "stock_guest_primary_pawn_unavailable";
+        if (!live(pawn) || pawn->GetClassPrivate() != pawn_type) return "stock_guest_primary_pawn_unavailable";
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         auto* controller = object_field(pawn, STR("Controller"));
         auto* local = object_field(controller, STR("Player"));
@@ -485,6 +484,7 @@ namespace
             !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
         if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
+        next.seat.pawn = pawn;
         next.seat.world = world;
         next.seat.controller = controller;
         next.seat.instance = object_field(world, STR("OwningGameInstance"));
@@ -496,14 +496,27 @@ namespace
         next.seat.mirrored = held != nullptr;
         next.seat.held = held;
         next.action = action;
-        if (!current_player(next.seat) || (!equipping && !matching_local_item(next)))
+        if (!current_player(next.seat) || (!equipping && !matching_local_item(next, observed)))
             return "stock_guest_primary_local_equipment_unqualified";
         if (next.seat.host && !active_photo_quest(next.seat.stock.Get())) return "stock_host_camera_quest_inactive";
         if (equipping) return {};
         next.started = bind_wrapper(pawn_type, action, started_path, 2);
+        if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
+        if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
-        return next.started.function.Get() && next.completed.function.Get() ?
-            std::string_view{} : "stock_guest_primary_wrappers_unavailable";
+        return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
+    }
+
+    std::string_view bind(Scope& next, Address requested_pawn, Address requested_controller, Address requested_world,
+                          bool equipping = false)
+    {
+        U::UObject* pawn{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (address(candidate) != requested_pawn) return RC::LoopAction::Continue;
+            pawn = candidate;
+            return RC::LoopAction::Break;
+        });
+        return bind_player(next, pawn, requested_controller, requested_world, equipping);
     }
 
     bool available() { return installed.load(std::memory_order_acquire) && U::IsInGameThreadRaw(); }
@@ -517,12 +530,49 @@ namespace
         }
     }
 
+    bool host_shutter_candidate(U::UFunction* function)
+    {
+        if (!protect_host_camera.load(std::memory_order_acquire)) return false;
+        static const U::FName start_name{STR("InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36")};
+        return function->GetFName() == start_name;
+    }
+
+    bool unleased_host_shutter(U::UObject* pawn, U::UFunction* function, const void* arguments)
+    {
+        auto* type = find<U::UClass>(pawn_path);
+        if (!type || !live(pawn) || pawn->GetClassPrivate() != type || function->GetOuterPrivate() != type) return false;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        if (!live(world) || world->GetPathName() != bridge_world) return false;
+        Scope local;
+        local.seat.host = true;
+        local.item = &equipment.back();
+        // The stock camera can still advance the objective if its display
+        // lens is unsuitable for an authorized capture. Verify ownership here.
+        if (!bind_player(local, pawn, address(object_field(pawn, STR("Controller"))), address(world),
+                         false, &local.guid).empty()) return false;
+        return function == local.started.function.Get() && verifies_source(local.started, local.action.Get(), arguments);
+    }
+
+    enum class StartedRoute { stock, block, authorized };
+
+    constexpr StartedRoute select_started_route(bool leased, bool exact_host_shutter)
+    {
+        if (leased) return StartedRoute::authorized;
+        return exact_host_shutter ? StartedRoute::block : StartedRoute::stock;
+    }
+
+    static_assert(select_started_route(false, false) == StartedRoute::stock);
+    static_assert(select_started_route(false, true) == StartedRoute::block);
+    static_assert(select_started_route(true, false) == StartedRoute::authorized);
+    static_assert(select_started_route(true, true) == StartedRoute::authorized);
+
     void intercept(Iteration& iteration, U::UObject* pawn, U::UFunction* function, const void* arguments)
     {
         if (!available() || !pawn || !function || iteration.OriginalFunctionCallPrevented()) return;
         const bool released = pawn == press.seat.pawn.Get() && function == press.completed.function.Get();
         const bool started = pawn == scope.seat.pawn.Get() && function == scope.started.function.Get();
-        if (!released && !started) return;
+        const bool host_candidate = host_shutter_candidate(function);
+        if (!released && !started && !host_candidate) return;
         const auto now = Clock::now();
         const auto active_generation = generation.load(std::memory_order_acquire);
         if (released && press.generation == active_generation && now < press.expires && current_player(press.seat) &&
@@ -534,9 +584,11 @@ namespace
             if (same_actor) iteration.PreventOriginalFunctionCall();
             return;
         }
-        if (!started || !qualified(scope, now) || !verifies_source(scope.started, scope.action.Get(), arguments)) return;
+        const bool leased = started && qualified(scope, now) && verifies_source(scope.started, scope.action.Get(), arguments);
+        const auto route = select_started_route(leased, !leased && host_candidate && unleased_host_shutter(pawn, function, arguments));
+        if (route == StartedRoute::stock) return;
         iteration.PreventOriginalFunctionCall();
-        if (!iteration.OriginalFunctionCallPrevented()) return;
+        if (route != StartedRoute::authorized || !iteration.OriginalFunctionCallPrevented()) return;
         if (press.generation == active_generation && now < press.expires &&
             press.seat.pawn.Get() == pawn && press.seat.controller.Get() == scope.seat.controller.Get() &&
             press.seat.world.Get() == scope.seat.world.Get()) return;
@@ -834,12 +886,14 @@ namespace silverfish::native_guest_primary_input
             uninstall_hooks();
             return;
         }
+        protect_host_camera.store(host_enabled(), std::memory_order_release);
         installed.store(true, std::memory_order_release);
     }
 
     void uninstall_hooks()
     {
         installed.store(false, std::memory_order_release);
+        protect_host_camera.store(false, std::memory_order_release);
         clear_scope();
         for (auto& callback : callbacks)
         {

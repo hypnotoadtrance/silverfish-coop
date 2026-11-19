@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -42,7 +43,8 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
             shown["native_shop_view_page"]["render_event"] = int(event)
             return shown
 
-        bridge = SimpleNamespace(native_shop_view_requests=Mock(), command=AsyncMock(side_effect=render))
+        bridge = SimpleNamespace(native_shop_view_requests=Mock(), command=AsyncMock(side_effect=render),
+                                 input_namespace=uuid.UUID(int=1))
         client = SimpleNamespace(bridge=bridge, last_game=game("pending", 1, 0, 0),
                                  host_session="server", zone_epoch="zone", stopping=False,
                                  gameplay_action=AsyncMock(side_effect=query), control=Mock())
@@ -82,3 +84,55 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
         client.last_game = game("buying", 6, 8, 8, guid=current["guid"], price=current["price"])
         await view.sync(client, True)
         self.assertEqual(client.last_game["native_shop_view_page"]["offset"], 0)
+
+    async def test_fresh_client_process_can_buy_the_same_reusable_offer_again(self):
+        actor, pawn = MERCHANTS[GUNSMITH], "Player_FP_C exact same guest"
+        row = {"guid": "A" * 32, "quantity": 200, "price": 100, "class_path": BALL_AMMO}
+        base = {"sequence": 1, "map": GUNSMITH, "pawn": pawn, "actor": actor}
+        receipts = {}
+        wallet = 1000
+
+        def game(state, pending, rendered=0):
+            return {
+                "map": GUNSMITH, "pawns": {"local": {"name": pawn}},
+                "native_shop_view": {**base, "state": state, "visible": 1, "guid": row["guid"], "price": row["price"]},
+                "native_shop_view_page": {**base, "offset": 0, "wanted_offset": 0,
+                                          "pending_event": pending, "render_event": rendered},
+            }
+
+        async def query(action, operation, target):
+            nonlocal wallet
+            if action == "native-finite-shop-list":
+                return {"native_finite_shop": {"map": GUNSMITH, "actor": actor, "wallet_after": wallet, "count": 1, "offers": [row]}}
+            self.assertEqual(action, "native-finite-shop-buy")
+            self.assertEqual(target, f"{row['guid']}@{row['price']}")
+            if operation not in receipts:
+                wallet -= row["price"]
+                receipts[operation] = {"native_finite_purchase": {"wallet_after": wallet}}
+            return receipts[operation]
+
+        async def render(command, *arguments, timeout):
+            self.assertEqual(command, "native-shop-view-render-page")
+            return game("ready", 0, int(arguments[1]))
+
+        for game_instance in (1, 2):
+            bridge = SimpleNamespace(native_shop_view_requests=Mock(), command=AsyncMock(side_effect=render),
+                                     input_namespace=uuid.UUID(int=game_instance))
+            client = SimpleNamespace(bridge=bridge, last_game=game("pending", 1), host_session="same server",
+                                     zone_epoch="same zone", stopping=False, gameplay_action=query, control=Mock())
+            view = ShopView()
+            bridge.native_shop_view_requests.return_value = [(1, 1, "open", GUNSMITH, pawn, actor, "-", "-")]
+            await view.sync(client, True)
+
+            client.last_game = game("buying", 2)
+            bridge.native_shop_view_requests.return_value = [(2, 1, "buy", GUNSMITH, pawn, actor, row["guid"], str(row["price"]))]
+            await view.sync(client, True)
+            self.assertEqual(client.last_game["native_shop_view_page"]["render_event"], 2)
+            self.assertEqual(len(receipts), game_instance)
+
+            client.last_game = game("buying", 2)
+            await view.sync(client, True)
+            self.assertEqual(len(receipts), game_instance)
+
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(wallet, 800)

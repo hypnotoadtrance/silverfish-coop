@@ -220,6 +220,15 @@ def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
     return path.is_file() and (marker is None or marker in path.read_text(encoding="utf-8"))
 
 
+def staged_guest_controls(work: Path) -> bool:
+    return native_death_backend(work) == "cpp" and all(staged_script(work, name, marker) for name, marker in (
+        ("native_inventory_view.lua", "SilverfishSetNativeInventoryViewScope"),
+        ("native_guest_primary_input.lua", "SilverfishSetNativeGuestPrimaryScope"),
+        ("native_guest_reload_input.lua", "SilverfishReadNativeGuestReloadIntent"),
+        ("native_guest_weapon.lua", "native-guest-equipped-weapon"),
+    ))
+
+
 def staged_build(work: Path) -> str:
     stage = work / "stage"
     metadata = read_json(stage / "silverfish-coop-stage.json")
@@ -732,6 +741,8 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields == ["native-zone-party-guard", "1"]:
+                    data["native_zone_party_guard"] = True
                 elif fields[0] == "player" and len(fields) >= 6:
                     data["player_effects"][fields[1]] = {
                         "state": fields[2], "crouched": fields[3] == "1",

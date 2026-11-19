@@ -61,7 +61,7 @@ class ShopView:
             return
         self.pending = None
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:shop:{sequence}:{event}"
-        operation = uuid.uuid5(uuid.NAMESPACE_OID, identifier).hex
+        operation = uuid.uuid5(client.bridge.input_namespace, identifier).hex
         try:
             wanted = self._requested_offset(kind, page, scope, guid, price, view)
             if kind == "buy":

@@ -374,6 +374,44 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.client.request({}), {"ok": True})
         await asyncio.wait_for(finished.wait(), 3)
 
+    async def test_stock_purchase_preserves_the_slow_receipt_and_ordinary_deadline(self):
+        native_started = asyncio.Event()
+        finish_checkout = asyncio.Event()
+        queued = asyncio.get_running_loop().create_future()
+        receipts = {}
+        fingerprint = {"action": "native-finite-shop-buy", "operation_id": "a" * 32, "target": "B" * 32 + "@100"}
+
+        async def on_request(guest_id, payload):
+            if payload == {"action": "ordinary"}:
+                return await queued
+            self.assertEqual(payload, fingerprint)
+            transaction = (guest_id, payload["operation_id"])
+            if transaction not in receipts:
+                native_started.set()
+                await finish_checkout.wait()
+                receipts[transaction] = {"ok": True, "revision": 1, "wallet_after": 900}
+            return receipts[transaction]
+
+        self.application_handler = on_request
+        self.assertTrue((await self.connect_guest())["accepted"])
+        with patch("tools.silverfish.link._ACTION_TIMEOUT", 0.06):
+            checkout = asyncio.create_task(self.client.request(fingerprint, timeout=2))
+            try:
+                await asyncio.wait_for(native_started.wait(), 2)
+                with self.assertRaisesRegex(LinkError, "^host application request timed out$"):
+                    await self.client.request({"action": "ordinary"}, timeout=2)
+                self.assertTrue(queued.cancelled())
+            finally:
+                finish_checkout.set()
+            settled = await checkout
+
+        self.assertEqual(settled, {"ok": True, "revision": 1, "wallet_after": 900})
+        await self.client.disconnect()
+        self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), self.request["guest_id"])
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertEqual(await self.client.request(fingerprint), settled)
+        self.assertEqual(len(receipts), 1)
+
     async def test_application_requests_have_a_bounded_flight_count(self):
         opened = asyncio.Queue()
         release = asyncio.Event()
