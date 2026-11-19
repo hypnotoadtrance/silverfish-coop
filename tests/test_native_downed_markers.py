@@ -1,8 +1,11 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import native_downed_markers as markers
+from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -33,6 +36,21 @@ class MarkerTests(unittest.IsolatedAsyncioTestCase):
             markers.parse(frame, [[*row[:6], "nan"]], CROSSROADS)
         with self.assertRaises(ValueError):
             markers.parse(frame, [row], OBSERVATORY)
+
+    def test_bridge_keeps_empty_current_frames_and_discards_invalid_visual_rows(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            status = directory / "status.tsv"
+            state = f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{CROSSROADS}\t0\t1\n"
+            frame = f"{markers.COMMAND}\t{EPOCH}\t{CROSSROADS}\t"
+            bridge = SimpleNamespace(directory=directory)
+            status.write_text(state + frame + "0\n", encoding="utf-8")
+            valid = Bridge.snapshot(bridge)
+            self.assertEqual(valid[markers.KEY], {"epoch": EPOCH, "map": CROSSROADS, "count": 0, "markers": {}})
+            status.write_text(state + frame + "1\n", encoding="utf-8")
+            invalid = Bridge.snapshot(bridge)
+            self.assertEqual(invalid["state"], "connected")
+            self.assertNotIn(markers.KEY, invalid)
 
     async def test_client_renews_only_current_authenticated_markers_and_clears_on_revive(self):
         view = markers.MarkerView()
