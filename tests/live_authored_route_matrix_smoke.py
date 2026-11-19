@@ -153,6 +153,19 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
                         await wait(run, lambda state: state.get("game", {}).get("native_zone_wall", {}).get("host_open"))
                     observed = (await act(probe, target=target, **options))[key]
                     attempt["probe"] = observed
+                    if group and not door and observed[field] == "other":
+                        # A stock overlap can start travel before a subsequent sweep hit.
+                        for _ in range(30):
+                            crossed = next((entry for entry in events("native_authored_zone_request", current["generation"])
+                                            if entry["source"] == route.source and entry["destination"] == route.destination
+                                            and entry["actor"] == route.actor and entry["entrance"] == route.entrance
+                                            and entry["result"]["ok"] is True
+                                            and entry["result"]["travel_epoch"] != current["zone_epoch"]), None)
+                            if crossed:
+                                leg["overlap_travel"] = crossed
+                                leg[label] = observed
+                                return lane
+                            await asyncio.sleep(0.2)
                     if observed[field] != "other":
                         leg[label] = observed
                         if observed[field] not in expected:
