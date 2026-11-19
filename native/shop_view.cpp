@@ -34,6 +34,7 @@ namespace
         const Unreal::TCHAR* actor;
         const Unreal::TCHAR* data;
         const Unreal::TCHAR* barter_replacement{};
+        bool smuggler_finite{};
     };
 
     constexpr std::array merchants{
@@ -64,6 +65,13 @@ namespace
             STR("/Game/Classes/Libraries/DataAssets/Merchants/AmmoShopData.AmmoShopData"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Barter_BP_C_1"),
         },
+        Merchant{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/SmugglerShopData.SmugglerShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P:PersistentLevel.Barter_BP_C_2"),
+            true,
+        },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
     constexpr auto action_path = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C:SendInteractionToActor");
@@ -79,6 +87,7 @@ namespace
         bool host{};
         bool accepting{};
         bool requires_cash_mode{};
+        bool smuggler_finite{};
         Unreal::FWeakObjectPtr pawn, controller, player, instance, world, driver, connection, shop, box, data;
         Unreal::FWeakObjectPtr barter_replacement;
         Unreal::UClass* pawn_type{};
@@ -197,6 +206,15 @@ namespace
             if (!actor_in_world(replacement, world) || object_field(shop, STR("BarterReplacement")) != replacement ||
                 object_field(replacement, STR("MerchantData")) != data ||
                 ((save || binding.host) && !is_false(save, STR("BarterOnly")))) return false;
+            if (binding.smuggler_finite)
+            {
+                auto* finite = field<Unreal::FBoolProperty>(shop, STR("NoInfiniteStock"));
+                auto* accepts_cash = field<Unreal::FBoolProperty>(replacement, STR("AcceptCash"));
+                auto* faction = field<Unreal::FByteProperty>(shop, STR("Rep Faction"));
+                if (!finite || !finite->GetPropertyValueInContainer(shop) ||
+                    !accepts_cash || !accepts_cash->GetPropertyValueInContainer(replacement) ||
+                    !faction || faction->GetPropertyValueInContainer(shop) != 0) return false;
+            }
         }
         auto* local = field<Unreal::FArrayProperty>(instance, STR("LocalPlayers"));
         auto* entry = local ? Unreal::CastField<Unreal::FObjectProperty>(local->GetInner()) : nullptr;
@@ -267,6 +285,7 @@ namespace
             if (!exact(replacement, find<Unreal::UClass>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C")))) return false;
             next.requires_cash_mode = true;
             next.barter_replacement = replacement;
+            next.smuggler_finite = profile->smuggler_finite;
         }
         auto* controller = object_field(pawn, STR("Controller"));
         auto* player = object_field(controller, STR("Player"));

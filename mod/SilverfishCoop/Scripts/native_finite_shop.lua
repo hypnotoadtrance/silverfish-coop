@@ -2,6 +2,7 @@ local shop = {}
 local pickup = require("native_pickup")
 local players = require("players")
 local shopkeep = require("native_dialogue_shopkeep")
+local focus_fixture = require("native_shop_focus_fixture")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -25,6 +26,10 @@ local merchants = {
     [shopkeep.map] = {
         level = "Shop_ShopKeep_P", actor = "Shop_BP_C_1", data = "StrangeJunkShopData", barter = "Barter_BP_C_1",
         neutral = true, reception = true,
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P"] = {
+        level = "Shop_Smuggler_P", actor = "Shop_BP_C_1", data = "SmugglerShopData", barter = "Barter_BP_C_2",
+        neutral = true, smuggler_finite = true,
     },
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
@@ -141,6 +146,11 @@ local function merchant(state, phase, pawn_name, allow_host)
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then
         refused("exact_stock_merchant_unavailable")
     end
+    if profile.smuggler_finite then
+        local markup = actor.MerchantData["MarkupMin/Max"]
+        if actor.NoInfiniteStock ~= true or actor.CanSellTo ~= true or actor.LimitedCash ~= true
+            or not markup or markup.X ~= 5 or markup.Y ~= 5 then refused("smuggler_finite_stock_unverified") end
+    end
     local reception
     if profile.reception then
         reception = shopkeep.authorized_counter(state, phase, pawn, stock)
@@ -153,13 +163,16 @@ local function merchant(state, phase, pawn_name, allow_host)
             or not same(replacement:GetWorld(), state.world) or not same(replacement, actor.BarterReplacement)
             or not same(replacement.MerchantData, actor.MerchantData) or not reception and (collision ~= 1 and collision ~= 3) then
             refused(profile.reception and "shopkeep_cash_reception_unavailable"
-                or profile.camera and "scientist_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
+                or profile.camera and "scientist_cash_counter_unavailable"
+                or profile.smuggler_finite and "smuggler_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
         end
         if profile.neutral and (replacement.AcceptCash ~= true or actor["Rep Faction"] ~= 0) then
-            refused(profile.reception and "shopkeep_neutral_profile_unverified" or "gunsmith_neutral_profile_unverified")
+            refused(profile.reception and "shopkeep_neutral_profile_unverified"
+                or profile.smuggler_finite and "smuggler_neutral_profile_unverified" or "gunsmith_neutral_profile_unverified")
         end
     end
-    return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance, reception = reception}
+    return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance, reception = reception,
+        prove_focus = profile.smuggler_finite}
 end
 
 local function quote_panel(context)
@@ -215,9 +228,12 @@ function shop.fixture_position(state, phase, pawn_name)
     if not rotation or not finite(rotation.Pitch) or not finite(rotation.Yaw) or not finite(rotation.Roll) then
         refused("fixture_merchant_rotation_unavailable")
     end
+    local origin = context.prove_focus and pawn:K2_GetActorLocation()
+    if context.prove_focus and not vector(origin) then refused("fixture_merchant_origin_unavailable") end
     local aim = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
     local ignored = { actor, pawn }
     if not same(pawn, state.local_pawn.pawn) then ignored[#ignored + 1] = state.local_pawn.pawn end
+    local moved = false
     for _, offset in ipairs(offsets) do
         local x, y = anchor.X + offset[1], anchor.Y + offset[2]
         for _, height in ipairs({150, 250, 400}) do
@@ -229,16 +245,27 @@ function shop.fixture_position(state, phase, pawn_name)
             if found and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= 0.7
                 and hit.ImpactPoint.Z < start.Z - 1 and hit.ImpactPoint.Z >= finish.Z then
                 local location = {X = x, Y = y, Z = hit.ImpactPoint.Z + half_height + 2}
-                if distance_squared(location, anchor) < (range - 10) ^ 2 and pawn:K2_TeleportTo(location, aim) then
+                if distance_squared(location, anchor) < (range - 10) ^ 2
+                    and (not context.prove_focus or focus_fixture.has_sight(pawn, actor.Box, location))
+                    and pawn:K2_TeleportTo(location, aim) then
+                    moved = true
                     local actual = pawn:K2_GetActorLocation()
                     if vector(actual) and distance_squared(actual, location) < 625
-                        and distance_squared(actual, anchor) < range ^ 2 then
+                        and distance_squared(actual, anchor) < range ^ 2
+                        and (not context.prove_focus or focus_fixture.has_sight(pawn, actor.Box, actual)) then
                         pawn:ForceNetUpdate()
                         return "exact stock merchant approach verified"
                     end
                 end
             end
         end
+    end
+    if context.prove_focus and moved then
+        local restored = pawn:K2_TeleportTo(origin, aim) and pawn:K2_GetActorLocation()
+        if not vector(restored) or distance_squared(restored, origin) >= 625 then
+            error("mutation_unverified_stock_merchant_fixture_position_restore", 0)
+        end
+        pawn:ForceNetUpdate()
     end
     refused("fixture_safe_merchant_approach_unavailable")
 end

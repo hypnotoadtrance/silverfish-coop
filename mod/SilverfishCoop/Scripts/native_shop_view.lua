@@ -1,5 +1,6 @@
 local view = {}
 local shopkeep = require("native_dialogue_shopkeep")
+local focus_fixture = require("native_shop_focus_fixture")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -26,6 +27,9 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
     "Shop_Gunsmith_P", "Shop_BP_C_1", "AmmoShopData", "Gunsmith shop", "Barter_BP_C_1")
 register_merchant(shopkeep.map, "Shop_ShopKeep_P", "Shop_BP_C_1", "StrangeJunkShopData", "ShopKeep limited stock", "Barter_BP_C_1")
 profiles[shopkeep.map].reception = shopkeep.target
+local smuggler = "/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P"
+register_merchant(smuggler, "Shop_Smuggler_P", "Shop_BP_C_1", "SmugglerShopData", "Smuggler shop", "Barter_BP_C_2")
+profiles[smuggler].prove_focus = true
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
@@ -354,10 +358,17 @@ local function fixture(current, action)
         local actor = qualified_actor(current)
         local probe = SilverfishProbeNativeInteractInput
         if not actor or type(probe) ~= "function" then error("The exact staged stock merchant input is unavailable", 0) end
-        local original = current.pawn.InteractionTarget_Component
-        current.pawn.InteractionTarget_Component = actor.Box
-        local invoked, ok, reason = pcall(probe, current.pawn:GetAddress(), true)
-        current.pawn.InteractionTarget_Component = valid(original) and original or nil
+        local invoked, ok, reason
+        if current.profile.prove_focus then
+            invoked, ok, reason = pcall(focus_fixture.press, current.pawn, actor.Box, probe)
+        else
+            local original = current.pawn.InteractionTarget_Component
+            current.pawn.InteractionTarget_Component = actor.Box
+            invoked, ok, reason = pcall(probe, current.pawn:GetAddress(), true)
+            current.pawn.InteractionTarget_Component = valid(original) and original or nil
+        end
+        if not invoked and current.profile.prove_focus then error(ok, 0) end
+        if not ok and current.profile.prove_focus then error(reason, 0) end
         if not invoked or not ok or reason ~= "stock_started_consumed" or current.controller.MenuStack:GetArrayNum() ~= 0
             or not read_press(current) then error("The stock merchant key did not publish one isolated shop press", 0) end
     elseif keys[action] and session and valid(widget) and (session.paging or (action ~= "page-up" and action ~= "page-down")) then

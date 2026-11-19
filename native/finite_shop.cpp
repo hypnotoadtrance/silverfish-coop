@@ -41,6 +41,7 @@ namespace
         const Unreal::TCHAR* cash_barter_replacement{};
         bool camera_only{};
         const Unreal::TCHAR* reception{};
+        bool smuggler_finite{};
     };
 
     constexpr std::array merchants{
@@ -79,6 +80,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.Barter_BP_C_1"),
             false,
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.Generic_Interact_BP_C_1"),
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/SmugglerShopData.SmugglerShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P:PersistentLevel.Barter_BP_C_2"),
+            false, nullptr, true,
         },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
@@ -298,6 +306,20 @@ namespace
         return mode == 1 || mode == 3;
     }
 
+    bool smuggler_finite_stock(Unreal::UObject* shop, Unreal::UObject* data)
+    {
+        auto* markup = field<Unreal::FStructProperty>(data, STR("MarkupMin/Max"));
+        auto* vector_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector2D"));
+        auto* x = field<Unreal::FDoubleProperty>(vector_type, STR("X"));
+        auto* y = field<Unreal::FDoubleProperty>(vector_type, STR("Y"));
+        if (!markup || !vector_type || markup->GetStruct().Get() != vector_type || !x || !y)
+            return false;
+        const auto* bounds = markup->ContainerPtrToValuePtr<void>(data);
+        return x->GetPropertyValueInContainer(bounds) == 5.0 && y->GetPropertyValueInContainer(bounds) == 5.0 &&
+            read_bool(shop, STR("NoInfiniteStock"), true) && read_bool(shop, STR("CanSellTo"), true) &&
+            read_bool(shop, STR("LimitedCash"), true);
+    }
+
     std::string_view bind_context(const std::array<Address, 5>& input, Context& context, bool allow_host = false)
     {
         const MerchantProfile* profile = nullptr;
@@ -342,6 +364,8 @@ namespace
             return "shop_exact_guest_and_canonical_saves_unavailable";
         if (!read_bool(context.stock, STR("BarterOnly"), false))
             return "shop_stock_cash_trade_unavailable";
+        if (profile->smuggler_finite && !smuggler_finite_stock(context.shop, data))
+            return "shop_smuggler_finite_stock_unverified";
         if (profile->reception)
         {
             context.reception = find<Unreal::UObject>(profile->reception);
@@ -359,13 +383,15 @@ namespace
                 !authority(conversion, context.world) || read_object(context.shop, STR("BarterReplacement")) != conversion ||
                 read_object(conversion, STR("MerchantData")) != data || (!context.reception && !cash_counter_open(context.shop)))
                 return context.reception ? "shop_shopkeep_cash_reception_unavailable" :
+                    profile->smuggler_finite ? "shop_smuggler_cash_counter_unavailable" :
                     context.camera_only ? "shop_scientist_cash_counter_unavailable" : "shop_gunsmith_cash_counter_unavailable";
             if (context.guards_neutral_purchase)
             {
                 auto* faction = field<Unreal::FByteProperty>(context.shop, STR("Rep Faction"));
                 if (static_cast<Unreal::AActor*>(conversion)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
                     !read_bool(conversion, STR("AcceptCash"), true) || !faction || faction->GetPropertyValueInContainer(context.shop) != 0)
-                    return context.reception ? "shop_shopkeep_neutral_profile_unverified" : "shop_gunsmith_neutral_profile_unverified";
+                    return context.reception ? "shop_shopkeep_neutral_profile_unverified" :
+                        profile->smuggler_finite ? "shop_smuggler_neutral_profile_unverified" : "shop_gunsmith_neutral_profile_unverified";
             }
         }
         if (!qualified_connection(context))
