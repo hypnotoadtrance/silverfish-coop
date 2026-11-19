@@ -38,6 +38,7 @@ local native_world_flush = require("native_world_flush")
 local native_rest = require("native_rest")
 local native_black_stone = require("native_black_stone")
 local native_nothing_return = require("native_nothing_return")
+local native_kill_volume = require("native_kill_volume")
 local native_world_view = require("native_world_view")
 local native_inventory = require("native_inventory")
 local native_inventory_view = require("native_inventory_view")
@@ -395,6 +396,7 @@ local function run_command(fields, state, current_phase)
 
     if command == "travel-party" then
         if not party_travel_guard_available() then return "native_roster_unavailable" end
+        if native_kill_volume.capture_blocked(state, current_phase) then return "stock_kill_volume_recovery_in_progress" end
         local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields)
         if not checked then return "native_roster_unavailable" end
         if refusal then return refusal end
@@ -413,6 +415,10 @@ local function run_command(fields, state, current_phase)
 
     if command == "travel" and native_enemy_loot.departure_pending(state, current_phase) then
         return "native_enemy_loot_roll_pending"
+    end
+    if (command == "travel" or command == "native-world-flush" or command == "native-host-save-capture"
+        or command == "native-guest-save-capture") and native_kill_volume.capture_blocked(state, current_phase) then
+        error("stock_kill_volume_recovery_in_progress", 0)
     end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
@@ -817,6 +823,7 @@ local function run_command(fields, state, current_phase)
     result = result
         or guest_save.command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
+        or native_kill_volume.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
@@ -1014,6 +1021,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_fresh_campaign.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_black_stone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_nothing_return.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_kill_volume.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1171,6 +1179,10 @@ local function tick()
     native_enemy_loot.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
+    if native_kill_volume.sync(state, current_phase) then
+        state, current_phase = observe_session()
+        if not state then return end
+    end
     native_zone.sync(state, current_phase)
     native_rest.sync_hook(state, current_phase)
     native_black_stone.sync(state, current_phase)

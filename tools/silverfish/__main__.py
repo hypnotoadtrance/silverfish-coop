@@ -197,7 +197,7 @@ def parser() -> argparse.ArgumentParser:
         "native-finite-shop-approach", "native-finite-shop-wallet-fixture", "native-interaction-fixture",
         "native-shop-view-fixture",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
-        "native-fall-position", "native-fall-return",
+        "native-fall-position", "native-fall-return", "native-kill-volume-fall-fixture",
         "native-door-position", "native-door-probe", "native-cistern-keypad",
         "native-transport-probe",
         "native-matrix-inspect", "native-matrix-seed", "native-matrix-equip", "native-matrix-fuel", "native-matrix-probe",

@@ -282,6 +282,24 @@ function native_death.rearm(slot)
     if slots[slot] then slots[slot].emitted = false end
 end
 
+function native_death.publish_kill_volume_down(state, phase, pawn, save)
+    if not scoped or not active(state, phase) or not file_path or not valid(pawn) or not pawn:HasAuthority()
+        or not same(pawn:GetWorld(), state.world) or not same(pawn.Save, save) or pawn.Dead ~= false then return false end
+    for slot, record in pairs(slots) do
+        if record.name == pawn:GetFullName() and same(record.pawn, pawn) then
+            -- The native overlap is lethal even though the co-op pawn itself remains alive for revival.
+            local health = save.PlayerHealth
+            if not finite(health) then return false end
+            if record.emitted then return health <= 0 end
+            save.PlayerHealth = 0
+            if save.PlayerHealth == 0 and emit(slot, record) then return true end
+            save.PlayerHealth = health
+            return false
+        end
+    end
+    return false
+end
+
 function native_death.has_pair(host, guest)
     local local_record, remote = scope_records["local"], scope_records.guest
     return local_record ~= nil and remote ~= nil and hook_status == "ready" and heartbeat_fresh()

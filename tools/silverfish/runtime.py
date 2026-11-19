@@ -22,6 +22,7 @@ from . import native_authored_pickup, native_borough_barter, native_dialogue, na
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_subway_valve
+from . import native_kill_volume
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -1603,6 +1604,17 @@ class Bridge:
                         "fresh": fields[4] == "1", "status": fields[5],
                         "pawn": None if fields[6] == "-" else fields[6], "volume": None if fields[7] == "-" else fields[7],
                     }
+                elif fields[0] == "native-kill-volume":
+                    if native_kill_volume.KEY in data:
+                        raise ValueError("Duplicate CrossRoads KillVolume state")
+                    data[native_kill_volume.KEY] = native_kill_volume.parse_state(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-kill-volume-recovered":
+                    recovery = native_kill_volume.parse_recovered(fields, data.get("state"), data.get(native_kill_volume.KEY))
+                    recoveries = data.setdefault(native_kill_volume.RECOVERED, {})
+                    pawn = recovery["pawn"]
+                    if pawn in recoveries or len(recoveries) >= 5 or any(row["sequence"] == recovery["sequence"] for row in recoveries.values()):
+                        raise ValueError("Duplicate or excessive CrossRoads KillVolume recovery proof")
+                    recoveries[pawn] = recovery
                 elif fields[0] == "native-dream-isolation" and len(fields) == 6:
                     data["native_dream_isolation"] = {
                         "state": fields[1], "map": fields[2], "actor": fields[3], "detail": fields[4],

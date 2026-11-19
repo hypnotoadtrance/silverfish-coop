@@ -27,6 +27,7 @@ from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_melee
 from . import native_host_landmine
+from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
@@ -327,6 +328,9 @@ class Host:
                    require_guest_frames: frozenset[str] = frozenset()) -> int:
         if self.last_game.get("state") != "hosting":
             raise RuntimeError("Wait for the host map to finish loading")
+        native_kill_volume.fence(self)
+        if native_kill_volume.pending(self.last_game):
+            raise RuntimeError(native_kill_volume.PENDING)
         current_map = self.last_game["map"]
         checkpoint_party = self.party if proposed_party is None else proposed_party
         status = self.store.status()
@@ -669,6 +673,8 @@ class Host:
 
     def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False,
                        staying: bool = False) -> dict | None:
+        if native_kill_volume.pending(self.last_game):
+            return {"ok": False, "error": native_kill_volume.PENDING}
         if self.party["wipe"] and not respawning:
             return {"ok": False, "error": "wipe_in_progress"}
         if not respawning and any(actor in self.party["pending_spawns"] for actor in roles.values()):
@@ -804,7 +810,7 @@ class Host:
                             self.begin_zone_guests(transport)
                             raise
                         message = departure.get("ack", {}).get("message")
-                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable"):
+                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable", native_kill_volume.PENDING):
                             return {"ok": False, "error": message}
                         if departure_proof:
                             moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
@@ -2129,6 +2135,8 @@ class Host:
                 elif action == "native-interaction-fixture":
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
+                elif action == native_kill_volume.FIXTURE and self.fixtures:
+                    result = await native_kill_volume.fixture(self, bridge, request.get("target"))
                 elif (action == "native-finite-shop-approach" and self.fixtures
                       and self.last_game.get("map") in native_finite_shop.MERCHANTS):
                     character = self.roles().get(request.get("target") or "guest")
@@ -2844,7 +2852,7 @@ class Host:
         with contextlib.suppress(OSError, RuntimeError):
             await bridge.command("native-exit-release", *arguments, timeout=3)
 
-    async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
+    def refresh_native_zone_heartbeat(self, bridge: Bridge, now: float) -> None:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
             if self.native_zone_walls:
                 recipients = self.native_recipients()
@@ -2855,6 +2863,9 @@ class Host:
                 write_text(bridge.directory / "native-zone-roster", "\n".join(listing) + "\n")
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
+
+    async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
+        self.refresh_native_zone_heartbeat(bridge, now)
         for operation_id, source, pawn, bed, hours, insomnia in bridge.native_rest_requests():
             local = self.last_game.get("pawns", {}).get("local", {}).get("name")
             site = native_rest.site(source)
@@ -2978,6 +2989,12 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            native_kill_volume.fence(self)
+            if native_kill_volume.pending(self.last_game):
+                self.refresh_native_zone_heartbeat(bridge, time.monotonic())
+                self.publish_host_status(transport)
+                await asyncio.sleep(.25)
+                continue
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             if self.enemy_shell_view:
@@ -3068,12 +3085,15 @@ class Host:
                     await self.checkpoint_native(bridge)
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_host_checkpoint_error", reason=str(error))
-            self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
-                                endpoint={"address": self.bind, "port": self.port},
-                                campaign=self.store.status(), gameplay=self.public_gameplay(),
-                                zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
-                                link_connected=self.game_link_connected(transport))
+            self.publish_host_status(transport)
             await asyncio.sleep(0.25)
+
+    def publish_host_status(self, transport):
+        self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
+                            endpoint={"address": self.bind, "port": self.port},
+                            campaign=self.store.status(), gameplay=self.public_gameplay(),
+                            zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
+                            link_connected=self.game_link_connected(transport))
 
 
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
