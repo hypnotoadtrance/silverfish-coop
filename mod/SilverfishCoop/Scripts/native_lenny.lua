@@ -1,5 +1,6 @@
 local guest_save = require("guest_save")
 local aim = require("native_flood_jammer_aim_fixture")
+local npc_fixtures = require("native_guest_npc")
 
 local lenny = {}
 local area = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
@@ -8,6 +9,7 @@ local spawner_path = level .. "Quest_AssassinTargetSpawn_BP_C_1"
 local spawner_name = "Quest_AssassinTargetSpawn_BP_C " .. spawner_path
 local target_class = "/Game/Classes/NPCs/NPC_Characters/NPC_Lenny.NPC_Lenny_C"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observing = false
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -40,14 +42,23 @@ local function read(state, phase)
 end
 
 function lenny.command(fields, state, phase)
-    if fields[2] ~= "native-lenny-aim" then return end
-    if #fields ~= 4 then error("stock_lenny_aim_arguments_unqualified", 0) end
+    local revive = fields[2] == "native-lenny-revive-approach"
+    if not revive and fields[2] ~= "native-lenny-aim" then return end
+    if not fixtures or #fields ~= (revive and 3 or 4) then error("stock_lenny_fixture_scope_unqualified", 0) end
     local status, name, replicated = read(state, phase)
     if status ~= "watching" or replicated ~= true or type(name) ~= "string" then error("stock_lenny_aim_native_target_unavailable", 0) end
     local spawner = StaticFindObject(spawner_path)
     local npc = valid(spawner) and spawner.TargetNPC
     if not valid(npc) or npc:GetFullName() ~= name or not same(npc:GetClass(), StaticFindObject(target_class))
         or npc.Alive ~= true then error("stock_lenny_aim_exact_living_target_required", 0) end
+    if revive then
+        local guest, saved = guest_save.exact_item_context(state, phase, fields[3])
+        if not valid(guest) or not valid(saved) or guest.Dead ~= false or guest.IsWeaponBlocked ~= true then
+            error("stock_lenny_exact_downed_guest_required", 0)
+        end
+        return npc_fixtures.approach_revive(state.local_pawn.pawn, guest, npc,
+            StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"))
+    end
     return aim.aim_target(state, phase, fields[3], fields[4], "native-lenny", npc, npc.CapsuleComponent, npc.Mesh)
 end
 

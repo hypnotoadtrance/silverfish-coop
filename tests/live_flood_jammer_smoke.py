@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import uuid
 
 from live_ai_smoke import status, wait
 from live_computer_board_smoke import stock_flags
+from live_guest_held_fire_smoke import events
 from live_multi_smoke import saved_hashes
 from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS
 
@@ -175,7 +177,12 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         return client_state["game"][key]
 
     async def fire(guid, magazine):
-        aim = (await action(host, spec.command("aim"), "--target", "guest", "--item-guid", guid))[f"{spec.key}_aim"]
+        try:
+            aim = (await action(host, spec.command("aim"), "--target", "guest", "--item-guid", guid))[f"{spec.key}_aim"]
+        except RuntimeError:
+            if lenny and guest_downed(status(run)):
+                return None
+            raise
         target = evidence["stock_watch"]["target"] if lenny else spec.jammer
         assert (aim["map"], aim["target" if lenny else "jammer"], aim["guid"]) == (area, target, guid), aim
         assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(target.split(" ", 1)[-1] + "."), aim
@@ -184,19 +191,46 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         evidence["shots"].append(attempt)
         assert (press["map"], press["guid"], press["stock_wrappers"]) == (area, guid, 2), press
         for _ in range(36):
-            events = (await command("events", *client, "--tail", "35"))["events"]
-            event = next((row for row in events if row.get("sequence") == press["sequence"]
-                          and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
+            candidates = events(client_run, "native_guest_primary_input")
+            candidates += events(client_run, "native_guest_primary_input_rejected")
+            event = next((row for row in reversed(candidates) if row.get("sequence") == press["sequence"]
+                          and row.get("generation") == status(client_run).get("generation")), None)
             if event:
                 attempt["receipt"] = event
+                if lenny and event["event"] == "native_guest_primary_input_rejected" and event.get("reason") == "downed":
+                    return None
                 assert event["event"] == "native_guest_primary_input", event
                 shot = event["native_guest_weapon"]
                 assert (shot["map"], shot["pawn"], shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
                     area, aim["pawn"], guid, magazine, magazine - 1, ammo.projectile_count,
                 ), shot
                 return shot
-            await asyncio.sleep(.2)
+            await asyncio.sleep(.1)
         raise RuntimeError(f"No authoritative stock primary-input receipt for sequence {press['sequence']}")
+
+    def guest_downed(state):
+        return state.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed") is True
+
+    def objective_committed(state):
+        return quest_record(state.get("campaign", {}), quest).get("step") == 2
+
+    async def revive_lenny_guest():
+        armed = await wait(run, lambda state: objective_committed(state) or (
+            guest_downed(state) and state.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
+        ), timeout=5)
+        if objective_committed(armed):
+            return
+        approach = (await action(host, native_lenny.REVIVE_APPROACH, "--target", "guest"))["native_lenny_revive_approach"]
+        assert (approach["map"], approach["target"]) == (area, evidence["stock_watch"]["target"]), approach
+        recovered = await action(host, "interact", "--target", character)
+        assert (recovered["effect"], recovered["target"]) == ("revive", character), recovered
+        settled = await wait(run, lambda state: objective_committed(state) or (
+            state.get("game", {}).get("native_guest_revivals", {}).get(approach["pawn"])
+        ), timeout=6)
+        native = settled["game"].get("native_guest_revivals", {}).get(approach["pawn"])
+        if native:
+            assert native["owner"] == character and math.isclose(native["health"], native["maximum"] * .10, abs_tol=.01), native
+        evidence["ordinary_guest_revivals"].append({"approach": approach, "interaction": recovered, "native": native})
 
     try:
         start_map = BOROUGH if lenny else board_map
@@ -294,7 +328,22 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             evidence["stock_buckshot_reserve"] = shells
         magazine = 7
         max_shots = 12 if lenny else 3
-        for attempt in range(max_shots):
+        if lenny:
+            evidence["ordinary_guest_revivals"] = []
+        fired = 0
+        observed = None
+        for _ in range(max_shots + (8 if lenny else 0)):
+            present = status(run)
+            if objective_committed(present):
+                observed = present
+                break
+            if lenny and guest_downed(present):
+                if len(evidence["ordinary_guest_revivals"]) >= 4:
+                    raise RuntimeError("Lenny downed the guest through four ordinary revives")
+                await revive_lenny_guest()
+                continue
+            if fired >= max_shots:
+                break
             if magazine == 0 and lenny:
                 reload = (await action(client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
                 magazine = reload["after"]
@@ -303,10 +352,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                 ), reload
                 evidence["stock_reload"] = reload
             shot = await fire(guid, magazine)
+            if shot is None:
+                await wait(run, lambda state: guest_downed(state) or objective_committed(state), timeout=5)
+                continue
             magazine = shot["after"]
-            def objective_committed(state):
-                return quest_record(state.get("campaign", {}), quest).get("step") == 2
-
+            fired += 1
             try:
                 observed = await wait(run, objective_committed, timeout=.8 if lenny else 10)
                 break
@@ -318,8 +368,10 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                               or isinstance(remaining_hp, (int, float)) and remaining_hp <= 0):
                     observed = await wait(run, objective_committed, timeout=9)
                     break
-                if attempt == max_shots - 1 or last_observer.get("state") != "watching":
+                if fired == max_shots or last_observer.get("state") != "watching":
                     raise
+        if observed is None:
+            raise RuntimeError("The party did not verify the stock objective within its shot and revive limit")
         completed = quest_record(observed["campaign"], quest)
         assert quest_record(read_saved(), quest) == completed, completed
         proof = completed["objective"]

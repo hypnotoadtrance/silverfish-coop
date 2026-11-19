@@ -230,6 +230,8 @@ local function approach_revive(host, guest, bandit, trace)
 end
 
 
+npc.approach_revive = approach_revive
+
 local function settle_aim(context, point)
     local eye = context.camera:K2_GetComponentLocation()
     if not vector(eye) then return end

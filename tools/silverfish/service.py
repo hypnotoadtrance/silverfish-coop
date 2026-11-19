@@ -2417,6 +2417,9 @@ class Host:
                 elif action == native_lenny.AIM:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_lenny.aim_fixture(self, bridge, actor, request.get("item_guid"))
+                elif action == native_lenny.REVIVE_APPROACH:
+                    actor = self.roles().get(request.get("target") or "guest")
+                    result = await native_lenny.revive_approach(self, bridge, actor)
                 elif action in native_flood_jammer.AIMS:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_flood_jammer.aim_fixture(self, bridge, actor, request.get("item_guid"), native_flood_jammer.COMMANDS[action])

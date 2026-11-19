@@ -8,6 +8,7 @@ from .native_gold import valid_guid
 
 SPEC = native_flood_jammer.LENNY
 AIM = SPEC.command("aim")
+REVIVE_APPROACH = SPEC.command("revive-approach")
 KEY = SPEC.key
 AREA = SPEC.objective_map
 LEVEL = f"{AREA}.RailYard_P:PersistentLevel."
@@ -24,7 +25,7 @@ async def aim_fixture(host, bridge, actor, guid):
     if (not host.fixtures or not host.native_guest or not host.native_zones or not valid_guid(guid)
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
             or host.last_game.get("map") != AREA or not member or not member["connected"]):
-        raise party.RuleError("Choose an enrolled guest with an owned light pistol near the Rail Yard target")
+        raise party.RuleError("Choose an enrolled guest with an owned SG-71 A near the Rail Yard target")
     pawn = member["pawn"]
     try:
         snapshot = await bridge.command(AIM, pawn, guid, timeout=7)
@@ -37,9 +38,34 @@ async def aim_fixture(host, bridge, actor, guid):
     if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("guid")) !=
             ("hosting", AREA, AREA, pawn, guid) or proof.get("target") != objective.get("target")
             or not exact_target(proof.get("target")) or objective.get("spawner") != SPAWNER):
-        raise RuntimeError("The stock aim did not identify the exact owned pistol and Lenny actor")
+        raise RuntimeError("The stock aim did not identify the exact owned shotgun and Lenny actor")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return {f"{KEY}_aim": proof}
+
+
+async def revive_approach(host, bridge, actor):
+    member = host.native_recipients().get(actor)
+    game = host.last_game
+    players = host.party["players"]
+    objective = game.get(f"{KEY}_objective", {})
+    if (not host.fixtures or not host.native_guest or not host.native_zones or host.transitioning
+            or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
+            or game.get("map") != AREA or objective.get("state") != "watching"
+            or objective.get("spawner") != SPAWNER or not exact_target(objective.get("target"))
+            or not member or not member["connected"] or players.get(actor, {}).get("downed") is not True
+            or players.get("host", {}).get("downed") is not False):
+        raise party.RuleError("The staged Lenny rescue needs a standing host and an enrolled downed guest")
+    pawn = member["pawn"]
+    try:
+        snapshot = await bridge.command(REVIVE_APPROACH, pawn, timeout=6)
+    except RuntimeError as error:
+        if str(error).startswith("mutation_unverified_"):
+            host.native_checkpoint_unsafe = host.stopping = True
+        raise
+    if snapshot.get("state") != "hosting" or snapshot.get("map") != AREA:
+        raise RuntimeError("The staged Lenny rescue lost its exact stock map")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    return {f"{KEY}_revive_approach": {"map": AREA, "pawn": pawn, "target": objective["target"]}}
 
 
 async def observe(host, bridge):
