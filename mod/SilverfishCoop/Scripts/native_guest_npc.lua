@@ -263,8 +263,12 @@ local function settle_aim(context, point)
     end
 end
 
-local function exact_watch(state, phase, host, name)
+local function exact_watch(state, phase, host, guest, name, tracked)
     if not enemy_loot_fixture or type(SilverfishReadNativeEnemyLoot) ~= "function" then return false end
+    if tracked then
+        local current_host, current_guest, actor = enemy_loot.watched_cqc(state, phase, name)
+        return same(host, current_host) and same(guest, current_guest) and same(tracked, actor)
+    end
     local row = enemy_loot.rows(state, phase, table.pack)[1]
     if not row or row[1] ~= "native-enemy-loot" or row[2] ~= state.map or row[3] ~= name or row[4] ~= "watching" then
         return false
@@ -309,7 +313,7 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
         return approach_revive(host, guest, bandit, trace)
     end
     if guid then
-        if not exact_watch(state, phase, host, name) then error("native_bandit_shot_watch_required", 0) end
+        if not exact_watch(state, phase, host, guest, name, tracked) then error("native_bandit_shot_watch_required", 0) end
         if not finite(detached.PlayerHealth) or detached.PlayerHealth <= 0 then error("downed", 0) end
         if type(SilverfishInspectNativeGuestWeapon) ~= "function" or type(SilverfishFireNativeGuestWeapon) ~= "function" then
             error("native_bandit_shot_weapon_unavailable", 0)
@@ -399,7 +403,7 @@ local function bandit_aim(state, phase, host, guest, before, name, guid, tracked
     if guid then
         -- No frame or stock AI tick between the qualifying trace and the standard shot.
         local read_scope, exact = pcall(function()
-            return exact_watch(state, phase, host, name) and same(guest.EquipedItem, weapon)
+            return exact_watch(state, phase, host, guest, name, tracked) and same(guest.EquipedItem, weapon)
         end)
         if not read_scope or not exact then
             restore_pose()

@@ -1,7 +1,11 @@
 -- Run with Lua 5.4 from the repository root.
 local root = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local headless_fixture = false
 local function flag(name)
     local enabled = { NATIVE_ZONE = true, NATIVE_GUEST_SAVE = true, NATIVE_LOOT = true, NATIVE_CQC_LOOT = true }
+    if headless_fixture then
+        enabled.HEADLESS, enabled.NATIVE_FIXTURES, enabled.NATIVE_NPC_TEST, enabled.NATIVE_ENEMY_LOOT = true, true, true, true
+    end
     return enabled[name:match("^SILVERFISH_COOP_(.*)$")] and "1" or nil
 end
 os.getenv = flag
@@ -15,6 +19,7 @@ local host = object(2, "host")
 host.GetWorld = function() return world end
 local scout, shooter = object(3, "scout"), object(4, "shooter")
 local scout_save, shooter_save = object(5, "scout save"), object(6, "shooter save")
+scout.Dead, scout.IsWeaponBlocked, scout_save.PlayerHealth = false, false, 250
 local scout_id = "aaaaaaaa-0000-0000-0000-000000000001"
 local shooter_id = "aaaaaaaa-0000-0000-0000-000000000002"
 package.loaded.guest_save = {
@@ -29,6 +34,8 @@ local npc_class_path = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infa
 local npc_path = root .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 local npc_class, npc = object(7, npc_class_path), object(8, "NPC_State_Infantry_CQC_C " .. npc_path)
 npc.GetWorld, npc.GetClass, npc.IsActorBeingDestroyed = host.GetWorld, function() return npc_class end, function() return false end
+npc.HasAuthority = function() return true end
+npc.Alive, npc.Initialized = true, true
 local ammo_path = root .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_123"
 local shell_path = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 local shell_class, ammo = object(9, shell_path), object(10, "Ammo_ShotgunShells_BP_C " .. ammo_path)
@@ -105,3 +112,38 @@ local rows = table.concat(enemy_loot.rows(state, "hosting", row), "\n")
 assert(rows:find(row("native-enemy-loot-cqc", root, npc:GetFullName(), shooter_id, 0, 1), 1, true))
 assert(rows:find(row("native-enemy-loot-escrow", root, "retired", "shooter", ammo:GetFullName(), slot, guid, 8, 1, 2, 3), 1, true))
 print("Ordinary Dead Bridge loot: detached roster, reserved escrow, exact retirement and source readback passed")
+
+package.loaded.native_enemy_loot = enemy_loot
+package.loaded.native_guest_weapon = {}
+local npc_script = "mod/SilverfishCoop/Scripts/native_guest_npc.lua"
+local shot = {"request", "native-bandit-shot-fixture", npc:GetFullName(), scout:GetFullName(), guid}
+local function refused(adapter, fields, expected)
+    local ok, error = pcall(adapter.command, fields, state, "hosting")
+    assert(not ok and error == expected, tostring(error))
+end
+refused(assert(loadfile(npc_script))(), shot, "native_bandit_shot_watch_required")
+
+headless_fixture, fresh, ready, captured = true, true, false, false
+local automatic = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_loot.lua"))()
+package.loaded.native_enemy_loot = automatic
+local fixture = assert(loadfile(npc_script))()
+automatic.sync(state, "hosting")
+assert(automatic.rows(state, "hosting", table.pack)[1][1] == "native-enemy-loot-cqc-capability")
+
+local inspect_count = 0
+SilverfishInspectNativeGuestWeapon = function(pawn, saved, selected)
+    assert(pawn == scout:GetAddress() and saved == scout_save:GetAddress() and selected == guid)
+    inspect_count = inspect_count + 1
+    return false, "not equipped"
+end
+SilverfishFireNativeGuestWeapon = function() error("Unqualified fixture reached stock fire") end
+refused(fixture, shot, "native_bandit_shot_equipped_guid_required")
+assert(inspect_count == 1)
+local sibling = {"request", "native-bandit-shot-fixture", npc:GetFullName():gsub("_0$", "_1"), scout:GetFullName(), guid}
+refused(fixture, sibling, "native_bandit_shot_watch_required")
+local other_guest = {"request", "native-bandit-shot-fixture", npc:GetFullName(), shooter:GetFullName(), guid}
+refused(fixture, other_guest, "native_bandit_shot_exact_guest_and_weapon_required")
+ready = true
+refused(fixture, shot, "native_bandit_shot_watch_required")
+assert(inspect_count == 1)
+print("Dead Bridge stock shot fixture reads the automatic watcher and requires the exact live actor and guest")
