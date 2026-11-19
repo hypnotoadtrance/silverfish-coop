@@ -251,7 +251,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise AssertionError("The Bandit did not show enough stock movement to verify replica motion")
         if require_damage and not (damage and damage["other_player_untouched"]):
             raise AssertionError("The Bandit did not damage the exposed pawn independently of the other pawn")
-        async def fight_and_share(target, proof_log, remaining):
+        async def fight(target, proof_log, remaining):
             def read_observer(current):
                 return actor_proof(current, "native_enemy_loot", target)
 
@@ -289,12 +289,18 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     accepted("stage host inside ordinary revive range", approach)
                     reply = accepted("revive exact guest", await combat_action(run, "interact", invitation["character_id"]))
                     assert reply["effect"] == "revive" and reply["target"] == invitation["character_id"], reply
+                    revived_at = time.monotonic()
+                    before_sequence = prepared.get("game", {}).get("sequence", 0)
                     standing = await wait(run, lambda state: killed(state) or (
                         not guest_downed(state)
                         and state.get("game", {}).get("native_guest_revivals", {}).get(exact_pawn)
-                    ), timeout=7)
+                    ) or (both_cqc and guest_downed(state) and time.monotonic() - revived_at >= 1
+                          and state.get("game", {}).get("sequence", 0) > before_sequence), timeout=7)
                     if killed(standing):
                         break
+                    if guest_downed(standing):
+                        revivals.append({"interaction": reply, "downed_again_before_standing_sample": True})
+                        continue
                     restored = standing["game"]["native_guest_revivals"][exact_pawn]
                     assert restored["owner"] == invitation["character_id"] and math.isclose(
                         restored["health"], restored["maximum"] * .10, abs_tol=.01
@@ -345,6 +351,9 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         bounty["permanent_count"], bounty["timed_count"], bounty["gear_count"], bounty["cache_unchanged"]) == (
                     observed["bounty_calls"], False, 0, 1, 0, 0, True
                 ), bounty
+            return remaining, observed
+
+        async def share(target, proof_log, observed):
             if shared_enemy_loot:
                 if automatic_cqc_loot:
                     def own_rolls(current):
@@ -437,20 +446,23 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         settled["game"]["pawns"]["local"]["name"], exact_pawn
                     )
                     proof_log["client_cqc_death_view_after_reconnect"] = actor_proof(rejoined, "native_enemy_loot_death_view", target)
-            return remaining
-
         if enemy_loot and both_cqc:
             encounters = evidence["stock_cqc_encounters"] = {CQC: {}, CQC_SECOND: {}}
-            remaining = await fight_and_share(CQC, encounters[CQC], remaining)
+            # Complete both stock fights before keeping the party exposed during
+            # inventory, shared claims or Direct IP reconnect verification.
+            remaining, first_observed = await fight(CQC, encounters[CQC], remaining)
             sibling = actor_proof(status(guest_run), "native_enemy_loot_death_view", CQC_SECOND)
             assert (sibling.get("state"), sibling.get("actor")) == ("present", CQC_SECOND), sibling
-            await fight_and_share(CQC_SECOND, encounters[CQC_SECOND], remaining)
+            _, second_observed = await fight(CQC_SECOND, encounters[CQC_SECOND], remaining)
+            await share(CQC, encounters[CQC], first_observed)
+            await share(CQC_SECOND, encounters[CQC_SECOND], second_observed)
             first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (CQC, CQC_SECOND))
             assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
             final = status(run)["gameplay"]["native_enemy_loot_rolls"]
             assert final == {first["guid"]: first, second["guid"]: second}, final
         elif enemy_loot:
-            await fight_and_share(target, evidence, remaining)
+            _, observed = await fight(target, evidence, remaining)
+            await share(target, evidence, observed)
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:

@@ -396,10 +396,15 @@ function rest.guest_fixture(state, phase, pawn_name)
         or not valid(actor.Box) or not same(actor.Box:GetOwner(), actor) then
         error("The exact stock guest rest interaction is unavailable", 0)
     end
-    -- Use a faction bed in the staged denial probe. If its guard regresses,
-    -- a guest test cannot trigger the stock neutral Insomnia sleep branch.
-    if actor.Faction == 0 or actor.Faction ~= profile.faction then
-        error("The stock guest rest denial fixture requires a qualified faction bed", 0)
+    if actor.Faction ~= profile.faction then
+        error("The stock guest rest denial fixture requires the exact authored bed faction", 0)
+    end
+    -- The host can verify the neutral Insomnia branch is inactive before its
+    -- headless menu guard is used. Client fixtures only probe faction beds.
+    if actor.Faction == 0 then
+        if not host or inspect_bed(state, phase, state.local_pawn.name, profile.actor_full_name).insomnia ~= false then
+            error("The neutral bed probe requires a headless host without stock Insomnia", 0)
+        end
     end
     local stack = state.controller.MenuStack
     if not stack or (host and (type(menu_guard) ~= "function" or not menu_guard(true))) then
