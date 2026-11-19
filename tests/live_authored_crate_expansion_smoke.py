@@ -34,7 +34,8 @@ SCENES = {
 DEFAULT_SCENES = tuple(SCENES)
 GUARANTEED_SCENES = {
     "guaranteed-observatory": (OBSERVATORY, ("LootCrate_Small_BP_C_1",)),
-    "guaranteed-docks": ("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P", ("LootCrate_Small_BP_C_10", "LootCrate_Small_BP_C_15")),
+    # Match the lower stock shelves on opposite sides of the sorting aisle.
+    "guaranteed-docks": ("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P", ("LootCrate_Small_BP_C_7", "LootCrate_Small_BP_C_16")),
 }
 SCENES.update(GUARANTEED_SCENES)
 FISH_CANNERY_ITEMS = {
