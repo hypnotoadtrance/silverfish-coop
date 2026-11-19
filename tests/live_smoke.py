@@ -1362,6 +1362,9 @@ async def smoke():
             assert (meet_turn_in["step"], meet_turn_in["cash"], meet_turn_in["xp"],
                     meet_turn_in["ammo_units"]) == (-10, 0, 1, 9), meet_turn_in
             assert set(meet_turn_in["recipients"]) == {"host", chosen}, meet_turn_in
+            stock_flags = meet_turn_in["native_meet_broker"]
+            meet_reputation = stock_flags["reputation_before"] + 2
+            assert stock_flags["reputation_after"] == meet_turn_in["freelancer_rep"] == meet_reputation, stock_flags
             meet_kits = [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)]
             for index, (old, kit) in enumerate(zip(old_kits, meet_kits, strict=True)):
                 added = {guid: row for guid, row in kit.items() if guid not in old}
@@ -2059,7 +2062,7 @@ async def smoke():
                        and not state.get("awaiting_zone_guest") and len(state["game"]["pawns"]) == 2)
             await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == expected_map)
             note("stock_transition_door_returns_party", {"map": expected_map, "entrance": "CR_Cstrn"})
-        elif (args.zones or args.native_zones) and not broker_map:
+        elif (args.zones or args.native_zones) and not (broker_map or args.native_bandage_input):
             stock_overworld = host_status["game"]["map"] == crossroads
             destination = ("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P" if stock_overworld
                            else "/Game/Classes/Maps/PlaytestMap_02")
@@ -2245,7 +2248,11 @@ async def smoke():
                 assert [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)] == meet_kits
                 assert broker_stock_balances(chosen) == meet_balances
                 assert (await command(*meet_redeem))["effect"] == "native_quest_already_settled"
-                note("meet_broker_starter_kits_and_xp_survive_host_restart", {"character_id": chosen, **meet_balances})
+                preflight = (await command("action", *guest_owner, "native-meet-broker-preflight"))["native_meet_broker"]
+                assert preflight["reputation_before"] == preflight["reputation_after"] == meet_reputation, preflight
+                note("meet_broker_starter_kits_and_xp_survive_host_restart", {
+                    "character_id": chosen, "freelancer_reputation": meet_reputation, **meet_balances,
+                })
             if args.native_broker:
                 await command("action", "--campaign", campaign, "checkpoint")
                 assert broker_stock_balances(chosen) == broker_paid

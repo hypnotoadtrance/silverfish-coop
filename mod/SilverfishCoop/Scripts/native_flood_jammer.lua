@@ -21,7 +21,8 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local operation_prefix = "native-flood-jammer-"
 local commands = {preflight = true, approach = true, start = true, ["turn-in"] = true}
 local board_order = {0, 1, 2, 4, 5, 3}
-local factions, reward_rep = {8, 5}, {[8] = 50, [5] = -40}
+-- Factions_Enum stores Commune (NewEnumerator8) as 2 and Coup (NewEnumerator5) as 5.
+local factions, reward_rep = {2, 5}, {[2] = 50, [5] = -40}
 local keys = {
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
     final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B",
@@ -85,7 +86,8 @@ local function recipe(row)
         if boards[index] ~= id then refuse("quest_board_recipe_unqualified") end
     end
     for _, id in ipairs(factions) do
-        if not rep:Contains(id) or rep:Find(id):get() ~= reward_rep[id] then refuse("quest_reputation_unqualified") end
+        if not rep:Contains(id) then refuse("quest_reputation_faction_" .. id .. "_missing") end
+        if rep:Find(id):get() ~= reward_rep[id] then refuse("quest_reputation_faction_" .. id .. "_amount_changed") end
     end
 end
 

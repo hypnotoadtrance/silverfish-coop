@@ -11,6 +11,8 @@ local profile = {map = map, world_path = world_path, board_path = board_path,
 local weapon_path = "/Game/Classes/Weapons/Wep_Pistol_Auto.Wep_Pistol_Auto_C"
 local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
+local character_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
+local freelancer_id, freelancer_reward = 8, 2
 local preflight, start, turn_in = "native-meet-broker-preflight", "native-meet-broker-start", "native-meet-broker-turn-in"
 local approach = "native-meet-broker-approach"
 local capture, grant = "native-meet-broker-capture", "native-meet-broker-grant"
@@ -50,28 +52,66 @@ local function recipe(row)
         or ammo:GetFullName() ~= "BlueprintGeneratedClass " .. ammo_path or not row then refuse("stock_recipe_unavailable") end
     local offers = row.AppearOn_Boards_95_2FDB27AE4695B9213302E5897144A531
     local items = row.Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A
+    local rep = row.ReputationGain_86_DA02B32344A59A6C236B848B22520EEC
+    local prereq = row.PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD
+    local flags = row.Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F
+    local advantage = row.Advantage_Faction_100_F1B0B60547EEC0A936CFECB9BE005CE2
     local ping = row.GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F
     if type(ping) ~= "string" then ping = ping and ping:ToString() end
-    if row.Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B ~= 1
-        or row.ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333 ~= false
-        or count(row.Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083) ~= 0
-        or row.Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0 ~= 0
-        or row.Reward_PlayerXp_44_8ED601354EEC8BFBAC19B8BE0F25C797 ~= 1
-        or count(items) ~= 2 or not same(items[1], weapon) or not same(items[2], ammo)
-        or row.QuestType_47_1031681D471E9929E30B17985E174BBE ~= 1
-        or row.Difficulty_12_9F1A01AD46151E4F5F152B82C99B5D85 ~= 0
-        or row.AppearOn_GlobalBountyBoards_78_B538291F4816D684913EAA8852507698 ~= false
-        or count(offers) ~= 2 or offers[1] ~= 1 or offers[2] ~= 3
-        or row.RedeemAt_83_FAE34B6C471D2019508A4898E9A0080F ~= 1
-        or not row.PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD
-        or #row.PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD ~= 0
-        or not row.Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F
-        or #row.Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F ~= 0
-        or not row.ReputationGain_86_DA02B32344A59A6C236B848B22520EEC
-        or #row.ReputationGain_86_DA02B32344A59A6C236B848B22520EEC ~= 0
-        or count(row.Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9) ~= 0
-        or (ping ~= nil and ping ~= "" and ping ~= "None") then refuse("stock_recipe_changed") end
+    local mismatches = {}
+    local function expect(field, actual, expected)
+        if actual == expected then return end
+        local kind = type(actual)
+        local value = (kind == "number" or kind == "boolean") and tostring(actual) or kind
+        if kind == "string" and #actual <= 96 and actual:match("^[%w_./:%- ]+$") then value = actual end
+        mismatches[#mismatches + 1] = field .. "=" .. value
+    end
+    expect("final_step", row.Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B, 1)
+    expect("consume", row.ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8AFABA6333, false)
+    expect("objective_count", count(row.Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083), 0)
+    expect("cash", row.Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0, 0)
+    expect("xp", row.Reward_PlayerXp_44_8ED601354EEC8BFBAC19B8BE0F25C797, 1)
+    local reward_count = count(items)
+    expect("reward_count", reward_count, 2)
+    if reward_count == 2 then
+        if not same(items[1], weapon) then expect("pistol_class", valid(items[1]) and items[1]:GetFullName(), weapon_path) end
+        if not same(items[2], ammo) then expect("ammo_class", valid(items[2]) and items[2]:GetFullName(), ammo_path) end
+    end
+    expect("quest_type", row.QuestType_47_1031681D471E9929E30B17985E174BBE, 1)
+    expect("difficulty", row.Difficulty_12_9F1A01AD46151E4F5F152B82C99B5D85, 0)
+    expect("global_board", row.AppearOn_GlobalBountyBoards_78_B538291F4816D684913EAA8852507698, false)
+    local offer_count = count(offers)
+    expect("board_count", offer_count, 2)
+    if offer_count == 2 then
+        expect("board_1", offers[1], 1)
+        expect("board_2", offers[2], 3)
+    end
+    expect("redeem_board", row.RedeemAt_83_FAE34B6C471D2019508A4898E9A0080F, 1)
+    expect("prereq_count", prereq and #prereq, 0)
+    expect("completion_flag_count", flags and #flags, 0)
+    expect("completion_quest_count", count(row.Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9), 0)
+    expect("reputation_count", rep and #rep, 1)
+    if rep and #rep == 1 then
+        expect("freelancer_reputation", rep:Contains(freelancer_id) and rep:Find(freelancer_id):get(), freelancer_reward)
+    end
+    expect("advantage_count", advantage and #advantage, 0)
+    if ping ~= nil and ping ~= "" then expect("ping", ping, "None") end
+    if #mismatches > 0 then refuse("stock_recipe_changed:" .. table.concat(mismatches, ",")) end
     return weapon, ammo
+end
+
+local function reputation(context)
+    local library = StaticFindObject(character_library)
+    if not valid(library) or library:GetFullName() ~= "FL_Characters_C " .. character_library then
+        refuse("reputation_library_unavailable")
+    end
+    local output = {}
+    library:Compose_FactionRep_FlagName(freelancer_id, context.host, output)
+    local key = output.Name
+    if type(key) ~= "userdata" or key:GetComparisonIndex() == 0 or not key:ToString():match("^Rep_") then
+        refuse("reputation_flag_unqualified")
+    end
+    return board_check(board_scope.stock_flag, context.instance, key)
 end
 
 local function progress(context)
@@ -79,7 +119,8 @@ local function progress(context)
     local step = row and row[step_field] or "-"
     if row then recipe(row) end
     if step ~= "-" and step ~= 1 and step ~= -10 then refuse("quest_step_unqualified") end
-    return {step = step,
+    local rep, rep_found = reputation(context)
+    return {step = step, reputation = rep, reputation_found = rep_found,
         cash = board_check(board_scope.stock_flag, context.instance, "Player_Cash"),
         xp = board_check(board_scope.stock_flag, context.instance, "Player_Xp")}
 end
@@ -134,13 +175,21 @@ local function redeem(context, before, weapon, ammo)
     if not valid(library) or library:GetFullName() ~= "FL_CodeLib01_C " .. library_path then
         refuse("turn_in_library_unavailable")
     end
+    local trait, effect = FName("IntensePersonality", EFindName.FNAME_Find), {}
+    if trait:GetComparisonIndex() == 0 then refuse("reputation_trait_unavailable") end
+    context.instance:FindPassiveEffect(trait, true, effect, effect)
+    if type(effect.EffectActive) ~= "boolean" or math.type(effect.Instances) ~= "integer" or effect.Instances < 0
+        or effect.Instances > 1073741822 then refuse("reputation_trait_unqualified") end
+    local expected_rep = before.reputation + freelancer_reward * (before.reputation_found and 1 + effect.Instances or 1)
+    if expected_rep > 2147483647 then refuse("reputation_range") end
     local old_weapons, old_units, old_ids = inventory(context.save, weapon, ammo)
     local output = {}
     local checked, after, identity = pcall(function()
         library:TurnIn_Quest(context.key, context.instance, true, context.host, output, output)
         local observed = progress(context)
         if output.Success ~= true or valid(output.ConfirmationPopup) or not unchanged(context)
-            or observed.step ~= -10 or observed.cash ~= before.cash or observed.xp ~= before.xp + 1 then return end
+            or observed.step ~= -10 or observed.cash ~= before.cash or observed.xp ~= before.xp + 1
+            or not observed.reputation_found or observed.reputation ~= expected_rep then return end
         local weapons, units, ids = inventory(context.save, weapon, ammo)
         local added
         for id in pairs(weapons) do
@@ -191,7 +240,8 @@ function contract.command(fields, state, phase)
             return progress(context)
         end)
         if not checked or not unchanged(context) or observed.step ~= 1
-            or observed.cash ~= before.cash or observed.xp ~= before.xp then
+            or observed.cash ~= before.cash or observed.xp ~= before.xp
+            or observed.reputation ~= before.reputation or observed.reputation_found ~= before.reputation_found then
             error("mutation_unverified_stock_meet_broker_start", 0)
         end
         after = observed
@@ -218,6 +268,7 @@ function contract.rows(state, phase, status_row)
     local before, after = proof.before, proof.after
     rows[#rows + 1] = status_row("native-meet-broker", proof.operation, map, proof.pawn, profile.board_name, quest_id,
         before.step, after.step, before.cash, after.cash, before.xp, after.xp, proof.weapon)
+    rows[#rows + 1] = status_row("native-meet-broker-reputation", before.reputation, after.reputation)
     return rows
 end
 

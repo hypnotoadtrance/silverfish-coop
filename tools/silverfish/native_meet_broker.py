@@ -43,9 +43,12 @@ async def _command(host, bridge, verb: str, pawn: str) -> dict:
     if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", BLACK_MARKET)
             or tuple(proof.get(key) for key in ("operation", "map", "pawn", "board", "quest")) != expected
             or any(proof.get(key) not in (None, 1, -10) for key in ("step_before", "step_after"))
-            or any(type(proof.get(key)) is not int for key in ("cash_before", "cash_after", "xp_before", "xp_after"))
+            or any(type(proof.get(key)) is not int for key in (
+                "cash_before", "cash_after", "xp_before", "xp_after", "reputation_before", "reputation_after",
+            ))
             or (not valid_guid(proof.get("weapon_guid")) if verb == TURN_IN else proof.get("weapon_guid") != "-")
-            or verb == PREFLIGHT and any(proof[f"{key}_before"] != proof[f"{key}_after"] for key in ("step", "cash", "xp"))):
+            or verb == PREFLIGHT and any(proof[f"{key}_before"] != proof[f"{key}_after"]
+                                         for key in ("step", "cash", "xp", "reputation"))):
         raise RuntimeError("The stock MeetBroker board did not return the exact authoritative report")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
@@ -91,7 +94,9 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
         if (proof["step_before"], proof["step_after"], proof["cash_before"], proof["cash_after"],
                 proof["xp_before"], proof["xp_after"]) != (
                 step, expected_step, before["cash_after"], before["cash_after"],
-                before["xp_after"], before["xp_after"] + int(turning_in)):
+                before["xp_after"], before["xp_after"] + int(turning_in)) or (
+                proof["reputation_before"] != before["reputation_after"]
+                or not turning_in and proof["reputation_after"] != before["reputation_after"]):
             raise RuntimeError("The stock MeetBroker transition did not match its authoritative preflight")
         candidate = party.load_party(host.party)
         record = {"quest_id": QUEST_ID, "step": expected_step, "actor": actor}
@@ -103,7 +108,8 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
                 player = candidate["players"][character]
                 player["quest_xp"] = player.get("quest_xp", 0) + 1
             await native_wire_quest._grant_xp(host, bridge, candidate, granted)
-            record.update(recipients=recipients, cash=0, xp=1, weapon_guid=proof["weapon_guid"], ammo_units=REWARDS.ammo_units)
+            record.update(recipients=recipients, cash=0, xp=1, weapon_guid=proof["weapon_guid"],
+                          ammo_units=REWARDS.ammo_units, freelancer_rep=proof["reputation_after"])
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(granted))
         host.party = candidate

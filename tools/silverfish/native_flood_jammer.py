@@ -45,7 +45,7 @@ async def _command(host, bridge, action, pawn):
     proof = snapshot.get("native_flood_jammer", {})
     if (snapshot.get("state"), snapshot.get("map"), *(proof.get(key) for key in ("operation", "map", "pawn", "board", "quest"))) != (
             "hosting", BOROUGH, action, BOROUGH, pawn, native_wire_quest.BOARD, QUEST_ID
-    ) or proof.get("reputation", {}).keys() != {"8", "5"}:
+    ) or proof.get("reputation", {}).keys() != {"2", "5"}:
         raise RuntimeError("The stock jammer board did not report the exact authored contract")
     if (any(key not in proof or proof[key] not in STEPS for key in ("step_before", "step_after"))
             or any(type(proof.get(key)) is not int for key in ("cash_before", "cash_after", "xp_before", "xp_after"))

@@ -33,6 +33,7 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.step = None
         self.xp = 3
+        self.reputation = -6
         self.guest_xp = {"exact scout pawn": 2, "exact reserve pawn": 1}
         self.created = {}
         self.bridge = Mock(command=AsyncMock(side_effect=self.command))
@@ -41,16 +42,18 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         snapshot = dict(self.host.last_game)
         area = snapshot["map"]
         if verb in (broker.PREFLIGHT, broker.START, broker.TURN_IN):
-            before, xp = self.step, self.xp
+            before, xp, reputation = self.step, self.xp, self.reputation
             if verb == broker.START:
                 self.step = 1
             if verb == broker.TURN_IN:
                 self.step, self.xp = -10, self.xp + 1
+                self.reputation += 2
             self.assertEqual(arguments, ("exact scout pawn",))
             snapshot["native_meet_broker"] = {
                 "operation": verb, "map": area, "pawn": arguments[0], "board": broker.BOARD, "quest": broker.QUEST_ID,
                 "step_before": before, "step_after": self.step, "cash_before": 30, "cash_after": 30,
                 "xp_before": xp, "xp_after": self.xp, "weapon_guid": STOCK_WEAPON if verb == broker.TURN_IN else "-",
+                "reputation_before": reputation, "reputation_after": self.reputation,
             }
         elif verb == "native-meet-broker-capture":
             slot, weapon = arguments
@@ -87,6 +90,7 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await stock_action("native-quest-start"))["effect"], "native_quest_present")
         receipt = await stock_action("native-quest-turnin")
         self.assertEqual((receipt["step"], receipt["cash"], receipt["xp"], receipt["ammo_units"]), (-10, 0, 1, 9))
+        self.assertEqual(receipt["freelancer_rep"], -4)
         self.assertEqual(receipt["recipients"], ["host", "reserve", "scout"])
         self.assertEqual(self.host.checkpoint_native.call_args.kwargs["require_guest_frames"], {"scout"})
         pending = self.host.party[broker.REWARDS.key]

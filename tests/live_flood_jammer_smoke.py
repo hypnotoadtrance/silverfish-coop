@@ -232,7 +232,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         before = await balances()
         evidence["stock_redemption_ready"], evidence["native_balances_before"] = ready, before
         assert ready["step_after"] == 2 and ready["xp_after"] == offer["xp_after"], ready
-        assert ready["reputation"]["8"]["after"] == offer["reputation"]["8"]["after"] + 10, (offer, ready)
+        assert ready["reputation"]["2"]["after"] == offer["reputation"]["2"]["after"] + 10, (offer, ready)
         assert ready["reputation"]["5"]["after"] == offer["reputation"]["5"]["after"], (offer, ready)
         settled = await action(client, "native-quest-turnin", "--target", QUEST)
         evidence["stock_turn_in"] = settled
@@ -241,7 +241,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False):
         ), settled
         assert settled["objective"] == proof, settled
         reputation = settled["native_flood_jammer"]["reputation"]
-        assert (reputation["8"]["after"] - reputation["8"]["before"], reputation["5"]["after"] - reputation["5"]["before"]) == (50, -40), reputation
+        assert (reputation["2"]["after"] - reputation["2"]["before"], reputation["5"]["after"] - reputation["5"]["before"]) == (50, -40), reputation
 
         def reward_materialized(state):
             players = state.get("campaign", {}).get("world", {}).get("party", {}).get("players", {})

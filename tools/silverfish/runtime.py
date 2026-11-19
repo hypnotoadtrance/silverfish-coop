@@ -897,6 +897,8 @@ class Bridge:
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
                     proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:12]))
                     data["native_meet_broker"] = dict(proof, weapon_guid=fields[12])
+                elif fields[0] == "native-meet-broker-reputation" and len(fields) == 3 and "native_meet_broker" in data:
+                    data["native_meet_broker"].update(reputation_before=int(fields[1]), reputation_after=int(fields[2]))
                 elif fields[0] == "native-flood-jammer" and len(fields) == 12:
                     names = ("operation", "map", "pawn", "board", "quest")
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
@@ -904,7 +906,7 @@ class Bridge:
                     proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:]))
                     data["native_flood_jammer"] = {**proof, "reputation": {}}
                 elif (fields[0] == "native-flood-jammer-reputation" and len(fields) == 4
-                      and fields[1] in ("5", "8") and "native_flood_jammer" in data):
+                      and fields[1] in ("2", "5") and "native_flood_jammer" in data):
                     data["native_flood_jammer"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
                 elif fields[0] == "native-flood-jammer-objective" and len(fields) == 12 and fields[9] in ("host", "guest", "-"):
                     names = ("step_before", "step_after", "xp_before", "xp_after")

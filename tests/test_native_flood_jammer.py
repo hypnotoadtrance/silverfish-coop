@@ -1,11 +1,35 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_flood_jammer as jammer, native_rewards, party
+from tools.silverfish import native_flood_jammer as jammer, native_rewards, party, runtime
 
 
 class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_board_readback_requires_cooked_faction_ordinals(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        pawn = "exact guest pawn"
+        stock = (
+            ("schema", "1"), ("session", "host", "hosting", jammer.BOROUGH, "1", "0"),
+            ("native-flood-jammer", jammer.PREFLIGHT, jammer.BOROUGH, pawn, jammer.native_wire_quest.BOARD,
+             jammer.QUEST_ID, "-", "-", "0", "0", "0", "0"),
+            ("native-flood-jammer-reputation", "5", "0", "0"),
+        )
+        reader = runtime.Bridge(directory, None)
+        host = SimpleNamespace()
+        for commune_id in ("2", "8"):
+            rows = stock + (("native-flood-jammer-reputation", commune_id, "0", "0"),)
+            (directory / "status.tsv").write_text("\n".join("\t".join(row) for row in rows), encoding="utf-8")
+            bridge = SimpleNamespace(command=AsyncMock(return_value=reader.snapshot()))
+            if commune_id == "2":
+                report = await jammer._command(host, bridge, jammer.PREFLIGHT, pawn)
+                self.assertEqual(set(report["reputation"]), {"2", "5"})
+            else:
+                with self.assertRaisesRegex(RuntimeError, "did not report the exact authored contract"):
+                    await jammer._command(host, bridge, jammer.PREFLIGHT, pawn)
+
     def host(self, step, *, forced=False):
         saved = party.new_party()
         for actor in ("host", "guest-character", "offline-character"):

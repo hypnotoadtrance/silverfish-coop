@@ -230,7 +230,7 @@ namespace
                     return count == size && data && value->GetPropertyValue(data) == delta;
                 });
         };
-        return effect(STR("Rep_OnComplete"), 8, 10, 1) && effect(STR("Adv_OnComplete"), 8, 75, 2) &&
+        return effect(STR("Rep_OnComplete"), 2, 10, 1) && effect(STR("Adv_OnComplete"), 2, 75, 2) &&
             effect(STR("Adv_OnComplete"), 5, -10, 2) &&
             map_member<U::FNameProperty, U::FIntProperty>(trigger, STR("Set_SaveFlags"), candidate.quest,
                 [](auto*, const void*, int count) { return count == 0; });
