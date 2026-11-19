@@ -131,7 +131,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
         invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
         client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
-        client_process = await start("client.txt", client, "join", *client, *client_flags)
+        await start("client.txt", client, "join", *client, *client_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected"
                    and state.get("game", {}).get("map") == area
                    and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
@@ -384,15 +384,17 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
                     assert durable == claimed, durable
                     assert saved["world"]["map"] == DEAD_BRIDGE, saved["world"]
-                    await command("action", *client, "stop")
-                    await asyncio.wait_for(client_process.wait(), 15)
-                    await wait(run, lambda state: not state.get("link_connected")
-                               and state.get("game", {}).get("remote_clients") == 0, timeout=15)
-                    await start("client-reconnect.txt", client, "join", *client, *client_flags)
-                    rejoined = await wait(guest_run, lambda state: state.get("generation") != settled["generation"]
-                                          and projected(state), timeout=45)
+                    await command("action", *client, "drop-link")
+                    await wait(guest_run, lambda state: state.get("reconnect_suspended") and not state.get("link_connected"))
+                    await wait(run, lambda state: not state.get("link_connected"))
+                    await command("action", *client, "reconnect")
+                    rejoined = await wait(guest_run, lambda state: state.get("link_connected")
+                                          and state.get("gameplay_fresh") and projected(state))
                     same_visit = status(run)
                     assert same_visit["generation"] == paired["generation"] and same_visit["zone_epoch"] == roll["epoch"], same_visit
+                    assert (rejoined["game"]["pawns"]["local"]["name"], same_visit["game"]["native_guest_save"]["pawn"]) == (
+                        settled["game"]["pawns"]["local"]["name"], exact_pawn
+                    )
                     evidence["client_cqc_death_view_after_reconnect"] = rejoined["game"]["native_enemy_loot_death_view"]
     finally:
         for process, controller in reversed(processes):
