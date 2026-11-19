@@ -25,6 +25,8 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
 
+#include <Windows.h>
+
 namespace
 {
     namespace U = RC::Unreal;
@@ -60,6 +62,10 @@ namespace
     constexpr auto scope_lease = std::chrono::seconds(2);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
     constexpr auto release_lease = std::chrono::seconds(12);
+    constexpr auto held_lease = std::chrono::seconds(8);
+    constexpr auto held_edge_window = std::chrono::milliseconds(750);
+    constexpr auto held_probe_period = std::chrono::milliseconds(90);
+    constexpr auto held_fixture_lease = std::chrono::seconds(3);
     constexpr std::size_t receipt_limit = 8;
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
 
@@ -128,6 +134,8 @@ namespace
 
     bool enabled() { return host_enabled() != guest_enabled(); }
 
+    bool held_enabled() { return guest_enabled() && env("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE"); }
+
     bool fixtures(bool host)
     {
         return env("SILVERFISH_COOP_HEADLESS") &&
@@ -167,6 +175,15 @@ namespace
         bool host{};
     };
 
+    struct MappedInput
+    {
+        U::FWeakObjectPtr subsystem{}, query{}, key_down{};
+        U::FObjectProperty* action{};
+        U::FArrayProperty* keys{};
+        U::FStructProperty* key{};
+        U::FBoolProperty* down{};
+    };
+
     struct Scope
     {
         LocalPlayer seat{};
@@ -177,6 +194,7 @@ namespace
         Guid guid{};
         std::string text;
         std::uint64_t generation{};
+        MappedInput mapped{};
     };
 
     struct CapturedPress
@@ -186,14 +204,30 @@ namespace
         Wrapper completed{};
         Clock::time_point expires{};
         std::uint64_t generation{};
+        std::uint64_t stroke{};
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
+    enum class HeldEdge { press, release, cancel };
+    enum class HeldProof { none, mapped_key, edge_window, fixture };
+    enum class FixtureDispatch { none, tap, held };
+    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; };
+    struct HeldStroke
+    {
+        std::uint64_t id{};
+        HeldProof proof{};
+        Clock::time_point expires{}, next_probe{};
+    };
     Scope scope;
     CapturedPress press;
     std::array<Receipt, receipt_limit> receipts{};
     std::size_t head{}, count{};
     std::uint64_t sequence{};
+    HeldStroke held;
+    std::array<HeldReceipt, receipt_limit> held_receipts{};
+    std::size_t held_head{}, held_count{};
+    std::uint64_t held_sequence{};
+    FixtureDispatch fixture_dispatch{};
     std::atomic<std::uint64_t> generation{1};
     std::atomic<bool> installed{};
     std::atomic<bool> protect_host_camera{};
@@ -405,6 +439,98 @@ namespace
         return std::isfinite(elapsed) && elapsed >= 0 && std::isfinite(triggered) && triggered >= 0;
     }
 
+    bool local_game_focused()
+    {
+        DWORD process{};
+        const auto window = GetForegroundWindow();
+        return window && GetWindowThreadProcessId(window, &process) != 0 && process == GetCurrentProcessId();
+    }
+
+    void bind_mapped_input(Scope& next)
+    {
+        auto* local = next.seat.local.Get();
+        auto* action = next.action.Get();
+        auto* type = find<U::UClass>(STR("/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"));
+        auto* interface_type = find<U::UClass>(STR("/Script/EnhancedInput.EnhancedInputSubsystemInterface"));
+        auto* key_type = find<U::UScriptStruct>(STR("/Script/InputCore.Key"));
+        auto* key_down = find<U::UFunction>(STR("/Script/Engine.PlayerController:IsInputKeyDown"));
+        if (!local || !action || !type || !key_type || !key_down) return;
+        U::UObject* subsystem{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* object, int, int) {
+            if (object->GetClassPrivate() != type || object->GetOuterPrivate() != local || !live(object))
+                return RC::LoopAction::Continue;
+            if (subsystem)
+            {
+                subsystem = nullptr;
+                return RC::LoopAction::Break;
+            }
+            subsystem = object;
+            return RC::LoopAction::Continue;
+        });
+        if (!subsystem) return;
+        auto* query = subsystem->GetFunctionByNameInChain(U::FName{STR("QueryKeysMappedToAction")});
+        if (!query || (query->GetOuterPrivate() != type && query->GetOuterPrivate() != interface_type) ||
+            !query->HasAnyFunctionFlags(U::FUNC_Native) || query->HasAnyFunctionFlags(U::FUNC_Net) ||
+            query->GetNumParms() != 2 || query->GetParmsSize() > 128 ||
+            !key_down->HasAnyFunctionFlags(U::FUNC_Native) || key_down->HasAnyFunctionFlags(U::FUNC_Net) ||
+            key_down->GetNumParms() != 2 || key_down->GetParmsSize() > 128) return;
+        auto* query_action = input<U::FObjectProperty>(query, STR("Action"), 0);
+        auto* keys = U::CastField<U::FArrayProperty>(query->GetReturnProperty());
+        auto* inner = keys ? U::CastField<U::FStructProperty>(keys->GetInner()) : nullptr;
+        auto* key = input<U::FStructProperty>(key_down, STR("Key"), 0);
+        auto* down = U::CastField<U::FBoolProperty>(key_down->GetReturnProperty());
+        if (!query_action || query_action->GetPropertyClass().Get() != action->GetClassPrivate() ||
+            !inner || inner->GetStruct().Get() != key_type || !key || key->GetStruct().Get() != key_type ||
+            !down || !down->HasAnyPropertyFlags(U::CPF_ReturnParm) || !keys->HasAnyPropertyFlags(U::CPF_ReturnParm) ||
+            keys->GetOffset_Internal() < query_action->GetSize() ||
+            keys->GetOffset_Internal() + keys->GetSize() > query->GetParmsSize() ||
+            down->GetOffset_Internal() < key->GetSize() ||
+            down->GetOffset_Internal() + down->GetSize() > key_down->GetParmsSize()) return;
+        next.mapped = {subsystem, query, key_down, query_action, keys, key, down};
+    }
+
+    struct ReflectedValue
+    {
+        U::FProperty* property;
+        void* buffer;
+        ReflectedValue(U::FProperty* property, void* buffer) : property(property), buffer(buffer)
+        {
+            property->InitializeValue_InContainer(buffer);
+        }
+        ~ReflectedValue() { property->DestroyValue_InContainer(buffer); }
+        ReflectedValue(const ReflectedValue&) = delete;
+        ReflectedValue& operator=(const ReflectedValue&) = delete;
+    };
+
+    enum class KeyState { unavailable, up, down };
+
+    KeyState mapped_key_state(const Scope& current)
+    {
+        const auto& mapped = current.mapped;
+        auto* subsystem = mapped.subsystem.Get();
+        auto* query = static_cast<U::UFunction*>(mapped.query.Get());
+        auto* key_down = static_cast<U::UFunction*>(mapped.key_down.Get());
+        auto* controller = current.seat.controller.Get();
+        auto* action = current.action.Get();
+        if (!live(subsystem) || !live(query) || !live(key_down) || !live(controller) || !live(action) ||
+            subsystem->GetOuterPrivate() != current.seat.local.Get()) return KeyState::unavailable;
+        alignas(std::max_align_t) std::array<std::byte, 128> query_args{};
+        ReflectedValue key_array(mapped.keys, query_args.data());
+        mapped.action->SetObjectPropertyValue(mapped.action->ContainerPtrToValuePtr<void>(query_args.data()), action);
+        subsystem->ProcessEvent(query, query_args.data());
+        U::FScriptArrayHelper keys(mapped.keys, mapped.keys->ContainerPtrToValuePtr<void>(query_args.data()));
+        if (keys.Num() < 0 || keys.Num() > 16) return KeyState::unavailable;
+        for (int index = 0; index < keys.Num(); ++index)
+        {
+            alignas(std::max_align_t) std::array<std::byte, 128> key_args{};
+            ReflectedValue key(mapped.key, key_args.data());
+            mapped.key->CopyCompleteValue(mapped.key->ContainerPtrToValuePtr<void>(key_args.data()), keys.GetRawPtr(index));
+            controller->ProcessEvent(key_down, key_args.data());
+            if (mapped.down->GetPropertyValueInContainer(key_args.data())) return KeyState::down;
+        }
+        return KeyState::up;
+    }
+
     Wrapper bind_wrapper(U::UClass* pawn, U::UObject* action, const U::TCHAR* path, std::uint8_t expected_trigger)
     {
         auto* function = find<U::UFunction>(path);
@@ -493,6 +619,8 @@ namespace
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
+        if (next.completed.function.Get() && !next.seat.host && next.item->kind == "smg" && held_enabled())
+            bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
     }
 
@@ -516,6 +644,73 @@ namespace
         {
             head = (head + 1) % receipt_limit;
             --count;
+        }
+    }
+
+    bool scoped_held_fire()
+    {
+        return scope.item && scope.item->kind == "smg" && !scope.seat.host && held_enabled();
+    }
+
+    void discard_held(Clock::time_point now)
+    {
+        while (held_count && now >= held_receipts[held_head].receipt.expires)
+        {
+            held_head = (held_head + 1) % receipt_limit;
+            --held_count;
+        }
+    }
+
+    bool queue_held(HeldEdge edge, std::uint64_t stroke, Clock::time_point now)
+    {
+        discard_held(now);
+        if (held_count == receipt_limit || held_sequence == max_sequence) return false;
+        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime}, stroke, edge};
+        ++held_count;
+        return true;
+    }
+
+    void stop_held(HeldEdge edge, Clock::time_point now)
+    {
+        if (!held.id) return;
+        queue_held(edge, held.id, now);
+        if (edge == HeldEdge::cancel && press.stroke == held.id && press.expires > now + held_probe_period)
+            press.expires = now + held_probe_period;
+        held = {};
+    }
+
+    bool begin_held(Clock::time_point now)
+    {
+        auto proof = HeldProof::fixture;
+        auto until = now + held_fixture_lease;
+        if (fixture_dispatch != FixtureDispatch::held)
+        {
+            if (!local_game_focused()) return false;
+            const auto key = mapped_key_state(scope);
+            if (key == KeyState::up) return false;
+            proof = key == KeyState::down ? HeldProof::mapped_key : HeldProof::edge_window;
+            until = now + (proof == HeldProof::mapped_key ? held_lease : held_edge_window);
+        }
+        if (held.id || held_sequence == max_sequence || !queue_held(HeldEdge::press, held_sequence + 1, now))
+            return false;
+        held = {held_sequence, proof, until, now + held_probe_period};
+        press.stroke = held.id;
+        return true;
+    }
+
+    void check_held(Clock::time_point now)
+    {
+        if (!held.id) return;
+        if (now >= held.expires || !qualified(scope, now) || !can_act(scope.seat) ||
+            (held.proof != HeldProof::fixture && !local_game_focused()))
+        {
+            stop_held(HeldEdge::cancel, now);
+            return;
+        }
+        if (held.proof == HeldProof::mapped_key && now >= held.next_probe)
+        {
+            if (mapped_key_state(scope) != KeyState::down) stop_held(HeldEdge::cancel, now);
+            else held.next_probe = now + held_probe_period;
         }
     }
 
@@ -569,6 +764,8 @@ namespace
         {
             auto* current = object_field(pawn, STR("EquipedItem"));
             const bool same_actor = press.seat.mirrored ? current && current == press.seat.held.Get() : !current;
+            if (press.stroke != 0 && press.stroke == held.id)
+                stop_held(same_actor ? HeldEdge::release : HeldEdge::cancel, now);
             press = {};
             if (same_actor) iteration.PreventOriginalFunctionCall();
             return;
@@ -582,7 +779,13 @@ namespace
             press.seat.pawn.Get() == pawn && press.seat.controller.Get() == scope.seat.controller.Get() &&
             press.seat.world.Get() == scope.seat.world.Get()) return;
         press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
-        if (!can_act(scope.seat) || sequence == max_sequence) return;
+        if (!can_act(scope.seat)) return;
+        if (scoped_held_fire() && fixture_dispatch != FixtureDispatch::tap)
+        {
+            begin_held(now);
+            return;
+        }
+        if (sequence == max_sequence) return;
         discard_expired(now);
         if (count == receipt_limit) return;
         receipts[(head + count) % receipt_limit] = {++sequence, now + receipt_lifetime};
@@ -629,6 +832,8 @@ namespace
         }
         scope = {};
         head = count = 0;
+        held = {};
+        held_head = held_count = 0;
         if (const auto failure = bind(next, pawn, controller, world); !failure.empty()) return result(lua, false, failure);
         next.expires = now + scope_lease;
         next.text = text;
@@ -654,29 +859,61 @@ namespace
         return 4;
     }
 
+    int take_held(const Lua& lua)
+    {
+        if (!available() || !scoped_held_fire() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto pawn = lua.get_integer();
+        if (pawn != address(scope.seat.pawn.Get())) return 0;
+        const auto now = Clock::now();
+        check_held(now);
+        discard_held(now);
+        if (!held_count || !current_player(scope.seat)) return 0;
+        const auto& event = held_receipts[held_head];
+        lua.set_integer(static_cast<std::int64_t>(event.receipt.sequence));
+        lua.set_integer(pawn);
+        lua.set_string(scope.text);
+        lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
+        lua.set_integer(static_cast<std::int64_t>(event.stroke));
+        held_head = (held_head + 1) % receipt_limit;
+        --held_count;
+        return 5;
+    }
+
+    int read_held(const Lua& lua)
+    {
+        if (!available() || !scoped_held_fire() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto pawn = lua.get_integer();
+        if (pawn != address(scope.seat.pawn.Get())) return 0;
+        check_held(Clock::now());
+        if (!held.id) return 0;
+        lua.set_integer(static_cast<std::int64_t>(held.id));
+        lua.set_integer(pawn);
+        lua.set_string(scope.text);
+        lua.set_string(held.proof == HeldProof::mapped_key ? "mapped-key" :
+            held.proof == HeldProof::edge_window ? "edge-window" : "headless-fixture");
+        return 4;
+    }
+
     int clear(const Lua&)
     {
         if (U::IsInGameThreadRaw())
         {
             scope = {};
             head = count = 0;
+            held = {};
+            held_head = held_count = 0;
             // A consumed Started may still need its matching physical release.
             // This one old, exact stroke cannot enqueue another shot.
         }
         return 0;
     }
 
-    struct StructValue
+    struct FixtureMode
     {
-        U::FStructProperty* property;
-        void* buffer;
-        StructValue(U::FStructProperty* property, void* buffer) : property(property), buffer(buffer)
-        {
-            property->InitializeValue_InContainer(buffer);
-        }
-        ~StructValue() { property->DestroyValue_InContainer(buffer); }
-        StructValue(const StructValue&) = delete;
-        StructValue& operator=(const StructValue&) = delete;
+        explicit FixtureMode(FixtureDispatch value) { fixture_dispatch = value; }
+        ~FixtureMode() { fixture_dispatch = FixtureDispatch::none; }
+        FixtureMode(const FixtureMode&) = delete;
+        FixtureMode& operator=(const FixtureMode&) = delete;
     };
 
     struct ValueFactory
@@ -713,8 +950,8 @@ namespace
         {
             alignas(std::max_align_t) std::array<std::byte, 0x40> packed{};
             alignas(std::max_align_t) std::array<std::byte, 0x30> input{};
-            StructValue generated(output, packed.data());
-            StructValue value(wrapper.value, input.data());
+            ReflectedValue generated(output, packed.data());
+            ReflectedValue value(wrapper.value, input.data());
             x->SetPropertyValueInContainer(packed.data(), down ? 1.0 : 0.0);
             library->ProcessEvent(function, packed.data());
             wrapper.value->CopyCompleteValue(wrapper.value->ContainerPtrToValuePtr<void>(input.data()),
@@ -741,6 +978,7 @@ namespace
         ValueFactory factory;
         if (!factory.bind(action, scope.started.value->GetStruct().Get()))
             return result(lua, false, "native_guest_primary_fixture_value_unavailable");
+        const FixtureMode fixture(FixtureDispatch::tap);
         const auto before = sequence;
         factory.dispatch(pawn, action, scope.started, true);
         if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
@@ -751,6 +989,42 @@ namespace
         result(lua, true, "stock_pressed");
         lua.set_integer(static_cast<std::int64_t>(sequence));
         lua.set_integer(2);
+        return 4;
+    }
+
+    int probe_held(const Lua& lua)
+    {
+        if (!available() || !scoped_held_fire() || !fixtures(false) || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_string(2))
+            return result(lua, false, "native_guest_held_fire_fixture_unavailable");
+        const auto pawn_address = lua.get_integer();
+        const auto edge = lua.get_string();
+        const auto now = Clock::now();
+        auto* pawn = scope.seat.pawn.Get();
+        auto* action = scope.action.Get();
+        if (pawn_address != address(pawn) || (edge != "press" && edge != "release") ||
+            !qualified(scope, now) || !can_act(scope.seat))
+            return result(lua, false, "native_guest_held_fire_fixture_scope_unavailable");
+        check_held(now);
+        discard_held(now);
+        const bool starts = edge == "press";
+        if (held_count || count || fixture_dispatch != FixtureDispatch::none ||
+            (starts ? held.id != 0 || (press.seat.pawn.Get() && now < press.expires) :
+                held.id == 0 || held.proof != HeldProof::fixture || press.stroke != held.id))
+            return result(lua, false, "native_guest_held_fire_fixture_input_busy");
+        ValueFactory factory;
+        if (!factory.bind(action, scope.started.value->GetStruct().Get()))
+            return result(lua, false, "native_guest_held_fire_fixture_value_unavailable");
+        const FixtureMode fixture(FixtureDispatch::held);
+        const auto before = held_sequence;
+        const auto stroke = starts ? before + 1 : held.id;
+        factory.dispatch(pawn, action, starts ? scope.started : scope.completed, starts);
+        if (held_sequence != before + 1 || held_count != 1 ||
+            (starts ? held.id != stroke || press.stroke != stroke : held.id != 0 || press.seat.pawn.Get()))
+            return result(lua, false, "native_guest_held_fire_fixture_edge_unverified");
+        result(lua, true, starts ? "stock_press" : "stock_release");
+        lua.set_integer(static_cast<std::int64_t>(held_sequence));
+        lua.set_integer(static_cast<std::int64_t>(stroke));
         return 4;
     }
 
@@ -914,6 +1188,12 @@ namespace silverfish::native_guest_primary_input
             lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", take);
             lua.register_function("SilverfishClearNativeGuestPrimaryScope", clear);
             if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestPrimaryInput", probe);
+            if (held_enabled())
+            {
+                lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", take_held);
+                lua.register_function("SilverfishReadNativeGuestHeldFire", read_held);
+                if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestHeldFire", probe_held);
+            }
         }
     }
 
@@ -924,5 +1204,7 @@ namespace silverfish::native_guest_primary_input
         scope = {};
         press = {};
         head = count = 0;
+        held = {};
+        held_head = held_count = 0;
     }
 }

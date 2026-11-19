@@ -25,6 +25,7 @@
 
 #include "black_stone.hpp"
 #include "guest_item.hpp"
+#include "guest_armor.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "inventory_view.hpp"
@@ -1330,6 +1331,7 @@ namespace
             silverfish::native_zone::register_lua(lua);
             silverfish::native_transport::register_lua(lua);
             silverfish::native_guest_item::register_lua(lua);
+            silverfish::native_guest_armor::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);

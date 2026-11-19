@@ -18,11 +18,12 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_dialogue, native_downed_markers
+from . import native_authored_pickup, native_dialogue, native_downed_markers, native_mosby_tape
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
+from .native_guest_armor import parse as parse_guest_armor
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
@@ -295,7 +296,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
            guest_clock: bool = False,
-           broker_input: bool = False, native_wipe_view: bool = False):
+           broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -318,6 +319,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT", None)
@@ -345,6 +347,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Stock guest reload input requires a staged native client")
     if guest_primary_input and (port is not None or not native_zones):
         raise ValueError("Stock guest primary input requires a staged native client")
+    if guest_held_fire and not (native_zones and (native_guest if port is not None else guest_primary_input)):
+        raise ValueError("Stock held fire requires the corresponding native host and guest controls")
     if guest_clock and (port is not None or not native_zones):
         raise ValueError("The stock guest clock requires a staged native client")
     if host_camera_input and (port is None or not native_guest or not native_zones):
@@ -392,6 +396,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES"] = "1"
+    if guest_held_fire:
+        env["SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE"] = "1"
     if guest_clock:
         env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK"] = "1"
         if headless:
@@ -442,6 +448,12 @@ def _finite(value: str) -> float | None:
     return number
 
 
+def _held_input_sequence(value: str) -> int:
+    if 0 < len(value) <= 16 and value.isascii() and value.isdecimal() and 0 < (number := int(value)) < 2**53:
+        return number
+    return 0
+
+
 class Bridge:
     """A single controller for one game's local, allowlisted commands."""
 
@@ -459,6 +471,7 @@ class Bridge:
         self.inventory_view_offset = 0
         self.inventory_equip_offset = 0
         self.primary_input_offset = 0
+        self.held_fire_offset = self.held_fire_sequence = 0
         self.host_camera_input_offset = 0
         self.shop_view_offset = 0
         self.broker_input_offset = 0
@@ -525,6 +538,32 @@ class Bridge:
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
                 continue
             events.append((sequence, *fields[2:]))
+        return events
+
+    def guest_held_fire_requests(self) -> list[tuple[int, str, str, str, str, int]]:
+        """Read ordered exact SMG edges without consuming an incomplete row."""
+        try:
+            with (self.directory / "native-guest-held-fire-events").open("rb") as stream:
+                stream.seek(self.held_fire_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.held_fire_offset += end or (len(batch) if len(batch) == 4096 else 0)
+        events = []
+        for raw in batch[:end].splitlines():
+            fields = raw.decode("utf-8", errors="replace").split("\t")
+            if len(fields) != 7 or fields[0] != "native-guest-held-fire-intent":
+                continue
+            number, area, pawn, guid, edge, stroke_text = fields[1:]
+            sequence, stroke = _held_input_sequence(number), _held_input_sequence(stroke_text)
+            if (sequence <= self.held_fire_sequence or not stroke or not valid_guid(guid)
+                    or not area.startswith("/Game/Classes/Maps/") or len(area) > 256
+                    or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
+                    or not (edge == "press" and stroke == sequence or edge in ("release", "cancel") and stroke < sequence)):
+                continue
+            self.held_fire_sequence = sequence
+            events.append((sequence, area, pawn, guid, edge, stroke))
         return events
 
     def native_host_camera_requests(self) -> list[tuple[int, str, str, str]]:
@@ -772,6 +811,7 @@ class Bridge:
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
+            mosby_frame, mosby_reputation = None, []
             matrix_rows, marker_rows = [], []
             marker_frame = None
             malformed_markers = False
@@ -793,7 +833,9 @@ class Bridge:
                     data["native_zone_party_guard"] = True
                 elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
                     with contextlib.suppress(ValueError):
-                        data[native_smg_hold.KEY] = native_smg_hold.parse(fields)
+                        row = native_smg_hold.parse(fields)
+                        data[native_smg_hold.KEY] = row
+                        data.setdefault(native_smg_hold.ALL, {})[row["pawn"]] = row
                 elif fields[0] == "player" and len(fields) >= 6:
                     data["player_effects"][fields[1]] = {
                         "state": fields[2], "crouched": fields[3] == "1",
@@ -900,6 +942,12 @@ class Bridge:
                     }
                     if len(fields) == 9 and fields[8]:
                         data["native_dream_effects"]["stock_event"] = fields[8]
+                elif fields[0] in ("native-guest-armor", "native-guest-armor-projection") and len(fields) == 14:
+                    report = parse_guest_armor(fields)
+                    if fields[0] == "native-guest-armor":
+                        data["native_guest_armor"] = report
+                    else:
+                        data.setdefault("native_guest_armor_projection", {})[report["pawn"]] = report
                 elif fields[0] == "native-guest-weapon" and len(fields) in (12, 14):
                     data["native_guest_weapon"] = {
                         "map": fields[1], "action": fields[2], "pawn": fields[3], "guid": fields[4],
@@ -955,6 +1003,16 @@ class Bridge:
                     if dialogue_progress is not None:
                         raise ValueError("Duplicate stock dialogue progress")
                     dialogue_progress = fields
+                elif fields[0] == "native-mosby-tape":
+                    data["native_mosby_tape"] = native_mosby_tape.parse_exchange(fields)
+                elif fields[0] == "native-mosby-readings":
+                    if mosby_frame is not None:
+                        raise ValueError("Duplicate Stone Maze quest frame")
+                    mosby_frame = fields
+                elif fields[0] == "native-mosby-readings-rep":
+                    mosby_reputation.append(fields)
+                elif fields[0] == "native-mosby-reward":
+                    data["native_mosby_reward"] = native_mosby_tape.parse_reward(fields)
                 elif fields[0] == "native-dialogue-line":
                     dialogue_lines.append(fields)
                 elif fields[0] == "native-dialogue-choice":
@@ -1116,6 +1174,16 @@ class Bridge:
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
                 elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
+                elif (fields[0] == "native-guest-held-fire" and len(fields) == 7 and valid_guid(fields[3])
+                      and (stroke := _held_input_sequence(fields[4])) and fields[5] == "held"
+                      and fields[6] in ("mapped-key", "edge-window", "headless-fixture")):
+                    data["native_guest_held_fire"] = dict(zip(("map", "pawn", "guid"), fields[1:4]),
+                                                         stroke=stroke, state=fields[5], proof=fields[6])
+                elif (fields[0] == "native-guest-held-fire-fixture" and len(fields) == 7 and valid_guid(fields[3])
+                      and (sequence := _held_input_sequence(fields[4])) and (stroke := _held_input_sequence(fields[5]))
+                      and (fields[6] == "press" and sequence == stroke or fields[6] == "release" and sequence > stroke)):
+                    data["native_guest_held_fire_fixture"] = dict(zip(("map", "pawn", "guid"), fields[1:4]),
+                                                                 sequence=sequence, stroke=stroke, edge=fields[6])
                 elif fields[0] == "native-host-camera-ready" and len(fields) == 4 and valid_guid(fields[3]):
                     data["native_host_camera_ready"] = dict(zip(("map", "pawn", "guid"), fields[1:]))
                 elif fields[0] == "native-host-camera-scope" and len(fields) == 5 and fields[4] == "stock_held" and valid_guid(fields[3]):
@@ -1522,6 +1590,13 @@ class Bridge:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):
                     del data["player_local_input"]
+                primary = data.get("native_guest_primary_scope", {})
+                for name in ("native_guest_held_fire", "native_guest_held_fire_fixture"):
+                    held_input = data.get(name)
+                    if held_input and (data["state"] != "connected" or primary.get("kind") != "smg"
+                            or data.get("map") != held_input["map"]
+                            or any(held_input[field] != primary.get(field) for field in ("map", "pawn", "guid"))):
+                        del data[name]
                 if marker_frame is not None and not malformed_markers:
                     with contextlib.suppress(ValueError):
                         data[native_downed_markers.KEY] = native_downed_markers.parse(marker_frame, marker_rows, data.get("map"))
@@ -1540,6 +1615,13 @@ class Bridge:
                     if not dialogue_frame or len(dialogue_frame) != 6 or data.get("state") != "hosting" or data.get("map") != dialogue_frame[1]:
                         raise ValueError("Stock dialogue frame has no qualified listen world")
                     data["native_dialogue_stock"] = native_dialogue.parse_stock(dialogue_frame, dialogue_lines, dialogue_choices, dialogue_progress)
+                if mosby_frame or mosby_reputation:
+                    if not mosby_frame:
+                        raise ValueError("Missing Stone Maze quest frame")
+                    data["native_mosby_readings"] = native_mosby_tape.parse_readings(mosby_frame, mosby_reputation)
+                for key in ("native_mosby_tape", "native_mosby_readings", "native_mosby_reward"):
+                    if key in data and (data.get("state"), data.get("map")) != ("hosting", data[key]["map"]):
+                        raise ValueError("Stone Maze proof is outside its authoritative map")
                 if quest_rows:
                     try:
                         data["native_quest_catalog"] = parse_quest_catalog(quest_rows, sequence=data.get("sequence"))

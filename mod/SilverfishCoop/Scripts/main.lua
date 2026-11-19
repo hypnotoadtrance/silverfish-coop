@@ -17,6 +17,7 @@ local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
 local native_dialogue = require("native_dialogue")
+local native_mosby_tape = require("native_mosby_tape")
 local native_computer_board = require("native_computer_board")
 local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
@@ -59,6 +60,7 @@ local players = require("players")
 local vitals = require("vitals")
 local wallet = require("wallet")
 local weapon_inventory = require("weapon_inventory")
+local native_guest_armor = require("native_guest_armor")
 local native_guest_weapon = require("native_guest_weapon")
 local native_guest_smg_hold = require("native_guest_smg_hold")
 local native_guest_npc = require("native_guest_npc")
@@ -795,6 +797,7 @@ local function run_command(fields, state, current_phase)
         or native_shop.command(fields, state, current_phase)
         or native_shop_view.command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
+        or native_guest_armor.command(fields, state, current_phase)
         or native_guest_weapon.command(fields, state, current_phase)
         or native_guest_smg_hold.command(fields, state, current_phase)
         or native_guest_npc.command(fields, state, current_phase)
@@ -811,6 +814,7 @@ local function run_command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
         or native_dialogue.command(fields, state, current_phase)
+        or native_mosby_tape.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
         or native_meet_broker.command(fields, state, current_phase)
         or native_flood_jammer.command(fields, state, current_phase)
@@ -929,6 +933,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_shop_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_campaign_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_armor.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_weapon.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_smg_hold.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -946,6 +951,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_meet_broker.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1100,6 +1106,7 @@ end
 local function tick()
     local state, current_phase = observe_session()
     if not state then return end
+    native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)

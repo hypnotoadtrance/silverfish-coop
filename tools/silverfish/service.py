@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
-               native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
+               native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
@@ -26,7 +26,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment, _census
-from . import native_smg_hold
+from . import native_mosby_tape, native_smg_hold
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -40,6 +40,7 @@ GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE,
+                        native_mosby_tape.PREFLIGHT, native_mosby_tape.CONVERT, native_mosby_tape.READINGS_PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, native_flood_jammer.PREFLIGHT, native_meet_broker.PREFLIGHT,
@@ -47,7 +48,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
-                        *native_guest_weapon.GUEST_ACTIONS, native_guest_consumable.ACTION)
+                        *native_guest_weapon.GUEST_ACTIONS, native_guest_consumable.ACTION, native_guest_armor.ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
                 "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
@@ -159,7 +160,7 @@ class Host:
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
                  guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
-                 dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False):
+                 dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -178,6 +179,7 @@ class Host:
         self.native_guest = native_guest
         self.native_zones = native_zones
         self.native_guest_controls = native_guest_controls and native_guest and native_zones and native_backend == "cpp"
+        self.smg_holds = native_smg_hold.Authority(self) if guest_held_fire and self.native_guest_controls else None
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -656,6 +658,8 @@ class Host:
                           matrix_plan: dict | None = None, authored_plan: AuthoredRoute | None = None,
                           respawn_plan: dict | None = None, source_flushed: bool = False,
                           recheck_party: bool = False) -> dict:
+        if holds := getattr(self, "smg_holds", None):
+            await holds.settle(bridge, stop_all=True)
         source_frame = self.last_game
         current = source_frame["map"]
         guests = self.travelling_guests()
@@ -1384,7 +1388,9 @@ class Host:
         if request == {"action": "snapshot"}:
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
-        if action in GUEST_NATIVE_ACTIONS and set(request) == {"action", "operation_id", "target"}:
+        if (action in GUEST_NATIVE_ACTIONS or action == native_smg_hold.ACTION and self.smg_holds) and set(request) == {
+            "action", "operation_id", "target"
+        }:
             return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:
             return {"ok": False, "error": "action_unavailable"}
@@ -1426,6 +1432,10 @@ class Host:
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
+            elif action == native_smg_hold.ACTION and self.smg_holds:
+                result = await self.smg_holds.request(bridge, character, target)
+            elif action == native_guest_armor.ACTION:
+                result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_consumable.ACTION:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"])
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
@@ -1444,6 +1454,10 @@ class Host:
                 if not self.dialogue_sessions:
                     raise party.RuleError("native_dialogue_unavailable")
                 result = await self.dialogue_sessions.act(self, bridge, character, action, target, request["operation_id"])
+            elif action in (native_mosby_tape.PREFLIGHT, native_mosby_tape.READINGS_PREFLIGHT):
+                result = await native_mosby_tape.preflight(self, bridge, character, action, target)
+            elif action == native_mosby_tape.CONVERT:
+                result = await native_mosby_tape.convert(self, bridge, character, target, request["operation_id"])
             elif action == native_wire_quest.PREFLIGHT:
                 if target is not None:
                     raise party.RuleError("native_wire_quest_has_fixed_board")
@@ -1507,6 +1521,7 @@ class Host:
             await native_rewards.settle(self, bridge)
             await native_wire_quest.settle(self, bridge)
             await native_wire_quest.settle(self, bridge, native_meet_broker.REWARDS)
+            await native_mosby_tape.settle(self, bridge)
             if not self.fixtures:
                 return
             await native_quest.project(self, bridge)
@@ -1593,6 +1608,8 @@ class Host:
             candidate["wipe"] = draft
             self.checkpoint(candidate)
             self.party = candidate
+        if holds := getattr(self, "smg_holds", None):
+            await holds.settle(bridge, stop_all=True)
         stock_rest = bool(self.native_guest and self.native_zones and self.native_profile is not None
                           and self.last_game.get("map") in self.allowed_maps - PLAYTEST_MAPS)
         if stock_rest and "native" not in draft:
@@ -1723,6 +1740,7 @@ class Host:
             "game_build": self.game_build, "protocol_version": PROTOCOL,
             "native_zones": self.native_zones, "native_zone_walls": self.native_zone_walls,
             "native_guest_controls": self.native_guest_controls,
+            "native_guest_held_fire": self.smg_holds is not None,
             "expanded_zones": self.expanded_zones,
             "native_shop_view": self.native_shop_view,
             "native_loot_input": self.native_loot_input,
@@ -2158,6 +2176,11 @@ class Host:
                 elif action == "native-bag-projection-fixture" and self.fixtures:
                     snapshot = await bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": snapshot.get("native_bag_projection_interaction", {})}
+                elif action == native_guest_armor.FIXTURE and self.native_guest and self.fixtures:
+                    character = self.roles().get(request.get("target") or "guest")
+                    guid = request.get("item_guid") or uuid.uuid4().hex.upper()
+                    result = await native_guest_armor.perform(self, bridge, character, request.get("operation_id") or path.stem,
+                                                              action, guid)
                 elif action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo",
                                  "native-guest-weapon-seed-light-pistol") and self.native_guest and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
@@ -2257,6 +2280,11 @@ class Host:
                     target = request.get("target") or "guest"
                     actor = self.roles().get(target, target)
                     result = await self.dialogue_sessions.approach(self, bridge, actor)
+                elif action == native_mosby_tape.APPROACH and self.fixtures:
+                    target = request.get("target") or "guest"
+                    result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target))
+                elif action == native_mosby_tape.READINGS_PREFLIGHT:
+                    result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
                     result = await native_meet_broker.preflight(self, bridge, "host")
                 elif action == native_meet_broker.APPROACH and self.fixtures:
@@ -2766,6 +2794,8 @@ class Host:
             now = time.monotonic()
             if self.native_backend:
                 self.deliver_native_deaths(bridge)
+            if self.smg_holds:
+                await self.smg_holds.settle(bridge)
             if self.native_zones:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
@@ -2842,7 +2872,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     native_zone_walls: bool = False, start_zone: str | None = None, max_guests: int = 1,
                     expanded_zones: bool = False, native_shop_view: bool = False,
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
-                    guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None) -> None:
+                    guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None,
+                    guest_held_fire: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -2860,6 +2891,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     mosby_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_mosby.lua")
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
+    if guest_held_fire and not (native_guest_controls and
+                                staged_script(work, "native_guest_smg_hold.lua", "SilverfishRenewNativeGuestSmgHold")
+                                and staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent")):
+        raise ValueError("Stock held fire requires the current native guest controls stage")
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
@@ -2929,7 +2964,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
                              guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
-                             native_wipe_view=wipe_view_enabled)
+                             native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             extraction_rules = {}
@@ -3012,7 +3047,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
-                              native_guest_controls=native_guest_controls,
+                              native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -3066,6 +3101,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 if (result == "stopped" and not controller.native_checkpoint_unsafe
                         and controller.last_game.get("state") == "hosting" and process.poll() is None):
                     with contextlib.suppress(CampaignError, OSError, RuntimeError):
+                        if controller.smg_holds:
+                            await controller.smg_holds.settle(bridge, stop_all=True)
                         await controller.checkpoint_native(bridge)
                 if native_guest and process.poll() is None:
                     with contextlib.suppress(OSError, RuntimeError):
@@ -3097,12 +3134,14 @@ def load_invite(file: Path, build: str) -> dict:
     if not all(isinstance(invite[key], str) for key in ("certificate", "guest_id", "credential", "character_id")):
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
-           ("native_zones", "native_zone_walls", "native_guest_controls", "expanded_zones", "native_shop_view", "native_loot_input",
+           ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
         raise ValueError("Invitation enables stock guest controls without native zones")
+    if invite.get("native_guest_held_fire") and not invite.get("native_guest_controls"):
+        raise ValueError("Invitation enables held fire without stock guest controls")
     return invite
 
 
@@ -3177,6 +3216,7 @@ class Client:
         self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
+        self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.last_primary_intent = 0
         self.last_inventory_use = 0
         self.last_crate_intent = 0
@@ -3676,6 +3716,12 @@ class Client:
                         raise ValueError("Equip an authenticated stock guest weapon before exercising primary input")
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
+                elif action == native_smg_hold.LOCAL_FIXTURE and self.guest_held_input:
+                    edge = request.get("target")
+                    if not self.primary_scope or self.primary_scope[3] != "smg-standard" or edge not in ("press", "release"):
+                        raise ValueError("The held-fire fixture requires the scoped SMG and a press or release")
+                    self.last_game = await self.bridge.command(action, self.primary_scope[1], edge, timeout=4)
+                    result = {"native_guest_held_fire_fixture": self.last_game.get("native_guest_held_fire_fixture", {})}
                 elif action == native_guest_clock.FIXTURE and self.guest_clock:
                     if self.last_game.get("state") != "connected" or not self.last_game.get("native_guest_clock"):
                         raise ValueError("Connect and wait for an authenticated host clock frame")
@@ -3798,6 +3844,8 @@ class Client:
                       and not self.needs_travel and not self.server_transitioning)
             await self.service_reload_input(active)
             await self.service_primary_input(active)
+            if self.guest_held_input:
+                await self.guest_held_input.service(active)
             await self.service_crate_interaction(active)
             if self.loot_view:
                 rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
@@ -3870,6 +3918,9 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):
         raise ValueError("Restage the native client to route stock primary attack input")
+    guest_held_fire = invite.get("native_guest_held_fire", False)
+    if guest_held_fire and not staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent"):
+        raise ValueError("Restage the current native client for stock held fire")
     if expanded_zones and not (native_zones and staged_script(work, "authored_zone_maps.lua")
                                and (not native_zone_walls or staged_script(work, "authored_wall_routes.lua"))):
         raise ValueError("Restage the current mod to join the host's expanded stock routes")
@@ -3893,7 +3944,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                              guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
                              native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
                              native_loot_input=native_loot_input, broker_input=broker_input,
-                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock)
+                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock, guest_held_fire=guest_held_fire)
             bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:

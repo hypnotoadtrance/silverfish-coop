@@ -3,6 +3,7 @@ local weapon_profiles = require("guest_weapon_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local held_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -10,7 +11,9 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
-local event_path, is_downed, binding, fixture_proof
+local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof
+local held_edges = {press = true, release = true, cancel = true}
+local held_proofs = {["mapped-key"] = true, ["edge-window"] = true, ["headless-fixture"] = true}
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -59,38 +62,59 @@ local function standing(current)
         and current.pawn.IsWeaponBlocked == false and type(is_downed) == "function" and is_downed(current.pawn) == false
 end
 
-local function emit(current, sequence, guid, kind)
-    local file = io.open(event_path, "ab")
+local function emit(path, fields)
+    local file = io.open(path, "ab")
     if not file then return false end
-    local written = file:write(table.concat({"native-guest-primary-intent", sequence, current.map, current.name,
-        guid, kind}, "\t"), "\n")
+    local written = file:write(table.concat(fields, "\t"), "\n")
     local closed = file:close()
     return written and closed
+end
+
+local function drain_held(current, address)
+    if not held_event_path or binding.kind ~= "smg" or type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function" then
+        return 0
+    end
+    local emitted, last = 0, nil
+    for _ = 1, 8 do
+        local sequence, owner, guid, edge, stroke = SilverfishTakeNativeGuestHeldFireIntent(address)
+        if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= binding.guid
+            or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
+            or (edge ~= "press" and stroke >= sequence) then break end
+        if not emit(held_event_path, {"native-guest-held-fire-intent", sequence, current.map, current.name,
+            guid, edge, stroke}) then break end
+        emitted, last = emitted + 1, sequence
+    end
+    return emitted, last
 end
 
 function primary.reset()
     if binding and type(SilverfishClearNativeGuestPrimaryScope) == "function" then
         SilverfishClearNativeGuestPrimaryScope()
     end
-    binding, fixture_proof = nil, nil
+    binding, fixture_proof, held_fixture_proof = nil, nil, nil
 end
 
 function primary.sync(state, phase)
     if not binding then return end
     local current = context(state, phase)
-    if not same_context(current, binding) or not standing(current) then
+    if not same_context(current, binding) then
         primary.reset()
         return
     end
     local address = current.pawn:GetAddress()
+    local held_emitted, held_last = drain_held(current, address)
+    if not standing(current) then
+        primary.reset()
+        return 0, held_emitted, held_last
+    end
     local emitted = 0
     for _ = 1, 8 do
         local sequence, owner, guid, kind = SilverfishTakeNativeGuestPrimaryIntent(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
-        if not emit(current, sequence, guid, kind) then break end
+        if not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
     end
-    return emitted
+    return emitted, held_emitted, held_last
 end
 
 function primary.command(fields, state, phase)
@@ -99,11 +123,28 @@ function primary.command(fields, state, phase)
         primary.reset()
         return "stock guest primary scope cleared"
     end
-    if action ~= "native-guest-primary-scope" and action ~= "native-guest-primary-input-fixture" then return end
+    if action ~= "native-guest-primary-scope" and action ~= "native-guest-primary-input-fixture"
+        and action ~= "native-guest-held-fire-fixture" then return end
     local current = context(state, phase)
     if not standing(current) then
         primary.reset()
         error("Stock primary input requires the exact standing connected guest", 0)
+    end
+    if action == "native-guest-held-fire-fixture" then
+        local edge = fields[4]
+        if not held_enabled or not fixtures or #fields ~= 4 or fields[3] ~= current.name
+            or not same_context(current, binding) or binding.kind ~= "smg" or (edge ~= "press" and edge ~= "release")
+            or type(SilverfishProbeNativeGuestHeldFire) ~= "function" then
+            error("The stock held input fixture requires the exact scoped headless SMG guest", 0)
+        end
+        local ok, status, sequence, stroke = SilverfishProbeNativeGuestHeldFire(current.pawn:GetAddress(), edge)
+        if ok ~= true or status ~= "stock_" .. edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
+            error("The stock SMG fixture edge was unverified (" .. tostring(status) .. ")", 0)
+        end
+        local taps, held, last = primary.sync(state, phase)
+        if taps ~= 0 or held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
+        held_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = edge}
+        return "stock guest SMG " .. edge .. " verified"
     end
     if action == "native-guest-primary-input-fixture" then
         if not fixtures or #fields ~= 3 or fields[3] ~= current.name or not same_context(current, binding)
@@ -124,6 +165,8 @@ function primary.command(fields, state, phase)
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or (kind ~= "camera" and not weapon_profiles.paths[kind])
+        or (held_enabled and kind == "smg" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
+            or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
@@ -159,11 +202,25 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)
     end
+    if held_enabled and binding.kind == "smg" and standing(current)
+        and type(SilverfishReadNativeGuestHeldFire) == "function" then
+        local address = current.pawn:GetAddress()
+        local stroke, owner, guid, proof = SilverfishReadNativeGuestHeldFire(address)
+        if valid_sequence(stroke) and owner == address and guid == binding.guid and held_proofs[proof]
+            and (proof ~= "headless-fixture" or fixtures) then
+            rows[#rows + 1] = status_row("native-guest-held-fire", current.map, current.name, guid, stroke, "held", proof)
+        end
+    end
+    if held_fixture_proof and same_context(current, held_fixture_proof.context) and held_fixture_proof.guid == binding.guid then
+        rows[#rows + 1] = status_row("native-guest-held-fire-fixture", current.map, current.name, held_fixture_proof.guid,
+            held_fixture_proof.sequence, held_fixture_proof.stroke, held_fixture_proof.edge)
+    end
     return rows
 end
 
 function primary.start(bridge, downed)
     event_path = enabled and bridge and bridge ~= "" and bridge .. "/native-guest-primary-events" or nil
+    held_event_path = event_path and held_enabled and bridge .. "/native-guest-held-fire-events" or nil
     is_downed = downed
 end
 

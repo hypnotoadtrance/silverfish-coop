@@ -41,12 +41,14 @@ _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-dialogue-choose": 20.0,
+    "native-mosby-tape-convert": 20.0,
     "native-authored-pickup-claim": 20.0,
     "native-finite-shop-list": 15.0,
     "native-finite-shop-buy": 15.0,
     "native-finite-shop-sale-quote": 15.0,
     "native-finite-shop-sell": 15.0,
     "native-guest-bandage": 15.0,
+    "native-guest-armor-equip": 20.0,
     "native-quest-interact": 15.0,
     "native-quest-list": 15.0,
     "native-turret-photo-capture": 20.0,
@@ -92,6 +94,8 @@ def checkpoint_action_timeout(payload: Action) -> float | None:
     action, target = payload["action"], payload["target"]
     if action == "native-quest-turnin" and target == "Clt_Wire":
         return 22.0
+    if action == "native-quest-turnin" and target == "Clt_Tape_StoneMaze_01":
+        return 28.0
     if action in _QUEST_ACTIONS and isinstance(target, str) and target in _CHECKPOINT_QUESTS:
         return 20.0
     return _CHECKPOINT_ACTION_TIMEOUTS.get(action)

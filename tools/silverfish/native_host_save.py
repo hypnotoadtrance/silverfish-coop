@@ -9,7 +9,7 @@ import uuid
 
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
-from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE
+from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
 
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
@@ -147,6 +147,30 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("The campaign's pending stock quest recipient or reward identity is invalid")
             used.update(items)
         quests.append(reward["escrow"])
+    tape_exchanges = party.get("native_mosby_tape_exchanges", {})
+    if type(tape_exchanges) is not dict:
+        raise CampaignFormatError("The campaign's Stone Maze station exchanges are invalid")
+    products, operations = set(), set()
+    for blank, trade in tape_exchanges.items():
+        if (not valid_guid(blank) or type(trade) is not dict or trade.get("blank_guid") != blank
+                or not isinstance(trade.get("owner"), str) or trade["owner"] not in checkpoint["characters"]
+                or not valid_guid(trade.get("filled_guid")) or trade["filled_guid"] in products or trade["filled_guid"] in tape_exchanges
+                or not isinstance(trade.get("operation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", trade["operation_id"])
+                or (trade["owner"], trade["operation_id"]) in operations):
+            raise CampaignFormatError("A Stone Maze station exchange has an invalid owner or tape identity")
+        products.add(trade["filled_guid"])
+        operations.add((trade["owner"], trade["operation_id"]))
+    mosby = party.get("native_mosby_rewards")
+    if mosby is not None:
+        if (type(mosby) is not dict or type(mosby.get("escrow")) is not dict or mosby["escrow"].get("map") != SCIENTIST_SHOP
+                or not valid_guid(mosby.get("template_guid")) or type(mosby.get("pending")) is not dict or not mosby["pending"]):
+            raise CampaignFormatError("The campaign's Stone Maze HazOp Gear escrow is invalid")
+        used = {mosby["template_guid"]}
+        for character, armor in mosby["pending"].items():
+            if character not in checkpoint["characters"] or not valid_guid(armor) or armor in used:
+                raise CampaignFormatError("A pending Stone Maze reward has an invalid recipient or armor identity")
+            used.add(armor)
+        quests.append(mosby["escrow"])
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
             + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]

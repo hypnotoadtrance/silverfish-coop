@@ -64,6 +64,7 @@ def parser() -> argparse.ArgumentParser:
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
+    host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")
@@ -137,15 +138,17 @@ def parser() -> argparse.ArgumentParser:
         "native-broker-grant-manifest",
         "native-broker-drill-issue-fixture", "native-broker-drill-seed-fixture", "native-broker-drill-inspect",
         "native-weapon-roundtrip",
+        "native-guest-armor-equip", "native-guest-armor-fixture",
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
-        "native-guest-smg-hold-fixture",
+        "native-guest-smg-hold-fixture", "native-guest-held-fire-fixture",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
         "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture",
+        "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",
@@ -225,6 +228,7 @@ async def execute(opts):
                         native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone, max_guests=opts.max_guests,
                         expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
                         guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness,
+                        guest_held_fire=opts.native_guest_held_fire,
                         start_preset=opts.native_start_preset,
                         world_seed=opts.native_world_seed,
                         extraction=None if opts.native_extraction_keep is None else (

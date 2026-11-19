@@ -1227,7 +1227,8 @@ namespace
         }
     };
 
-    SmgHold smg_hold;
+    std::array<SmgHold, max_clients> smg_holds;
+    SmgHold* shot_hold{};
     std::int64_t smg_hold_serial{};
     std::array hold_hooks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
                           Hook::ERROR_ID, Hook::ERROR_ID};
@@ -1235,7 +1236,8 @@ namespace
     bool hold_enabled()
     {
         return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && env("SILVERFISH_COOP_NATIVE_ZONE") &&
-            env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
+            (env("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") ||
+                (env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS")));
     }
 
     bool hold_primary_shape(Unreal::UObject* actor, Unreal::UFunction* action)
@@ -1259,7 +1261,7 @@ namespace
         actor->ProcessEvent(action, &parameters);
     }
 
-    void hold_stop(std::string_view status, bool dirty = false)
+    void hold_stop(SmgHold& smg_hold, std::string_view status, bool dirty = false)
     {
         if (!smg_hold.fenced) return;
         if (!smg_hold.dirty)
@@ -1271,7 +1273,7 @@ namespace
         smg_hold.closing = true;
     }
 
-    void hold_release()
+    void hold_release(SmgHold& smg_hold)
     {
         if (!smg_hold.closing || smg_hold.shot_before >= 0) return;
         smg_hold.closing = false;
@@ -1298,7 +1300,7 @@ namespace
         smg_hold.fenced = smg_hold.receiver.Get() != nullptr;
     }
 
-    bool hold_locate(Unreal::UObject* receiver, Context& context, Inventory& inventory)
+    bool hold_locate(const SmgHold& smg_hold, Unreal::UObject* receiver, Context& context, Inventory& inventory)
     {
         context = smg_hold.context();
         return ownership_current(context) && locate(context, inventory).empty() &&
@@ -1308,25 +1310,31 @@ namespace
 
     void hold_pre(HoldHook& iteration, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
     {
-        if (!Unreal::IsInGameThreadRaw() || !smg_hold.fenced || receiver != smg_hold.receiver.Get()) return;
+        if (!Unreal::IsInGameThreadRaw() || !receiver) return;
+        const auto match = std::ranges::find_if(smg_holds, [&](const SmgHold& hold) {
+            return hold.fenced && (frame.Node() == hold.fire.Get() || frame.Node() == hold.end_cycle.Get()) &&
+                receiver == hold.receiver.Get();
+        });
+        if (match == smg_holds.end()) return;
+        auto& smg_hold = *match;
         const bool firing = frame.Node() == smg_hold.fire.Get();
-        if (!firing && frame.Node() != smg_hold.end_cycle.Get()) return;
-        if (smg_hold.active && HoldClock::now() >= smg_hold.deadline) hold_stop("expired");
-        if (smg_hold.active && smg_hold.after == 0) hold_stop("empty");
+        if (smg_hold.active && HoldClock::now() >= smg_hold.deadline) hold_stop(smg_hold, "expired");
+        if (smg_hold.active && smg_hold.after == 0) hold_stop(smg_hold, "empty");
         if (smg_hold.active && (!ready_pawn(smg_hold.context()) || !boolean(smg_hold.pawn.Get(), STR("Wep_HeldAside"), false)))
-            hold_stop("ineligible");
+            hold_stop(smg_hold, "ineligible");
         if (smg_hold.active && firing)
         {
             Context context;
             Inventory inventory;
             auto* ammo = field<Unreal::FIntProperty>(receiver, STR("Ammo"));
-            if (iteration.OriginalFunctionCallPrevented() || smg_hold.shot_before >= 0 || !ammo ||
-                !hold_locate(receiver, context, inventory) || smg_hold.after < 1 ||
+            if (iteration.OriginalFunctionCallPrevented() || shot_hold || !ammo ||
+                !hold_locate(smg_hold, receiver, context, inventory) || smg_hold.after < 1 ||
                 ammo->GetPropertyValueInContainer(receiver) != smg_hold.after ||
                 inventory.ammo->GetPropertyValueInContainer(inventory.item) != smg_hold.after)
-                hold_stop("mutation_unverified_guest_smg_hold_shot_scope", true);
+                hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_shot_scope", true);
             else
             {
+                shot_hold = &smg_hold;
                 smg_hold.shot_before = smg_hold.after;
                 smg_hold.shot_births = 0;
                 smg_hold.owned_birth = true;
@@ -1338,7 +1346,9 @@ namespace
 
     void hold_birth(HoldHook&, Unreal::AActor* actor)
     {
-        if (!Unreal::IsInGameThreadRaw() || smg_hold.shot_before < 0 || !actor ||
+        if (!Unreal::IsInGameThreadRaw() || !shot_hold || !actor) return;
+        auto& smg_hold = *shot_hold;
+        if (smg_hold.shot_before < 0 ||
             actor->GetClassPrivate() != smg_hold.projectile.Get() || actor->GetWorld() != smg_hold.world.Get()) return;
         ++smg_hold.shot_births;
         auto* pawn = smg_hold.pawn.Get();
@@ -1349,18 +1359,21 @@ namespace
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
     {
-        if (!Unreal::IsInGameThreadRaw() || smg_hold.shot_before < 0 ||
+        if (!Unreal::IsInGameThreadRaw() || !shot_hold) return;
+        auto& smg_hold = *shot_hold;
+        if (smg_hold.shot_before < 0 ||
             receiver != smg_hold.receiver.Get() || frame.Node() != smg_hold.fire.Get()) return;
         const auto remaining = smg_hold.shot_before - 1;
+        shot_hold = nullptr;
         smg_hold.shot_before = -1;
         Context context;
         Inventory inventory;
         auto* ammo = field<Unreal::FIntProperty>(receiver, STR("Ammo"));
         if (smg_hold.shot_births != 1 || !smg_hold.owned_birth || !smg_hold.birth.Get() || !ammo ||
-            !hold_locate(receiver, context, inventory) || ammo->GetPropertyValueInContainer(receiver) != remaining ||
+            !hold_locate(smg_hold, receiver, context, inventory) || ammo->GetPropertyValueInContainer(receiver) != remaining ||
             inventory.ammo->GetPropertyValueInContainer(inventory.item) != remaining)
         {
-            hold_stop("mutation_unverified_guest_smg_hold_shot_readback", true);
+            hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_shot_readback", true);
             return;
         }
         smg_hold.after = remaining;
@@ -1377,6 +1390,27 @@ namespace
         }
     }
 
+    void tick_holds()
+    {
+        if (shot_hold)
+        {
+            shot_hold->shot_before = -1;
+            hold_stop(*shot_hold, "mutation_unverified_guest_smg_hold_missing_post", true);
+            shot_hold = nullptr;
+        }
+        const auto now = HoldClock::now();
+        for (auto& smg_hold : smg_holds)
+        {
+            if (!smg_hold.fenced) continue;
+            const auto context = smg_hold.context();
+            if (smg_hold.active && now >= smg_hold.deadline) hold_stop(smg_hold, "expired");
+            if (smg_hold.active && smg_hold.after == 0) hold_stop(smg_hold, "empty");
+            if (smg_hold.active && (!ownership_current(context) || !ready_pawn(context)))
+                hold_stop(smg_hold, "ineligible");
+            hold_release(smg_hold);
+        }
+    }
+
     bool install_hold_hooks()
     {
         if (hold_hooks.front() != Hook::ERROR_ID) return true;
@@ -1389,32 +1423,28 @@ namespace
             hold_birth, {false, false, owner, STR("Verify the stock guest SMG projectile birth")});
         hold_hooks[3] = Hook::RegisterEngineTickPreCallback(
             [](HoldHook&, Unreal::UEngine*, float, bool) {
-                if (!Unreal::IsInGameThreadRaw() || !smg_hold.fenced) return;
-                if (smg_hold.shot_before >= 0)
-                {
-                    smg_hold.shot_before = -1;
-                    hold_stop("mutation_unverified_guest_smg_hold_missing_post", true);
-                }
-                if (smg_hold.active && HoldClock::now() >= smg_hold.deadline) hold_stop("expired");
-                if (smg_hold.active && smg_hold.after == 0) hold_stop("empty");
-                if (smg_hold.active && (!ownership_current(smg_hold.context()) || !ready_pawn(smg_hold.context())))
-                    hold_stop("ineligible");
-                hold_release();
+                if (Unreal::IsInGameThreadRaw()) tick_holds();
             }, {false, false, owner, STR("Expire the native guest SMG hold")});
         hold_hooks[4] = Hook::RegisterLoadMapPreCallback(
             [](Hook::TCallbackIterationData<bool>&, Unreal::UEngine*, Unreal::FWorldContext&, Unreal::FURL,
                Unreal::UPendingNetGame*, Unreal::FString&) {
-                if (!Unreal::IsInGameThreadRaw() || !smg_hold.fenced) return;
-                hold_stop("mutation_unverified_guest_smg_hold_world", true);
-                hold_release();
+                if (!Unreal::IsInGameThreadRaw()) return;
+                for (auto& smg_hold : smg_holds)
+                {
+                    hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_world", true);
+                    hold_release(smg_hold);
+                }
             }, {false, true, owner, STR("Release the held guest SMG before map invalidation")});
         hold_hooks[5] = Hook::RegisterEndPlayPreCallback(
             [](HoldHook&, Unreal::AActor* actor, Unreal::EEndPlayReason) {
-                if (!Unreal::IsInGameThreadRaw() || !smg_hold.fenced || !actor ||
-                    (actor != smg_hold.receiver.Get() && actor != smg_hold.pawn.Get() &&
-                        actor != smg_hold.controller.Get())) return;
-                hold_stop("mutation_unverified_guest_smg_hold_endplay", true);
-                hold_release();
+                if (!Unreal::IsInGameThreadRaw() || !actor) return;
+                for (auto& smg_hold : smg_holds)
+                {
+                    if (!smg_hold.fenced || (actor != smg_hold.receiver.Get() && actor != smg_hold.pawn.Get() &&
+                        actor != smg_hold.controller.Get())) continue;
+                    hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_endplay", true);
+                    hold_release(smg_hold);
+                }
             }, {false, false, owner, STR("Invalidate the exact ending guest SMG scope")});
         if (std::ranges::find(hold_hooks, Hook::ERROR_ID) == hold_hooks.end()) return true;
         remove_hold_hooks();
@@ -1439,6 +1469,14 @@ namespace
         std::int64_t duration{};
         if (const auto error = resolve(lua, context, nullptr, &duration); !error.empty())
             return hold_result(lua, false, error);
+        auto seat = std::ranges::find_if(smg_holds, [&](const SmgHold& hold) { return hold.pawn.Get() == context.pawn; });
+        if (seat == smg_holds.end())
+        {
+            seat = std::ranges::min_element(smg_holds, {}, [](const SmgHold& hold) {
+                return hold.fenced || hold.dirty ? (std::int64_t{1} << 53) : hold.serial;
+            });
+        }
+        auto& smg_hold = *seat;
         if (smg_hold.fenced || smg_hold.dirty || smg_hold_serial == (std::int64_t{1} << 53) - 1)
             return hold_result(lua, false, "native_guest_smg_hold_busy");
 
@@ -1498,23 +1536,40 @@ namespace
         hold_primary(actor, action, true);
         if (smg_hold.rounds != 1)
         {
+            if (shot_hold == &smg_hold) shot_hold = nullptr;
             smg_hold.shot_before = -1;
-            hold_stop("mutation_unverified_guest_smg_hold_begin", true);
-            hold_release();
+            hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_begin", true);
+            hold_release(smg_hold);
         }
         return hold_result(lua, !smg_hold.dirty, smg_hold.closing && !smg_hold.dirty ? "closing" : smg_hold.status, &smg_hold);
     }
 
-    template <bool stop>
+    enum class HoldAction { observe, stop, renew };
+
+    template <HoldAction action>
     int read_hold(const Lua& lua)
     {
-        if (!Unreal::IsInGameThreadRaw() || !hold_enabled() || lua.get_stack_size() != 1 ||
-            !lua.is_integer(1) || !smg_hold.serial || lua.get_integer() != smg_hold.serial)
+        constexpr bool renew = action == HoldAction::renew;
+        if (!Unreal::IsInGameThreadRaw() || !hold_enabled() || lua.get_stack_size() != (renew ? 2 : 1) ||
+            !lua.is_integer(1) || (renew && !lua.is_integer(2)))
             return hold_result(lua, false, "native_guest_smg_hold_exact_serial_required");
-        if constexpr (stop)
+        const auto serial = lua.get_integer();
+        const auto seat = std::ranges::find(smg_holds, serial, &SmgHold::serial);
+        if (serial < 1 || seat == smg_holds.end())
+            return hold_result(lua, false, "native_guest_smg_hold_exact_serial_required");
+        auto& smg_hold = *seat;
+        if constexpr (action == HoldAction::stop)
         {
-            if (smg_hold.active) hold_stop("released");
-            hold_release();
+            if (smg_hold.active) hold_stop(smg_hold, "released");
+            hold_release(smg_hold);
+        }
+        if constexpr (renew)
+        {
+            const auto duration = lua.get_integer();
+            if (duration < 250 || duration > 2400)
+                return hold_result(lua, false, "native_guest_smg_hold_duration_unqualified");
+            tick_holds();
+            if (smg_hold.active) smg_hold.deadline = HoldClock::now() + std::chrono::milliseconds{duration};
         }
         return hold_result(lua, !smg_hold.dirty, smg_hold.closing && !smg_hold.dirty ? "closing" : smg_hold.status, &smg_hold);
     }
@@ -1538,7 +1593,9 @@ namespace
         if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_variant : nullptr);
             !error.empty()) return fail(error);
         if constexpr (operation != Operation::Inspect)
-            if (smg_hold.fenced && smg_hold.pawn.Get() == context.pawn) return fail("native_guest_smg_hold_busy");
+            if (std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+                return hold.fenced && hold.pawn.Get() == context.pawn;
+            })) return fail("native_guest_smg_hold_busy");
         Inventory inventory;
         if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo)
         {
@@ -1585,18 +1642,22 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
         if (hold_enabled())
         {
             lua.register_function("SilverfishStartNativeGuestSmgHold", start_hold);
-            lua.register_function("SilverfishReadNativeGuestSmgHold", read_hold<false>);
-            lua.register_function("SilverfishStopNativeGuestSmgHold", read_hold<true>);
+            lua.register_function("SilverfishReadNativeGuestSmgHold", read_hold<HoldAction::observe>);
+            lua.register_function("SilverfishStopNativeGuestSmgHold", read_hold<HoldAction::stop>);
+            lua.register_function("SilverfishRenewNativeGuestSmgHold", read_hold<HoldAction::renew>);
         }
     }
 }
 
 void silverfish::native_guest_item::shutdown()
 {
-    if (Unreal::IsInGameThreadRaw() && smg_hold.fenced)
+    if (Unreal::IsInGameThreadRaw())
     {
-        hold_stop("shutdown");
-        hold_release();
+        for (auto& smg_hold : smg_holds)
+        {
+            hold_stop(smg_hold, "shutdown");
+            hold_release(smg_hold);
+        }
     }
     remove_hold_hooks();
 }
