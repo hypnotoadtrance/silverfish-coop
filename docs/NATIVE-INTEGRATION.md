@@ -190,6 +190,10 @@ The guest equipped their earned HazOp Gear, swapped to the Bomber Jacket, then u
 
 With `--native-guest-mre`, a guest picked up the placed Borough MRE through the original Interact action and used it from the inventory overlay. The exact owned unit was consumed once. The guest gained 30 food and their personal intoxication moved from 42 to 39. The host's intoxication stayed at zero. The guest's value and consumed item restored after restart, and all nine original save hashes matched. The test started at full health.
 
+A second Borough run set the guest's isolated test save to 210 health and 230 regeneration capacity. Stock MRE use raised regeneration capacity to 240 and left current health at 210. Same-port restart preserved the consumed item receipt, reduced guest intoxication, and removed inventory row. All nine original save hashes matched.
+
+With the same food option, a guest collected the exact placed Canned Peaches in City through stock Interact and confirmed use in the inventory overlay. It consumed one stock unit and raised food from 50 to 62. Both health and regeneration values stayed at 250. The same-port restart restored the exact use receipt and refused another claim for the consumed pickup.
+
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
 ## Pending live verification

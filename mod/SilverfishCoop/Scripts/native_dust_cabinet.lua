@@ -51,26 +51,43 @@ local function inspect(state, phase)
     if not exact(pawn, pawn_class) or not exact(controller, controller_class) or pawn:HasAuthority() ~= host
         or detail.name ~= pawn:GetFullName() or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
         or not pawn:IsLocallyControlled() or not controller:IsLocalController()
-        or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn) then return end
+        or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn) then return nil, "local_pawn" end
+    if not host then
+        local driver = state.world.NetDriver
+        local connection = valid(driver) and driver.ServerConnection
+        if not valid(connection) or not same(driver.World, state.world) or not same(connection.Driver, driver) then
+            return nil, "client_connection"
+        end
+    end
     local actor = StaticFindObject(actor_path)
-    if not exact(actor, cabinet_class) or actor:GetFullName() ~= actor_name or not actor:HasAuthority()
-        or actor.bReplicates ~= false or actor.SpawnSalt ~= -1540208128 or type(actor.Looted) ~= "boolean"
-        or not same(actor:GetWorld(), state.world) or not same(actor:GetOuter(), state.world.PersistentLevel) then return end
+    if not exact(actor, cabinet_class) or actor:GetFullName() ~= actor_name or actor:IsActorBeingDestroyed()
+        or not same(actor:GetWorld(), state.world) or not same(actor:GetOuter(), state.world.PersistentLevel) then
+        return nil, "actor_identity"
+    end
+    -- The stock actor's local role on a client need not be authority.
+    -- ClearLoot runs only against this same package's nonreplicating copy.
+    local authority, replicates = actor:HasAuthority(), actor.bReplicates
+    if (host and not authority) or replicates ~= false then
+        return nil, "actor_role:" .. tostring(authority) .. ":" .. tostring(replicates)
+    end
+    if actor.SpawnSalt ~= -1540208128 or type(actor.Looted) ~= "boolean" then return nil, "actor_stock_fields" end
     local first, second = actor.SM_Prop_Cabinet_Small_Door_01, actor.SM_Prop_Cabinet_Small_Door_02
     local frame = actor.SM_Prop_Cabinet_Small_02
     if not component(first, actor, "SM_Prop_Cabinet_Small_Door_01", "StaticMeshComponent")
         or not component(second, actor, "SM_Prop_Cabinet_Small_Door_02", "StaticMeshComponent")
         or not component(frame, actor, "SM_Prop_Cabinet_Small_02", "StaticMeshComponent")
-        or not same(first:GetAttachParent(), frame) or not same(second:GetAttachParent(), frame) then return end
+        or not same(first:GetAttachParent(), frame) or not same(second:GetAttachParent(), frame) then
+        return nil, "door_identity"
+    end
     local box_type = StaticFindObject("/Script/Engine.BoxComponent")
-    if not valid(box_type) then return end
+    if not valid(box_type) then return nil, "box_class" end
     -- DestroyComponent can leave the Blueprint Box member pointing at a
     -- retired component. Census the actor's owned live components instead.
     local boxes = actor:K2_GetComponentsByClass(box_type)
     local shape = type(boxes)
     if shape == "userdata" and type(boxes.type) == "function" then shape = boxes:type() end
     local count = (shape == "table" or shape == "TArray") and #boxes or nil
-    if count ~= 0 and count ~= 1 then return end
+    if count ~= 0 and count ~= 1 then return nil, "box_census:" .. shape .. ":" .. tostring(count) end
     local box
     if count == 1 then
         box = boxes[1]
@@ -78,12 +95,14 @@ local function inspect(state, phase)
             box = box:get()
         end
         if not component(box, actor, "Box", "BoxComponent") or not same(box, actor.Box)
-            or not same(box:GetAttachParent(), frame) then return end
+            or not same(box:GetAttachParent(), frame) then return nil, "box_identity" end
     end
     local closed = box and not actor.Looted and door_roll(first, 0) and door_roll(second, 0)
     local opened = not box and door_roll(first, 95) and door_roll(second, -95)
     return { actor = actor, pawn = pawn, world = state.world, box = box, host = host,
-        closed = closed, opened = opened, looted = actor.Looted }
+        closed = closed, opened = opened, looted = actor.Looted,
+        roll_first = first.RelativeRotation and first.RelativeRotation.Roll,
+        roll_second = second.RelativeRotation and second.RelativeRotation.Roll }
 end
 
 local function qualified_epoch(value)
@@ -102,11 +121,11 @@ end
 function cabinet.command(fields, state, phase)
     local command = fields[2]
     if command ~= "native-dust-cabinet-stock-fixture" and command ~= "native-dust-cabinet-project" then return end
-    local scene = inspect(state, phase)
+    local scene, reason = inspect(state, phase)
     if command == "native-dust-cabinet-stock-fixture" then
         if #fields ~= 3 or not host_fixture or not scene or not scene.host or not scene.closed
             or scene.pawn:GetFullName() ~= fields[3] or scene.pawn.Dead ~= false then
-            error("stock_dust_cabinet_fixture_requires_exact_closed_host_cabinet", 0)
+            error("stock_dust_cabinet_fixture_requires_exact_closed_host_cabinet:" .. (reason or "scope"), 0)
         end
         stock_input.open_dust_cabinet(state, phase, scene.pawn, scene.actor, scene.box)
         return "stock host cabinet Interact dispatched"
@@ -115,7 +134,7 @@ function cabinet.command(fields, state, phase)
     local epoch = fields[3]
     if #fields ~= 5 or not client_fixture or not scene or scene.host or not qualified_epoch(epoch)
         or fields[4] ~= actor_name or fields[5] ~= scene.pawn:GetFullName() then
-        error("stock_dust_cabinet_projection_requires_exact_client_visit", 0)
+        error("stock_dust_cabinet_projection_requires_exact_client_visit:" .. (reason or "scope"), 0)
     end
     if same_projection(scene) and projection.epoch == epoch and not scene.looted then
         return "stock Dust Filter cabinet presentation already requested"
@@ -133,8 +152,10 @@ function cabinet.command(fields, state, phase)
 end
 
 function cabinet.rows(state, phase, status_row)
-    local scene = inspect(state, phase)
-    if not scene then return {} end
+    local scene, reason = inspect(state, phase)
+    if not scene then
+        return reason and {status_row("native-dust-cabinet-diagnostic", area, reason)} or {}
+    end
     local name, epoch
     if scene.closed then
         name = "closed"
@@ -143,7 +164,8 @@ function cabinet.rows(state, phase, status_row)
     elseif not scene.host and not scene.looted and same_projection(scene) then
         name, epoch = scene.opened and "projected" or "projecting", projection.epoch
     else
-        return {}
+        return {status_row("native-dust-cabinet-diagnostic", area, "stock_animation_or_box", scene.looted,
+            scene.box ~= nil, scene.roll_first or "-", scene.roll_second or "-")}
     end
     return {status_row("native-dust-cabinet", name, area, actor_name, scene.pawn:GetFullName(), epoch or "-")}
 end
