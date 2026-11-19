@@ -13,9 +13,10 @@ from live_multi_smoke import saved_hashes
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+LOOSE_PICKUP = "observatory-comp-board"
 
 
-async def validate(work: Path, vanilla_saved: Path | None) -> None:
+async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -24,6 +25,9 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
     primary = ("--campaign", name)
     secondary = ("--profile", name)
     cli = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
+    host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones")
+    wipe_options = ("--native-extraction-keep", "1", "--native-extraction-backpacks", "--native-extraction-lose-slot") \
+        if stock_rules else ("--fixture-keep-slots", "1", "--fixture-backpacks")
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     processes = []
 
@@ -32,13 +36,14 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
             process = await asyncio.create_subprocess_exec(*cli, *arguments, stdout=output, stderr=output,
                                                             creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((process, owner))
+        return process
 
     async def command(*arguments, expected=True):
         process = await asyncio.create_subprocess_exec(*cli, *arguments, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.PIPE,
                                                         creationflags=subprocess.CREATE_NO_WINDOW)
         output, error = await asyncio.wait_for(process.communicate(), 42)
-        if not output or bool(process.returncode) == expected:
+        if not output or (expected is not None and (process.returncode == 0) != expected):
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
         return json.loads(output)
 
@@ -61,11 +66,13 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
         raise RuntimeError(f"{directory} did not reach the expected state: {last}")
 
     try:
-        await start(host / "host.txt", primary, "host", *primary, "--port", "0", "--headless", "--fixtures",
-                    "--fixture-keep-slots", "1", "--fixture-backpacks", "--native-events", "--native-guest",
-                    "--native-zones", "--start-zone", OBSERVATORY)
-        await wait(host, lambda status: status.get("state") == "hosting"
-                   and status["game"].get("native_rest_hook", {}).get("fresh"))
+        host_process = await start(host / "host.txt", primary, "host", *primary, "--port", "0", *host_flags,
+                                   *wipe_options, "--start-zone", OBSERVATORY)
+        initial = await wait(host, lambda status: status.get("state") == "hosting"
+                             and status["game"].get("native_rest_hook", {}).get("fresh"))
+        extraction_fields = {"extraction_mode": 1, "items_kept_on_death": 1, "drop_bone_pile": 1, "lose_slot_per_death": 1}
+        if stock_rules:
+            assert all(initial["game"]["native_rules"].get(key) == value for key, value in extraction_fields.items()), initial
         await action(primary, "native-rest-approach")
         rest = (await action(primary, "native-rest", "--amount", "0"))["native_rest"]
         invitation = await command("invite", *primary, "--name", "Native wipe guest", "--character", "Native wipe character")
@@ -102,6 +109,14 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
         assert denied["error"] == "native_wipe_bag_not_owned", denied
         after_wipe = (await action(secondary, "native-inventory-list"))["native_inventory"]
         assert [row["guid"] for row in after_wipe["items"]] == [gun], after_wipe
+        if visible_bag:
+            viewed = await wait(guest, lambda status: status.get("game", {}).get("native_bag_projection", {}).get("count") == 1)
+            bag_projection = viewed["game"]["native_bag_projection"]
+            assert bag_projection["owner"] == character and bag_projection["map"] == OBSERVATORY, bag_projection
+            assert not revived["game"].get("native_bag_projection", {}).get("count"), revived["game"]
+            tested = (await action(secondary, "native-bag-projection-fixture", "--target", bag_id))["native_bag_projection_interaction"]
+            assert tested["bag"] == bag_id and tested["entry"] == "fixture", tested
+            assert (await action(secondary, "native-inventory-list"))["native_inventory"] == after_wipe
         operation = uuid.uuid4().hex
         recover = ("native-wipe-recover", "--target", bag_id, "--operation-id", operation)
         recovered = await action(secondary, *recover)
@@ -109,6 +124,39 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
         after_recovery = (await action(secondary, "native-inventory-list"))["native_inventory"]
         assert {row["guid"] for row in after_recovery["items"]} == {gun, reserve}, after_recovery
         proof = {"rest": rest, "retained": after_wipe, "backpack": bag, "recovered": after_recovery}
+        if visible_bag:
+            await wait(guest, lambda status: status.get("game", {}).get("state") == "connected"
+                       and not status["game"].get("native_bag_projection", {}).get("count")
+                       and not status.get("gameplay", {}).get("native_backpacks"))
+            proof["owner_only_stock_backpack_projection"] = {"projection": bag_projection, "intercept": tested}
+        if authored_pickup:
+            await action(primary, "native-authored-pickup-approach")
+            await wait(guest, lambda status: status.get("game", {}).get("native_authored_pickup", {}).get("state") == "available")
+            preview = (await action(secondary, "native-authored-pickup-fixture"))["native_authored_pickup_interaction"]
+            assert preview["source"] == LOOSE_PICKUP and preview["entry"] == "fixture", preview
+            assert (await action(secondary, "native-inventory-list"))["native_inventory"] == after_recovery
+            claim = ("native-authored-pickup-claim", "--target", LOOSE_PICKUP, "--operation-id", uuid.uuid4().hex)
+            award = (await action(secondary, *claim))["native_authored_pickup_claim"]
+            assert (await action(secondary, *claim))["native_authored_pickup_claim"] == award
+            rival = await action(primary, "native-authored-pickup-claim", "--target", LOOSE_PICKUP, expected=False)
+            assert rival["error"] == "native_authored_pickup_already_claimed", rival
+            for directory in (host, guest):
+                await wait(directory, lambda status: status.get("game", {}).get("native_authored_pickup", {}).get("state") == "claimed")
+            changed = (await action(secondary, "native-inventory-list"))["native_inventory"]
+            item, = [row for row in changed["items"] if row["guid"] == award["guid"]]
+            assert item["class_path"] == award["class_path"] and item["quantity"] == 1, item
+            proof["ordinary_authored_stock_pickup"] = {"intercept": preview, "claim": award, "inventory_row": item}
+        if stock_rules:
+            extraction_fields["items_kept_on_death"] = 0
+            await wait(host, lambda status: status.get("game", {}).get("native_rules", {}).get("items_kept_on_death") == 0)
+            await action(primary, "stop")
+            await asyncio.wait_for(host_process.wait(), 12)
+            await start(host / "host-restart.txt", primary, "host", *primary, "--port", str(initial["endpoint"]["port"]),
+                        *host_flags)
+            resumed = await wait(host, lambda status: status.get("state") == "hosting"
+                                 and status.get("generation") != initial["generation"])
+            assert all(resumed["game"]["native_rules"].get(key) == value for key, value in extraction_fields.items()), resumed
+            proof["stock_rules_after_wipe_and_restart"] = extraction_fields
     finally:
         for process, owner in reversed(processes):
             if process.returncode is None:
@@ -130,5 +178,9 @@ if __name__ == "__main__":
     arguments = argparse.ArgumentParser(description=__doc__)
     arguments.add_argument("--work", required=True, type=Path)
     arguments.add_argument("--vanilla-saved", type=Path)
+    arguments.add_argument("--visible-bag", action="store_true")
+    arguments.add_argument("--authored-pickup", action="store_true")
+    arguments.add_argument("--stock-rules", action="store_true")
     options = arguments.parse_args()
-    asyncio.run(validate(options.work.resolve(), options.vanilla_saved))
+    asyncio.run(validate(options.work.resolve(), options.vanilla_saved, options.visible_bag, options.authored_pickup,
+                         options.stock_rules))

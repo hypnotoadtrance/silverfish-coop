@@ -1,0 +1,179 @@
+local pickup = {}
+local guest_save = require("guest_save")
+local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local statics_path = "/Script/Engine.Default__GameplayStatics"
+local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
+local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+
+pickup.map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+pickup.source = "observatory-comp-board"
+pickup.actor = "Item_CompBoard_C " .. pickup.map .. ".Observitory_P:PersistentLevel.Item_CompBoard_C_2"
+pickup.class = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
+
+local binding, report
+
+local function valid(value)
+    return value and value:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function exact_slot(slot)
+    return type(slot) == "string" and #slot == 39 and slot:match("^SFCoop_[0-9a-f]+$")
+end
+
+local function guid(value)
+    return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value ~= string.rep("0", 32)
+end
+
+function pickup.clear()
+    binding, report = nil, nil
+    if enabled and type(SilverfishClearNativeAuthoredPickup) == "function" then SilverfishClearNativeAuthoredPickup() end
+end
+
+function pickup.update(state, phase)
+    local detail = state.local_pawn
+    local pawn = detail and detail.pawn
+    local host = phase == "hosting" and state.server == false
+    if not enabled or state.map ~= pickup.map or not state.listening or not valid(pawn)
+        or (not host and (phase ~= "connected" or state.server ~= true))
+        or type(SilverfishSetNativeAuthoredPickupScope) ~= "function" then
+        if binding then pickup.clear() end
+        return false
+    end
+    local ok, reason = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host)
+    if not ok then
+        if binding then pickup.clear() end
+        return false, reason
+    end
+    if not binding or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
+        binding = { pawn = pawn, world = state.world }
+        report = nil
+    end
+    return true
+end
+
+local function owner(state, phase, name)
+    local info, controller = state.local_pawn, state.controller
+    local statics = StaticFindObject(statics_path)
+    if not valid(statics) or not info or not valid(info.pawn) or not valid(controller)
+        or not same(controller:GetClass(), StaticFindObject(controller_path))
+        or not controller:HasAuthority() or not controller:IsLocalController()
+        or not same(info.pawn, controller.Pawn) or not same(info.pawn:GetWorld(), state.world) then return end
+    local instance = statics:GetGameInstance(info.pawn)
+    local stock = valid(instance) and instance.SaveSlot_Ref
+    if not valid(stock) or not same(info.pawn.Save, stock) then return end
+    if name == info.name then return info.pawn, stock, statics end
+    local pawn, save = guest_save.exact_item_context(state, phase, name)
+    if not valid(pawn) or not valid(save) or same(save, stock) or not same(save, pawn.Save) then return end
+    return pawn, save, statics
+end
+
+local function claim(fields, state, phase)
+    local name, slot = fields[3], fields[4]
+    if #fields ~= 4 or phase ~= "hosting" or not exact_slot(slot) or type(SilverfishCaptureNativeAuthoredPickup) ~= "function"
+        or type(SilverfishVerifyNativeAuthoredPickup) ~= "function" or type(SilverfishRecoverNativeInventoryBag) ~= "function" then
+        error("authored_pickup_claim_arguments", 0)
+    end
+    report = { action = "claim", pawn = name, slot = slot, ok = false, applied = false }
+    local pawn, save, statics = owner(state, phase, name)
+    local save_class = StaticFindObject(save_path)
+    if not valid(pawn) or not valid(save_class) or statics:DoesSaveGameExist(slot, 0) then
+        report.status = "authored_pickup_claimant_or_slot_unavailable"
+        return "authored loose pickup reported"
+    end
+    local scratch = statics:CreateSaveGameObject(save_class)
+    if not valid(scratch) then
+        report.status = "authored_pickup_escrow_create_failed"
+        return "authored loose pickup reported"
+    end
+    local ok, reason, item = SilverfishCaptureNativeAuthoredPickup(pawn:GetAddress(), save:GetAddress(), scratch:GetAddress())
+    if not ok or not guid(item) then
+        report.status = tostring(reason)
+        return "authored loose pickup reported"
+    end
+    if not statics:SaveGameToSlot(scratch, slot, 0) then
+        report.status = "authored_pickup_escrow_write_failed"
+        return "authored loose pickup reported"
+    end
+    local restored = statics:LoadGameFromSlot(slot, 0)
+    if not valid(restored) or not SilverfishVerifyNativeAuthoredPickup(scratch:GetAddress(), restored:GetAddress()) then
+        report.status = "authored_pickup_escrow_roundtrip_failed"
+        return "authored loose pickup reported"
+    end
+    report.guid = item
+    local applied, status, count = SilverfishRecoverNativeInventoryBag(restored:GetAddress(), save:GetAddress(), pawn:GetAddress())
+    report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
+    report.ok = applied == true and status == "recovered" and count == 1
+    report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(status))
+    return "authored loose pickup reported"
+end
+
+function pickup.command(fields, state, phase)
+    local action = fields[2]
+    if action ~= "native-authored-pickup-project" and action ~= "native-authored-pickup-claim"
+        and action ~= "native-authored-pickup-fixture" and action ~= "native-authored-pickup-approach" then return end
+    local ok, reason = pickup.update(state, phase)
+    if not ok then error(reason or "authored_pickup_scope_unavailable", 0) end
+    if action == "native-authored-pickup-claim" then return claim(fields, state, phase) end
+    if action == "native-authored-pickup-approach" then
+        if #fields ~= 3 or phase ~= "hosting" or not fixtures or not host_fixtures then
+            error("The Observatory pickup positioning fixture is unavailable", 0)
+        end
+        local pawn = owner(state, phase, fields[3])
+        local actor = StaticFindObject(pickup.actor:match("^%S+ (.+)$"))
+        if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= pickup.actor or not same(actor:GetWorld(), state.world) then
+            error("The Observatory pickup fixture did not match its placed actor", 0)
+        end
+        local point = actor:K2_GetActorLocation()
+        for _, x in ipairs({ -115, 115 }) do
+            if pawn:K2_TeleportTo({ X = point.X + x, Y = point.Y, Z = point.Z + 75 }, pawn:K2_GetActorRotation()) then
+                pawn:ForceNetUpdate()
+                return "exact stock loose pickup approached"
+            end
+        end
+        error("The Observatory pickup fixture did not find safe ground", 0)
+    end
+    if action == "native-authored-pickup-project" then
+        local state_word = fields[3]
+        if #fields ~= 3 or (state_word ~= "available" and state_word ~= "claimed")
+            or type(SilverfishProjectNativeAuthoredPickup) ~= "function" then error("authored_pickup_project_arguments", 0) end
+        local projected, detail = SilverfishProjectNativeAuthoredPickup(state_word == "claimed")
+        if not projected then error(detail, 0) end
+        return "authored loose pickup projection verified"
+    end
+    if #fields ~= 2 or not fixtures or (phase == "hosting" and not host_fixtures)
+        or type(SilverfishProbeNativeAuthoredPickup) ~= "function" then error("authored_pickup_fixture_unavailable", 0) end
+    local intercepted, detail = SilverfishProbeNativeAuthoredPickup()
+    if not intercepted then error(detail, 0) end
+    return "authored loose pickup stock interaction intercepted"
+end
+
+function pickup.focused_target(pawn)
+    if binding and same(pawn, binding.pawn) and type(SilverfishFocusedNativeAuthoredPickup) == "function"
+        and SilverfishFocusedNativeAuthoredPickup(pawn:GetAddress()) then return pickup.source end
+end
+
+function pickup.rows(state, phase, status_row)
+    local qualified = pickup.update(state, phase)
+    if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return {} end
+    local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup()
+    if not active then return {} end
+    local rows = { status_row("native-authored-pickup", pickup.source, pickup.map, pickup.actor, pickup.class,
+        claimed and "claimed" or "available") }
+    if sequence > 0 then
+        rows[#rows + 1] = status_row("native-authored-pickup-interaction", pickup.source, pickup.map,
+            state.local_pawn.name, sequence, fixture and "fixture" or "stock")
+    end
+    if report and phase == "hosting" then
+        rows[#rows + 1] = status_row("native-authored-pickup-claim", pickup.source, pickup.map, report.pawn,
+            report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
+    end
+    return rows
+end
+
+return pickup

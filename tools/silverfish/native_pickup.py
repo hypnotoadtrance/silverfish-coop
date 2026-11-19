@@ -137,6 +137,20 @@ class NativePickup:
             elif self._pending[0] not in exact:
                 self._recheck_pending = True
 
+    def forget_committed_row(self, character: str, guid: str) -> None:
+        """Leave this row to the detached save after a durable native transaction."""
+        for binding, rows in self._projected.items():
+            if binding.character == character:
+                rows.discard(guid)
+        for binding, pending in tuple(self._pending_shop.items()):
+            if binding.character == character and pending == guid:
+                del self._pending_shop[binding]
+        if self._pending and self._pending[0].character == character and self._pending[1].guid == guid:
+            if self._source == self._pending[1]:
+                self._source = None
+            self._pending = None
+            self._recheck_pending = False
+
     @staticmethod
     def _claimant(host, actor: str | None) -> tuple[_Binding, dict]:
         bindings = _bindings(host, connected=True)

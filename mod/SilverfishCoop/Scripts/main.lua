@@ -4,9 +4,12 @@ if not bridge or bridge == "" then return end
 local guest_save = require("guest_save")
 local loot = require("loot")
 local native_bed = require("native_bed")
+local native_bag_projection = require("native_bag_projection")
+local native_authored_pickup = require("native_authored_pickup")
 local native_blue = require("native_blue")
 local native_death = require("native_death")
 local native_dream = require("native_dream")
+local native_finite_shop = require("native_finite_shop")
 local native_matrix = require("native_matrix")
 local native_quest_catalog = require("native_quest_catalog")
 local native_broker_quest = require("native_broker_quest")
@@ -18,8 +21,10 @@ local native_host_save = require("native_host_save")
 local native_world_flush = require("native_world_flush")
 local native_rest = require("native_rest")
 local native_black_stone = require("native_black_stone")
+local native_nothing_return = require("native_nothing_return")
 local native_world_view = require("native_world_view")
 local native_inventory = require("native_inventory")
+local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_loot_actions = require("native_loot_actions")
 local native_pickup = require("native_pickup")
@@ -28,6 +33,8 @@ local native_purple = require("native_cubes").new("purple")
 local purple_arrival = require("native_purple_arrival")
 local native_roster = require("native_roster")
 local native_shop = require("native_shop")
+local native_shop_view = require("native_shop_view")
+local native_campaign_npc = require("native_campaign_npc")
 local native_stardust = require("native_stardust")
 local native_transport = require("native_transport")
 local native_world = require("native_world")
@@ -39,6 +46,8 @@ local weapon_inventory = require("weapon_inventory")
 local native_guest_weapon = require("native_guest_weapon")
 local native_guest_npc = require("native_guest_npc")
 local native_guest_reload_input = require("native_guest_reload_input")
+local native_guest_primary_input = require("native_guest_primary_input")
+local native_guest_consumable = require("native_guest_consumable")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
@@ -55,7 +64,8 @@ local stock_save_probes = {
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local command_path = bridge .. "/command.tsv"
 local status_path = bridge .. "/status.tsv"
-local connection_timeout_seconds = 95
+-- A quiet Direct IP link can take up to 12 seconds to declare a disconnect.
+local connection_timeout_seconds = 110
 local restore_position_tolerance = 0.25
 
 local role = "idle"
@@ -67,7 +77,6 @@ local acknowledged_id = ""
 local acknowledged_result = ""
 local acknowledged_message = ""
 local sequence = 0
-local tick_queued = false
 local last_blue_route, last_blue_arrival, last_dream_route, last_dream_arrival, last_dream_effects
 local last_quest_catalog, last_purple_arrival, last_broker_quest, last_broker_position
 local last_world_flush
@@ -351,10 +360,24 @@ local function run_command(fields, state, current_phase)
     end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
+        native_guest_consumable.reset()
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
-    if command == "join" or command == "leave" then native_world_view.clear() end
-    if command == "host" then
+    if command == "join" or command == "leave" then
+        native_world_view.clear()
+        native_inventory_view.clear()
+        native_bag_projection.clear()
+        native_authored_pickup.clear()
+        native_shop_view.clear()
+        native_campaign_npc.clear()
+        native_guest_primary_input.reset()
+    end
+    if command == "native-extraction-prepare" then
+        if not authored_routes or role ~= "idle" or #fields ~= 5 then
+            error("Stock extraction settings require a new authored co-op campaign", 0)
+        end
+        return native_host_save.prepare_extraction(state, current_phase, fields[3], fields[4], fields[5])
+    elseif command == "host" then
         local carry, dream_kind
         local load_save = #fields >= 5 and #fields <= 7 and fields[4] == "native-save"
         if load_save then
@@ -575,16 +598,22 @@ local function run_command(fields, state, current_phase)
         return "stock Broker interaction position verified"
     elseif command == "native-broker-inspect" or command == "native-broker-issue"
         or command == "native-broker-issue-fixture" or command == "native-broker-turn-in"
-        or command == "native-broker-grant-manifest" then
+        or command == "native-broker-grant-manifest" or command:match("^native%-broker%-drill%-") then
+        local drill = native_broker_quest.drill
         local actions = {
             ["native-broker-inspect"] = { count = 3, invoke = native_broker_quest.inspect },
             ["native-broker-issue"] = { count = 4, invoke = native_broker_quest.issue },
             ["native-broker-issue-fixture"] = { count = 4, invoke = native_broker_quest.issue_fixture },
             ["native-broker-turn-in"] = { count = 5, invoke = native_broker_quest.turn_in },
             ["native-broker-grant-manifest"] = { count = 3, invoke = native_broker_quest.fixture_grant_manifest },
+            ["native-broker-drill-inspect"] = { count = 3, invoke = drill.inspect },
+            ["native-broker-drill-issue"] = { count = 4, invoke = drill.issue },
+            ["native-broker-drill-issue-fixture"] = { count = 4, invoke = drill.issue_fixture },
+            ["native-broker-drill-turn-in"] = { count = 5, invoke = drill.turn_in },
+            ["native-broker-drill-seed-fixture"] = { count = 4, invoke = drill.seed_fixture },
         }
         local action = actions[command]
-        if #fields ~= action.count or role ~= "host" or current_phase ~= "hosting" then
+        if not action or #fields ~= action.count or role ~= "host" or current_phase ~= "hosting" then
             error("Stock Broker actions require the exact authoritative interactor", 0)
         end
         local result = action.invoke(state, current_phase, argument, fields[4], fields[5])
@@ -626,6 +655,9 @@ local function run_command(fields, state, current_phase)
             error("Stock rest denial requires the exact enrolled guest", 0)
         end
         return native_rest.guest_fixture(state, current_phase, argument)
+    elseif command == "native-dream-nothing-position" then
+        if #fields ~= 4 then error("Expected an exact terminal fixture guest and distance", 0) end
+        return native_dream.position_terminal_fixture(state, current_phase, argument, fields[4])
     elseif command == "native-world-view-apply" then
         if not world_view_enabled or (#fields ~= 18 and #fields ~= 23)
             or current_phase ~= "connected" or role ~= "client" then
@@ -697,13 +729,20 @@ local function run_command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
+        or native_inventory_view.command(fields, state, current_phase)
+        or native_bag_projection.command(fields, state, current_phase)
+        or native_authored_pickup.command(fields, state, current_phase)
+        or native_finite_shop.command(fields, state, current_phase)
         or native_wipe_inventory.command(fields, state, current_phase)
         or native_pickup.command(fields, state, current_phase)
         or native_shop.command(fields, state, current_phase)
+        or native_shop_view.command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
         or native_guest_weapon.command(fields, state, current_phase)
         or native_guest_npc.command(fields, state, current_phase)
         or native_guest_reload_input.command(fields, state, current_phase)
+        or native_guest_primary_input.command(fields, state, current_phase)
+        or native_guest_consumable.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
         or native_black_stone.command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
@@ -799,15 +838,24 @@ local function write_status(state, current_phase, failure)
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_bag_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_authored_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_finite_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_shop_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_campaign_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_weapon.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_black_stone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_nothing_return.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -842,10 +890,14 @@ local function write_status(state, current_phase, failure)
         end
         if last_broker_quest and same_object(last_broker_quest.world, state.world) then
             local result = last_broker_quest.result
+            local drill = result.debt_reward and { result.native_debt, result.topic_epc, result.topic_drill_lab,
+                result.topic_micro_drill, result.freelancer_rep, result.fae_rep, result.debt_reward,
+                result.voucher_rows or 0, result.menu_guard_armed and 1 or 0, result.guarded_ping or 0,
+                result.guarded_menu or 0, result.guarded_gameplay or 0 } or {}
             rows[#rows + 1] = status_row("native-broker", last_broker_quest.operation, state.map, last_broker_quest.target,
                 result.quest_id, result.state, result.step, result.final_step, result.cash, result.xp,
                 result.manifest_guid, result.native_cash, result.native_xp, result.changed and 1 or 0,
-                result.consumed_guid or "-")
+                result.consumed_guid or "-", table.unpack(drill))
         end
         if last_broker_position and last_broker_position.map == state.map then
             local proof = last_broker_position
@@ -945,6 +997,9 @@ local function tick()
     local state, current_phase = observe_session()
     if not state then return end
     native_world_view.sync(state, current_phase)
+    native_inventory_view.sync(state, current_phase)
+    native_shop_view.sync(state, current_phase)
+    native_guest_primary_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
     native_zone.sync(state, current_phase)
     native_rest.sync_hook(state, current_phase)
@@ -956,6 +1011,7 @@ local function tick()
     native_purple.sync(state, current_phase)
     native_stardust.sync(state, current_phase)
     native_matrix.sync(state, current_phase)
+    native_nothing_return.sync(state, current_phase)
     if native_dream.sync(state, current_phase) then
         state, current_phase = observe_session()
         if not state then return end
@@ -985,6 +1041,7 @@ local function tick()
             or fields[2] == "native-dream-place-guest" or fields[2] == "native-matrix-place"
             or fields[2] == "native-broker-position-fixture" or fields[2] == "native-authored-arrival"
             or fields[2] == "native-loot-approach" or fields[2] == "native-dream-stone-position"
+            or fields[2] == "native-dream-nothing-position"
             or fields[2] == "restore" or fields[2] == "restore-exact" then
             state, current_phase = observe_session()
             if not state then return end
@@ -1004,17 +1061,13 @@ local function tick()
 end
 
 players.start(bridge)
+native_inventory_view.start(bridge, players.is_downed)
+native_shop_view.start(bridge, players.is_downed)
+native_guest_primary_input.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)
 native_zone.start(bridge)
-LoopAsync(250, function()
-    if not tick_queued then
-        tick_queued = true
-        ExecuteInGameThread(function()
-            local ok, failure = pcall(tick)
-            tick_queued = false
-            if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
-        end)
-    end
-    return false
+LoopInGameThreadWithDelay(250, function()
+    local ok, failure = pcall(tick)
+    if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
 end)

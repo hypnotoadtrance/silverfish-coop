@@ -70,6 +70,7 @@ local maps = {
     ["/Game/Classes/Maps/Dreams/Pyroclast_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
     ["/Game/Classes/Maps/Dreams/Slate_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
     ["/Game/Classes/Maps/Dreams/BlackOcean_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    ["/Game/Classes/Maps/Dreams/Nothing_P"] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
     [lab_e206] = {
         entrance = "RY_Lab206",
         door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = rail_yard, entrance = "RY_Lab206" },

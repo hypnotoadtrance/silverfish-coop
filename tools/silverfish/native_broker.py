@@ -1,4 +1,4 @@
-"""Commit the stock Broker manifest issue and redemption against the host save."""
+"""Commit qualified stock Broker contracts against the host save."""
 
 import time
 
@@ -8,6 +8,9 @@ from .travel import BLACK_MARKET
 
 
 QUEST_ID = "Clct_EManifest"
+DRILL_ID = "Clt_DrillHead_Brkr"
+QUESTS = {QUEST_ID: ("native-broker", 10_000), DRILL_ID: ("native-broker-drill", 0)}
+DEBT_REWARD = 1_000_000
 CASH = 10_000
 XP = 1
 LEVEL = BLACK_MARKET + ".Shop_BlackMarket_01:PersistentLevel."
@@ -16,22 +19,22 @@ STATION = "ItemRequest_TradeStation_BP_C " + LEVEL + "ItemRequest_TradeStation_B
 STEPS = {"missing": None, "active": 1, "ready": 2, "completed": -10}
 
 
-async def _command(host, bridge, verb: str, pawn: str, *arguments: str) -> dict:
+async def _command(host, bridge, verb: str, pawn: str, *arguments: str, quest_id: str = QUEST_ID) -> dict:
     snapshot = await bridge.command(verb, pawn, *arguments, timeout=6)
     proof = snapshot.get("native_broker", {})
     state = proof.get("state")
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != BLACK_MARKET
             or proof.get("operation") != verb or proof.get("map") != BLACK_MARKET
-            or proof.get("pawn") != pawn or proof.get("id") != QUEST_ID
+            or proof.get("pawn") != pawn or proof.get("id") != quest_id
             or state not in STEPS or proof.get("step") != STEPS[state] or proof.get("final_step") != 2
-            or proof.get("cash") != CASH or proof.get("xp") != XP
+            or proof.get("cash") != QUESTS[quest_id][1] or proof.get("xp") != XP
             or (proof.get("manifest_guid") != "-" and not valid_guid(proof.get("manifest_guid")))):
         raise RuntimeError("The authoritative stock Broker quest report could not be verified")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
 
-async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) -> dict:
+async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False, quest_id: str = QUEST_ID) -> dict:
     roles = host.roles()
     player = host.party["players"].get(actor)
     pawn = host.authoritative_pawns(roles).get(actor)
@@ -46,7 +49,8 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) 
     if not expected:
         raise party.RuleError("stock_broker_interactor_unavailable")
 
-    receipt = host.party.get("native_quests", {}).get(QUEST_ID)
+    prefix, cash_reward = QUESTS[quest_id]
+    receipt = host.party.get("native_quests", {}).get(quest_id)
     if receipt and receipt["step"] == -10:
         return {"effect": "native_quest_already_settled", **receipt}
     if verb not in ("native-quest-start", "native-quest-turnin"):
@@ -54,37 +58,36 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) 
 
     host.transitioning = True
     try:
-        before = await _command(host, bridge, "native-broker-inspect", expected)
+        before = await _command(host, bridge, f"{prefix}-inspect", expected, quest_id=quest_id)
+        if quest_id == DRILL_ID and (before.get("debt_reward") != DEBT_REWARD or not isinstance(before.get("native_debt"), int)):
+            raise RuntimeError("The authoritative Drill Head debt reward was unavailable")
         if before["step"] == -10:
             # Stock completion present in an imported generation needs no second award.
-            return {"effect": "native_quest_already_completed", "quest_id": QUEST_ID, "step": -10}
+            return {"effect": "native_quest_already_completed", "quest_id": quest_id, "step": -10}
         if verb == "native-quest-start" and before["step"] is not None:
-            return {"effect": "native_quest_present", "quest_id": QUEST_ID, "step": before["step"]}
+            return {"effect": "native_quest_present", "quest_id": quest_id, "step": before["step"]}
         if verb == "native-quest-turnin":
             if before["step"] is None or not valid_guid(before["manifest_guid"]):
-                raise party.RuleError("stock_broker_manifest_required")
-            wallet = host.party["economy"]["wallet"]
-            if wallet + CASH > 2_147_483_647:
+                raise party.RuleError("stock_broker_manifest_required" if quest_id == QUEST_ID else "stock_broker_drill_required")
+            wallet = before["native_cash"]
+            if not -(2**31) <= wallet <= 2_147_483_647 - cash_reward:
                 raise party.RuleError("wallet_capacity_exceeded")
-            if before["native_cash"] != wallet:
-                await bridge.command("wallet-set", str(wallet), timeout=4)
-                before = await _command(host, bridge, "native-broker-inspect", expected)
-                if before["native_cash"] != wallet:
-                    raise RuntimeError("The native wallet could not be synchronized before Broker redemption")
 
         await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         if verb == "native-quest-start":
-            operation = "native-broker-issue-fixture" if fixture else "native-broker-issue"
-            after = await _command(host, bridge, operation, expected, BROKER)
-            if not after["changed"] or after["step"] != 1:
+            operation = f"{prefix}-issue-fixture" if fixture else f"{prefix}-issue"
+            after = await _command(host, bridge, operation, expected, BROKER, quest_id=quest_id)
+            if (not after["changed"] or after["step"] != 1 or (quest_id == DRILL_ID and
+                    (after.get("topic_epc", 0) < 1 or after.get("topic_drill_lab", 0) < 1))):
                 raise RuntimeError("The stock Broker quest did not start exactly once")
-            record = {"quest_id": QUEST_ID, "step": 1, "actor": actor}
+            record = {"quest_id": quest_id, "step": 1, "actor": actor}
             candidate = party.load_party(host.party)
         else:
-            after = await _command(host, bridge, "native-broker-turn-in", expected, STATION, before["manifest_guid"])
+            after = await _command(host, bridge, f"{prefix}-turn-in", expected, STATION, before["manifest_guid"],
+                                   quest_id=quest_id)
             if (not after["changed"] or after["step"] != -10 or after["consumed_guid"] != before["manifest_guid"]
-                    or after["native_cash"] != wallet + CASH or after["native_xp"] != before["native_xp"] + XP):
+                    or after["native_cash"] != wallet + cash_reward or after["native_xp"] != before["native_xp"] + XP):
                 raise RuntimeError("The native Broker completion and stock rewards did not reconcile")
             candidate = party.load_party(host.party)
             recipients = sorted(set(roles.values()) & candidate["players"].keys())
@@ -95,10 +98,16 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False) 
                     native_rewards.queue(recipient, XP)
             await native_rewards.project(host, bridge, candidate, native_rewards.pending_recipients(host, candidate))
             candidate["economy"]["wallet"] = after["native_cash"]
-            record = {"quest_id": QUEST_ID, "step": -10, "actor": actor, "recipients": recipients, "xp": XP,
-                      "cash": CASH, "wallet": after["native_cash"], "consumed_guid": after["consumed_guid"]}
+            record = {"quest_id": quest_id, "step": -10, "actor": actor, "recipients": recipients, "xp": XP,
+                      "cash": cash_reward, "wallet": after["native_cash"], "consumed_guid": after["consumed_guid"]}
+            if quest_id == DRILL_ID:
+                if (after.get("native_debt") != before["native_debt"] - DEBT_REWARD
+                        or after["freelancer_rep"] <= before["freelancer_rep"] or after["fae_rep"] >= before["fae_rep"]):
+                    raise RuntimeError("The stock Drill Head debt and reputation effects did not verify")
+                record.update(debt=after["native_debt"], debt_reward=DEBT_REWARD,
+                              freelancer_rep=after["freelancer_rep"], fae_rep=after["fae_rep"])
 
-        candidate.setdefault("native_quests", {})[QUEST_ID] = record
+        candidate.setdefault("native_quests", {})[quest_id] = record
         revision = await host.checkpoint_native(bridge, candidate)
         host.party = candidate
         host.native_checkpoint_unsafe = False

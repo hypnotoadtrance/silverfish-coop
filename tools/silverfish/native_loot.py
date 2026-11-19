@@ -23,7 +23,8 @@ def _scope(host, character: str) -> str:
     return record.get("pawn", "") if record.get("connected") else ""
 
 
-async def perform(host, bridge, character: str, action: str, target: str, operation_id: str) -> dict:
+async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
+                  fixture_nonempty: bool = False) -> dict:
     if (not host.native_zones or not host.fixtures or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
             or host.last_game.get("state") != "hosting" or host.last_game.get("map") != CROSSROADS
@@ -60,7 +61,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, escrow)
         arguments = (target, escrow["slot"])
     elif action == "open":
-        arguments = (native_host_save.new_slot(),)
+        arguments = (native_host_save.new_slot(), *(("fixture-nonempty",) if fixture_nonempty else ()))
     mutates = action in ("open", "seed", "claim")
     if mutates:
         host.native_checkpoint_unsafe = True

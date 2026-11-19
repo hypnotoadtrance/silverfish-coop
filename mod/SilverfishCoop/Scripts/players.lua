@@ -1,8 +1,9 @@
 local players = {}
+local native_bag_projection = require("native_bag_projection")
+local native_authored_pickup = require("native_authored_pickup")
 
 local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local interact_path = player_path .. ":InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19"
-local tick_path = player_path .. ":ReceiveTick"
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local input_subsystem_path = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
 local subsystem_library_path = "/Script/Engine.Default__SubsystemBlueprintLibrary"
@@ -26,9 +27,7 @@ local walking
 local input_file
 local input_sequence = 0
 local interact_hook_checked = false
-local movement_hook_checked = false
-local movement_hooked = false
-local pulse_queued = false
+local native_interact_address
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -44,6 +43,40 @@ end
 
 local function active(phase)
     return phase == "hosting" or phase == "connected"
+end
+
+local function write_interaction(pawn)
+    if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
+        or not pawn:IsLocallyControlled() then return end
+    local file = io.open(input_file, "ab")
+    if not file then return end
+    input_sequence = input_sequence + 1
+    local target = native_bag_projection.focused_target(pawn) or native_authored_pickup.focused_target(pawn)
+    file:write("interact\t", tostring(input_sequence), target and "\t" .. target or "", "\n")
+    file:close()
+end
+
+local function sync_native_interact(phase)
+    if type(SilverfishSetNativeInteractScope) ~= "function" or type(SilverfishTakeNativeInteractPress) ~= "function" then
+        return
+    end
+    local pawn = local_player and local_player.pawn
+    if not active(phase) or not valid(pawn) then
+        if native_interact_address then SilverfishClearNativeInteractScope() end
+        native_interact_address = nil
+        return
+    end
+    local address = pawn:GetAddress()
+    if not SilverfishSetNativeInteractScope(address, phase == "hosting") then
+        native_interact_address = nil
+        return
+    end
+    native_interact_address = address
+    for _ = 1, 8 do
+        local sequence, matched = SilverfishTakeNativeInteractPress(address)
+        if matched ~= address or type(sequence) ~= "number" or sequence < 1 then break end
+        write_interaction(pawn)
+    end
 end
 
 local function roster(state, phase)
@@ -339,11 +372,28 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    sync_native_interact(phase)
+end
+
+function players.is_downed(pawn)
+    if not local_player or not same(local_player.pawn, pawn) then return nil end
+    local record = desired[local_player.name]
+    return record ~= nil and same(record.pawn, pawn) and same(record.world, pawn:GetWorld())
 end
 
 function players.command(fields, state, phase)
     local command = fields[2]
-    if command == "walk" then
+    if command == "native-interaction-fixture" then
+        local pawn = local_player and local_player.pawn
+        if #fields ~= 2 or not active(phase) or not valid(pawn) or desired[local_player.name]
+            or native_interact_address ~= pawn:GetAddress() or type(SilverfishProbeNativeInteractInput) ~= "function" then
+            error("The stock interact fixture requires the exact standing staged pawn", 0)
+        end
+        local ok, status = SilverfishProbeNativeInteractInput(native_interact_address)
+        if not ok then error(status, 0) end
+        sync_native_interact(phase)
+        return "stock interact input callback verified"
+    elseif command == "walk" then
         local x, y, milliseconds = tonumber(fields[3]), tonumber(fields[4]), tonumber(fields[5])
         if #fields ~= 5 or not finite(x) or not finite(y) or not finite(milliseconds)
             or math.abs(x) > 1 or math.abs(y) > 1 or milliseconds % 1 ~= 0
@@ -394,14 +444,7 @@ function players.rows(status_row)
 end
 
 local function on_interact(context)
-    if not local_player or desired[local_player.name] then return end
-    local pawn = context:get()
-    if not same(pawn, local_player.pawn) or not pawn:IsLocallyControlled() then return end
-    local file = io.open(input_file, "ab")
-    if not file then return end
-    input_sequence = input_sequence + 1
-    file:write("interact\t", tostring(input_sequence), "\n")
-    file:close()
+    if type(SilverfishTakeNativeInteractPress) ~= "function" then write_interaction(context:get()) end
 end
 
 local function apply_walk(pawn)
@@ -413,59 +456,35 @@ local function apply_walk(pawn)
     pawn:AddMovementInput(walking.world_direction, 1.0, false)
 end
 
-local function on_actor_tick(context)
-    if not walking then return end
-    local pawn = context:get()
-    if not same(pawn, walking.pawn) then return end
-    local ok, failure = pcall(apply_walk, pawn)
-    if not ok then
-        walking = nil
-        print("[SilverfishCoop] Player movement update failed: " .. tostring(failure) .. "\n")
-    end
-end
-
 local function ensure_hooks()
-    if not interact_hook_checked and valid(StaticFindObject(interact_path)) then
+    if type(SilverfishTakeNativeInteractPress) == "function" then
+        interact_hook_checked = true
+    elseif not interact_hook_checked and valid(StaticFindObject(interact_path)) then
         local ok, failure = pcall(RegisterHook, interact_path, on_interact)
         interact_hook_checked = true
         if not ok then
             print("[SilverfishCoop] Enhanced Input interaction hook unavailable: " .. tostring(failure) .. "\n")
         end
     end
-    if not movement_hook_checked and valid(StaticFindObject(tick_path)) then
-        local ok, failure = pcall(RegisterHook, tick_path, on_actor_tick)
-        movement_hook_checked = true
-        movement_hooked = ok
-        if not ok then
-            print("[SilverfishCoop] Using periodic movement input: " .. tostring(failure) .. "\n")
-        end
-    end
 end
 
 local function pulse()
     for _, record in pairs(applied) do apply_downed(record) end
-    if walking and not movement_hooked then apply_walk(walking.pawn) end
+    if walking then apply_walk(walking.pawn) end
 end
 
 function players.start(bridge)
     input_file = bridge .. "/input.tsv"
-    LoopAsync(250, function()
-        ensure_hooks()
-        return interact_hook_checked and movement_hook_checked
+    LoopInGameThreadWithDelay(250, function()
+        if not interact_hook_checked then ensure_hooks() end
     end)
-    LoopAsync(20, function()
-        if not pulse_queued and ((walking and not movement_hooked) or next(applied)) then
-            pulse_queued = true
-            ExecuteInGameThread(function()
-                local ok, failure = pcall(pulse)
-                pulse_queued = false
-                if not ok then
-                    walking = nil
-                    print("[SilverfishCoop] Player movement update failed: " .. tostring(failure) .. "\n")
-                end
-            end)
+    LoopInGameThreadWithDelay(20, function()
+        if not walking and not next(applied) then return end
+        local ok, failure = pcall(pulse)
+        if not ok then
+            walking = nil
+            print("[SilverfishCoop] Player movement update failed: " .. tostring(failure) .. "\n")
         end
-        return false
     end)
 end
 

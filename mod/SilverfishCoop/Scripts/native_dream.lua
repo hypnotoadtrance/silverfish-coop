@@ -2,6 +2,7 @@ local dream = {}
 local bed = require("native_bed")
 local transport = require("native_transport")
 local routes = require("zone_maps")
+local terminal = require("native_nothing_return")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_TRANSPORT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -10,6 +11,7 @@ local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pyroclast = "/Game/Classes/Maps/Dreams/Pyroclast_P"
 local slate = "/Game/Classes/Maps/Dreams/Slate_P"
 local black_ocean = "/Game/Classes/Maps/Dreams/BlackOcean_P"
+local nothing = "/Game/Classes/Maps/Dreams/Nothing_P"
 local slate_return_plane = -18785.228689655527
 local countdown_name = "Dream_CountDown_BP_C_1"
 local countdown_class = "Dream_CountDown_BP_C"
@@ -25,6 +27,7 @@ local profiles = {
         level = "BlackOcean_P", class = "BlackOcean_P_C", actor = "BlackOcean_P_C_0",
         fixed_seconds = 160, startup = 0, fade = 2,
     },
+    [nothing] = { level = "Nothing_P", fixed_seconds = 0, startup = 0, fade = 0 },
 }
 local tarot_routes = {
     { flag = "Tarot_Obelisk", destination = pyroclast },
@@ -36,7 +39,8 @@ local stock_items = {
     stardust = { seconds = 90, reputation = 10 },
     ["fruiting-stardust"] = { seconds = 180, reputation = 20 },
 }
-local continuation = { [exchange] = rook, [rook] = pyroclast, [pyroclast] = slate, [slate] = black_ocean }
+local continuation = { [exchange] = rook, [rook] = pyroclast, [pyroclast] = slate,
+    [slate] = black_ocean, [black_ocean] = nothing, [nothing] = nothing }
 local current
 
 local function valid(object)
@@ -169,6 +173,11 @@ function dream.sync(state, phase)
         current = { world = state.world, map = state.map, early_requested = false,
             slate_guests = {}, slate_adjustments = 0, slate_state = "waiting", slate_enrolled = 0 }
     end
+    if state.map == nothing then
+        local ready, detail, actor = terminal.guard(state, phase)
+        current.status, current.detail, current.actor_name = ready and "ready" or "blocked", detail, actor
+        return
+    end
     local ok, ready, detail = pcall(inspect, state)
     current.status = ok and ready == true and "ready" or "blocked"
     current.detail = ok and (type(detail) == "string" and detail or "") or tostring(ready)
@@ -186,7 +195,7 @@ end
 function dream.rows(status_row)
     if not enabled then return {} end
     if not current then return { status_row("native-dream-isolation", "inactive", "", "", "", 0) } end
-    local actor = valid(current.actor) and (profiles[current.map].actor or countdown_name) or ""
+    local actor = current.actor_name or (valid(current.actor) and (profiles[current.map].actor or countdown_name) or "")
     local rows = { status_row("native-dream-isolation", current.status, current.map, actor, current.detail,
         current.early_requested and 1 or 0) }
     if current.map == slate then
@@ -216,7 +225,6 @@ local function selection(instance, source)
             return choice.destination, choice.flag
         end
     end
-    if source == black_ocean then return nil, "" end
     return continuation[source] or exchange, ""
 end
 
@@ -229,7 +237,8 @@ function dream.source(state, phase, kind)
     require_guard()
     local destination, tarot = selection(instance, state.map)
     local profile = profiles[destination]
-    if not profile or destination == state.map then
+    if not profile or destination == state.map
+        or (destination == nothing and type(SilverfishSetNativeNothingScope) ~= "function") then
         error("The stock Stardust continuation is not qualified for party travel", 0)
     end
     return { source = state.map, destination = destination, tarot = tarot, kind = kind,
@@ -324,6 +333,36 @@ function dream.arrival(state, phase)
         error("The stock dream arrival position could not be read back", 0)
     end
     return { destination = map, actor = name, x = location.X, y = location.Y, z = location.Z }
+end
+
+function dream.position_terminal_fixture(state, phase, name, distance)
+    if not fixtures or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or state.map ~= nothing
+        or (distance ~= "near" and distance ~= "far") then
+        error("The terminal distance fixture requires an isolated Nothing listen host", 0)
+    end
+    host_context(state, phase, nothing, false)
+    local marker = placed_actor(state.world, nothing, "PlayerStart", "PlayerStart_1", false)
+    local origin = marker:K2_GetActorLocation()
+    if math.abs(origin.X) > 1 or math.abs(origin.Y) > 1 or math.abs(origin.Z - 200) > 1 then
+        error("The terminal stock start does not match the qualified plane", 0)
+    end
+    local guest
+    for _, details in ipairs(state.guests) do
+        local pawn, controller = details.pawn, details.controller_object
+        if details.name == name and valid(pawn) and valid(controller) and pawn:HasAuthority()
+            and not controller:IsLocalController() and same(pawn:GetWorld(), state.world)
+            and same(controller.Pawn, pawn) then
+            if guest then error("The terminal fixture guest is ambiguous", 0) end
+            guest = pawn
+        end
+    end
+    if not guest then error("Choose the exact enrolled terminal fixture guest", 0) end
+    local x = distance == "near" and 110 or 2100
+    if not guest:K2_TeleportTo({ X = origin.X + x, Y = origin.Y, Z = origin.Z }, guest:K2_GetActorRotation()) then
+        error("The terminal fixture placement could not be verified", 0)
+    end
+    guest:ForceNetUpdate()
+    return "isolated terminal distance fixture positioned"
 end
 
 function dream.place_descending_guest(state, phase, name)

@@ -53,7 +53,8 @@ function actions.command(fields, state, phase)
         return
     end
     local pawn, crate = fields[3], fields[4]
-    local count = action == "open" and 5 or action == "claim" and 6 or 4
+    local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
+    local count = action == "open" and (fixture_nonempty and 6 or 5) or action == "claim" and 6 or 4
     if not enabled or phase ~= "hosting" or #fields ~= count or crate ~= loot.crate or state.map ~= loot.map then
         error("The exact stock crate fixture is unavailable", 0)
     end
@@ -118,9 +119,14 @@ function actions.command(fields, state, phase)
         result.status = "native_loot_crate_hook_unavailable"
         return "stock loot hook unavailable"
     end
+    if fixture_nonempty and os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then
+        result.status = "stock_loot_fixture_seed_unavailable"
+        return "stock loot fixture seed unavailable"
+    end
+    local fixture_args = fixture_nonempty and { true } or {}
     local ok, status, looted, first, second, calls, invoked = SilverfishOpenNativeLootCrate(
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
-        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter)
+        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(fixture_args))
     result.ok, result.status, result.looted, result.calls, result.invoked = ok, status, looted, calls, invoked
     if ok then
         local addresses = {}

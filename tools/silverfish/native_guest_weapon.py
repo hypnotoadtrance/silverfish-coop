@@ -9,10 +9,13 @@ GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "na
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
+CLASS_PATHS = {"/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C",
+               "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"}
 
 
-async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str) -> dict:
-    if (not host.native_guest or not host.fixtures or host.native_profile is None
+async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, pistol_fixture=False) -> dict:
+    fixture = action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
+    if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
             or time.monotonic() - host.last_seen > 3 or host.last_game.get("state") != "hosting"):
         raise party.RuleError("native_guest_weapon_unavailable")
@@ -26,7 +29,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     if not scope or not scope["connected"]:
         raise party.RuleError("guest_not_active")
     operation = action.removeprefix("native-guest-weapon-")
-    fingerprint = [action, guid, None]
+    extra = ("light-pistol",) if pistol_fixture else ()
+    fingerprint = [action, guid, extra[0] if extra else None]
     mutates = operation != "inspect"
     if mutates:
         for receipt in host.party["receipts"].get(character, []):
@@ -43,7 +47,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     if mutates:
         host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(action, pawn, guid, timeout=5)
+        snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
         proof = snapshot.get("native_guest_weapon", {})
         observed_guid = proof.get("guid")
         qualified_guid = (observed_guid == guid if not implicit else

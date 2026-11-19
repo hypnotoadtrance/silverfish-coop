@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from . import native_blue, party
 from .authored_routes import MAPS as EXPANDED_MAPS
 from .native_gold import valid_guid
-from .travel import AUTHORED_MAPS, BLACK_OCEAN, CROSSROADS, EXCHANGE, PYROCLAST, SLATE, THE_ROOK
+from .travel import AUTHORED_MAPS, BLACK_OCEAN, CROSSROADS, EXCHANGE, NOTHING, PYROCLAST, SLATE, THE_ROOK
 
 
 ARRIVAL = "PlayerStart_1"
@@ -20,7 +20,7 @@ TAROT_DESTINATIONS = {
     "": EXCHANGE, "Tarot_Obelisk": PYROCLAST, "Tarot_Night": SLATE, "Tarot_BlackStag": BLACK_OCEAN,
     "Tarot_Rook": THE_ROOK,
 }
-_NEXT_DREAM = {EXCHANGE: THE_ROOK, THE_ROOK: PYROCLAST, PYROCLAST: SLATE, SLATE: BLACK_OCEAN}
+_NEXT_DREAM = {EXCHANGE: THE_ROOK, THE_ROOK: PYROCLAST, PYROCLAST: SLATE, SLATE: BLACK_OCEAN, BLACK_OCEAN: NOTHING}
 LEGACY_KEYS = {
     "id", "guid", "before", "payload", "phase", "deadline", "source", "destination", "return_map", "return_bed",
 }
@@ -44,6 +44,7 @@ PROFILES = {
     PYROCLAST: DreamProfile(COUNTDOWN, 3, 3, 3),
     SLATE: DreamProfile("Slate_P_C_0", 1, 0, 2),
     BLACK_OCEAN: DreamProfile("BlackOcean_P_C_0", 0, 0, 2, fixed_seconds=160),
+    NOTHING: DreamProfile("KillVolume_BP_C_0", 0, 0, 0),
 }
 
 
@@ -54,7 +55,7 @@ def destination_for(source: str, tarot: str) -> str | None:
     if tarot:
         destination = TAROT_DESTINATIONS.get(tarot)
     elif source in PROFILES:
-        destination = _NEXT_DREAM.get(source)  # Black Ocean's next stock map is outside the guarded routes.
+        destination = _NEXT_DREAM.get(source)
     else:
         destination = EXCHANGE
     return destination if destination != source else None
@@ -93,8 +94,8 @@ def visit(state: dict) -> dict | None:
                                                      or saved["source"] != CROSSROADS))
             or (saved["effects"] == "pending" and phase != "departing")
             or phase not in ("departing", "visiting", "returning")
-            or (phase == "departing" and deadline is not None)
-            or (phase != "departing" and not _valid_timestamp(deadline))):
+            or ((phase == "departing" or destination == NOTHING) and deadline is not None)
+            or (phase != "departing" and destination != NOTHING and not _valid_timestamp(deadline))):
         raise ValueError("Invalid saved Stardust visit")
     return saved
 
@@ -136,8 +137,8 @@ def arrived(state: dict, now: float) -> dict:
     if not _valid_timestamp(now):
         raise ValueError("Invalid Stardust arrival time")
     profile = PROFILES[active["destination"]]
-    deadline = now + profile.startup + profile.duration(active["kind"])
-    if not _valid_timestamp(deadline) or deadline <= now:
+    deadline = None if active["destination"] == NOTHING else now + profile.startup + profile.duration(active["kind"])
+    if deadline is not None and (not _valid_timestamp(deadline) or deadline <= now):
         raise ValueError("Invalid Stardust visit deadline")
     proposed = party.load_party(state)
     proposed["stardust_visit"] = dict(active, phase="visiting", deadline=deadline)
@@ -150,7 +151,8 @@ def return_due(state: dict, now: float) -> bool:
         return False
     if not _valid_timestamp(now):
         raise ValueError("Invalid Stardust return time")
-    return active["phase"] == "returning" or now >= active["deadline"] + PROFILES[active["destination"]].fade
+    return (active["phase"] == "returning"
+            or active["deadline"] is not None and now >= active["deadline"] + PROFILES[active["destination"]].fade)
 
 
 def accelerate(state: dict, now: float) -> dict:
@@ -159,7 +161,7 @@ def accelerate(state: dict, now: float) -> dict:
         return state
     if not _valid_timestamp(now):
         raise ValueError("Invalid Stardust acceleration time")
-    if now >= active["deadline"]:
+    if active["deadline"] is None or now >= active["deadline"]:
         return state
     proposed = party.load_party(state)
     proposed["stardust_visit"]["deadline"] = now

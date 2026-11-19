@@ -27,6 +27,17 @@
 #include "guest_item.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
+#include "inventory_view.hpp"
+#include "bag_projection.hpp"
+#include "finite_shop.hpp"
+#include "interaction_input.hpp"
+#include "authored_pickup.hpp"
+#include "broker_menu.hpp"
+#include "campaign_npc.hpp"
+#include "guest_primary_input.hpp"
+#include "guest_consumable.hpp"
+#include "shop_view.hpp"
+#include "nothing_return.hpp"
 #include "guest_npc.hpp"
 #include "guest_reload_input.hpp"
 #include "item_roundtrip.hpp"
@@ -1204,6 +1215,15 @@ namespace
             silverfish::native_stock_rest::uninstall_hooks();
             silverfish::native_guest_npc::uninstall_hooks();
             silverfish::native_guest_reload_input::uninstall_hooks();
+            silverfish::native_inventory_view::uninstall_hooks();
+            silverfish::native_bag_projection::uninstall_hooks();
+            silverfish::native_interaction_input::uninstall_hooks();
+            silverfish::native_authored_pickup::uninstall_hooks();
+            silverfish::native_broker_menu::uninstall_hooks();
+            silverfish::campaign_npc::uninstall_hooks();
+            silverfish::native_guest_primary_input::uninstall_hooks();
+            silverfish::native_shop_view::uninstall_hooks();
+            silverfish::native_nothing_return::uninstall_hooks();
             silverfish::shared_loot::uninstall_hooks();
             silverfish::native_black_stone::uninstall_hooks();
             invalidate_bridge();
@@ -1225,6 +1245,15 @@ namespace
             silverfish::native_stock_rest::install_hooks();
             silverfish::native_guest_npc::install_hooks();
             silverfish::native_guest_reload_input::install_hooks();
+            silverfish::native_inventory_view::install_hooks();
+            silverfish::native_bag_projection::install_hooks();
+            silverfish::native_interaction_input::install_hooks();
+            silverfish::native_authored_pickup::install_hooks();
+            silverfish::native_broker_menu::install_hooks();
+            silverfish::campaign_npc::install_hooks();
+            silverfish::native_guest_primary_input::install_hooks();
+            silverfish::native_shop_view::install_hooks();
+            silverfish::native_nothing_return::install_hooks();
             silverfish::shared_loot::install_hooks();
             silverfish::native_black_stone::install_hooks();
             if (!enabled)
@@ -1284,8 +1313,19 @@ namespace
             silverfish::loot_escrow::register_lua(lua);
             silverfish::inventory_census::register_lua(lua);
             silverfish::inventory_wipe::register_lua(lua);
+            silverfish::finite_shop::register_lua(lua);
             silverfish::native_guest_npc::register_lua(lua);
             silverfish::native_guest_reload_input::register_lua(lua);
+            silverfish::native_inventory_view::register_lua(lua);
+            silverfish::native_bag_projection::register_lua(lua);
+            silverfish::native_interaction_input::register_lua(lua);
+            silverfish::native_authored_pickup::register_lua(lua);
+            silverfish::native_broker_menu::register_lua(lua);
+            silverfish::campaign_npc::register_lua(lua);
+            silverfish::native_guest_primary_input::register_lua(lua);
+            silverfish::native_guest_consumable::register_lua(lua);
+            silverfish::native_shop_view::register_lua(lua);
+            silverfish::native_nothing_return::register_lua(lua);
             silverfish::native_black_stone::register_lua(lua);
             if (!enabled)
             {
@@ -1320,6 +1360,15 @@ namespace
                 silverfish::native_transport::clear_scope();
                 silverfish::native_stock_rest::clear_scope();
                 silverfish::native_guest_npc::clear_scope();
+                silverfish::native_inventory_view::clear_scope();
+                silverfish::native_bag_projection::clear_scope();
+                silverfish::native_interaction_input::clear_scope();
+                silverfish::native_authored_pickup::clear_scope();
+                silverfish::native_broker_menu::clear_scope();
+                silverfish::campaign_npc::clear_scope();
+                silverfish::native_guest_primary_input::clear_scope();
+                silverfish::native_shop_view::clear_scope();
+                silverfish::native_nothing_return::clear_scope();
                 silverfish::native_black_stone::clear_scope();
                 invalidate_bridge();
             }

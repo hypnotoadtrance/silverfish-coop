@@ -513,19 +513,20 @@ function native_death.start(bridge)
     if scoped then heartbeat_path = bridge .. "/native-events-heartbeat" end
     if configured_mode == "cpp" then return end
     local attempts = 0
-    LoopAsync(500, function()
-        if not next(slots) or not valid(StaticFindObject(die_path)) then return false end
+    LoopInGameThreadWithDelay(500, function()
+        if hook_status == "ready" or hook_status == "error" or not next(slots) or not valid(StaticFindObject(die_path)) then
+            return
+        end
         local ok, failure = pcall(RegisterHook, die_path, on_die)
         if ok then
             hook_status, hook_failure = "ready", ""
-            return true
+            return
         end
         attempts = attempts + 1
         hook_failure = tostring(failure)
-        if attempts < 8 then return false end
+        if attempts < 8 then return end
         hook_status = "error"
         print("[SilverfishCoop] Native death hook unavailable: " .. hook_failure .. "\n")
-        return true
     end)
 end
 

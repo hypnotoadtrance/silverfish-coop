@@ -6,6 +6,12 @@ local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local extraction_fields = {
+    "ExtractionMode_45_FC0B60E8470417127E7367B262395F41",
+    "Items_KeptOnDeath_14_9602AB054254974168B43BB0C2924307",
+    "Drop_BonePile_43_877E5A2C4F77E5E91CB0ED82EBC3738D",
+    "LoseSlot_PerDeath_41_60DB8A134132D666D7FD9E9714F51A77",
+}
 local receipt
 
 local function valid(object)
@@ -69,12 +75,50 @@ local function eather_remainder(instance)
     if type(carry) == "number" and carry == carry and carry >= 0 and carry < 1 then return carry end
 end
 
+local function matches_extraction(save, rules)
+    local observed = save.GameRules
+    for index, field in ipairs(extraction_fields) do
+        if observed[field] ~= rules[index] then return false end
+    end
+    return true
+end
+
+function host_save.prepare_extraction(state, phase, keep_text, drops_text, shrink_text)
+    local keep = math.tointeger(tonumber(keep_text))
+    if phase ~= "ready" or state.map ~= main_menu or state.listening or not keep or keep < 0 or keep > 10
+        or (drops_text ~= "0" and drops_text ~= "1") or (shrink_text ~= "0" and shrink_text ~= "1") then
+        error("Stock extraction settings require the staged title menu and exact rule values", 0)
+    end
+    local instance = owner(state)
+    if not instance then error("The staged title menu does not have a canonical stock save", 0) end
+    local save = instance.SaveSlot_Ref
+    local values = {true, keep, drops_text == "1", shrink_text == "1"}
+    local rules, previous = save.GameRules, {}
+    for index, field in ipairs(extraction_fields) do
+        local value = rules[field]
+        if type(value) ~= type(values[index]) then error("The stock extraction rules are unavailable", 0) end
+        previous[index] = value
+    end
+    local ok, confirmed = pcall(function()
+        for index, field in ipairs(extraction_fields) do rules[field] = values[index] end
+        return matches_extraction(save, values)
+    end)
+    if not ok or not confirmed then
+        for index, field in ipairs(extraction_fields) do rules[field] = previous[index] end
+        if not matches_extraction(save, previous) then error("Stock extraction rollback did not verify", 0) end
+        error("The stock extraction settings did not verify", 0)
+    end
+    return "canonical stock extraction settings prepared before travel"
+end
+
 function host_save.capture(state, phase, slot)
     if not generation_slot(slot) then error("An exact co-op save generation slot is required", 0) end
     local instance, pawn, statics = canonical_host(state, phase)
     if not instance then error("The authoritative host does not have a canonical stock save", 0) end
     local save = instance.SaveSlot_Ref
     local observed = summary(save)
+    local rules, extraction = save.GameRules, {}
+    for index, field in ipairs(extraction_fields) do extraction[index] = rules[field] end
     if statics:DoesSaveGameExist(slot, 0) ~= false then error("The co-op save generation already exists", 0) end
     if statics:SaveGameToSlot(save, slot, 0) ~= true then error("Stock save serialization failed", 0) end
 
@@ -84,7 +128,8 @@ function host_save.capture(state, phase, slot)
         error("The co-op save generation failed stock readback", 0)
     end
     local readback = summary(verified)
-    if observed.seed ~= readback.seed or observed.backpack ~= readback.backpack or observed.equipment ~= readback.equipment then
+    if observed.seed ~= readback.seed or observed.backpack ~= readback.backpack or observed.equipment ~= readback.equipment
+        or not matches_extraction(verified, extraction) then
         error("The co-op save generation summary did not survive stock serialization", 0)
     end
     receipt = { kind = "captured", slot = slot, map = state.map, pawn = pawn:GetFullName(),

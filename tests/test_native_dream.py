@@ -3,7 +3,7 @@ import unittest
 
 from tools.silverfish import native_blue, native_dream, party
 from tools.silverfish.travel import (
-    BLACK_OCEAN, CROSSROADS, DEAD_BRIDGE, EXCHANGE, OBSERVATORY, PYROCLAST, SLATE, THE_ROOK,
+    BLACK_OCEAN, CROSSROADS, DEAD_BRIDGE, EXCHANGE, NOTHING, OBSERVATORY, PYROCLAST, SLATE, THE_ROOK,
 )
 
 
@@ -80,13 +80,13 @@ class StardustVisitTests(unittest.TestCase):
 
     def test_stock_next_dream_and_tarot_priority(self):
         for source, destination in ((CROSSROADS, EXCHANGE), (EXCHANGE, THE_ROOK), (THE_ROOK, PYROCLAST),
-                                    (PYROCLAST, SLATE), (SLATE, BLACK_OCEAN)):
+                                    (PYROCLAST, SLATE), (SLATE, BLACK_OCEAN), (BLACK_OCEAN, NOTHING)):
             with self.subTest(source=source):
                 self.assertEqual(native_dream.destination_for(source, ""), destination)
         self.assertEqual(native_dream.destination_for(EXCHANGE, "Tarot_Obelisk"), PYROCLAST)
         self.assertEqual(native_dream.destination_for(BLACK_OCEAN, "Tarot_Rook"), THE_ROOK)
         self.assertIsNone(native_dream.destination_for(THE_ROOK, "Tarot_Rook"))
-        self.assertIsNone(native_dream.destination_for(BLACK_OCEAN, ""))
+        self.assertIsNone(native_dream.destination_for(NOTHING, ""))
         self.assertIsNone(native_dream.destination_for(BLACK_OCEAN, "Tarot_Nothing"))
         self.assertIsNone(native_dream.destination_for("unsupported", "Tarot_Rook"))
         self.assertIsNone(native_dream.destination_for(EXCHANGE, None))
@@ -94,11 +94,12 @@ class StardustVisitTests(unittest.TestCase):
     def test_follow_on_chain_preserves_original_bed_and_latest_debit_on_reload(self):
         guid = "AB" * 16
         bed = native_blue.BED_IDS[DEAD_BRIDGE]
-        current = native_dream.begin(party.new_party(), guid, 5, native_dream.STOCK_PAYLOAD, DEAD_BRIDGE, bed)
+        current = native_dream.begin(party.new_party(), guid, 6, native_dream.STOCK_PAYLOAD, DEAD_BRIDGE, bed)
         previous_id = native_dream.visit(current)["id"]
         current = native_dream.arrived(native_dream.effects_applied(current), 20)
-        steps = ((EXCHANGE, THE_ROOK, 4, 50, 233), (THE_ROOK, PYROCLAST, 3, 65, 338),
-                 (PYROCLAST, SLATE, 2, 78, 168), (SLATE, BLACK_OCEAN, 1, 83, 243))
+        steps = ((EXCHANGE, THE_ROOK, 5, 50, 233), (THE_ROOK, PYROCLAST, 4, 65, 338),
+                 (PYROCLAST, SLATE, 3, 78, 168), (SLATE, BLACK_OCEAN, 2, 83, 243),
+                 (BLACK_OCEAN, NOTHING, 1, 90, None))
         for source, destination, quantity, now, deadline in steps:
             with self.subTest(source=source):
                 latest = native_dream.begin(current, guid, quantity, native_dream.STOCK_PAYLOAD,
@@ -119,7 +120,9 @@ class StardustVisitTests(unittest.TestCase):
                 self.assertEqual(native_dream.visit(current)["deadline"], deadline)
                 previous_id = departing["id"]
         with self.assertRaisesRegex(ValueError, "Invalid saved Stardust visit"):
-            native_dream.begin(current, guid, 1, "", OBSERVATORY, "", source=BLACK_OCEAN)
+            native_dream.begin(current, guid, 1, "", OBSERVATORY, "", source=NOTHING)
+        self.assertFalse(native_dream.return_due(current, 100_000))
+        self.assertTrue(native_dream.return_due(native_dream.returning(current), 100_000))
         returned = native_dream.finished(native_dream.returning(current))
         self.assertEqual(returned["last_stardust_visit"], {
             "id": previous_id, "guid": guid, "remaining": 0, "return_map": DEAD_BRIDGE,

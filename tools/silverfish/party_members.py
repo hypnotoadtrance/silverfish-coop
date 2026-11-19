@@ -235,7 +235,7 @@ class PartyMembers:
             self._last_census = _census(game)
         return result
 
-    def match_pawns(self, game: dict | None) -> dict[str, PawnObservation]:
+    def match_pawns(self, game: dict | None, *, include_expired: bool = False) -> dict[str, PawnObservation]:
         """Match public aliases to stable roles using this frame's complete native census."""
         try:
             census = _census(game)
@@ -261,7 +261,7 @@ class PartyMembers:
         now = self.clock()
         for member in self.members:
             binding = member.binding
-            if (binding is None or not member.in_grace(now) or binding.driver != census.driver
+            if (binding is None or (not include_expired and not member.in_grace(now)) or binding.driver != census.driver
                     or RosterEnrollment._binding_problem(census, binding)):
                 continue
             matches = remote_rows.get((binding.pawn, binding.controller), [])

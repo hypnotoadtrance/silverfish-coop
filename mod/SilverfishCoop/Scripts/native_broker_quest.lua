@@ -3,18 +3,31 @@ local broker = {}
 local map = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local level = map .. ".Shop_BlackMarket_01:PersistentLevel."
 local npc_name = "NPC_Broker_C " .. level .. "NPC_Broker_C_1"
-local dialogue_actor_name = "Dialogue_Controler_BP_C " .. level .. "Dialogue_Controler_BP_C_3"
 local station_name = "ItemRequest_TradeStation_BP_C " .. level .. "ItemRequest_TradeStation_BP_C_1"
 local dialogue_table = "/Game/Classes/Libraries/Tables_Dialogue/Dialogue_Broker_DT.Dialogue_Broker_DT"
 local dialogue_schema = "/Game/Classes/Libraries/Structs/Conversation_Struct.Conversation_Struct"
 local quest_table = "/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT"
 local quest_schema = "/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct"
 local quest_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
-local manifest_path = "/Game/Classes/Items/Books_Items/Item_EtrCartManifest.Item_EtrCartManifest_C"
-local quest_id, previous_quest, issue_row = "Clct_EManifest", "Clt_DrillHead_Brkr", "Broker_Questline_02"
-local stock_ping = "BrokerQuest_03"
-local reward_cash, reward_xp, buyer = 10000, 1, 1
+local character_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
+local manifest = {
+    id = "Clct_EManifest", previous = "Clt_DrillHead_Brkr", issue_row = "Broker_Questline_02",
+    dialogue = "Dialogue_Controler_BP_C_3", responses = 1, cash = 10000, ping = "BrokerQuest_03",
+    objective = "/Game/Classes/Items/Books_Items/Item_EtrCartManifest.Item_EtrCartManifest_C",
+}
+local drill = {
+    id = "Clt_DrillHead_Brkr", previous = "Clct_ECart_Chem_01", issue_row = "Broker_Questline_01",
+    dialogue = "Dialogue_Controler_BP_C_2", responses = 2, cash = 0, ping = "BrokerQuest_02",
+    objective = "/Game/Classes/Items/Artifacts/Art_DrillHead.Art_DrillHead_C",
+    reward = "/Game/Classes/Items/Key_Items/Item_DebtVoucher_1Mil.Item_DebtVoucher_1Mil_C",
+    debt = 1000000, flags = { "Topic_EPC", "Topic_DrillLab" },
+    -- The cooked enum stores Freelancer (NewEnumerator9) as 8 and Fae (NewEnumerator7) as 3.
+    reputation = { freelancer = { id = 8, gain = 1200 }, fae = { id = 3, gain = -200 } },
+}
+local reward_xp, buyer = 1, 1
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local drill_fixtures = fixtures and headless
 
 local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local final_field = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
@@ -26,6 +39,9 @@ local objective_consumed = "ObjectiveItemsAreConsumed_61_4669760345DABF3B531CBF8
 local redeem_field = "RedeemAt_83_FAE34B6C471D2019508A4898E9A0080F"
 local ping_field = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
 local prereq_field = "PreReq_Flags_105_3FA9C82A48BE1675F41E15A54570DBAD"
+local reputation_field = "ReputationGain_86_DA02B32344A59A6C236B848B22520EEC"
+local completion_flags = "Set_FlagsOnComplete_73_4E24EFBB44C3458694C7DCB8CEF1D03F"
+local completion_quests = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_quantity = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -33,13 +49,13 @@ local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local responses_field = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
 local activate_field = "Activate_Quests_22_323EA585468EFFDA9A12A188EBDF5022"
 local terminal_field = "Terminate_Convo_5_BAA128604982D7FC877B498C6500026C"
+local add_flags_field = "Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7"
 local response_arrays = {
     "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23",
     "Add_JournalEntries_17_E77934214DFD7B85991F729C59678191",
     "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD",
 }
 local response_maps = {
-    "Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7",
     "Flags_PreReq_26_50B864DB4BE3226CB3721BB63C4D74DE",
     "Flags_HideIfMet_28_6501CD9247D8EA6D695B5C9F5FD8C639",
     "Rep_Effect_33_CA3AB131482DEE2637F973B7480AA04F",
@@ -187,27 +203,64 @@ local function live_quest(save, key)
     return found and save.ActiveQuests:Find(key):get() or nil
 end
 
-local function qualify_recipe(quest, expected_objective)
-    if not quest or quest[final_field] ~= 2 or quest[cash_field] ~= reward_cash or quest[xp_field] ~= reward_xp
+local function qualify_recipe(profile, quest, expected_objective)
+    if not quest or quest[final_field] ~= 2 or quest[cash_field] ~= profile.cash or quest[xp_field] ~= reward_xp
         or quest[redeem_field] ~= buyer or quest[objective_consumed] ~= true
         or not quest[prereq_field] or #quest[prereq_field] ~= 0
-        or count(quest[rewards_field], 32) ~= 0 or count(quest[objective_items], 32) ~= 1 then
+        or count(quest[rewards_field], 32) ~= (profile.reward and 1 or 0) or count(quest[objective_items], 32) ~= 1 then
         error("stock_broker_quest_recipe_changed", 0)
     end
     local objective, ping = quest[objective_items][1], quest[ping_field]
     if type(ping) == "userdata" then ping = ping:ToString() end
-    if not valid(objective) or objective:GetFullName() ~= "BlueprintGeneratedClass " .. manifest_path
-        or (expected_objective and not same(objective, expected_objective)) or ping ~= stock_ping then
+    if not valid(objective) or objective:GetFullName() ~= "BlueprintGeneratedClass " .. profile.objective
+        or (expected_objective and not same(objective, expected_objective)) or ping ~= profile.ping then
         error("stock_broker_quest_objective_changed", 0)
     end
-    return objective
+    local reward
+    if profile.reward then
+        reward = quest[rewards_field][1]
+        local reputation = quest[reputation_field]
+        if not valid(reward) or reward:GetFullName() ~= "BlueprintGeneratedClass " .. profile.reward
+            or not reputation or #reputation ~= 2 or #quest[completion_flags] ~= 0
+            or count(quest[completion_quests], 32) ~= 0 then error("stock_broker_drill_reward_changed", 0) end
+        for _, faction in pairs(profile.reputation) do
+            if not reputation:Contains(faction.id) or reputation:Find(faction.id):get() ~= faction.gain then
+                error("stock_broker_drill_reputation_changed", 0)
+            end
+        end
+        local default = reward:GetCDO()
+        if not valid(default) or not same(default:GetClass(), reward) or default.Ammo ~= profile.debt then
+            error("stock_broker_drill_voucher_changed", 0)
+        end
+    end
+    return objective, reward
 end
 
 local function stock_flag(instance, name)
     local out = {}
-    instance:Check_SaveFlag(fname(name), out, out)
+    instance:Check_SaveFlag(type(name) == "string" and fname(name) or name, out, out)
     if type(out.Found) ~= "boolean" or not int32(out.Value) then error("stock_broker_player_stat_unqualified", 0) end
-    return out.Found and out.Value or 0
+    return out.Found and out.Value or 0, out.Found
+end
+
+local function raw_reputation(context, faction)
+    local library = StaticFindObject(character_library)
+    local out = {}
+    if not valid(library) then error("stock_broker_reputation_library_unavailable", 0) end
+    library:Compose_FactionRep_FlagName(faction.id, context.host, out)
+    local name = out.Name
+    if not name or type(name) ~= "userdata" or name:GetComparisonIndex() == 0
+        or not name:ToString():match("^Rep_") then error("stock_broker_reputation_name_unqualified", 0) end
+    return stock_flag(context.instance, name)
+end
+
+local function class_rows(array, class, limit)
+    local found = 0
+    for index = 1, count(array, limit) do
+        local row = array[index]
+        if row and same(row[item_class], class) then found = found + 1 end
+    end
+    return found
 end
 
 local function guid(value, permit_empty)
@@ -242,55 +295,78 @@ local function stored_manifest(save, class)
     return id or "-", slot
 end
 
-local function describe(context, key, objective)
+local function describe(profile, context, key, objective, reward)
     if not same(context.instance.SaveSlot_Ref, context.save) or not same(context.host.Save, context.save) then
         error("broker_canonical_save_changed", 0)
     end
     local details = live_quest(context.save, key)
     local step = details and details[step_field] or nil
     if details then
-        qualify_recipe(details, objective)
+        qualify_recipe(profile, details, objective)
         if step ~= 1 and step ~= 2 and step ~= -10 then error("stock_broker_quest_step_unqualified", 0) end
     end
-    return { quest_id = quest_id, state = not details and "missing" or step == -10 and "completed"
+    local result = { quest_id = profile.id, state = not details and "missing" or step == -10 and "completed"
             or step == 2 and "ready" or "active",
-        step = step or "-", final_step = 2, cash = reward_cash, xp = reward_xp, changed = false,
+        step = step or "-", final_step = 2, cash = profile.cash, xp = reward_xp, changed = false,
         manifest_guid = stored_manifest(context.save, objective),
         native_cash = stock_flag(context.instance, "Player_Cash"),
         native_xp = stock_flag(context.instance, "Player_Xp"),
     }
+    if profile.debt then
+        result.objective_guid = result.manifest_guid
+        result.native_debt = stock_flag(context.instance, "Player_Debt")
+        result.topic_epc = stock_flag(context.instance, "Topic_EPC")
+        result.topic_drill_lab = stock_flag(context.instance, "Topic_DrillLab")
+        result.topic_micro_drill = stock_flag(context.instance, "Topic_MicroDrill")
+        result.freelancer_rep, result.freelancer_rep_found = raw_reputation(context, profile.reputation.freelancer)
+        result.fae_rep, result.fae_rep_found = raw_reputation(context, profile.reputation.fae)
+        result.debt_reward = profile.debt
+        result.voucher_rows = class_rows(context.save.PlayerBackpack, reward, 1024)
+            + class_rows(context.save.PlayerEquipment, reward, 128)
+        local out = {}
+        context.instance:FindPassiveEffect(fname("IntensePersonality"), true, out, out)
+        if type(out.EffectActive) ~= "boolean" or not int32(out.Instances) or out.Instances < 0 then
+            error("stock_broker_reputation_trait_unqualified", 0)
+        end
+        result.intense_personality = out.Instances
+        if headless and type(SilverfishReadNativeBrokerMenuGuard) == "function" then
+            result.menu_guard_armed, result.guarded_ping, result.guarded_menu, result.guarded_gameplay =
+                SilverfishReadNativeBrokerMenuGuard()
+        end
+    end
+    return result
 end
 
-local function quest_objects()
+local function quest_objects(profile)
     local quests = data_table(quest_table, quest_schema)
-    local template = quests:FindRow(quest_id)
-    local objective = qualify_recipe(template)
+    local template = quests:FindRow(profile.id)
+    local objective, reward = qualify_recipe(profile, template)
     if template[step_field] ~= 1 then error("stock_broker_quest_template_changed", 0) end
-    return quests, fname(quest_id), objective
+    return quests, fname(profile.id), objective, reward
 end
 
-function broker.inspect(state, phase, pawn_name)
+local function inspect(profile, state, phase, pawn_name)
     local context = host_context(state, phase, pawn_name)
-    local _, key, objective = quest_objects()
-    return describe(context, key, objective)
+    local _, key, objective, reward = quest_objects(profile)
+    return describe(profile, context, key, objective, reward)
 end
 
-local function qualify_issue(context, quests, expected_npc)
+local function qualify_issue(profile, context, quests, expected_npc)
     if expected_npc ~= npc_name then error("broker_issue_actor_unqualified", 0) end
     require_reach(context.interactor, actor(context.world, "NPC_Broker_C", npc_name))
-    local controller = actor(context.world, "Dialogue_Controler_BP_C", dialogue_actor_name)
+    local controller = actor(context.world, "Dialogue_Controler_BP_C", "Dialogue_Controler_BP_C " .. level .. profile.dialogue)
     local dialogue = data_table(dialogue_table, dialogue_schema)
     local pointer = controller.ConversationPointer
-    local key = fname(issue_row)
+    local key = fname(profile.issue_row)
     if controller.Prioroty ~= true or not pointer or not same(pointer.DataTable, dialogue)
         or not same_name(pointer.RowName, key) then error("stock_broker_dialogue_pointer_changed", 0) end
-    local row = dialogue:FindRow(issue_row)
+    local row = dialogue:FindRow(profile.issue_row)
     local responses = row and row[responses_field]
-    if count(responses, 64) ~= 1 then error("stock_broker_dialogue_response_unqualified", 0) end
+    if count(responses, 64) ~= profile.responses then error("stock_broker_dialogue_response_unqualified", 0) end
     local response = responses[1]
     local activate = response[activate_field]
     if response[terminal_field] ~= true or count(activate, 32) ~= 1
-        or not same(activate[1].DataTable, quests) or not same_name(activate[1].RowName, fname(quest_id)) then
+        or not same(activate[1].DataTable, quests) or not same_name(activate[1].RowName, fname(profile.id)) then
         error("stock_broker_dialogue_response_changed", 0)
     end
     for _, name in ipairs(response_arrays) do
@@ -299,65 +375,123 @@ local function qualify_issue(context, quests, expected_npc)
     for _, name in ipairs(response_maps) do
         if not response[name] or #response[name] ~= 0 then error("stock_broker_dialogue_flags_changed", 0) end
     end
+    local flags = response[add_flags_field]
+    if not flags or #flags ~= (profile.flags and #profile.flags or 0) then
+        error("stock_broker_dialogue_flags_changed", 0)
+    end
+    for _, name in ipairs(profile.flags or {}) do
+        local flag = fname(name)
+        if not flags:Contains(flag) or flags:Find(flag):get() ~= 1 then
+            error("stock_broker_dialogue_flags_changed", 0)
+        end
+    end
 end
 
-local function issue(state, phase, pawn_name, expected_npc, use_fixture)
+local function issue(profile, state, phase, pawn_name, expected_npc, use_fixture)
     local context = host_context(state, phase, pawn_name)
-    local quests, key, objective = quest_objects()
-    qualify_issue(context, quests, expected_npc)
-    local before = describe(context, key, objective)
+    local quests, key, objective, reward = quest_objects(profile)
+    qualify_issue(profile, context, quests, expected_npc)
+    local before = describe(profile, context, key, objective, reward)
     if before.state ~= "missing" then return before end
     if not use_fixture then
-        local previous = live_quest(context.save, fname(previous_quest))
+        local previous = live_quest(context.save, fname(profile.previous))
         if not previous or previous[step_field] ~= -10 then error("broker_predecessor_incomplete", 0) end
     end
 
-    -- This response has one quest activation and no save flags, reputation, journal, or event side effects.
+    -- PlayerResponce_Widget applies its authored save flags before activating the quest.
+    for _, name in ipairs(profile.flags or {}) do
+        context.instance:Add_PointTo_SaveFlag(fname(name), 1, true, false)
+    end
     context.instance:AddQuest_ByName(key)
-    local after = describe(context, key, objective)
+    local after = describe(profile, context, key, objective, reward)
     if after.step ~= 1 or after.manifest_guid ~= before.manifest_guid
         or after.native_cash ~= before.native_cash or after.native_xp ~= before.native_xp then
-        error("stock_broker_issue_readback_failed", 0)
+        error("mutation_unverified_stock_broker_issue", 0)
+    end
+    if profile.flags and (after.topic_epc ~= math.max(1, before.topic_epc)
+        or after.topic_drill_lab ~= math.max(1, before.topic_drill_lab)
+        or after.topic_micro_drill ~= before.topic_micro_drill or after.native_debt ~= before.native_debt
+        or after.freelancer_rep ~= before.freelancer_rep or after.fae_rep ~= before.fae_rep
+        or after.voucher_rows ~= before.voucher_rows) then
+        error("mutation_unverified_stock_broker_drill_issue_flags", 0)
     end
     after.changed = true
     return after
 end
 
-function broker.issue(state, phase, pawn_name, expected_npc)
-    return issue(state, phase, pawn_name, expected_npc, false)
+local function qualify_drill_ping(context)
+    local receiver = actor(context.world, "GlobalPing_ScriptingReciver_BP_C",
+        "GlobalPing_ScriptingReciver_BP_C " .. level .. "GlobalPing_ScriptingReciver_BP_C_5")
+    local controller = actor(context.world, "Dialogue_Controler_BP_C", "Dialogue_Controler_BP_C " .. level .. manifest.dialogue)
+    local pointer = controller.ConversationPointer
+    local ping = receiver.Ping_ID
+    if type(ping) == "userdata" then ping = ping:ToString() end
+    if ping ~= drill.ping or count(receiver.ActorsToPower, 32) ~= 1
+        or not same(receiver.ActorsToPower[1], controller) or controller.Prioroty ~= true or not pointer
+        or not same(pointer.DataTable, data_table(dialogue_table, dialogue_schema))
+        or not same_name(pointer.RowName, fname(manifest.issue_row)) then
+        error("stock_broker_drill_next_dialogue_unqualified", 0)
+    end
+    return controller
 end
 
-function broker.issue_fixture(state, phase, pawn_name, expected_npc)
-    if not fixtures then error("broker_fixtures_disabled", 0) end
-    return issue(state, phase, pawn_name, expected_npc, true)
+local function next_reputation(before, key, change)
+    local multiplier = before[key .. "_rep_found"] and (1 + before.intense_personality) or 1
+    if not int32(change * multiplier) then error("stock_broker_reputation_out_of_range", 0) end
+    return before[key .. "_rep"] + change * multiplier
 end
 
-function broker.turn_in(state, phase, pawn_name, expected_station, expected_guid)
+local function turn_in(profile, state, phase, pawn_name, expected_station, expected_guid)
     local context = host_context(state, phase, pawn_name)
     if expected_station ~= station_name then error("broker_redemption_station_unqualified", 0) end
     local station = actor(context.world, "ItemRequest_TradeStation_BP_C", station_name)
     if station.Buyer ~= buyer then error("stock_broker_redemption_buyer_changed", 0) end
     require_reach(context.interactor, station)
 
-    local _, key, objective = quest_objects()
-    local before = describe(context, key, objective)
+    local _, key, objective, reward = quest_objects(profile)
+    local before = describe(profile, context, key, objective, reward)
     if before.state == "completed" then return before end
     if before.state == "missing" then error("broker_quest_not_started", 0) end
     if type(expected_guid) ~= "string" or #expected_guid ~= 32 or expected_guid:find("[^0-9A-F]")
         or before.manifest_guid ~= expected_guid then error("broker_manifest_guid_mismatch", 0) end
-    if not int32(before.native_cash + reward_cash) or not int32(before.native_xp + reward_xp) then
+    if not int32(before.native_cash + profile.cash) or not int32(before.native_xp + reward_xp) then
         error("broker_stock_reward_out_of_range", 0)
+    end
+    local expected_debt, expected_freelancer, expected_fae, next_dialogue
+    if profile.debt then
+        next_dialogue = qualify_drill_ping(context)
+        expected_debt = before.native_debt - profile.debt
+        expected_freelancer = next_reputation(before, "freelancer", profile.reputation.freelancer.gain)
+        expected_fae = next_reputation(before, "fae", profile.reputation.fae.gain)
+        if not int32(expected_debt) or not int32(expected_freelancer) or not int32(expected_fae) then
+            error("stock_broker_drill_reward_out_of_range", 0)
+        end
     end
     local library = StaticFindObject(quest_library)
     if not valid(library) then error("stock_broker_quest_library_unavailable", 0) end
+    if next_dialogue and headless then
+        if type(SilverfishArmNativeBrokerMenuGuard) ~= "function" then
+            error("stock_broker_menu_guard_unavailable", 0)
+        end
+        local armed, reason = SilverfishArmNativeBrokerMenuGuard(state.controller:GetAddress(), next_dialogue:GetAddress())
+        if not armed then error(reason or "stock_broker_menu_guard_unavailable", 0) end
+    end
 
-    -- Stock turn-in owns the completion, item debit, cash/XP, and authored BrokerQuest_03 world ping.
+    -- Let stock consume the objective and run the authored ping and rewards once.
+    -- SpawnItemForPlayer invokes the voucher immediately against the canonical save.
     local out = {}
     library:TurnIn_Quest(key, context.instance, true, context.host, out, out)
-    local after = describe(context, key, objective)
+    local after = describe(profile, context, key, objective, reward)
     if out.Success ~= true or valid(out.ConfirmationPopup) or after.step ~= -10 or after.manifest_guid ~= "-"
-        or after.native_cash ~= before.native_cash + reward_cash or after.native_xp ~= before.native_xp + reward_xp then
-        error("stock_broker_turnin_readback_failed", 0)
+        or after.native_cash ~= before.native_cash + profile.cash or after.native_xp ~= before.native_xp + reward_xp then
+        error("mutation_unverified_stock_broker_turnin", 0)
+    end
+    if profile.debt and (after.native_debt ~= expected_debt or after.freelancer_rep ~= expected_freelancer
+        or not after.freelancer_rep_found or after.fae_rep ~= expected_fae or not after.fae_rep_found
+        or after.voucher_rows ~= before.voucher_rows or after.topic_epc ~= before.topic_epc
+        or after.topic_drill_lab ~= before.topic_drill_lab or after.topic_micro_drill ~= before.topic_micro_drill
+        or (headless and after.guarded_ping ~= 1)) then
+        error("mutation_unverified_stock_broker_drill_reward", 0)
     end
     after.changed, after.consumed_guid = true, expected_guid
     return after
@@ -476,12 +610,12 @@ local function retire_source(source)
     source:K2_DestroyActor()
 end
 
-function broker.fixture_grant_manifest(state, phase, expected_guid)
-    if not fixtures then error("broker_fixtures_disabled", 0) end
+local function fixture_grant(profile, state, phase, pawn_name, expected_guid)
+    if not fixtures or (profile.debt and not drill_fixtures) then error("broker_fixtures_disabled", 0) end
     local parts = guid_parts(expected_guid)
-    local context = host_context(state, phase)
-    local _, key, objective = quest_objects()
-    local before = describe(context, key, objective)
+    local context = host_context(state, phase, pawn_name)
+    local _, key, objective, reward = quest_objects(profile)
+    local before = describe(profile, context, key, objective, reward)
     if before.state == "completed" then error("broker_fixture_quest_completed", 0) end
     local backpack = context.save.PlayerBackpack
     local matches = count_guid(backpack, 1024, expected_guid)
@@ -516,13 +650,47 @@ function broker.fixture_grant_manifest(state, phase, expected_guid)
     end
     -- Stock conversion makes a fresh GUID. Replace only the new row's GUID with the fixture identity.
     backpack[slot][item_guid] = parts
-    local after = describe(context, key, objective)
+    local after = describe(profile, context, key, objective, reward)
     if after.manifest_guid ~= expected_guid or after.step ~= before.step
         or after.native_cash ~= before.native_cash or after.native_xp ~= before.native_xp then
         error("broker_fixture_manifest_guid_readback_failed", 0)
     end
+    if profile.debt and (after.topic_micro_drill ~= math.max(1, before.topic_micro_drill)
+        or after.native_debt ~= before.native_debt or after.voucher_rows ~= before.voucher_rows
+        or after.topic_epc ~= before.topic_epc or after.topic_drill_lab ~= before.topic_drill_lab
+        or after.freelancer_rep ~= before.freelancer_rep or after.fae_rep ~= before.fae_rep) then
+        error("mutation_unverified_broker_fixture_drill_pickup", 0)
+    end
     after.changed = true
     return after
 end
+
+local function bind(profile, fixture_allowed)
+    return {
+        inspect = function(state, phase, pawn_name) return inspect(profile, state, phase, pawn_name) end,
+        issue = function(state, phase, pawn_name, target) return issue(profile, state, phase, pawn_name, target, false) end,
+        issue_fixture = function(state, phase, pawn_name, target)
+            if not fixture_allowed then error("broker_fixtures_disabled", 0) end
+            return issue(profile, state, phase, pawn_name, target, true)
+        end,
+        turn_in = function(state, phase, pawn_name, target, id)
+            return turn_in(profile, state, phase, pawn_name, target, id)
+        end,
+        seed_fixture = function(state, phase, pawn_name, id)
+            return fixture_grant(profile, state, phase, pawn_name, id)
+        end,
+        fixture_position = broker.fixture_position,
+    }
+end
+
+local legacy = bind(manifest, fixtures)
+broker.inspect = legacy.inspect
+broker.issue = legacy.issue
+broker.issue_fixture = legacy.issue_fixture
+broker.turn_in = legacy.turn_in
+function broker.fixture_grant_manifest(state, phase, expected_guid)
+    return fixture_grant(manifest, state, phase, nil, expected_guid)
+end
+broker.drill = bind(drill, drill_fixtures)
 
 return broker

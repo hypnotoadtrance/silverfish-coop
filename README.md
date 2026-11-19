@@ -63,6 +63,16 @@ The host starts on the shipped `PlaytestMap_01`. Add `--headless` to host and jo
 
 Action responses have an `id` and an `ok` flag. Events carry the session generation and, for actions, the command ID. Inspect `stale` before trusting a status. Host and guest status files are under `campaigns/<campaign>/run` and `clients/<profile>/run` within the workspace. The interface accepts allowlisted commands from the local workspace.
 
+On native campaign stages, `native-inventory-list` reads an exact stock inventory page. Run it against a guest profile to read that character. On the host, the same action reads the host's inventory or the enrolled role selected with `--target`. Use `next_offset` to advance the page. The guest passes the offset through `--target`. The host uses `--amount`.
+
+Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Pass `--native-guest-reload-input` to route short presses of the stock reload key to the host for the qualified guest SMG and Light Pistol.
+
+In a new authored campaign with native guest ownership, set `--native-extraction-keep N` to enable the stock extraction mode and keep up to `N` inventory rows after a wipe. Add `--native-extraction-backpacks` for owner-only drops and `--native-extraction-lose-slot` to reduce the host's saved retention limit after each wipe. These settings are stored in the campaign's native save and resume automatically.
+
+During a stock retention wipe, `native-wipe-items` returns the caller's frozen stock inventory. Select a whole row or stack with `keep --keep GUID=1`. An empty `keep` submits an empty selection. Once the party has respawned, the owner's `native_backpacks` status contains their backpack IDs and death positions. Use `native-wipe-recover --target BACKPACK_ID` while nearby.
+
+At the Observatory merchant, use `native-finite-shop-list` for stock prices and `native-finite-shop-buy --target GUID@PRICE` to buy a whole stock row. Use `native-finite-shop-sale-quote --target GUID` and `native-finite-shop-sell --target GUID@PRICE` to sell a qualified backpack row into the merchant's buyback stock. With `--native-shop-view` on the host, a guest can also use the stock interact key to open the purchase overlay. Use the arrow keys to select, press Enter to review and confirm, and press Backspace to close.
+
 ## What persists
 
 The host writes a versioned campaign snapshot, a previous snapshot for recovery, and host-issued character identities under `campaigns/<campaign>/save`. This build stores the test map, character positions, the co-op gameplay ledger, and the host's observed native world state. The separate `game-user` folders isolate any stock game writes. The playtest fixtures cover the shared wallet, owned inventories, revive, and travel. See the [native integration status](docs/NATIVE-INTEGRATION.md) for the full-campaign work.

@@ -121,6 +121,20 @@ class CampaignStoreTests(unittest.TestCase):
             self.assertNotEqual(restored["lease_id"], original["lease_id"])
             self.assertEqual(restored["character"]["state"], {"health": 12})
 
+    def test_wipe_can_checkpoint_an_unleased_character_without_overwriting_a_live_lease(self):
+        with self.open_store() as store:
+            active_identity, active = self.create_guest(store, "Active")
+            offline_identity, offline = self.create_guest(store, "Offline")
+            active_id, offline_id = active["character_id"], offline["character_id"]
+            lease = store.activate(character_id=active_id, **active_identity)
+            revision = store.checkpoint({"wipe_committed": True}, {lease["lease_id"]: {"health": 100}},
+                                        unleased_states={offline_id: {"health": 0, "inventory": []}})
+            with self.assertRaises(LeaseError):
+                store.checkpoint({}, {}, unleased_states={active_id: {"health": 0}})
+            self.assertEqual(store.status()["revision"], revision)
+            self.assertEqual(store.status()["world"], {"wipe_committed": True})
+            self.assertEqual(store.list_characters(**offline_identity)[0]["state"], {"health": 0, "inventory": []})
+
     def test_invalid_checkpoint_leaves_world_characters_and_revision_unchanged(self):
         with self.open_store() as store:
             identity, character = self.create_guest(store)

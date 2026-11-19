@@ -157,6 +157,37 @@ def nearby_bag(host, character: str) -> str | None:
     return min(closest)[1] if closest else None
 
 
+async def project_bags(service, bridge, owner: str, bags: dict) -> None:
+    game, epoch = service.last_game, service.zone_epoch
+    area = game.get("map")
+    if not area or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
+        return
+    current = {bag_id: bag for bag_id, bag in bags.items()
+               if bag["owner_id"] == owner and bag["position"]["map"] == area}
+    origin = game.get("pawns", {}).get("local", {}).get("location", ())
+    if len(current) > 128 and len(origin) == 3 and None not in origin:
+        local_ids = sorted(current, key=lambda key: (math.dist(origin, current[key]["position"]["location"]), key))[:128]
+    else:
+        local_ids = sorted(current)[:128]
+    rows = tuple((key, *current[key]["position"]["location"], current[key]["count"]) for key in sorted(local_ids))
+    desired = (area, epoch, rows)
+    observed = game.get("native_bag_projection")
+    if not rows:
+        if observed:
+            service.last_game = await bridge.command("native-bag-projection-clear", timeout=4)
+        service.bag_projection_key = None
+        return
+    if desired == service.bag_projection_key and observed and observed["epoch"] == epoch and observed["count"] == len(rows):
+        return
+    snapshot = await bridge.command("native-bag-projection-sync", owner, epoch, area,
+                                     *(str(value) for row in rows for value in row), timeout=5)
+    if snapshot.get("native_bag_projection") != {"map": area, "epoch": epoch, "owner": owner, "count": len(rows),
+                                                 "requested": len(rows), "status": "projected"}:
+        raise RuntimeError("The game did not verify the exact local backpack projection")
+    service.last_game = snapshot
+    service.bag_projection_key = desired
+
+
 async def recover(host, bridge, character: str, bag_id: str | None, operation_id: str) -> dict:
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")

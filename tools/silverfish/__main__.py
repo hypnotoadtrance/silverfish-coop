@@ -67,6 +67,11 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS) - DREAM_MAPS - {GOLD_NEXUS}),
                       help="start a new campaign in a qualified zone")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
+    host.add_argument("--native-shop-view", action="store_true", help="enable the qualified native guest merchant overlay")
+    host.add_argument("--native-extraction-keep", type=int, choices=range(11),
+                      help="enable stock extraction mode in a new campaign with this item retention limit")
+    host.add_argument("--native-extraction-backpacks", action="store_true", help="drop owner-only backpacks on party wipes")
+    host.add_argument("--native-extraction-lose-slot", action="store_true", help="reduce stock item retention after each wipe")
     host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
     host.add_argument("--fixture-backpacks", action="store_true", help="drop unretained test inventory in owner-only bags")
 
@@ -83,6 +88,8 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     join.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     join.add_argument("--native-guest-reload-input", action="store_true", help="route stock reload input to the staged host")
+    join.add_argument("--native-guest-primary-input", action="store_true", help="route stock primary input for qualified guest weapons")
+    join.add_argument("--native-guest-inventory-view", action="store_true", help="show a read-only stock guest inventory overlay")
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
@@ -114,20 +121,29 @@ def parser() -> argparse.ArgumentParser:
         "native-fruiting-stardust-seed", "native-fruiting-stardust-inspect", "native-fruiting-stardust-use-probe",
         "native-dream-tarot-fixture",
         "native-dream-stone-position", "native-dream-stone-fixture",
+        "native-return-to-rest", "native-dream-nothing-position",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
+        "native-authored-pickup-claim", "native-authored-pickup-fixture", "native-authored-pickup-approach",
         "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
         "native-broker-grant-manifest",
+        "native-broker-drill-issue-fixture", "native-broker-drill-seed-fixture", "native-broker-drill-inspect",
         "native-weapon-roundtrip",
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
-        "native-guest-reload-input-fixture",
+        "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
+        "native-guest-bandage", "native-inventory-view-key-fixture",
+        "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",
         "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
+        "native-bag-projection-fixture",
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
-        "native-loot-claim",
+        "native-loot-claim", "native-loot-open-fixture",
         "native-inventory-list",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
-        "native-shop-approach", "native-shop-buy",
+        "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
+        "native-finite-shop-sale-quote", "native-finite-shop-sell",
+        "native-finite-shop-approach", "native-finite-shop-wallet-fixture", "native-interaction-fixture",
+        "native-shop-view-fixture",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
         "native-fall-position", "native-fall-return",
         "native-door-position", "native-door-probe", "native-cistern-keypad",
@@ -171,17 +187,24 @@ async def execute(opts):
             if not opts.fixtures or (opts.fixture_keep_slots is not None and opts.fixture_keep_slots < 0):
                 raise ValueError("Wipe fixture settings require --fixtures and a nonnegative slot count")
             rules = {"keep_slots": opts.fixture_keep_slots, "drop_backpacks": opts.fixture_backpacks}
+        if opts.native_extraction_keep is None and (opts.native_extraction_backpacks or opts.native_extraction_lose_slot):
+            raise ValueError("Set --native-extraction-keep to enable the stock extraction options")
+        if rules is not None and opts.native_extraction_keep is not None:
+            raise ValueError("Choose the stock extraction options or the wipe fixture settings")
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
                         opts.bind, opts.port, opts.headless, opts.fixtures, rules,
                         native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
                         native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone, max_guests=opts.max_guests,
-                        expanded_zones=opts.native_expanded_zones)
+                        expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
+                        extraction=None if opts.native_extraction_keep is None else (
+                            opts.native_extraction_keep, opts.native_extraction_backpacks, opts.native_extraction_lose_slot))
         return {"ok": True, "state": "stopped"}
     if operation == "join":
         from .service import join_game
         await join_game(opts.work, select_run(opts.work, "clients", opts.profile),
                         opts.invite, opts.headless, opts.character, native_zones=opts.native_zones,
-                        native_zone_walls=opts.native_zone_walls, guest_reload_input=opts.native_guest_reload_input)
+                        native_zone_walls=opts.native_zone_walls, guest_reload_input=opts.native_guest_reload_input,
+                        guest_inventory_view=opts.native_guest_inventory_view, guest_primary_input=opts.native_guest_primary_input)
         return {"ok": True, "state": "stopped"}
     if operation in {"characters", "create-character"}:
         from .service import character_catalog

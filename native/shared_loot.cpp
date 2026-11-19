@@ -50,6 +50,8 @@ namespace
         STR("/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C:AffectKarma");
     constexpr auto spawn_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:SpawnLoot");
     constexpr auto roll_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:RollKarma");
+    constexpr auto decide_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:DecideObject");
+    constexpr auto table_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:RollTable");
     constexpr auto passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
     constexpr auto box_location_path = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
     constexpr auto box_collision_path = STR("/Script/Engine.PrimitiveComponent:GetCollisionEnabled");
@@ -127,6 +129,11 @@ namespace
     bool enabled()
     {
         return env_flag("SILVERFISH_COOP_NATIVE_LOOT");
+    }
+
+    bool seeded_fixture_enabled()
+    {
+        return env_flag("SILVERFISH_COOP_NATIVE_FIXTURES") && env_flag("SILVERFISH_COOP_HEADLESS");
     }
 
     struct Context
@@ -379,6 +386,170 @@ namespace
                schema.effect && schema.count && schema.active && schema.instances;
     }
 
+    // Its first UE FRandomStream fraction is exactly zero. Check this on a
+    // scratch copy with the actual engine before changing a fixture's stream.
+    constexpr std::int32_t first_fraction_zero = -1768226079;
+
+    struct SeedFixture
+    {
+        Unreal::UFunction* table{};
+        Unreal::UFunction* decide{};
+        Unreal::FStructProperty* stream{};
+        Unreal::FIntProperty* initial{};
+        Unreal::FIntProperty* current{};
+        Unreal::FBoolProperty* seeded{};
+        Unreal::FMapProperty* table_items{};
+        Unreal::FClassProperty* roll_item{};
+        std::array<Unreal::UClass*, 2> selected{};
+        std::array<Unreal::FWeakObjectPtr, 2> children{};
+        std::array<std::array<std::int32_t, 2>, 2> previous{};
+        std::array<bool, 2> changed{};
+
+        std::string_view first_weighted_item(Unreal::FMapProperty* property, const void* container,
+                                             Unreal::UClass* item_base, Unreal::UClass*& selected_item) const
+        {
+            if (!property) return "stock_loot_fixture_map_property_unavailable";
+            if (!container) return "stock_loot_fixture_map_storage_unavailable";
+            auto* key = Unreal::CastField<Unreal::FClassProperty>(property->GetKeyProp());
+            auto* numeric = property->GetValueProp();
+            auto* double_weight = Unreal::CastField<Unreal::FDoubleProperty>(numeric);
+            auto* float_weight = Unreal::CastField<Unreal::FFloatProperty>(numeric);
+            if (!key || key->GetMetaClass().Get() != item_base || key->GetOffset_Internal() != 0 ||
+                key->GetSize() != sizeof(void*)) return "stock_loot_fixture_map_class_key_unverified";
+            if ((!double_weight && !float_weight) ||
+                numeric->GetSize() != (double_weight ? sizeof(double) : sizeof(float)))
+                return "stock_loot_fixture_map_weight_schema_unverified";
+            const auto layout = Unreal::FScriptMap::GetScriptLayout(
+                key->GetSize(), key->GetMinAlignment(), numeric->GetSize(), numeric->GetMinAlignment());
+            const auto declared_offset = numeric->GetOffset_Internal();
+            if (declared_offset != 0 && declared_offset != layout.ValueOffset)
+                return "stock_loot_fixture_map_pair_layout_unverified";
+            const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(container);
+            const auto count = map->Num();
+            const auto maximum = map->GetMaxIndex();
+            if (count == 0 && maximum == 0) return "stock_loot_fixture_map_empty";
+            if (count < 1 || maximum > 128 || count > maximum) return "stock_loot_fixture_map_extent_unverified";
+            for (int index = 0; index < maximum; ++index)
+            {
+                if (!map->IsValidIndex(index)) continue;
+                const auto* entry = static_cast<const std::byte*>(map->GetData(index, layout));
+                if (!entry) return "stock_loot_fixture_map_entry_unavailable";
+                const auto* value = entry + layout.ValueOffset;
+                const double chance = double_weight ? double_weight->GetPropertyValue(value)
+                                                    : float_weight->GetPropertyValue(value);
+                // A zero roll uses <= in the stock selector, so preceding zero-weight
+                // entries cannot be skipped. The authored fixture has positive weights.
+                if (!std::isfinite(chance) || chance <= 0.0)
+                    return "stock_loot_fixture_map_first_weight_unverified";
+                auto* object = key->GetObjectPropertyValue(entry);
+                if (!object) return "stock_loot_fixture_map_first_class_missing";
+                auto* type = Unreal::Cast<Unreal::UClass>(object);
+                if (!live(type) || !type->IsChildOf(item_base))
+                    return "stock_loot_fixture_map_first_class_unverified";
+                selected_item = type;
+                return {};
+            }
+            return "stock_loot_fixture_map_sparse_entry_missing";
+        }
+
+        std::string_view bind(const Context& context, const Schema& schema)
+        {
+            auto* type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.RandomStream"));
+            auto* child_type = context.spawners.front()->GetClassPrivate();
+            table = find<Unreal::UFunction>(table_path);
+            decide = find<Unreal::UFunction>(decide_path);
+            stream = field<Unreal::FStructProperty>(context.spawners.front(), STR("Stream"));
+            initial = field<Unreal::FIntProperty>(type, STR("InitialSeed"));
+            current = field<Unreal::FIntProperty>(type, STR("Seed"));
+            seeded = argument<Unreal::FBoolProperty>(table, STR("Seeded"), false, 0x50);
+            table_items = field<Unreal::FMapProperty>(table, STR("Table"));
+            roll_item = argument<Unreal::FClassProperty>(schema.roll, STR("Item"), false, 0);
+            if (!type || !blueprint(table, child_type, 3) || !blueprint(decide, child_type, 5) ||
+                !stream || stream->GetStruct().Get() != type || stream->GetSize() != 8 ||
+                !initial || initial->GetOffset_Internal() != 0 || initial->GetSize() != 4 ||
+                !current || current->GetOffset_Internal() != 4 || current->GetSize() != 4 ||
+                !seeded || !table_items || !table_items->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+                table_items->GetOffset_Internal() != 0 || !roll_item)
+                return "stock_loot_fixture_schema_unavailable";
+
+            Unreal::UClass* authored_first{};
+            if (const auto failure = first_weighted_item(
+                field<Unreal::FMapProperty>(context.crate, STR("Loot Table_Items")), context.crate,
+                schema.item_type, authored_first); !failure.empty()) return failure;
+            auto* slot_value = field<Unreal::FDoubleProperty>(context.crate, STR("SpawnerExpectedValue"));
+            const auto expected_value = slot_value ? slot_value->GetPropertyValueInContainer(context.crate) : 0.0;
+            if (!std::isfinite(expected_value) || expected_value <= 0.0)
+                return "stock_loot_fixture_slot_value_unverified";
+
+            constexpr std::array salts{-73835290, -28604056};
+            for (std::size_t index = 0; index < children.size(); ++index)
+            {
+                auto* child = context.spawners[index];
+                auto* salt = field<Unreal::FIntProperty>(child, STR("SpawnerSalt"));
+                if (!salt || salt->GetPropertyValueInContainer(child) != salts[index])
+                    return "stock_loot_fixture_authored_spawner_changed";
+                children[index] = child;
+            }
+
+            auto* math = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetMathLibrary"));
+            auto* draw = find<Unreal::UFunction>(STR("/Script/Engine.KismetMathLibrary:RandomFloatFromStream"));
+            auto* input = field<Unreal::FStructProperty>(draw, STR("Stream"));
+            auto* output = field<Unreal::FFloatProperty>(draw, STR("ReturnValue"));
+            struct Draw
+            {
+                std::int32_t initial_seed{first_fraction_zero};
+                std::int32_t seed{first_fraction_zero};
+                float fraction{-1.0f};
+            } test;
+            if (!math || !draw || draw->GetOuterPrivate() != math->GetClassPrivate() ||
+                !draw->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+                draw->GetNumParms() != 2 || draw->GetParmsSize() != sizeof(test) ||
+                !input || !input->HasAnyPropertyFlags(Unreal::CPF_Parm) || input->GetStruct().Get() != type ||
+                input->GetOffset_Internal() != 0 || input->GetSize() != 8 ||
+                !output || output != draw->GetReturnProperty() || output->GetOffset_Internal() != offsetof(Draw, fraction))
+                return "stock_loot_fixture_random_schema_unavailable";
+            math->ProcessEvent(draw, &test);
+            return test.fraction == 0.0f ? std::string_view{} : "stock_loot_fixture_seed_unverified";
+        }
+
+        bool reset_draw(std::size_t index, Unreal::UObject* child)
+        {
+            if (!live(child) || children[index].Get() != child) return false;
+            auto* value = stream->ContainerPtrToValuePtr<void>(child);
+            if (!changed[index])
+            {
+                previous[index] = {initial->GetPropertyValueInContainer(value),
+                                   current->GetPropertyValueInContainer(value)};
+                changed[index] = true;
+            }
+            initial->SetPropertyValueInContainer(value, first_fraction_zero);
+            current->SetPropertyValueInContainer(value, first_fraction_zero);
+            return true;
+        }
+
+        bool restore()
+        {
+            bool complete = true;
+            for (std::size_t index = 0; index < children.size(); ++index)
+            {
+                if (!changed[index]) continue;
+                auto* child = children[index].Get();
+                if (!live(child))
+                {
+                    complete = false;
+                    continue;
+                }
+                auto* value = stream->ContainerPtrToValuePtr<void>(child);
+                initial->SetPropertyValueInContainer(value, previous[index][0]);
+                current->SetPropertyValueInContainer(value, previous[index][1]);
+                if (initial->GetPropertyValueInContainer(value) != previous[index][0] ||
+                    current->GetPropertyValueInContainer(value) != previous[index][1])
+                    complete = false;
+            }
+            return complete;
+        }
+    };
+
     struct OpenScope
     {
         const Context& context;
@@ -389,6 +560,9 @@ namespace
         std::array<int, 2> rolls{};
         int accounts{};
         std::string_view problem{};
+        SeedFixture* fixture{};
+        std::array<int, 2> table_draws{};
+        std::array<int, 2> karma_draws{};
     };
 
     using Clock = std::chrono::steady_clock;
@@ -408,6 +582,7 @@ namespace
     thread_local VerifiedRoll latest_roll;
     std::atomic<bool> installed{};
     Hook::GlobalCallbackId callback = Hook::ERROR_ID;
+    Hook::GlobalCallbackId fixture_callback = Hook::ERROR_ID;
 
     struct ActiveOpen
     {
@@ -433,6 +608,55 @@ namespace
         if (component == context.spawners[0]) return 0;
         if (component == context.spawners[1]) return 1;
         return -1;
+    }
+
+    void seed_fixture_draw(Iteration& iteration, Unreal::UObject* object, Unreal::FFrame& frame, void*)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !opening || !opening->fixture || !opening->problem.empty()) return;
+        auto& scope = *opening;
+        auto& fixture = *scope.fixture;
+        const bool table = frame.Node() == fixture.table;
+        if (!table && frame.Node() != scope.schema.roll) return;
+        const auto index = spawner_index(scope.context, object);
+        if (index < 0) return;
+        const auto slot = static_cast<std::size_t>(index);
+        auto* decide = frame.PreviousFrame();
+        auto* spawn = decide ? decide->PreviousFrame() : nullptr;
+        auto* script = spawn ? spawn->PreviousFrame() : nullptr;
+        auto* locals = frame.Locals();
+        if (frame.Object() != object || !locals || !decide || decide->Node() != fixture.decide ||
+            decide->Object() != object || !spawn || spawn->Node() != scope.schema.spawn ||
+            spawn->Object() != object || !script || script->Node() != scope.schema.script ||
+            script->Object() != scope.context.crate || iteration.OriginalFunctionCallPrevented())
+        {
+            scope.problem = "stock_loot_fixture_draw_frame_unverified";
+            return;
+        }
+        if (table)
+        {
+            auto* items = fixture.table_items->HasAnyPropertyFlags(Unreal::CPF_OutParm)
+                ? find_output(frame, fixture.table_items) : locals;
+            if (++scope.table_draws[slot] != 1 || fixture.seeded->GetPropertyValueInContainer(locals))
+            {
+                scope.problem = "stock_loot_fixture_stock_seed_branch_changed";
+                return;
+            }
+            scope.problem = fixture.first_weighted_item(
+                fixture.table_items, items, scope.schema.item_type, fixture.selected[slot]);
+            if (!scope.problem.empty()) return;
+            if (!fixture.reset_draw(slot, object))
+            {
+                scope.problem = "stock_loot_fixture_child_stream_unverified";
+                return;
+            }
+            fixture.seeded->SetPropertyValueInContainer(locals, true);
+        }
+        else if (++scope.karma_draws[slot] != 1 || scope.table_draws[slot] != 1 ||
+                 fixture.roll_item->GetObjectPropertyValue(fixture.roll_item->ContainerPtrToValuePtr<void>(locals)) !=
+                     fixture.selected[slot] || !fixture.reset_draw(slot, object))
+        {
+            scope.problem = "stock_loot_fixture_karma_draw_unverified";
+        }
     }
 
     void override_luck(OpenScope& scope, Iteration& iteration, Unreal::UObject* object, Unreal::FFrame& frame)
@@ -539,25 +763,38 @@ namespace
     {
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
-        if (lua.get_stack_size() != 6 || !lua.is_bool(6))
+        const auto argc = lua.get_stack_size();
+        if ((argc != 6 && argc != 7) || !lua.is_bool(6) || (argc == 7 && !lua.is_bool(7)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
         std::array<Address, 5> addresses{};
         if (!read_addresses(lua, addresses)) return result(lua, false, "native_loot_exact_open_arguments_required");
         latest_roll = {};
         Context context;
         context.lucky = lua.get_bool();
+        const bool force_nonempty = argc == 7 && lua.get_bool();
+        if (force_nonempty && (!seeded_fixture_enabled() || fixture_callback == Hook::ERROR_ID))
+            return result(lua, false, "stock_loot_fixture_seed_unavailable");
         if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context);
             !failure.empty()) return result(lua, false, failure);
 
         Schema schema;
         if (!bind_schema(context, schema)) return result(lua, false, "stock_loot_blueprint_schema_unavailable");
+        SeedFixture fixture;
+        if (force_nonempty)
+        {
+            if (const auto failure = fixture.bind(context, schema); !failure.empty())
+                return result(lua, false, failure);
+        }
         OpenParams input;
         schema.opener->SetObjectPropertyValue(schema.opener->ContainerPtrToValuePtr<void>(&input), context.pawn);
         schema.hit_component->SetObjectPropertyValue(schema.hit_component->ContainerPtrToValuePtr<void>(&input), context.box);
         OpenScope scope{context, schema};
+        if (force_nonempty) scope.fixture = &fixture;
+        bool restored = true;
         {
             ActiveOpen guard(scope);
             context.crate->ProcessEvent(schema.open, &input);
+            if (force_nonempty) restored = fixture.restore();
         }
 
         const bool looted = authority(context.crate, context.world) && read_bool(context.crate, STR("Looted"), true);
@@ -565,7 +802,8 @@ namespace
         auto* second = scope.items[1].Get();
         if (scope.problem.empty())
         {
-            if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
+            if (!restored) scope.problem = "stock_loot_fixture_original_stream_unverified";
+            else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
             else if (scope.accounts != 1) scope.problem = "stock_loot_open_karma_query_unverified";
             else if (scope.spawns != std::array{1, 1}) scope.problem = "stock_loot_open_roll_calls_unverified";
             else if (object_field(context.crate, STR("Player")) != context.pawn)
@@ -577,6 +815,17 @@ namespace
             else if ((scope.produced[0] && !authority(first, context.world)) ||
                      (scope.produced[1] && !authority(second, context.world)) || (first && first == second))
                 scope.problem = "stock_loot_open_spawned_item_unverified";
+            else if (force_nonempty)
+            {
+                if (scope.table_draws != std::array{1, 1} || scope.karma_draws != std::array{1, 1} ||
+                    scope.rolls != std::array{1, 1})
+                    scope.problem = "stock_loot_fixture_seed_route_unverified";
+                else if (!first && !second)
+                    scope.problem = "stock_loot_fixture_no_stock_spawn";
+                else if ((first && first->GetClassPrivate() != fixture.selected[0]) ||
+                         (second && second->GetClassPrivate() != fixture.selected[1]))
+                    scope.problem = "stock_loot_fixture_spawn_class_unverified";
+            }
         }
         const int traits = scope.accounts + scope.rolls[0] + scope.rolls[1];
         const bool ok = scope.problem.empty();
@@ -714,6 +963,11 @@ namespace silverfish::shared_loot
         if (!enabled() || callback != Hook::ERROR_ID) return;
         callback = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             capture, {false, false, owner, STR("Observe exact stock crate loot")});
+        if (callback != Hook::ERROR_ID && seeded_fixture_enabled())
+        {
+            fixture_callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+                seed_fixture_draw, {false, false, owner, STR("Seed exact staged stock crate draws")});
+        }
         installed.store(callback != Hook::ERROR_ID, std::memory_order_release);
     }
 
@@ -721,7 +975,9 @@ namespace silverfish::shared_loot
     {
         installed.store(false, std::memory_order_release);
         if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
+        if (fixture_callback != Hook::ERROR_ID) Hook::UnregisterCallback(fixture_callback);
         callback = Hook::ERROR_ID;
+        fixture_callback = Hook::ERROR_ID;
     }
 
     void register_lua(RC::LuaMadeSimple::Lua& lua)

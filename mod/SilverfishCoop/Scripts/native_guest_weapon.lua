@@ -2,8 +2,10 @@ local guest_weapon = {}
 local guest_save = require("guest_save")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
-    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local weapon_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
+local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local smg_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
+local pistol_path = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -11,9 +13,9 @@ local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 
 local function equipped_guid(pawn, save)
     local held = pawn.EquipedItem
-    local stock = StaticFindObject(weapon_path)
-    if not held or not held:IsValid() or not stock or not stock:IsValid()
-        or held:GetClass():GetAddress() ~= stock:GetAddress() then return nil end
+    if not held or not held:IsValid() then return nil end
+    local held_class = held:GetClass()
+    if not held_class or not held_class:IsValid() then return nil end
     local index = math.tointeger(save.PlayerEquipIndex)
     local equipment = save.PlayerEquipment
     local count = equipment and math.tointeger(equipment:GetArrayNum())
@@ -21,7 +23,7 @@ local function equipped_guid(pawn, save)
     local row = equipment[index + 1]
     local class = row and row[class_field]
     local identity = row and row[guid_field]
-    if not class or not class:IsValid() or class:GetAddress() ~= stock:GetAddress() or not identity then return nil end
+    if not class or not class:IsValid() or class:GetAddress() ~= held_class:GetAddress() or not identity then return nil end
     local words = {}
     for _, name in ipairs({"A", "B", "C", "D"}) do
         local word = math.tointeger(identity[name])
@@ -29,7 +31,9 @@ local function equipped_guid(pawn, save)
         words[#words + 1] = word & 0xffffffff
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
-    return guid:find("[^0]") and guid or nil
+    local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
+    local kind = class_name == smg_path and "smg" or class_name == pistol_path and "light-pistol" or nil
+    return guid:find("[^0]") and guid or nil, kind
 end
 
 function guest_weapon.command(fields, state, phase)
@@ -46,12 +50,15 @@ function guest_weapon.command(fields, state, phase)
     local invoke = operations[action]
     local inspect = operations.inspect
     local name, guid = fields[3], fields[4]
+    local fixture = action == "seed" or action == "seed-ammo"
+    local pistol_fixture = action == "seed" and #fields == 5 and fixtures and headless and fields[5] == "light-pistol"
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
-    if not enabled or #fields ~= 4 or phase ~= "hosting"
+    if not enabled or (#fields ~= 4 and not pistol_fixture) or phase ~= "hosting"
         or (not equipped_target and (not guid or #guid ~= 32 or guid:find("[^0-9A-F]"))) then
-        error("A staged native weapon operation needs an exact guest and item GUID", 0)
+        error("A native weapon operation needs an exact guest and item GUID", 0)
     end
+    if fixture and not fixtures then error("native_guest_weapon_fixtures_disabled", 0) end
     if type(invoke) ~= "function" or type(inspect) ~= "function" then
         error("The matched native weapon add-on is unavailable", 0)
     end
@@ -67,14 +74,15 @@ function guest_weapon.command(fields, state, phase)
         guid = equipped
     end
     if not pawn or not detached then error("The exact guest weapon save is unavailable", 0) end
-    if action == "seed" or action == "seed-ammo" then
-        local path = action == "seed-ammo" and ammo_path or weapon_path
+    if fixture then
+        local path = action == "seed-ammo" and ammo_path or pistol_fixture and pistol_path or smg_path
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) end
     end
 
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
-    local ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid)
+    local seed_variant = pistol_fixture and { "light-pistol" } or {}
+    local ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid, table.unpack(seed_variant))
     local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after
     if action == "fire" then projectiles = fifth end
     if action == "reload" then before, after, reserve_before, reserve_after = first, second, fifth, sixth end
@@ -102,11 +110,23 @@ function guest_weapon.reset()
 end
 
 function guest_weapon.rows(state, phase, status_row)
+    local rows = {}
+    if not enabled or phase ~= "hosting" or not state.listening then return rows end
+    for _, detail in ipairs(state.guests) do
+        local ok, guid, kind = pcall(function()
+            local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
+            if pawn and save then return equipped_guid(pawn, save) end
+        end)
+        if ok and guid and kind then
+            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind)
+        end
+    end
     local row = observation
-    if not row or phase ~= "hosting" or row.map ~= state.map then return {} end
-    return { status_row("native-guest-weapon", row.map, row.action, row.pawn, row.guid, row.ok and 1 or 0,
+    if not row or row.map ~= state.map then return rows end
+    rows[#rows + 1] = status_row("native-guest-weapon", row.map, row.action, row.pawn, row.guid, row.ok and 1 or 0,
         row.status, row.before or "-", row.after or "-", row.actor_ammo or "-", row.stored_ammo or "-",
-        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-") }
+        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-")
+    return rows
 end
 
 return guest_weapon

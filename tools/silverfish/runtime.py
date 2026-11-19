@@ -16,6 +16,8 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
+from .native_authored_pickup import SOURCE as AUTHORED_PICKUP_SOURCE
 from .native_guest_npc import parse_bandit
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
@@ -259,7 +261,8 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
-           expanded_zones: bool = False, guest_reload_input: bool = False):
+           expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
+           native_shop_view: bool = False, guest_primary_input: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -278,6 +281,12 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_HEADLESS", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES", None)
+    env.pop("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW", None)
+    env.pop("SILVERFISH_COOP_NATIVE_INTERACT_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_SHOP_VIEW", None)
+    env.pop("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES", None)
     backend = native_death_backend(work)
     if native_events and (backend != "cpp" or port is None):
         raise ValueError("Native event scope requires a staged C++ listen host")
@@ -289,6 +298,12 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Physical exit blockers require native exit handling")
     if guest_reload_input and (port is not None or not native_zones):
         raise ValueError("Stock guest reload input requires a staged native client")
+    if guest_primary_input and (port is not None or not native_zones):
+        raise ValueError("Stock guest primary input requires a staged native client")
+    if guest_inventory_view and (port is not None or not native_zones):
+        raise ValueError("The guest inventory view requires a staged native client")
+    if native_shop_view and (not native_zones or port is not None and not native_guest):
+        raise ValueError("The merchant view requires scoped native guest ownership")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
     if native_events:
@@ -298,6 +313,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     if native_zones:
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
+        env["SILVERFISH_COOP_NATIVE_INTERACT_INPUT"] = "1"
         if port is not None and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
@@ -307,6 +323,16 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_EXPANDED_ZONES"] = "1"
     if guest_reload_input:
         env["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT"] = "1"
+    if guest_primary_input:
+        env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT"] = "1"
+        if headless:
+            env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES"] = "1"
+    if guest_inventory_view:
+        env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
+    if native_shop_view:
+        env["SILVERFISH_COOP_NATIVE_SHOP_VIEW"] = "1"
+        if headless and port is None:
+            env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -353,8 +379,12 @@ class Bridge:
         self.matrix_offset = 0
         self.authored_zone_offset = 0
         self.rest_offset = 0
+        self.inventory_view_offset = 0
+        self.inventory_equip_offset = 0
+        self.primary_input_offset = 0
+        self.shop_view_offset = 0
 
-    def interactions(self) -> list[str]:
+    def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
         try:
             with (self.directory / "input.tsv").open("rb") as stream:
@@ -366,10 +396,94 @@ class Bridge:
         self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
         results = []
         for line in batch[:end].splitlines():
-            action, _, count = line.partition(b"\t")
-            if action == b"interact" and count.isdigit() and len(count) <= 12:
-                results.append(uuid.uuid5(self.input_namespace, count.decode("ascii")).hex)
+            fields = line.split(b"\t")
+            if len(fields) not in (2, 3) or fields[0] != b"interact" or not fields[1].isdigit() or len(fields[1]) > 12:
+                continue
+            target = fields[2] if len(fields) == 3 else None
+            if (target is not None and target != AUTHORED_PICKUP_SOURCE.encode("ascii")
+                    and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
+                continue
+            results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
+                            target.decode("ascii") if target else None))
         return results
+
+    def native_inventory_view_requests(self) -> list[tuple[int, bool, str, str]]:
+        try:
+            with (self.directory / "native-inventory-view-events").open("rb") as stream:
+                stream.seek(self.inventory_view_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.inventory_view_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) == 5 and fields[0] == "inventory-view" and fields[2] in ("open", "closed")
+                    and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
+                    and 0 < (sequence := int(fields[1])) < 2**53 and len(fields[3]) <= 256 and len(fields[4]) <= 512):
+                events.append((sequence, fields[2] == "open", fields[3], fields[4]))
+        return events
+
+    def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str]]:
+        try:
+            with (self.directory / "native-guest-primary-events").open("rb") as stream:
+                stream.seek(self.primary_input_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.primary_input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) != 6 or fields[0] != "native-guest-primary-intent"
+                    or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
+                    or not 0 < (sequence := int(fields[1])) < 2**53
+                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol")
+                    or len(fields[2]) > 256 or len(fields[3]) > 512):
+                continue
+            events.append((sequence, *fields[2:]))
+        return events
+
+    def native_inventory_equip_requests(self) -> list[tuple[int, str, str, str, str]]:
+        try:
+            with (self.directory / "native-guest-inventory-equip-events").open("rb") as stream:
+                stream.seek(self.inventory_equip_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.inventory_equip_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) != 6 or fields[0] != "native-guest-inventory-equip"
+                    or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
+                    or not 0 < (sequence := int(fields[1])) < 2**53
+                    or len(fields[2]) > 256 or any(len(value) > 512 for value in fields[3:])):
+                continue
+            events.append((sequence, *fields[2:]))
+        return events
+
+    def native_shop_view_requests(self) -> list[tuple[int, int, str, str, str, str, str, str]]:
+        try:
+            with (self.directory / "native-shop-view-events").open("rb") as stream:
+                stream.seek(self.shop_view_offset)
+                batch = stream.read(8192)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.shop_view_offset += end if end else len(batch) if len(batch) == 8192 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy")
+                    and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
+                            for value in fields[1:3])
+                    and all(len(value) <= 512 for value in fields[4:])):
+                events.append((int(fields[1]), int(fields[2]), *fields[3:]))
+        return events
 
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
         try:
@@ -618,11 +732,70 @@ class Bridge:
                     }
                 elif fields[0] == "native-bandit":
                     data["native_bandit"] = parse_bandit(fields)
+                elif fields[0] == "native-campaign-npc" and len(fields) == 10:
+                    data["native_campaign_npc"] = {
+                        "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
+                        "spawner": fields[5], "squad_data": fields[6], "cohort_size": int(fields[7]),
+                        "replicated": int(fields[8]), "spawn_denials": int(fields[9]), "members": [],
+                    }
+                elif fields[0] == "native-campaign-npc-census" and len(fields) == 10 and "native_campaign_npc" in data:
+                    metrics = ("natural_calls", "authority", "simulated", "other", "simulated_controllers",
+                               "ai_denials", "antfarm")
+                    data["native_campaign_npc"].update(zip(metrics, map(int, fields[3:])))
+                elif fields[0] == "native-campaign-npc-member" and len(fields) == 4 and "native_campaign_npc" in data:
+                    data["native_campaign_npc"]["members"].append(fields[3])
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol"):
+                    data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
+                elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
+                    data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
+                                                            "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
+                elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
+                    data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
+                elif fields[0] == "native-guest-bandage" and len(fields) == 13 and fields[12] in ("0", "1"):
+                    data["native_guest_bandage"] = {"state": fields[1], "map": fields[2], "pawn": fields[3], "guid": fields[4],
+                                                   "quantity_before": int(fields[5]), "quantity_after": int(fields[6]),
+                                                   "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
+                                                   "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
+                                                   "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
                 elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
                     data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
                                                            "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}
+                elif fields[0] == "native-inventory-view" and len(fields) == 8:
+                    data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
+                                                    "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
+                                                    "total": int(fields[6]), "count": int(fields[7])}
+                elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
+                    data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
+                                                                 "pawn": fields[3], "guid": fields[4], "state": fields[5]}
+                elif fields[0] == "native-bag-projection" and len(fields) == 7:
+                    data["native_bag_projection"] = {"map": fields[1], "epoch": fields[2], "owner": fields[3],
+                                                     "count": int(fields[4]), "requested": int(fields[5]), "status": fields[6]}
+                elif fields[0] == "native-bag-projection-interaction" and len(fields) == 6:
+                    data["native_bag_projection_interaction"] = {"map": fields[1], "epoch": fields[2], "bag": fields[3],
+                                                                 "sequence": int(fields[4]), "entry": fields[5]}
+                elif fields[0] == "native-finite-shop" and len(fields) == 10:
+                    data["native_finite_shop"] = parse_finite_shop_summary(fields)
+                elif fields[0] == "native-finite-shop-item" and len(fields) == 6 and "native_finite_shop" in data:
+                    data["native_finite_shop"]["offers"].append(parse_finite_shop_item(fields))
+                elif fields[0] == "native-shop-view" and len(fields) == 12:
+                    data["native_shop_view"] = {
+                        "state": fields[1], "sequence": int(fields[2]), "map": fields[3], "pawn": fields[4], "actor": fields[5],
+                        "wallet": None if fields[6] == "-" else int(fields[6]), "total": int(fields[7]),
+                        "visible": int(fields[8]), "selection": int(fields[9]),
+                        "guid": None if fields[10] == "-" else fields[10], "price": None if fields[11] == "-" else int(fields[11]),
+                    }
+                elif fields[0] == "native-authored-pickup" and len(fields) == 6:
+                    data["native_authored_pickup"] = {"source": fields[1], "map": fields[2], "actor": fields[3],
+                                                      "class_path": fields[4], "state": fields[5]}
+                elif fields[0] == "native-authored-pickup-interaction" and len(fields) == 6:
+                    data["native_authored_pickup_interaction"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
+                                                                  "sequence": int(fields[4]), "entry": fields[5]}
+                elif fields[0] == "native-authored-pickup-claim" and len(fields) == 9:
+                    data["native_authored_pickup_claim"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
+                                                            "ok": fields[4] == "1", "applied": fields[5] == "1",
+                                                            "status": fields[6], "guid": fields[7], "slot": fields[8]}
                 elif fields[0] == "native-rest-guard" and len(fields) == 4:
                     data["native_rest_guard"] = {"armed": fields[1] == "1", "status": fields[2],
                                                "guest_denials": int(fields[3])}
@@ -684,6 +857,12 @@ class Bridge:
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
                         "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],
+                    }
+                elif fields[0] == "native-nothing-return" and len(fields) == 8:
+                    data["native_nothing_return"] = {
+                        "map": fields[1], "installed": fields[2] == "1", "armed": fields[3] == "1",
+                        "fresh": fields[4] == "1", "status": fields[5],
+                        "pawn": None if fields[6] == "-" else fields[6], "volume": None if fields[7] == "-" else fields[7],
                     }
                 elif fields[0] == "native-dream-isolation" and len(fields) == 6:
                     data["native_dream_isolation"] = {
@@ -815,7 +994,7 @@ class Bridge:
                         "id": fields[1], "state": fields[2], "step": fields[3], "final_step": fields[4],
                         "reward_cash": fields[5], "message": fields[6],
                     }
-                elif fields[0] == "native-broker" and len(fields) == 15:
+                elif fields[0] == "native-broker" and len(fields) in (15, 27):
                     data["native_broker"] = {
                         "operation": fields[1], "map": fields[2], "pawn": fields[3], "id": fields[4], "state": fields[5],
                         "step": None if fields[6] == "-" else int(fields[6]), "final_step": int(fields[7]),
@@ -823,6 +1002,13 @@ class Bridge:
                         "native_cash": int(fields[11]), "native_xp": int(fields[12]), "changed": fields[13] == "1",
                         "consumed_guid": fields[14],
                     }
+                    if len(fields) == 27:
+                        data["native_broker"].update({
+                            key: int(value) for key, value in zip(("native_debt", "topic_epc", "topic_drill_lab",
+                                "topic_micro_drill", "freelancer_rep", "fae_rep", "debt_reward", "voucher_rows",
+                                "menu_guard_armed", "guarded_ping", "guarded_menu", "guarded_gameplay"),
+                                fields[15:], strict=True)
+                        })
                 elif fields[0] == "native-broker-position" and len(fields) == 8:
                     data["native_broker_position"] = {"map": fields[1], "pawn": fields[2], "target": fields[3],
                                                      "point": fields[4], "location": [_finite(axis) for axis in fields[5:]]}

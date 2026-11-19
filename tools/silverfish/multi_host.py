@@ -1,6 +1,5 @@
 """Apply independent authenticated guest leases to the staged game host."""
 
-import asyncio
 import contextlib
 import math
 import time
@@ -19,6 +18,7 @@ class MultiHost(Host):
         self.members = PartyMembers(self.store, max_guests=max_guests, enrollment=self.enrollment)
         self.relay = None
         self.returning_guests: list[str] = []
+        self.retirement_processed: set[str] = set()
 
     def _update_native_relay(self) -> None:
         if self.relay is None:
@@ -194,15 +194,7 @@ class MultiHost(Host):
             scope = self.last_game.get("native_guest_save_members", {}).get(pawn)
             if not scope or scope["state"] != "bound":
                 raise RuntimeError("An enrolled native guest has no independent save scope")
-            slot = native_host_save.new_slot()
-            snapshot = await bridge.command("native-guest-save-capture", pawn, slot, timeout=7)
-            proof = snapshot.get("native_guest_save_member_frames", {}).get(pawn, {})
-            if (proof.get("state") != "captured" or proof.get("slot") != slot
-                    or proof.get("map") != self.last_game["map"] or snapshot.get("state") != "hosting"):
-                raise RuntimeError("The detached member save generation was not verified")
-            frame = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, proof["map"], flush=True)
-            records[member.character_id] = dict(frame, character_id=member.character_id)
-            self.last_game, self.last_seen = snapshot, time.monotonic()
+            records[member.character_id] = await self.capture_guest_generation(bridge, pawn, member.character_id)
         return records
 
     async def _place_member(self, bridge, member, observation, *, near_host: bool):
@@ -280,6 +272,13 @@ class MultiHost(Host):
             identifier = result.reservation.guest_id
             self.control.event("native_guest_enrollment_aborted", guest_id=identifier, reason=result.reason)
             await transport.abort_guest_route(identifier)
+        expired = self.members.expired()
+        still_bound = self.members.match_pawns(self.last_game, include_expired=True) if expired else {}
+        departing = {member.character_id: row.binding.pawn for member in expired
+                     if member.ready and member.lease_id not in self.retirement_processed
+                     and (row := still_bound.get(member.role))}
+        await self.checkpoint_departing_guests(bridge, departing)
+        self.retirement_processed = {member.lease_id for member in expired}
         for member in self.members.expire(self.last_game):
             if member.binding:
                 with contextlib.suppress(RuntimeError, TimeoutError):

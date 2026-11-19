@@ -27,9 +27,12 @@ namespace
     using Guid = std::array<std::uint32_t, 4>;
 
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
+    constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
-    constexpr auto weapon_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
+    constexpr auto smg_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
+    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
+    constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto ammo_fixture_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
@@ -163,7 +166,9 @@ namespace
 
     bool ownership_current(const Context& context)
     {
-        if (!authority(context.pawn) || !live(context.controller) || !live(context.connection) ||
+        if (!authority(context.pawn) || !authority(context.controller) || !live(context.connection) ||
+            !boolean(context.pawn, STR("bActorIsBeingDestroyed"), false) ||
+            !boolean(context.controller, STR("bActorIsBeingDestroyed"), false) ||
             static_cast<Unreal::AActor*>(context.pawn)->GetWorld() != context.world ||
             static_cast<Unreal::AActor*>(context.controller)->GetWorld() != context.world ||
             object(context.pawn, STR("Controller")) != context.controller ||
@@ -177,7 +182,11 @@ namespace
         auto* driver = object(context.world, STR("NetDriver"));
         auto* clients = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
         auto* connection = clients ? Unreal::CastField<Unreal::FObjectProperty>(clients->GetInner()) : nullptr;
-        if (!live(driver) || object(driver, STR("ServerConnection")) || !connection) return false;
+        if (!live(driver) || !field<Unreal::FObjectProperty>(driver, STR("ServerConnection")) ||
+            object(driver, STR("ServerConnection")) || object(driver, STR("World")) != context.world || !connection ||
+            object(context.connection, STR("Driver")) != driver ||
+            object(context.connection, STR("PlayerController")) != context.controller ||
+            object(context.connection, STR("OwningActor")) != context.controller) return false;
         Unreal::FScriptArrayHelper list(clients, clients->ContainerPtrToValuePtr<void>(driver));
         if (list.Num() < 1 || list.Num() > max_clients) return false;
         std::array<Unreal::UObject*, max_clients> seen{};
@@ -204,23 +213,29 @@ namespace
         return matched;
     }
 
-    std::string_view resolve(const Lua& lua, Context& context)
+    std::string_view resolve(const Lua& lua, Context& context, bool* seed_pistol)
     {
-        if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return "native_guest_weapon_fixtures_disabled";
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+        if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
+        const auto count = lua.get_stack_size();
+        if (!Unreal::IsInGameThreadRaw() || (count != 3 && !(seed_pistol && count == 4 && lua.is_string(4))) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         if (pawn_address <= 0 || save_address <= 0 || !parse_guid(lua.get_string(), context.guid))
             return "guest_pawn_save_and_guid_required";
+        if (count == 4)
+        {
+            if (!env("SILVERFISH_COOP_HEADLESS") || lua.get_string() != "light-pistol")
+                return "stock_guest_weapon_fixture_profile_unqualified";
+            *seed_pistol = true;
+        }
 
         auto* pawn_class = find<Unreal::UClass>(pawn_path);
         auto* save_class = find<Unreal::UClass>(save_path);
         auto* instance_class = find<Unreal::UClass>(instance_path);
-        auto* controller_class = find<Unreal::UClass>(STR("/Script/Engine.PlayerController"));
+        auto* controller_class = find<Unreal::UClass>(controller_path);
         auto* connection_class = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
-        context.weapon = find<Unreal::UClass>(weapon_path);
-        if (!pawn_class || !save_class || !instance_class || !controller_class || !connection_class || !context.weapon)
+        if (!pawn_class || !save_class || !instance_class || !controller_class || !connection_class)
             return "stock_guest_weapon_class_unavailable";
 
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
@@ -242,7 +257,7 @@ namespace
         context.connection = object(context.controller, STR("Player"));
         if (!context.world || !live(context.instance) || context.instance->GetClassPrivate() != instance_class ||
             !live(context.stock) || context.stock->GetClassPrivate() != save_class || context.stock == context.save ||
-            !live(context.controller) || !context.controller->IsA(controller_class) ||
+            !live(context.controller) || context.controller->GetClassPrivate() != controller_class ||
             !live(context.connection) || !context.connection->IsA(connection_class) || !ownership_current(context))
             return "authenticated_guest_detached_save_required";
         return {};
@@ -323,7 +338,7 @@ namespace
             {
                 auto* row = rows.GetRawPtr(i);
                 if (inventory.identity(row) != context.guid) continue;
-                if (inventory.item || inventory.row_class(row) != expected_class) return false;
+                if (inventory.item || (expected_class && inventory.row_class(row) != expected_class)) return false;
                 inventory.item = row;
                 index = i;
             }
@@ -331,6 +346,14 @@ namespace
         };
         return scan(inventory.backpack, inventory.backpack_index) && scan(inventory.equipment, inventory.equipment_index)
             ? "" : "guest_weapon_guid_conflict";
+    }
+
+    Unreal::UClass* qualified_weapon(Unreal::UObject* item_class)
+    {
+        auto* weapon = Unreal::Cast<Unreal::UClass>(item_class);
+        auto* base = find<Unreal::UClass>(weapon_base_path);
+        if (!live(weapon) || !base || !weapon->IsChildOf(base)) return nullptr;
+        return weapon == find<Unreal::UClass>(smg_path) || weapon == find<Unreal::UClass>(pistol_path) ? weapon : nullptr;
     }
 
     bool ready_pawn(const Context& context)
@@ -818,39 +841,47 @@ namespace
             return reports_ammo ? proof(lua, false, error, -1, -1, operation == Operation::Fire ? 0 : -1)
                                 : result(lua, false, error);
         };
-        Context context;
-        if (const auto error = resolve(lua, context); !error.empty()) return fail(error);
-        auto* expected_class = context.weapon;
-        if constexpr (operation == Operation::SeedAmmo)
+        if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo || operation == Operation::Disarm)
         {
-            expected_class = find<Unreal::UClass>(ammo_fixture_path);
-            if (!expected_class) return fail("stock_guest_ammo_fixture_class_unavailable");
+            if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return fail("native_guest_weapon_fixtures_disabled");
         }
+        Context context;
+        bool seed_pistol = false;
+        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_pistol : nullptr);
+            !error.empty()) return fail(error);
         Inventory inventory;
-        if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
         if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo)
         {
+            const auto path = operation == Operation::SeedAmmo ? ammo_fixture_path : seed_pistol ? pistol_path : smg_path;
+            auto* expected_class = find<Unreal::UClass>(path);
+            if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class)))
+                return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
+                                                             : "stock_guest_weapon_class_unavailable");
+            if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
             return seed(lua, context, inventory, expected_class, operation == Operation::SeedAmmo);
         }
-        else
-        {
-            if (!inventory.item) return fail("owned_guest_weapon_guid_required");
-            if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
-            if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
-            if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
-            return fire(lua, context, inventory, operation == Operation::Disarm);
-        }
+        if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
+        if (!inventory.item) return fail("owned_guest_weapon_guid_required");
+        context.weapon = qualified_weapon(inventory.row_class(inventory.item));
+        if (!context.weapon) return fail("guest_weapon_class_unqualified");
+        if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
+        if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
+        if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
+        return fire(lua, context, inventory, operation == Operation::Disarm);
     }
 }
 
 void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
-    if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return;
-    lua.register_function("SilverfishSeedNativeGuestWeapon", run<Operation::Seed>);
-    lua.register_function("SilverfishSeedNativeGuestAmmo", run<Operation::SeedAmmo>);
+    if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return;
     lua.register_function("SilverfishEquipNativeGuestWeapon", run<Operation::Equip>);
     lua.register_function("SilverfishInspectNativeGuestWeapon", run<Operation::Inspect>);
     lua.register_function("SilverfishFireNativeGuestWeapon", run<Operation::Fire>);
-    lua.register_function("SilverfishDisarmNativeGuestWeapon", run<Operation::Disarm>);
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
+    if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
+    {
+        lua.register_function("SilverfishSeedNativeGuestWeapon", run<Operation::Seed>);
+        lua.register_function("SilverfishSeedNativeGuestAmmo", run<Operation::SeedAmmo>);
+        lua.register_function("SilverfishDisarmNativeGuestWeapon", run<Operation::Disarm>);
+    }
 }

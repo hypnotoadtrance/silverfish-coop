@@ -41,8 +41,8 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
-    if target == native_broker.QUEST_ID:
-        return await native_broker.action(host, bridge, actor, verb)
+    if isinstance(target, str) and target in native_broker.QUESTS:
+        return await native_broker.action(host, bridge, actor, verb, quest_id=target)
     roles = host.roles()
     player = host.party["players"].get(actor)
     if (not host.fixtures or not player or actor not in host.authoritative_pawns(roles)
