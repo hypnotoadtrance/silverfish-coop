@@ -52,14 +52,16 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
         return EQUIP_KEY, dict(zip(("map", "pawn", "guid"), fields[1:4]), ok=fields[4] == "1", status=fields[5])
     if fields[0] == AIM_FIXTURE and len(fields) == 5 and registered_target(fields[1], fields[4]) and valid_guid(fields[3]):
         return AIM_KEY, dict(zip(("map", "pawn", "guid", "target"), fields[1:]))
-    if fields[0] == CONTACT_FIXTURE and len(fields) == 14:
+    if fields[0] == CONTACT_FIXTURE and len(fields) in (14, 15):
         area, pawn, guid, serial, target, stage, component = fields[1:8]
+        camera_scope = fields[14] if len(fields) == 15 else None
         if (not registered_target(area, target) or not valid_guid(guid) or stage not in CONTACT_STAGES
+                or camera_scope not in (None, "unchanged", "restored", "restore_unverified")
                 or not pawn.startswith("Player_FP_C " + area + ".") or len(pawn) > 512
                 or not component or len(component) > 512 or len(serial) > 16 or not serial.isascii() or not serial.isdecimal()):
             return None
         try:
-            initial, current, selected, eye_drift, facing, target_drift = map(float, fields[8:])
+            initial, current, selected, eye_drift, facing, target_drift = map(float, fields[8:14])
         except ValueError:
             return None
         if (not 1 <= int(serial) < 2**53 or not 100 <= initial <= 160 or not -1 <= current <= 1_000_000
@@ -67,7 +69,8 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
                 or not (facing == -2 or -1 <= facing <= 1) or not -1 <= target_drift <= 1_000_000):
             return None
         return CONTACT_KEY, dict(map=area, pawn=pawn, guid=guid, serial=int(serial), target=target, stage=stage,
-                                 component=component, initial_health=initial, contact_health=None if current == -1 else current,
+                                 component=component, camera_scope=camera_scope, initial_health=initial,
+                                 contact_health=None if current == -1 else current,
                                  selected_health=None if selected == -1 else selected,
                                  camera_displacement=None if eye_drift == -1 else eye_drift,
                                  camera_direction_dot=None if facing == -2 else facing,

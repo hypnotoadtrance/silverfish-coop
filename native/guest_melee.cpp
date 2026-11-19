@@ -138,6 +138,7 @@ namespace
     }
 
     constexpr auto vector_path = STR("/Script/CoreUObject.Vector");
+    constexpr auto rotator_path = STR("/Script/CoreUObject.Rotator");
     constexpr auto impact_vector_path = STR("/Script/Engine.Vector_NetQuantize");
 
     bool vector_field(U::FStructProperty* value, const U::TCHAR* type = vector_path)
@@ -162,15 +163,15 @@ namespace
                 origin[2] + distance * direction[2]};
     }
 
-    std::optional<Vector> component_vector(U::UObject* component, const U::TCHAR* path)
+    std::optional<Vector> component_vector(U::UObject* component, const U::TCHAR* path, const U::TCHAR* type = vector_path)
     {
         auto* fn = find<U::UFunction>(path);
         auto* value = fn ? U::CastField<U::FStructProperty>(fn->GetReturnProperty()) : nullptr;
-        if (!vector_field(value) || fn->GetNumParms() != 1 || fn->GetParmsSize() != sizeof(Vector) ||
+        if (!vector_field(value, type) || fn->GetNumParms() != 1 || fn->GetParmsSize() != sizeof(Vector) ||
             value->GetOffset_Internal() != 0 || !fn->HasAnyFunctionFlags(U::FUNC_Native)) return {};
         Vector returned{};
         component->ProcessEvent(fn, returned.data());
-        return read_vector(value, returned.data());
+        return read_vector(value, returned.data(), type);
     }
 
     struct TraceBuffer
@@ -190,6 +191,38 @@ namespace
             while (count) constructed[--count]->DestroyValue_InContainer(values.data());
         }
     };
+
+    std::optional<Vector> relative_rotation(U::UObject* camera)
+    {
+        auto* value = field<U::FStructProperty>(camera, STR("RelativeRotation"));
+        return value && value->GetOffset_Internal() == 0x140 ? read_vector(value, camera, rotator_path) : std::nullopt;
+    }
+
+    bool set_camera_rotation(U::UObject* camera, const Vector& rotation, bool world)
+    {
+        const auto* path = world ? STR("/Script/Engine.SceneComponent:K2_SetWorldRotation")
+                                 : STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation");
+        auto* function = find<U::UFunction>(path);
+        auto* value = parameter<U::FStructProperty>(function, STR("NewRotation"));
+        auto* hit = parameter<U::FStructProperty>(function, STR("SweepHitResult"));
+        auto* sweep = parameter<U::FBoolProperty>(function, STR("bSweep"));
+        auto* teleport = parameter<U::FBoolProperty>(function, STR("bTeleport"));
+        if (!function || function->GetOuterPrivate() != find<U::UClass>(STR("/Script/Engine.SceneComponent")) ||
+            !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != 4 ||
+            function->GetReturnProperty() || function->GetParmsSize() > sizeof(TraceBuffer::values) ||
+            !vector_field(value, rotator_path) || value->GetOffset_Internal() != 0 || !hit ||
+            hit->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/Engine.HitResult")) ||
+            !hit->HasAnyPropertyFlags(U::CPF_OutParm) || hit->GetOffset_Internal() != 0x20 ||
+            !sweep || sweep->GetOffset_Internal() != 0x18 || !teleport || teleport->GetOffset_Internal() != 0x118) return false;
+        TraceBuffer buffer;
+        buffer.initialize(hit);
+        auto* storage = buffer.values.data();
+        std::memcpy(value->ContainerPtrToValuePtr<void>(storage), rotation.data(), sizeof(rotation));
+        sweep->SetPropertyValueInContainer(storage, false);
+        teleport->SetPropertyValueInContainer(storage, true);
+        camera->ProcessEvent(function, storage);
+        return true;
+    }
 
     struct TraceCall
     {
@@ -540,10 +573,12 @@ namespace
 
     struct FixtureContact
     {
-        U::FWeakObjectPtr target;
+        U::FWeakObjectPtr target, camera;
+        U::FFrame* restore_frame{};
         std::string name, component{"-"};
         std::string_view stage{"awaiting_contact"};
-        Vector eye{}, direction{}, target_origin{};
+        std::string_view pose{"unchanged"};
+        Vector eye{}, direction{}, target_origin{}, qualified_rotation{}, saved_relative{};
         double initial_health{-1}, contact_health{-1}, selected_health{-1};
         double eye_drift{-1}, direction_dot{-2}, target_drift{-1};
     };
@@ -670,6 +705,26 @@ namespace
         return std::hypot(first[0] - second[0], first[1] - second[1], first[2] - second[2]);
     }
 
+    double direction_dot(const Vector& first, const Vector& second)
+    {
+        return std::clamp(first[0] * second[0] + first[1] * second[1] + first[2] * second[2], -1.0, 1.0);
+    }
+
+    bool restore_fixture_camera(FixtureContact& fixture, U::UObject* pawn)
+    {
+        if (!fixture.restore_frame) return true;
+        fixture.restore_frame = nullptr;
+        auto* camera = fixture.camera.Get();
+        const auto restored = live(camera) && camera->GetOuterPrivate() == pawn && object(pawn, STR("Camera")) == camera &&
+            set_camera_rotation(camera, fixture.saved_relative, false) ? relative_rotation(camera) : std::nullopt;
+        bool matches = restored.has_value();
+        if (restored)
+            for (std::size_t axis = 0; axis < restored->size(); ++axis)
+                matches = matches && std::abs(std::remainder((*restored)[axis] - fixture.saved_relative[axis], 360.0)) <= 0.15;
+        fixture.pose = matches ? "restored" : "restore_unverified";
+        return matches;
+    }
+
     void* output(U::FFrame& frame, U::FProperty* property)
     {
         auto* current = frame.OutParms();
@@ -745,6 +800,12 @@ namespace
 
     void tick()
     {
+        if (swing.fixture && swing.fixture->restore_frame)
+        {
+            const bool restored = restore_fixture_camera(*swing.fixture, swing.pawn.Get());
+            return finish(restored ? "mutation_unverified_guest_melee_fixture_contact_post" :
+                "mutation_unverified_guest_melee_fixture_camera_restore");
+        }
         if (!swing.pending) return;
         const bool ordinary = swing.mode == SwingMode::ordinary;
         const bool cancellable = ordinary && !swing.damage.calls && !swing.damage.sweeps && swing.damage.target_name == "-";
@@ -807,10 +868,10 @@ namespace
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
-        const auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, nullptr,
+        auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, nullptr,
             swing.fixture ? &diagnostic : nullptr);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
-        const bool allowed = trace && (!ordinary || eligible(enemy));
+        bool allowed = trace && (!ordinary || eligible(enemy));
         if (swing.fixture)
         {
             auto& staged = *swing.fixture;
@@ -825,13 +886,38 @@ namespace
             auto* component = trace ? trace->first : diagnostic.component.Get();
             if (live(component)) staged.component = RC::to_utf8_string(component->GetFullName());
             if (diagnostic.origin) staged.eye_drift = displacement(staged.eye, *diagnostic.origin);
-            if (diagnostic.direction)
-            {
-                const auto& facing = *diagnostic.direction;
-                staged.direction_dot = std::clamp(staged.direction[0] * facing[0] + staged.direction[1] * facing[1] +
-                    staged.direction[2] * facing[2], -1.0, 1.0);
-            }
+            if (diagnostic.direction) staged.direction_dot = direction_dot(staged.direction, *diagnostic.direction);
             if (const auto origin = enemy_origin(expected)) staged.target_drift = displacement(staged.target_origin, *origin);
+            allowed = allowed && enemy == expected;
+            // The idle headless client can overwrite look rotation during the stock montage. Only replay a verified
+            // fixture camera angle if the two real actors have barely moved, then run the same stock sweep qualification.
+            if (!allowed && diagnostic.direction && staged.direction_dot < 0.99 && staged.eye_drift >= 0 &&
+                staged.eye_drift <= 18 && staged.target_drift >= 0 && staged.target_drift <= 22 && eligible(expected))
+            {
+                auto* pawn = swing.pawn.Get();
+                auto* camera = staged.camera.Get();
+                if (live(camera) && camera->GetOuterPrivate() == pawn && object(pawn, STR("Camera")) == camera)
+                {
+                    const auto saved = relative_rotation(camera);
+                    if (saved && set_camera_rotation(camera, staged.qualified_rotation, true))
+                    {
+                        staged.saved_relative = *saved;
+                        staged.restore_frame = &frame;
+                        trace = stock_trace(receiver, pawn, expected);
+                        allowed = trace && direction_dot(staged.direction, trace->direction) >= 0.9999 &&
+                            displacement(staged.eye, trace->origin) <= 18 && eligible(expected);
+                        if (allowed)
+                        {
+                            enemy = expected;
+                            staged.stage = "selected_contact";
+                            staged.selected_health = enemy_health(expected);
+                            staged.component = RC::to_utf8_string(trace->first->GetFullName());
+                        }
+                        else if (!restore_fixture_camera(staged, pawn))
+                            return refuse("mutation_unverified_guest_melee_fixture_camera_restore");
+                    }
+                }
+            }
         }
         if (!allowed)
         {
@@ -844,7 +930,12 @@ namespace
         if (ordinary)
         {
             auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
-            if (!deal) return refuse("mutation_unverified_guest_melee_stock_damage_path");
+            if (!deal)
+            {
+                if (swing.fixture && !restore_fixture_camera(*swing.fixture, swing.pawn.Get()))
+                    return refuse("mutation_unverified_guest_melee_fixture_camera_restore");
+                return refuse("mutation_unverified_guest_melee_stock_damage_path");
+            }
             swing.damage.target = enemy;
             swing.damage.deal = deal;
             swing.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
@@ -930,6 +1021,12 @@ namespace
     {
         if (!U::IsInGameThreadRaw()) return;
         auto& proof = swing.damage;
+        if (swing.fixture && swing.fixture->restore_frame == &frame &&
+            !restore_fixture_camera(*swing.fixture, swing.pawn.Get()))
+        {
+            proof.contact_frame = nullptr;
+            return finish("mutation_unverified_guest_melee_fixture_camera_restore");
+        }
         if (proof.deal_frame == &frame)
         {
             proof.deal_frame = nullptr;
@@ -1163,13 +1260,18 @@ namespace
             const auto hp = enemy_health(target);
             const auto origin = enemy_origin(target);
             const auto lane = nonlethal_health(hp) ? stock_trace(pipe, pawn, target) : std::nullopt;
-            if (!lane || !origin) return proof(lua, false, "native_guest_melee_stock_fixture_contact_baseline_unqualified");
+            auto* camera = object(pawn, STR("Camera"));
+            const auto facing = lane ? component_vector(camera, STR("/Script/Engine.SceneComponent:K2_GetComponentRotation"),
+                rotator_path) : std::nullopt;
+            if (!lane || !origin || !facing) return proof(lua, false, "native_guest_melee_stock_fixture_contact_baseline_unqualified");
             auto& staged = candidate.fixture.emplace();
             staged.target = target;
+            staged.camera = camera;
             staged.name = RC::to_utf8_string(target->GetFullName());
             staged.eye = lane->origin;
             staged.direction = lane->direction;
             staged.target_origin = *origin;
+            staged.qualified_rotation = *facing;
             staged.initial_health = hp;
         }
         std::erase_if(fenced_pipes, [](const PipeFence& fence) { return !fence.pipe.Get() || !fence.contact.Get(); });
@@ -1240,7 +1342,8 @@ namespace
         lua.set_number(staged.eye_drift);
         lua.set_number(staged.direction_dot);
         lua.set_number(staged.target_drift);
-        return 9;
+        lua.set_string(staged.pose);
+        return 10;
     }
 }
 

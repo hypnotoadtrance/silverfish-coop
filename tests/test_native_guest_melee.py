@@ -104,6 +104,9 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((proof["initial_health"], proof["contact_health"], proof["selected_health"]), (160, 145, None))
         self.assertEqual((proof["camera_displacement"], proof["camera_direction_dot"], proof["target_displacement"]),
                          (2.5, 0.3, 161))
+        self.assertIsNone(proof["camera_scope"])
+        self.assertEqual(melee.parse([*fields, "restored"])[1]["camera_scope"], "restored")
+        self.assertIsNone(melee.parse([*fields, "unknown_camera_mutation"]))
         for index, wrong in ((1, REFINERY), (2, "other pawn"), (4, "0"), (5, "foreign target"), (6, "fake_stage"),
                              (8, "99"), (9, "x"), (10, "nan"), (12, "1.5"), (13, "-3")):
             self.assertIsNone(melee.parse([*fields[:index], wrong, *fields[index+1:]]))

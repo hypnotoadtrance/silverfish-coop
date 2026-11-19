@@ -93,6 +93,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                                                 DEAD_BRIDGE, swing["pawn"], guid, swing["serial"], target)
                                             and row["stage"] != "awaiting_contact", timeout=5)
                     proof["headless_contact"] = diagnostic["game"][CONTACT_KEY]
+                    assert proof["headless_contact"]["camera_scope"] in ("unchanged", "restored"), proof["headless_contact"]
                 assert (swing["map"], swing["guid"], swing["status"], swing["presses"], swing["releases"],
                         swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
                     DEAD_BRIDGE, guid, expected, 1, 1, 1, 1, True, True), swing

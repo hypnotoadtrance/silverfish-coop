@@ -357,8 +357,9 @@ function melee.rows(state, phase, status_row, standing)
     rows[#rows + 1] = status_row(table.unpack(fields))
     if latest.fixture_target and type(SilverfishReadNativeGuestMeleeContactFixture) == "function" then
         local ok, detail = pcall(function() return table.pack(SilverfishReadNativeGuestMeleeContactFixture(proof.serial)) end)
-        if ok and detail.n == 9 and detail[1] == latest.fixture_target then
-            rows[#rows + 1] = status_row(fixture_contact, state.map, latest.pawn, latest.guid, proof.serial, table.unpack(detail, 1, 9))
+        if ok and (detail.n == 9 or detail.n == 10) and detail[1] == latest.fixture_target then
+            rows[#rows + 1] = status_row(fixture_contact, state.map, latest.pawn, latest.guid, proof.serial,
+                table.unpack(detail, 1, detail.n))
         end
     end
     return rows
