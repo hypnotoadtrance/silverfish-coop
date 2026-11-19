@@ -369,23 +369,66 @@ end
 
 local function nexus_rail_pocket(world, world_name, center, normal, sign)
     local path = world_name .. ":PersistentLevel.Lantern_Portal_BP_C_2"
-    local portal = StaticFindObject(path)
-    local portal_class = StaticFindObject("/Game/Classes/Actors/Lantern_Portal_BP.Lantern_Portal_BP_C")
-    local crypt = valid(portal) and portal.SM_Env_Entrance_Crypt_01
-    local cube = valid(portal) and portal.Cube
-    local mesh = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_BuildingSets/Tunnels_Dungeons/SM_Env_Entrance_Crypt_01.SM_Env_Entrance_Crypt_01")
-    if not valid(portal) or not same(portal:GetClass(), portal_class) or not same(portal:GetWorld(), world)
-        or not portal:HasAuthority() or portal:IsActorBeingDestroyed() or not valid(crypt) or not valid(cube)
-        or not same(crypt:GetOwner(), portal) or not same(cube:GetOwner(), portal) or not same(crypt.StaticMesh, mesh)
-        or crypt:GetFullName() ~= "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then
-        error("The exact stock Gold Nexus Rail crypt is unavailable", 0)
+    local portal = placed_actor("Lantern_Portal_BP_C", "Lantern_Portal_BP_C_2", world)
+    if not valid(portal) then error("Gold Nexus Rail crypt actor missing in the current world", 0) end
+    if portal:GetFullName() ~= "Lantern_Portal_BP_C " .. path then
+        error("Gold Nexus Rail crypt actor path changed: " .. portal:GetFullName(), 0)
+    end
+    local class = portal:GetClass()
+    if not valid(class) or class:GetFullName() ~= "BlueprintGeneratedClass /Game/Classes/Actors/Lantern_Portal_BP.Lantern_Portal_BP_C" then
+        error("Gold Nexus Rail crypt actor class changed: " .. (valid(class) and class:GetFullName() or "missing"), 0)
+    end
+    if not portal:HasAuthority() or portal:IsActorBeingDestroyed() then
+        error("Gold Nexus Rail crypt lacks current stock actor authority", 0)
+    end
+
+    local root = portal.RootComponent
+    if not valid(root) or root:GetFullName() ~= "SceneComponent " .. path .. ".DefaultSceneRoot"
+        or not same(root:GetOwner(), portal) then
+        error("Gold Nexus Rail crypt stock root changed: " .. (valid(root) and root:GetFullName() or "missing"), 0)
+    end
+    local component_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+    if not valid(component_class) then error("Gold Nexus Rail crypt static mesh component class missing", 0) end
+    local components = portal:K2_GetComponentsByClass(component_class)
+    local count = components and components:GetArrayNum()
+    if not finite(count) or count < 2 or count > 24 then
+        error("Gold Nexus Rail crypt component census unavailable: " .. tostring(count), 0)
+    end
+    local crypt, cube
+    local names = {}
+    for index = 1, count do
+        local component = components[index]
+        if valid(component) then
+            local name = component:GetFullName()
+            names[#names + 1] = name:match("[^.]+$") or name
+            if name == "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then crypt = component end
+            if name == "StaticMeshComponent " .. path .. ".Cube" then cube = component end
+        end
+    end
+    if not valid(crypt) or not valid(cube) then
+        error("Gold Nexus Rail crypt " .. (valid(crypt) and "rear cube" or "entrance mesh")
+            .. " component missing from stock census: " .. table.concat(names, ", "), 0)
+    end
+    for _, component in ipairs({crypt, cube}) do
+        local name = component:GetFullName()
+        if not same(component:GetClass(), component_class) then error("Gold Nexus Rail crypt component class changed: " .. name, 0) end
+        if not same(component:GetOwner(), portal) then error("Gold Nexus Rail crypt component owner changed: " .. name, 0) end
+        if not same(component:GetAttachParent(), root) then error("Gold Nexus Rail crypt component root changed: " .. name, 0) end
+    end
+    local mesh = crypt.StaticMesh
+    if not valid(mesh) or mesh:GetFullName() ~= "StaticMesh /Game/Assets/StaticMeshes/Mesh_BuildingSets/Tunnels_Dungeons/SM_Env_Entrance_Crypt_01.SM_Env_Entrance_Crypt_01" then
+        error("Gold Nexus Rail crypt entrance asset changed: " .. (valid(mesh) and mesh:GetFullName() or "missing"), 0)
     end
     local origin, back, right = crypt:K2_GetComponentLocation(), cube:K2_GetComponentLocation(), crypt:GetRightVector()
-    if not vector(origin) or not vector(back) or not vector(right)
-        or (origin.X - center.X)^2 + (origin.Y - center.Y)^2 > 3^2
-        or (right.X * normal.X + right.Y * normal.Y) * sign < .99
-        or math.abs(side_of(back, center, normal) * sign + 217.56) > 4 then
-        error("The stock Gold Nexus Rail crypt orientation did not verify", 0)
+    if not vector(origin) or not vector(back) or not vector(right) then
+        error("Gold Nexus Rail crypt stock component geometry is unavailable", 0)
+    end
+    local offset = math.sqrt((origin.X - center.X)^2 + (origin.Y - center.Y)^2)
+    local facing = (right.X * normal.X + right.Y * normal.Y) * sign
+    local depth = side_of(back, center, normal) * sign
+    if offset > 3 or facing < .99 or math.abs(depth + 217.56) > 4 then
+        error(string.format("Gold Nexus Rail crypt geometry changed (offset %.2f, facing %.3f, rear depth %.2f)",
+            offset, facing, depth), 0)
     end
 end
 
