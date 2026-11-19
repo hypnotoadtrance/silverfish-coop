@@ -35,7 +35,7 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(bridge.snapshot())
 
     def test_stock_food_clamp_healing_and_guest_detox(self):
-        proof = consume.parse_mre(report())
+        proof = consume.parse_meal(report())
         self.assertEqual(proof["class_path"], consume.MRE_CLASS)
         self.assertEqual((proof["food_before"], proof["food_after"], proof["regen_after"]), (193, 200, 26))
         self.assertEqual((proof["intox_before"], proof["intox_after"], proof["host_intox_after"]), (40, 37, 4))
@@ -44,7 +44,27 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(column=column), self.assertRaises(ValueError):
                 frame = report()
                 frame[column] = value
-                consume.parse_mre(frame)
+                consume.parse_meal(frame)
+
+    def test_canned_peaches_have_a_distinct_stock_proof(self):
+        peaches = [consume.CANNED_PEACHES, "used", BOROUGH, PAWN, GUID, "2", "1", "17", "29",
+                   "230", "230", "210", "250", "42", "41", "4", "0"]
+        expected = consume.parse_meal(peaches)
+        self.assertEqual(expected["class_path"], consume.CANNED_PEACHES_CLASS)
+        self.assertEqual((expected["quantity_after"], expected["food_after"], expected["regen_after"],
+                          expected["intox_after"]), (1, 29, 230, 41))
+        for column, change in [(0, consume.MRE), (0, "native-guest-canned-tuna"), (8, "47"), (10, "240"), (14, "39")]:
+            with self.subTest(column=column, change=change), self.assertRaises(ValueError):
+                invalid = peaches.copy()
+                invalid[column] = change
+                consume.parse_meal(invalid)
+        with TemporaryDirectory() as folder:
+            directory = Path(folder)
+            bridge = runtime.Bridge(directory, None)
+            status = directory / "status.tsv"
+            prefix = f"schema\t1\nsession\thost\thosting\t{BOROUGH}\t1\t0\n"
+            status.write_text(prefix + "\t".join(peaches) + "\n", encoding="utf-8")
+            self.assertEqual(bridge.snapshot()["native_guest_canned_peaches"], expected)
 
     async def test_opt_in_transaction_requires_exact_written_guest_frame_and_accepts_replay(self):
         state = {"players": {"guest": {"downed": False, "native_inventory": {GUID: {"quantity": 2}}}},
@@ -54,7 +74,7 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
                                native_recipients=lambda: {"guest": {"connected": True, "pawn": PAWN}},
                                party=state, checkpoint_native=AsyncMock(return_value=5), control=SimpleNamespace(event=Mock()),
                                native_pickup=SimpleNamespace(forget_committed_row=Mock()))
-        snapshot = {"state": "hosting", "map": BOROUGH, "native_guest_mre": consume.parse_mre(report())}
+        snapshot = {"state": "hosting", "map": BOROUGH, "native_guest_mre": consume.parse_meal(report())}
         bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
         with self.assertRaisesRegex(party.RuleError, "native_guest_mre_unavailable"):
             await consume.use(host, bridge, "guest", GUID, OPERATION, action=consume.MRE)

@@ -139,6 +139,7 @@ local rows = table.concat(enemy_loot.rows(state, "hosting", row), "\n")
 assert(rows:find(row("native-enemy-loot-cqc", root, npc:GetFullName(), shooter_id, 0, 1), 1, true))
 assert(rows:find(row("native-enemy-loot-cqc", root, second:GetFullName(), "-", 0, 0), 1, true))
 assert(rows:find(row("native-enemy-loot-escrow", root, "retired", "shooter", ammo:GetFullName(), slot, guid, 8, 1, 2, 3), 1, true))
+assert(rows:find(row("native-enemy-loot-retire-proof", 1, root, ammo:GetFullName(), slot, guid), 1, true))
 print("Ordinary Dead Bridge loot: detached roster, reserved escrow, exact retirement and source readback passed")
 
 package.loaded.native_enemy_loot = enemy_loot

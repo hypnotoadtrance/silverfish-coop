@@ -18,6 +18,24 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 STOCK_START_MODES = ("Mercy", "Respawn_WtPenalty", "Decimation")
 CQC_DROP_SOURCE = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 CQC_DROP_SOURCES = (CQC_DROP_SOURCE, CQC_DROP_SOURCE.removesuffix("_0") + "_1")
+CQC_SHELL_ACTOR = f"Ammo_ShotgunShells_BP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
+
+
+def cqc_retirement_record(roll, slot):
+    return {"schema": 1, "epoch": roll["epoch"], "bandit": roll["bandit"], "actor": roll["actor"],
+            "guid": roll["guid"], "slot": slot}
+
+
+def cqc_retired(roll):
+    proof = roll.get("retirement")
+    slot = proof.get("slot") if type(proof) is dict else None
+    if (roll.get("map") != DEAD_BRIDGE or roll.get("bandit") not in CQC_DROP_SOURCES
+            or not isinstance(slot, str) or not SLOT.fullmatch(slot) or type(proof.get("schema")) is not int
+            or any(key not in roll for key in ("epoch", "actor", "guid"))):
+        return False
+    frame = roll.get("escrow")
+    return (proof == cqc_retirement_record(roll, slot)
+            and (roll.get("claimed_by") is not None or (isinstance(frame, dict) and frame.get("slot") == slot)))
 
 
 def new_slot() -> str:
@@ -133,14 +151,15 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
             raise CampaignFormatError("A stock enemy drop has an invalid escrow or owner")
         if roll.get("map") == DEAD_BRIDGE:
             epoch, actor = roll.get("epoch"), roll.get("actor")
-            shell_prefix = f"Ammo_ShotgunShells_BP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
             if (not isinstance(epoch, str) or not re.fullmatch(r"[0-9a-f]{32}", epoch)
-                    or not isinstance(actor, str) or not actor.startswith(shell_prefix)
-                    or not re.fullmatch(r"[0-9]+", actor.removeprefix(shell_prefix))
+                    or not isinstance(actor, str) or not actor.startswith(CQC_SHELL_ACTOR)
+                    or not re.fullmatch(r"[0-9]+", actor.removeprefix(CQC_SHELL_ACTOR))
                     or (epoch, roll["bandit"]) in cqc_visits or (epoch, actor) in cqc_drops):
                 raise CampaignFormatError("A placed CQC has an invalid or duplicate roll in this visit")
             cqc_visits.add((epoch, roll["bandit"]))
             cqc_drops.add((epoch, actor))
+        if "retirement" in roll and not cqc_retired(roll):
+            raise CampaignFormatError("A stock enemy drop has an invalid retirement receipt")
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")

@@ -49,6 +49,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-finite-shop-sale-quote": 15.0,
     "native-finite-shop-sell": 15.0,
     "native-guest-bandage": 15.0,
+    "native-guest-canned-peaches": 15.0,
     "native-guest-armor-equip": 20.0,
     "native-guest-helmet-equip": 20.0,
     "native-quest-interact": 15.0,

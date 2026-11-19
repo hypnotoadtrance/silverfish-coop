@@ -304,6 +304,9 @@ local function retire(state, phase, fields)
         error("native_enemy_loot_retirement_unavailable", 0)
     end
     if captured.status == "retired" then
+        if not captured.raw_verified or not shell_view.raw_retired(state.world, captured.actor) then
+            error("mutation_unverified_enemy_loot_raw_actor_live", 0)
+        end
         escrow = captured
         return "exact stock ammunition already retired"
     end
@@ -313,9 +316,10 @@ local function retire(state, phase, fields)
         error("mutation_unverified_enemy_loot_exact_retirement_actor", 0)
     end
     retire_actor(ammo)
+    if not shell_view.raw_retired(state.world, captured.actor) then error("mutation_unverified_enemy_loot_raw_actor_live", 0) end
     local ok, status = SilverfishFinishNativeCqcEnemyLoot(host:GetAddress(), captured.address)
     if ok ~= true or status ~= "retired" then error("mutation_unverified_enemy_loot_retirement", 0) end
-    captured.status = "retired"
+    captured.status, captured.raw_verified = "retired", true
     escrow = captured
     scoped.proof = read(host, scoped) or scoped.proof
     return "exact stock ammunition retired after commit"
@@ -328,8 +332,9 @@ local function claim(state, phase, fields)
     if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
-    local focus = #fields == 9 and fields[9] == "stock-focus" and cqc
-    if (#fields ~= 8 and not focus) or not is_slot(slot) or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z)
+    local guarded = cqc and #fields == 10 and (fields[9] == "stock-focus" or fields[9] == "stock-exact")
+    if (not guarded and (#fields ~= 8 or cqc)) or not is_slot(slot) or not is_guid(guid)
+        or not finite(x) or not finite(y) or not finite(z)
         or not valid(host) or type(SilverfishClaimNativeEnemyLootEscrow) ~= "function" then
         error("native_enemy_loot_claim_unavailable", 0)
     end
@@ -341,7 +346,10 @@ local function claim(state, phase, fields)
         (at.X - x)^2 + (at.Y - y)^2 + (at.Z - z)^2 > math.min(reach, 250)^2 then
         error("native_enemy_loot_out_of_reach", 0)
     end
-    if focus then
+    if guarded and not shell_view.raw_retired(state.world, fields[10]) then
+        error("native_enemy_loot_raw_actor_present", 0)
+    end
+    if guarded and fields[9] == "stock-focus" then
         local checked, visible = pcall(shell_view.clear_line, pawn, { X = x, Y = y, Z = z })
         if not checked or visible ~= true then error("native_enemy_loot_focus_obstructed", 0) end
     end
@@ -560,6 +568,9 @@ function enemy_loot.rows(state, phase, status_row)
         local at = escrow.at
         rows[#rows + 1] = status_row("native-enemy-loot-escrow", state.map, escrow.status, escrow.pawn, escrow.actor,
             escrow.slot, escrow.guid, escrow.units or "-", at and at.X or "-", at and at.Y or "-", at and at.Z or "-")
+        if escrow.raw_verified then
+            rows[#rows + 1] = status_row("native-enemy-loot-retire-proof", 1, state.map, escrow.actor, escrow.slot, escrow.guid)
+        end
     end
     return rows
 end

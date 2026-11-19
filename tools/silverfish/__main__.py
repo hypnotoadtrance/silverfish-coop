@@ -65,7 +65,7 @@ def parser() -> argparse.ArgumentParser:
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
-    host.add_argument("--native-guest-mre", action="store_true", help="enable stock guest MRE use and personal intoxication")
+    host.add_argument("--native-guest-mre", action="store_true", help="enable guest MRE and Canned Peaches use with personal intoxication")
     host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
     host.add_argument("--native-dead-bridge-enemy-loot", action="store_true",
                       help="automatically share the exact Dead Bridge CQC stock shotgun-shell roll")
@@ -148,7 +148,8 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-smg-hold-fixture", "native-guest-held-fire-fixture",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
-        "native-guest-bandage", "native-guest-mre", "native-guest-mre-fixture", "native-inventory-view-key-fixture", "native-guest-clock-fixture",
+        "native-guest-bandage", "native-guest-mre", "native-guest-canned-peaches", "native-guest-mre-fixture",
+        "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach", "native-enemy-shell-input-fixture",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",

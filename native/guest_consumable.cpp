@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -41,6 +42,7 @@ namespace
     constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
     constexpr auto mre_path = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
+    constexpr auto canned_peaches_path = STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C");
     constexpr auto gain_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GainHealth");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
     constexpr auto intox_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Apply_PlayerIntox");
@@ -56,6 +58,7 @@ namespace
     };
     constexpr Consumable bandage{bandage_path, 15, 0.05, 45.0, 0.0};
     constexpr Consumable mre{mre_path, 25, 0.65, 10.0, 30.0};
+    constexpr Consumable canned_peaches{canned_peaches_path, 8, 0.4, 0.0, 12.0};
 
     bool opt_in(const char* name)
     {
@@ -319,6 +322,7 @@ namespace
                 !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0) ||
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
+            if (&profile == &canned_peaches && !read_bool(defaults, STR("CanCook"), false)) return false;
             return units > 0 && units <= INT32_MAX / profile.value &&
                    weight->GetPropertyValueInContainer(row) == units * profile.weight &&
                    value->GetPropertyValueInContainer(row) == units * profile.value &&
@@ -848,26 +852,31 @@ namespace
         return 5;
     }
 
-    int use_mre(const Lua& lua)
+    int use_meal(const Lua& lua, const Consumable& profile, std::string_view kind)
     {
-        const auto refusal = [&](std::string_view reason) { return result(lua, false, reason); };
+        const auto refuse = [&](std::string_view reason) {
+            return result(lua, false, std::string("guest_").append(kind).append("_refused_").append(reason));
+        };
+        const auto unverified = [&](std::string_view reason) {
+            return result(lua, false, std::string("mutation_unverified_guest_").append(kind).append("_").append(reason));
+        };
         if (!food_available() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_integer(3) || !lua.is_string(4) || meal) return refusal("guest_mre_refused_arguments");
+            !lua.is_integer(3) || !lua.is_string(4) || meal) return refuse("arguments");
         const auto pawn_address = lua.get_integer(), guest_address = lua.get_integer(), stock_address = lua.get_integer();
         Guid guid{};
         if (pawn_address <= 0 || guest_address <= 0 || stock_address <= 0 || guest_address == stock_address ||
-            !parse_guid(lua.get_string(), guid)) return refusal("guest_mre_refused_identity");
+            !parse_guid(lua.get_string(), guid)) return refuse("identity");
         Scope scope;
-        if (!scope.bind(pawn_address, guest_address, stock_address)) return refusal("guest_mre_refused_exact_detached_save");
+        if (!scope.bind(pawn_address, guest_address, stock_address)) return refuse("exact_detached_save");
         Inventory inventory;
-        if (!inventory.locate(scope, guid, mre).empty()) return refusal("guest_mre_refused_stock_owned_stack");
+        if (!inventory.locate(scope, guid, profile).empty()) return refuse("stock_owned_stack");
         Health health;
         if (!health.bind(scope).empty() || health.max_health > 10'000 || !health.no_food_traits(scope.guest))
-            return refusal("guest_mre_refused_vitals_or_traits");
+            return refuse("vitals_or_traits");
 
         Intoxication personal, canonical;
         if (!personal.bind(scope.guest) || !canonical.bind(scope.stock) || personal.map != canonical.map)
-            return refusal("guest_mre_refused_intoxication_schema");
+            return refuse("intoxication_schema");
         auto* guest_flags = personal.data(scope.guest);
         auto* host_flags = canonical.data(scope.stock);
         auto* bag = inventory.backpack;
@@ -877,7 +886,7 @@ namespace
         const int host_intox = canonical.read(host_flags);
         const auto host_vitals = health.read(scope.stock);
         if (intox_before < 0 || intox_before > 100 || host_intox < 0 || host_intox > 100 ||
-            pawn_before < 0 || pawn_before > 100 || !host_vitals.finite()) return refusal("guest_mre_refused_intoxication_values");
+            pawn_before < 0 || pawn_before > 100 || !host_vitals.finite()) return refuse("intoxication_values");
 
         const auto backup_flags = copy_value(personal.map, guest_flags);
         const auto expected_flags = copy_value(personal.map, guest_flags);
@@ -887,18 +896,18 @@ namespace
         const auto stock_bag = copy_value(bag, host_rows);
         const auto cache = copy_value(health.cache, health.cache->ContainerPtrToValuePtr<void>(scope.instance));
         if (!backup_flags || !expected_flags || !stock_flags || !backup_bag || !expected_bag || !stock_bag || !cache)
-            return refusal("guest_mre_refused_snapshot");
+            return refuse("snapshot");
 
-        auto expected = health.expected(mre.regen_gain);
-        expected.food = std::clamp(health.before.food + mre.food, 0.0, 200.0);
-        const int delta = static_cast<int>(mre.food * -0.1);
+        auto expected = health.expected(profile.regen_gain);
+        expected.food = std::clamp(health.before.food + profile.food, 0.0, 200.0);
+        const int delta = static_cast<int>(profile.food * -0.1);
         const int intox_after = std::clamp(intox_before + delta, 0, 100);
         if (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), intox_after))
-            return refusal("guest_mre_refused_prepared_intoxication");
+            return refuse("prepared_intoxication");
         const int remaining = inventory.units - 1;
         Unreal::FScriptArrayHelper prepared(bag, expected_bag.get());
         if (remaining == 0) prepared.RemoveValues(inventory.selected);
-        else inventory.row.set_remaining(prepared.GetRawPtr(inventory.selected), remaining, mre);
+        else inventory.row.set_remaining(prepared.GetRawPtr(inventory.selected), remaining, profile);
 
         const auto stock_unchanged = [&] {
             return scope.current() && bag->Identical(host_rows, stock_bag.get()) && canonical.map->Identical(host_flags, stock_flags.get()) &&
@@ -925,21 +934,21 @@ namespace
         DuringMeal receipt{scope.pawn, delta};
         {
             ScopedMeal scope_call{receipt};
-            double food = mre.food;
+            double food = profile.food;
             scope.pawn->ProcessEvent(food_functions.effect, &food);
         }
 
         auto only_food = health.before;
         only_food.food = expected.food;
         if (receipt.call_count != 1 || !receipt.applied || !prove(backup_bag.get(), only_food))
-            return refusal(rollback(false, only_food) ? "guest_mre_refused_food_rolled_back" : "mutation_unverified_guest_mre_food");
-        double gain = mre.regen_gain;
+            return rollback(false, only_food) ? refuse("food_rolled_back") : unverified("food");
+        double gain = profile.regen_gain;
         scope.pawn->ProcessEvent(health.gain, &gain);
         if (!prove(backup_bag.get(), expected))
-            return refusal(rollback(false, only_food) ? "guest_mre_refused_regen_rolled_back" : "mutation_unverified_guest_mre_regen");
+            return rollback(false, only_food) ? refuse("regen_rolled_back") : unverified("regen");
         bag->CopyCompleteValue(guest_rows, expected_bag.get());
         if (!prove(expected_bag.get(), expected))
-            return refusal(rollback(true, expected) ? "guest_mre_refused_debit_rolled_back" : "mutation_unverified_guest_mre_debit");
+            return rollback(true, expected) ? refuse("debit_rolled_back") : unverified("debit");
 
         result(lua, true, "used");
         lua.set_integer(inventory.units);
@@ -956,6 +965,9 @@ namespace
         lua.set_bool(health.hemophilia);
         return 14;
     }
+
+    int use_mre(const Lua& lua) { return use_meal(lua, mre, "mre"); }
+    int use_canned_peaches(const Lua& lua) { return use_meal(lua, canned_peaches, "canned_peaches"); }
 }
 
 void silverfish::native_guest_consumable::install_hooks()
@@ -979,6 +991,7 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
     {
         lua.register_function("SilverfishPrepareNativeGuestMre", prepare_food);
         lua.register_function("SilverfishUseNativeGuestMre", use_mre);
+        lua.register_function("SilverfishUseNativeGuestCannedPeaches", use_canned_peaches);
         if (opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeGuestMreFixture", seed_mre_test);
     }

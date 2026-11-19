@@ -1,6 +1,7 @@
 """Consume an exact supported item from the authenticated guest's own save."""
 
 import asyncio
+from dataclasses import dataclass
 import math
 import time
 
@@ -12,30 +13,46 @@ ACTION = "native-guest-bandage"
 BANDAGE_CLASS = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 MRE = "native-guest-mre"
 MRE_CLASS = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
-COMMANDS = {BANDAGE_CLASS: ACTION, MRE_CLASS: MRE}
-RESULT = {ACTION: "native_guest_bandage", MRE: "native_guest_mre"}
+CANNED_PEACHES = "native-guest-canned-peaches"
+CANNED_PEACHES_CLASS = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"
 
 
-def parse_mre(fields: list[str]) -> dict:
+@dataclass(frozen=True)
+class Meal:
+    class_path: str
+    food: int
+    gain: int
+    unit_value: int
+
+
+MEALS = {MRE: Meal(MRE_CLASS, 30, 10, 25), CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8)}
+COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()}}
+RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
+
+
+def parse_meal(fields: list[str]) -> dict:
     if len(fields) != 17:
-        raise ValueError("Invalid stock MRE report size")
+        raise ValueError("Invalid stock food report size")
     (tag, status, area, pawn, guid, initial, remaining, food_before, food_after,
      regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia) = fields
-    if ((tag, status) != (MRE, "used") or not valid_guid(guid) or len(pawn) > 512
+    meal = MEALS.get(tag)
+    if (meal is None or status != "used" or not valid_guid(guid) or len(pawn) > 512
             or not pawn.startswith("Player_FP_C " + area + ".") or hemophilia not in ("0", "1")):
-        raise ValueError("Invalid stock MRE identity")
+        raise ValueError("Invalid stock food identity")
     count, after = int(initial), int(remaining)
     food, restored, regen, buffered, health, max_health = map(float, (food_before, food_after, regen_before, regen_after, hp, maximum))
     intox_start, intox_end, shared_intox = map(int, (intox_before, intox_after, host_intox))
     trait = hemophilia == "1"
-    if (not 1 <= count <= (2**31 - 1) // 25 or after != count - 1
+    gain = meal.gain * (0.6 if trait else 1)
+    detox = meal.food // 10
+    if (not 1 <= count <= (2**31 - 1) // meal.unit_value or after != count - 1
             or not all(math.isfinite(value) for value in (food, restored, regen, buffered, health, max_health))
             or not 25 <= max_health <= 10_000 or not 0 < health <= max_health
-            or not 0 <= food <= 200 or restored != min(food + 30, 200)
-            or not 0 <= regen <= max_health or buffered != min(max(regen + (6 if trait else 10), 25), max_health)
-            or not 0 <= intox_start <= 100 or intox_end != max(intox_start - 3, 0) or not 0 <= shared_intox <= 100):
-        raise ValueError("Invalid stock MRE effect proof")
-    return {"state": status, "map": area, "pawn": pawn, "guid": guid, "class_path": MRE_CLASS,
+            or not 0 <= food <= 200 or restored != min(food + meal.food, 200)
+            or not 0 <= regen <= max_health or buffered != min(max(regen + gain, 25), max_health)
+            or not 0 <= intox_start <= 100 or intox_end != max(intox_start - detox, 0) or not 0 <= shared_intox <= 100):
+        raise ValueError("Invalid stock food effect proof")
+    return {"state": status, "map": area, "pawn": pawn, "guid": guid, "class_path": meal.class_path,
             "quantity_before": count, "quantity_after": after, "food_before": food, "food_after": restored,
             "regen_before": regen, "regen_after": buffered, "health_before": health, "health_after": health,
             "max_health": max_health, "hemophilia": trait, "intox_before": intox_start, "intox_after": intox_end,
@@ -45,16 +62,16 @@ def parse_mre(fields: list[str]) -> dict:
 async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
     if action not in RESULT:
         raise party.RuleError("native_guest_consumable_unavailable")
-    is_mre = action == MRE
-    kind = "mre" if is_mre else "bandage"
     key = RESULT[action]
+    kind = key.removeprefix("native_guest_")
+    meal = MEALS.get(action)
     if not valid_guid(guid):
         raise party.RuleError(f"invalid_{kind}_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
     if (not host.native_guest or host.native_profile is None or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
-            or time.monotonic() - host.last_seen > 3 or is_mre and not host.guest_mre):
+            or time.monotonic() - host.last_seen > 3 or meal is not None and not host.guest_mre):
         raise party.RuleError(f"native_guest_{kind}_unavailable")
     owner = host.native_recipients().get(character)
     player = host.party["players"].get(character)
@@ -89,12 +106,12 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
                 or not 0 < hp <= maximum or not 25 <= regen <= maximum or not 0 <= proof["regen_before"] <= maximum
                 or proof.get("health_after") != hp or type(proof.get("hemophilia")) is not bool):
             raise RuntimeError("The native consumable did not verify its exact quantity and stock regeneration")
-        if is_mre and (proof.get("class_path") != MRE_CLASS
-                       or not {"food_before", "food_after", "intox_before", "intox_after"}.issubset(proof)):
-            raise RuntimeError("The native MRE did not verify its detached food and intoxication effects")
+        if meal is not None and (proof.get("class_path") != meal.class_path
+                                 or not {"food_before", "food_after", "intox_before", "intox_after"}.issubset(proof)):
+            raise RuntimeError("The native food did not verify its detached food and intoxication effects")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         candidate = party.load_party(host.party)
-        if not is_mre or after == 0:
+        if meal is None or after == 0:
             candidate["players"][character].get("native_inventory", {}).pop(guid, None)
         result = {key: proof}
         recent = candidate["receipts"].setdefault(character, [])
@@ -106,10 +123,10 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
             host.stopping = True
         raise
     host.party = candidate
-    if not is_mre or after == 0:
+    if meal is None or after == 0:
         host.native_pickup.forget_committed_row(character, guid)
     host.native_checkpoint_unsafe = False
-    details = {"food": proof["food_after"], "intoxication": proof["intox_after"]} if is_mre else {}
+    details = {"food": proof["food_after"], "intoxication": proof["intox_after"]} if meal is not None else {}
     host.control.event(f"{key}_committed", character_id=character, operation_id=operation_id,
                        guid=guid, revision=revision, quantity=after, regen=regen, **details)
     return result

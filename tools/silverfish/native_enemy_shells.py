@@ -5,11 +5,13 @@ import time
 
 from .native_downed_markers import location
 from .native_gold import valid_guid
+from .native_host_save import CQC_SHELL_ACTOR
 from .travel import DEAD_BRIDGE
 
 
 KEY = "native_enemy_shell_view"
 FRAME_KEY = "native_enemy_shell_frame"
+AUTHORITY_KEY = "native_enemy_shell_authority"
 FRAME = "native-enemy-shell-frame"
 CLEAR = "native-enemy-shell-clear"
 FIXTURE = "native-enemy-shell-input-fixture"
@@ -40,7 +42,15 @@ def parse_view(area, epoch, markers, focused):
     return None
 
 
-def _fields(frame, epoch):
+def parse_authority(area, epoch, pawn, eligible):
+    guids = [] if eligible == "-" else eligible.split(",")
+    if (area == DEAD_BRIDGE and valid_epoch(epoch) and 0 < len(pawn) <= 512 and pawn.startswith("Player_FP_C ")
+            and len(guids) <= LIMIT and len(set(guids)) == len(guids) and all(valid_guid(guid) for guid in guids)):
+        return {"map": area, "epoch": epoch, "pawn": pawn, "eligible": guids}
+    return None
+
+
+def _fields(frame, epoch, *, hosting):
     if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (DEAD_BRIDGE, epoch):
         return ()
     rows = frame.get("shells")
@@ -48,8 +58,11 @@ def _fields(frame, epoch):
         return ()
     encoded = []
     for guid, row in rows.items():
-        if (not valid_guid(guid) or not isinstance(row, (list, tuple)) or len(row) != 4
-                or type(row[0]) is not int or not 3 <= row[0] <= 9 or not location(row[1:])):
+        if (not valid_guid(guid) or not isinstance(row, (list, tuple)) or len(row) != (5 if hosting else 4)
+                or type(row[0]) is not int or not 3 <= row[0] <= 9 or not location(row[1:4])):
+            return ()
+        if hosting and (not isinstance(row[4], str) or not row[4].startswith(CQC_SHELL_ACTOR)
+                        or not re.fullmatch(r"[0-9]+", row[4][len(CQC_SHELL_ACTOR):])):
             return ()
         encoded.append("|".join(map(str, (guid, *row))))
     return tuple(sorted(encoded))
@@ -72,9 +85,10 @@ class ShellView:
 
     async def sync(self, bridge, game, phase, epoch, frame):
         pawn = game.get("pawns", {}).get("local", {}).get("name")
+        version = game.get("native_enemy_shell_view_version")
         current = ((game.get("state"), game.get("map")) == (phase, DEAD_BRIDGE)
-                   and game.get("native_enemy_shell_view_capability") is True and pawn and valid_epoch(epoch))
-        fields = _fields(frame, epoch) if current else ()
+                   and version in ((2,) if phase == "hosting" else (1, 2)) and pawn and valid_epoch(epoch))
+        fields = _fields(frame, epoch, hosting=phase == "hosting") if current else ()
         if not fields:
             old, self.binding = self.binding, None
             if old and current:

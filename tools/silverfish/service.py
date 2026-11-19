@@ -2928,7 +2928,7 @@ class Host:
             if self.enemy_shell_view:
                 with contextlib.suppress(OSError, RuntimeError):
                     snapshot = await self.enemy_shell_view.sync(
-                        bridge, self.last_game, "hosting", self.zone_epoch, native_enemy_loot.shell_frame(self),
+                        bridge, self.last_game, "hosting", self.zone_epoch, native_enemy_loot.shell_candidates(self),
                     )
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
@@ -3743,7 +3743,7 @@ class Client:
             items = [row for row in page["items"] if row["guid"] == guid and row["source"] == "backpack"]
             item_class = items[0]["class_path"] if len(items) == 1 else None
             action = native_guest_consumable.COMMANDS.get(item_class)
-            if not action or action == native_guest_consumable.MRE and not self.invite.get("native_guest_mre"):
+            if not action or action in native_guest_consumable.MEALS and not self.invite.get("native_guest_mre"):
                 raise ValueError("The selected stock item is not available to use")
             current = self.bridge.snapshot() or {}
             if ((self.host_session, self.zone_epoch) != epoch or current.get("state") != "connected"
@@ -3754,6 +3754,8 @@ class Client:
             report = consumed[native_guest_consumable.RESULT[action]]
             if (report.get("state"), report.get("map"), report.get("guid")) != ("used", area, guid):
                 raise ValueError("The host did not verify use of the selected item")
+            if action in native_guest_consumable.MEALS and report.get("class_path") != item_class:
+                raise ValueError("The host did not verify the selected food class")
             outcome = "used"
             self.control.event("native_guest_inventory_used", operation_id=operation, view_sequence=sequence, **consumed)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:

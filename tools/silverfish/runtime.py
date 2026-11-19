@@ -19,10 +19,10 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
-from .native_guest_consumable import parse_mre
+from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
-from .native_host_save import CQC_DROP_SOURCES
+from .native_host_save import CQC_DROP_SOURCES, SLOT
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
@@ -1189,8 +1189,12 @@ class Bridge:
                 elif fields in (["native-enemy-loot-cqc-capability", "1"], ["native-enemy-loot-cqc-capability", "2"]):
                     data["native_enemy_loot_cqc_capability"] = True
                     data["native_enemy_loot_cqc_version"] = int(fields[1])
-                elif fields == ["native-enemy-shell-view-capability", "1"]:
+                elif fields in (["native-enemy-shell-view-capability", "1"], ["native-enemy-shell-view-capability", "2"]):
                     data["native_enemy_shell_view_capability"] = True
+                    data["native_enemy_shell_view_version"] = int(fields[1])
+                elif fields[0] == "native-enemy-shell-authority" and len(fields) == 5 and fields[1] == data.get("map"):
+                    if authority := native_enemy_shells.parse_authority(*fields[1:]):
+                        data[native_enemy_shells.AUTHORITY_KEY] = authority
                 elif fields[0] == "native-enemy-shell-view" and len(fields) == 5 and fields[1] == data.get("map"):
                     if view := native_enemy_shells.parse_view(*fields[1:]):
                         data[native_enemy_shells.KEY] = view
@@ -1216,6 +1220,10 @@ class Bridge:
                     data["native_enemy_loot_escrow"] = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
                                                             units=None if fields[7] == "-" else int(fields[7]),
                                                             position=[_finite(axis) for axis in fields[8:11]])
+                elif (fields[0] == "native-enemy-loot-retire-proof" and len(fields) == 6 and fields[1] == "1"
+                        and fields[2] == data.get("map") and SLOT.fullmatch(fields[4]) and valid_guid(fields[5])):
+                    data["native_enemy_loot_retire_proof"] = dict(schema=1, map=fields[2], actor=fields[3],
+                                                                 slot=fields[4], guid=fields[5])
                 elif fields[0] == "native-campaign-npc" and len(fields) == 10:
                     data["native_campaign_npc"] = {
                         "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
@@ -1310,11 +1318,12 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] == "native-guest-mre":
-                    proof = parse_mre(fields)
-                    if ("native_guest_mre" in data or data.get("state") != "hosting" or data.get("map") != proof["map"]):
-                        raise ValueError("Invalid stock MRE report scope")
-                    data["native_guest_mre"] = proof
+                elif fields[0] in MEALS:
+                    proof = parse_meal(fields)
+                    key = CONSUMABLE_RESULT[fields[0]]
+                    if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
+                        raise ValueError("Invalid stock food report scope")
+                    data[key] = proof
                 elif fields[0] == "native-guest-mre-fixture" and len(fields) in (6, 11):
                     area, pawn, food, intox, host_intox = fields[1:6]
                     if (data.get("state") != "hosting" or data.get("map") != area or not pawn.startswith("Player_FP_C " + area + ".")

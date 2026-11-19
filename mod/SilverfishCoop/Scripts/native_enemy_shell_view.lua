@@ -2,6 +2,8 @@ local view = {}
 
 local area = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local world_name = "World " .. area .. ".DeadBridge_P"
+local raw_class = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
+local raw_prefix = area .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_INPUT") == "1"
 local host_enabled = os.getenv("SILVERFISH_COOP_NATIVE_CQC_LOOT") == "1"
@@ -47,6 +49,20 @@ end
 
 local function distance_squared(first, second)
     return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
+end
+
+local function raw_path(name)
+    if type(name) ~= "string" then return end
+    local body = name:match("^Ammo_ShotgunShells_BP_C (%S+)$")
+    if body and body:sub(1, #raw_prefix) == raw_prefix and body:sub(#raw_prefix + 1):match("^[0-9]+$") then return body end
+end
+
+function view.raw_retired(world, name)
+    local path = raw_path(name)
+    if not path or not valid(world) or world:GetFullName() ~= world_name then return false end
+    local shell = StaticFindObject(path)
+    return not valid(shell) or (same(shell:GetWorld(), world) and shell:GetFullName() == name
+        and exact(shell, raw_class) and shell:IsActorBeingDestroyed() == true)
 end
 
 local function viewer(state, phase)
@@ -208,14 +224,20 @@ local function paint(pawn, controller, guid)
     return widget.TextBlock_Notes:GetText():ToString() == text
 end
 
-local function row_at(encoded)
-    local guid, units, x, y, z = encoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+local function row_at(encoded, hosting)
+    local guid, units, x, y, z, raw
+    if hosting then
+        guid, units, x, y, z, raw = encoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+    else
+        guid, units, x, y, z = encoded:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+    end
     local quantity = math.tointeger(tonumber(units))
     local point = { X = tonumber(x), Y = tonumber(y), Z = tonumber(z) }
-    if not identifier(guid, "[^0-9A-F]") or not quantity or quantity < 3 or quantity > 9 or not vector(point) then
+    if not identifier(guid, "[^0-9A-F]") or not quantity or quantity < 3 or quantity > 9
+        or not vector(point) or (hosting and not raw_path(raw)) then
         error("native_enemy_shell_frame_invalid", 0)
     end
-    return guid, { quantity = quantity, point = point, cue = aim_point(point) }
+    return guid, { quantity = quantity, point = point, cue = aim_point(point), raw = raw }
 end
 
 function view.command(fields, state, phase)
@@ -232,7 +254,7 @@ function view.command(fields, state, phase)
     end
     local rows, order = {}, {}
     for index = 5, #fields do
-        local guid, row = row_at(fields[index])
+        local guid, row = row_at(fields[index], phase == "hosting")
         if rows[guid] then error("native_enemy_shell_frame_invalid", 0) end
         rows[guid], order[#order + 1] = row, guid
     end
@@ -241,13 +263,13 @@ function view.command(fields, state, phase)
     end
     for guid, old in pairs(frame and frame.rows or {}) do
         local row = rows[guid]
-        if row and row.quantity == old.quantity and distance_squared(row.point, old.point) == 0 then
+        if row and row.quantity == old.quantity and row.raw == old.raw and distance_squared(row.point, old.point) == 0 then
             rows[guid] = old
         else
             remove_marker(old)
         end
     end
-    frame = { epoch = epoch, pawn = pawn, world = state.world, rows = rows, order = order, visible = {},
+    frame = { epoch = epoch, pawn = pawn, world = state.world, rows = rows, order = order, visible = {}, eligible = {},
         expires = now(pawn) + frame_lifetime }
     return "local shell frame accepted"
 end
@@ -259,15 +281,20 @@ function view.sync(state, phase)
         view.clear()
         return
     end
-    frame.visible = {}
+    frame.visible, frame.eligible = {}, {}
     for _, guid in ipairs(frame.order) do
         local row = frame.rows[guid]
-        if not marker_visible(row) then
+        if phase == "hosting" and not view.raw_retired(state.world, row.raw) then
             remove_marker(row)
-            local ok, visible = pcall(create_marker, row)
-            if not ok or not visible then remove_marker(row) end
+        else
+            frame.eligible[#frame.eligible + 1] = guid
+            if not marker_visible(row) then
+                remove_marker(row)
+                local ok, visible = pcall(create_marker, row)
+                if not ok or not visible then remove_marker(row) end
+            end
+            if marker_visible(row) then frame.visible[#frame.visible + 1] = guid end
         end
-        if marker_visible(row) then frame.visible[#frame.visible + 1] = guid end
     end
     local focus = closest_focus(pawn, controller)
     local ok, shown = false, false
@@ -322,10 +349,16 @@ end
 
 function view.rows(state, phase, status_row)
     if not viewer(state, phase) then return {} end
-    local rows = { status_row("native-enemy-shell-view-capability", 1) }
-    if frame and #frame.visible > 0 and same(frame.world, state.world) then
-        rows[#rows + 1] = status_row("native-enemy-shell-view", area, frame.epoch,
-            table.concat(frame.visible, ","), frame.focus or "-")
+    local rows = { status_row("native-enemy-shell-view-capability", 2) }
+    if frame and same(frame.world, state.world) then
+        if phase == "hosting" then
+            rows[#rows + 1] = status_row("native-enemy-shell-authority", area, frame.epoch, frame.pawn:GetFullName(),
+                #frame.eligible > 0 and table.concat(frame.eligible, ",") or "-")
+        end
+        if #frame.visible > 0 then
+            rows[#rows + 1] = status_row("native-enemy-shell-view", area, frame.epoch,
+                table.concat(frame.visible, ","), frame.focus or "-")
+        end
     end
     return rows
 end

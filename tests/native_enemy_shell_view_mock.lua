@@ -10,6 +10,9 @@ local mesh_path = "/Engine/BasicShapes/Cube.Cube"
 local material_path = "/Game/Assets/Materials/M_Light_Yellow.M_Light_Yellow"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local text_path = "/Script/UMG.TextBlock"
+local raw_path = area .. ".DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
+local raw_class = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
+local function raw_name(suffix) return "Ammo_ShotgunShells_BP_C " .. raw_path .. suffix end
 local game_time, blocked, downed = 0, false, false
 local spawned, destroyed, created, removed = 0, 0, 0, 0
 
@@ -25,7 +28,7 @@ os.getenv = function() return "1" end
 StaticFindObject = function(path) return classes[path] end
 FText = function(value) return { ToString = function() return value end } end
 SilverfishTakeNativeInteractPress = function() end
-for _, path in ipairs({pawn_path, controller_path, camera_path, actor_path, mesh_path, material_path, widget_path, text_path}) do
+for _, path in ipairs({pawn_path, controller_path, camera_path, actor_path, mesh_path, material_path, widget_path, text_path, raw_class}) do
     classes[path] = object(path)
 end
 world = object("World " .. area .. ".DeadBridge_P")
@@ -99,11 +102,13 @@ local view = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_shell_view
 view.start(function() return downed end)
 local state = { map = area, world = world, server = false, listening = true, controller = controller,
     local_pawn = { pawn = pawn, name = pawn:GetFullName(), controller_object = controller } }
-local frame = { "nonce", "native-enemy-shell-frame", epoch, pawn:GetFullName(), first .. "|6|150|0|0", second .. "|5|0|160|0" }
+local frame = { "nonce", "native-enemy-shell-frame", epoch, pawn:GetFullName(),
+    first .. "|6|150|0|0|" .. raw_name("10"), second .. "|5|0|160|0|" .. raw_name("11") }
 assert(view.command(frame, state, "hosting"))
 view.sync(state, "hosting")
 assert(spawned == 2 and created == 1 and view.focused_target(pawn) == selected)
-assert(view.rows(state, "hosting", table.pack)[2][4] == first .. "," .. second)
+local rows = view.rows(state, "hosting", table.pack)
+assert(rows[2][5] == first .. "," .. second and rows[3][4] == first .. "," .. second)
 blocked = true
 assert(not view.focused_target(pawn) and not view.clear_line(pawn, { X = 150, Y = 0, Z = 0 }))
 view.sync(state, "hosting")
@@ -123,14 +128,27 @@ frame[6] = nil
 assert(view.command(frame, state, "hosting"))
 view.sync(state, "hosting")
 assert(destroyed == 1 and spawned == 2)
+local raw = object(raw_name("10"), raw_class)
+classes[raw_path .. "10"] = raw
+view.sync(state, "hosting")
+assert(not view.focused_target(pawn) and not view.raw_retired(world, raw_name("10")))
+assert(destroyed == 2 and view.rows(state, "hosting", table.pack)[2][5] == "-")
+local exact_world = raw.GetWorld
+raw.GetWorld, raw.destroyed = function() return object("old world") end, true
+view.sync(state, "hosting")
+assert(not view.raw_retired(world, raw_name("10")) and spawned == 2)
+raw.GetWorld = exact_world
+view.sync(state, "hosting")
+assert(view.raw_retired(world, raw_name("10")) and view.focused_target(pawn) == selected and spawned == 3)
 game_time = 3
 view.sync(state, "hosting")
-assert(destroyed == 2 and not view.focused_target(pawn) and #view.rows(state, "hosting", table.pack) == 1)
+assert(destroyed == 3 and not view.focused_target(pawn) and #view.rows(state, "hosting", table.pack) == 1)
 state.server, pawn.HasAuthority = true, function() return false end
+frame[5] = first .. "|6|150|0|0"
 assert(view.command(frame, state, "connected"))
 view.sync(state, "connected")
 assert(view.focused_target(pawn) == selected)
 state.server = false
 view.sync(state, "connected")
-assert(destroyed == 3 and not view.focused_target(pawn))
+assert(destroyed == 4 and not view.focused_target(pawn))
 print("Exact shell cues yield to stock focus and walls, remain noncolliding, expire, and use the selected local stock press")
