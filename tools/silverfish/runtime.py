@@ -1324,7 +1324,7 @@ class Bridge:
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
                         raise ValueError("Invalid stock food report scope")
                     data[key] = proof
-                elif fields[0] == "native-guest-mre-fixture" and len(fields) in (6, 11):
+                elif fields[0] == "native-guest-mre-fixture" and len(fields) in (6, 10, 11):
                     area, pawn, food, intox, host_intox = fields[1:6]
                     if (data.get("state") != "hosting" or data.get("map") != area or not pawn.startswith("Player_FP_C " + area + ".")
                             or (float(food), int(intox)) != (17, 42) or not 0 <= int(host_intox) <= 100
@@ -1332,7 +1332,13 @@ class Bridge:
                         raise ValueError("Invalid detached MRE fixture report")
                     data["native_guest_mre_fixture"] = {"map": area, "pawn": pawn, "food": 17, "intoxication": 42,
                                                          "host_intoxication": int(host_intox)}
-                    if len(fields) == 11:
+                    if len(fields) == 10:
+                        vitals = tuple(map(_finite, fields[6:]))
+                        if vitals != (250, 210, 250, 230):
+                            raise ValueError("Invalid detached MRE fixture wound baseline")
+                        data["native_guest_mre_fixture"]["wound_baseline"] = dict(zip(
+                            ("hp_before", "hp_after", "regen_before", "regen_after"), vitals))
+                    elif len(fields) == 11:
                         damage = tuple(map(_finite, fields[6:]))
                         if damage != (40, 250, 210, 250, 230):
                             raise ValueError("Invalid stock MRE fixture nonlethal damage proof")

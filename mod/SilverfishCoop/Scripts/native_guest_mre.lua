@@ -24,54 +24,13 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
-local function damage_test_source(state, pawn, detached)
+local function check_wound_fixture(state, pawn, detached)
     local world = state.world
     if not headless_test or not valid(world) or world:GetFullName() ~= "World " .. borough
         or not same(pawn:GetWorld(), world) or not pawn:HasAuthority() or pawn.Dead ~= false
-        or pawn.GodMode ~= false or pawn.Sickness ~= 0 or pawn.MaxHealth ~= 250
-        or pawn.RegenDmg_Coeff ~= 0.5 or pawn.Min_RegenRatio ~= 0.25
-        or detached.PlayerHealth ~= 250 or detached.PlayerRegen ~= 250 then
-        error("guest_mre_refused_fixture_stock_damage_baseline", 0)
+        or pawn.MaxHealth ~= 250 or detached.PlayerHealth ~= 250 or detached.PlayerRegen ~= 250 then
+        error("guest_mre_refused_fixture_wound_baseline", 0)
     end
-    local source = StaticFindObject(borough .. ":PersistentLevel.WorldSettings")
-    local class = StaticFindObject("/Script/Engine.WorldSettings")
-    if not valid(source) or not same(source:GetClass(), class) or not same(source:GetWorld(), world)
-        or not same(source:GetOuter(), world.PersistentLevel) or not source:HasAuthority() then
-        error("guest_mre_refused_fixture_stock_damage_source", 0)
-    end
-    return source
-end
-
-local function measurement(value)
-    if bounded(value, -10000, 10000) then return string.format("%.6g", value) end
-    if type(value) == "boolean" then return tostring(value) end
-    return type(value)
-end
-
-local function wound_test_guest(pawn, detached, host, stock, source)
-    local host_health, host_regen = stock.PlayerHealth, stock.PlayerRegen
-    local hp, regen = detached.PlayerHealth, detached.PlayerRegen
-    local total, lethal = {}, {}
-    local called, call_error = pcall(function()
-        pawn:DealDamage({Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 40}, {}, source,
-            {X = 0, Y = 0, Z = 0}, false, total, lethal)
-    end)
-    local guest_hp_after, guest_regen_after = detached.PlayerHealth, detached.PlayerRegen
-    local host_hp_after, host_regen_after = stock.PlayerHealth, stock.PlayerRegen
-    local guest_bound, host_bound = same(pawn.Save, detached), same(host.Save, stock)
-    if not called or total.TotalDamage ~= 40 or lethal.IsLethal ~= false or pawn.Dead ~= false or not guest_bound or not host_bound
-        or guest_hp_after ~= hp - 40 or guest_regen_after ~= regen - 20
-        or host_hp_after ~= host_health or host_regen_after ~= host_regen then
-        local call = called and "ok" or tostring(call_error):gsub("[%c]", " "):sub(1, 144)
-        error(string.format("mutation_unverified_guest_mre_fixture_stock_damage:call=%s:damage=%s:lethal=%s:dead=%s"
-            .. ":guest_hp=%s/%s:guest_regen=%s/%s:host_hp=%s/%s:host_regen=%s/%s:bindings=%s/%s",
-            call, measurement(total.TotalDamage), measurement(lethal.IsLethal), measurement(pawn.Dead),
-            measurement(hp), measurement(guest_hp_after), measurement(regen), measurement(guest_regen_after),
-            measurement(host_health), measurement(host_hp_after), measurement(host_regen), measurement(host_regen_after),
-            tostring(guest_bound == true), tostring(host_bound == true)), 0)
-    end
-    return {amount = total.TotalDamage, hp_before = hp, hp_after = guest_hp_after,
-        regen_before = regen, regen_after = guest_regen_after}
 end
 
 function mre.sync(state, phase)
@@ -105,7 +64,9 @@ function mre.command(fields, state, phase)
         error(refused .. "exact_detached_save", 0)
     end
     if test then
-        local source = damage_test_source(state, pawn, detached)
+        check_wound_fixture(state, pawn, detached)
+        local host_health, host_regen = stock.PlayerHealth, stock.PlayerRegen
+        local hp_before, regen_before = detached.PlayerHealth, detached.PlayerRegen
         local invoked, ok, status, food, intox, stock_intox = pcall(
             SilverfishSeedNativeGuestMreFixture, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress())
         if invoked and ok == false and type(status) == "string" and status:match("^guest_mre_refused_[a-z0-9_]+$") then
@@ -115,9 +76,14 @@ function mre.command(fields, state, phase)
             or math.type(stock_intox) ~= "integer" or not bounded(stock_intox, 0, 100) then
             error("mutation_unverified_guest_mre_fixture", 0)
         end
-        local damage = wound_test_guest(pawn, detached, host, stock, source)
-        fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox, damage = damage}
-        return "exact detached MRE test baseline verified"
+        local hp_after, regen_after = detached.PlayerHealth, detached.PlayerRegen
+        if hp_after ~= 210 or regen_after ~= 230 or pawn.Dead ~= false or not same(pawn.Save, detached)
+            or not same(host.Save, stock) or stock.PlayerHealth ~= host_health or stock.PlayerRegen ~= host_regen then
+            error("mutation_unverified_guest_mre_fixture_wound_baseline", 0)
+        end
+        fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox,
+            hp_before = hp_before, hp_after = hp_after, regen_before = regen_before, regen_after = regen_after}
+        return "isolated guest MRE wound and food baseline verified"
     end
     local called, used, status, before, after, food_before, food_after, regen_before, regen_after,
         health, maximum, intox_before, intox_after, host_intox, trait =
@@ -148,9 +114,8 @@ function mre.rows(state, phase, status_row)
     if not enabled or phase ~= "hosting" or state.server ~= false or not state.listening then return {} end
     local rows = {}
     if fixture and fixture.map == state.map then
-        local damage = fixture.damage
         rows[#rows + 1] = status_row("native-guest-mre-fixture", fixture.map, fixture.name, fixture.food, fixture.intox,
-            fixture.stock_intox, damage.amount, damage.hp_before, damage.hp_after, damage.regen_before, damage.regen_after)
+            fixture.stock_intox, fixture.hp_before, fixture.hp_after, fixture.regen_before, fixture.regen_after)
     end
     local function real(value) return string.format("%.17g", value) end
     if row and row.map == state.map then

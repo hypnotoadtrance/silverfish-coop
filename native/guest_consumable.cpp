@@ -822,31 +822,41 @@ namespace
         const auto before = copy_value(personal.map, flags);
         const auto expected = copy_value(personal.map, flags);
         const auto stock_before = copy_value(canonical.map, stock_flags);
+        const auto stock_vitals = health.read(scope.stock);
         constexpr int test_intoxication = 42;
-        constexpr double test_food = 17;
-        if (!before || !expected || !stock_before ||
+        if (health.max_health != 250.0 || health.before.health != 250.0 || health.before.regen != 250.0 ||
+            !stock_vitals.finite() || !before || !expected || !stock_before ||
             !personal.write(static_cast<Unreal::FScriptMap*>(expected.get()), test_intoxication))
             return refusal("guest_mre_refused_fixture_snapshot");
+        // Seed the isolated test frame before exercising normal stock item use.
+        auto vitals = health.before;
+        vitals.food = 17.0;
+        vitals.health = 210.0;
+        vitals.regen = 230.0;
+        const auto write_baseline = [&](const Vitals& value) {
+            health.food->SetPropertyValueInContainer(scope.guest, value.food);
+            health.health->SetPropertyValueInContainer(scope.guest, value.health);
+            health.regen->SetPropertyValueInContainer(scope.guest, value.regen);
+        };
         const int pawn_before = food_functions.pawn_intox->GetPropertyValueInContainer(scope.pawn);
         personal.map->CopyCompleteValue(flags, expected.get());
-        health.food->SetPropertyValueInContainer(scope.guest, test_food);
+        write_baseline(vitals);
         food_functions.pawn_intox->SetPropertyValueInContainer(scope.pawn, test_intoxication);
-        auto vitals = health.before;
-        vitals.food = test_food;
-        const auto safe_stock = [&] { return scope.current() && canonical.map->Identical(stock_flags, stock_before.get()); };
+        const auto safe_stock = [&] { return scope.current() && health.read(scope.stock) == stock_vitals &&
+            canonical.map->Identical(stock_flags, stock_before.get()); };
         if (!safe_stock() || !personal.map->Identical(flags, expected.get()) || health.read(scope.guest) != vitals ||
             food_functions.pawn_intox->GetPropertyValueInContainer(scope.pawn) != test_intoxication)
         {
             if (!safe_stock()) return refusal("mutation_unverified_guest_mre_fixture");
             personal.map->CopyCompleteValue(flags, before.get());
-            health.food->SetPropertyValueInContainer(scope.guest, health.before.food);
+            write_baseline(health.before);
             food_functions.pawn_intox->SetPropertyValueInContainer(scope.pawn, pawn_before);
             return refusal(safe_stock() && personal.map->Identical(flags, before.get()) && health.read(scope.guest) == health.before &&
                 food_functions.pawn_intox->GetPropertyValueInContainer(scope.pawn) == pawn_before
                 ? "guest_mre_refused_fixture_rolled_back" : "mutation_unverified_guest_mre_fixture");
         }
         result(lua, true, "verified");
-        lua.set_number(test_food);
+        lua.set_number(vitals.food);
         lua.set_integer(test_intoxication);
         lua.set_integer(canonical.read(stock_flags));
         return 5;

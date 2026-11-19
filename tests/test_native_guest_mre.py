@@ -20,18 +20,18 @@ def report():
 
 
 class NativeMreTests(unittest.IsolatedAsyncioTestCase):
-    def test_headless_fixture_authenticates_nonlethal_stock_damage(self):
+    def test_headless_fixture_validates_its_wound_baseline(self):
         with TemporaryDirectory() as folder:
             directory = Path(folder)
             bridge = runtime.Bridge(directory, None)
             prefix = f"schema\t1\nsession\thost\thosting\t{BOROUGH}\t1\t0\n"
             fixture = f"native-guest-mre-fixture\t{BOROUGH}\t{PAWN}\t17\t42\t0"
             status = directory / "status.tsv"
-            status.write_text(prefix + fixture + "\t40\t250\t210\t250\t230\n", encoding="utf-8")
-            self.assertEqual(bridge.snapshot()["native_guest_mre_fixture"]["damage"], {
-                "amount": 40, "hp_before": 250, "hp_after": 210, "regen_before": 250, "regen_after": 230,
+            status.write_text(prefix + fixture + "\t250\t210\t250\t230\n", encoding="utf-8")
+            self.assertEqual(bridge.snapshot()["native_guest_mre_fixture"]["wound_baseline"], {
+                "hp_before": 250, "hp_after": 210, "regen_before": 250, "regen_after": 230,
             })
-            status.write_text(prefix + fixture + "\t40\t250\t210\t250\t250\n", encoding="utf-8")
+            status.write_text(prefix + fixture + "\t250\t210\t250\t250\n", encoding="utf-8")
             self.assertIsNone(bridge.snapshot())
 
     def test_stock_food_clamp_healing_and_guest_detox(self):

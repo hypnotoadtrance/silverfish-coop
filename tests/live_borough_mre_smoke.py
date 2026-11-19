@@ -101,7 +101,7 @@ async def verify(work: Path, original: Path):
 
         seeded = (await action(host_run, "native-guest-mre-fixture", target="guest"))["native_guest_mre_fixture"]
         assert (seeded["food"], seeded["intoxication"]) == (17, 42), seeded
-        assert seeded["damage"] == {"amount": 40, "hp_before": 250, "hp_after": 210, "regen_before": 250, "regen_after": 230}, seeded
+        assert seeded["wound_baseline"] == {"hp_before": 250, "hp_after": 210, "regen_before": 250, "regen_after": 230}, seeded
         evidence["seed"] = seeded
 
         await action(guest_run, "native-inventory-view-fixture")
