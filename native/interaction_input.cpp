@@ -45,6 +45,10 @@ namespace
     constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
     constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
     constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
+    constexpr auto dialogue_world = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
+    constexpr auto dialogue_actor = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_Castaway_C_1");
+    constexpr auto dialogue_class = STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C");
+    constexpr auto dialogue_interaction = STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C:SendInteractionToActor");
     constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
@@ -155,9 +159,9 @@ namespace
         Clock::time_point expires{};
     };
 
-    struct WireBoard
+    struct ScopedInteraction
     {
-        Unreal::FWeakObjectPtr actor{}, box{}, pawn{};
+        Unreal::FWeakObjectPtr actor{}, component{}, pawn{};
         bool accepting{};
         Clock::time_point expires{};
         Receipt pending{};
@@ -167,11 +171,12 @@ namespace
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
-    WireBoard wire_board;
+    ScopedInteraction wire_board, dialogue_input;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
     std::uint64_t wire_sequence{};
+    std::uint64_t dialogue_sequence{};
     bool event_source_matches{}, event_consumed{};
 
     bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
@@ -360,7 +365,7 @@ namespace
                 ? std::string_view{} : "native_wire_board_configuration";
     }
 
-    bool wire_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* box)
+    bool interaction_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
     {
         auto* range = field<Unreal::FDoubleProperty>(pawn, STR("InteractionRange"));
         auto* getter = find<Unreal::UFunction>(STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
@@ -372,7 +377,7 @@ namespace
             getter->GetParmsSize() != sizeof(point) || !getter->HasAnyFunctionFlags(Unreal::FUNC_Native)) return false;
         const double reach = range->GetPropertyValueInContainer(pawn);
         if (!std::isfinite(reach) || reach <= 0 || reach > 1000) return false;
-        box->ProcessEvent(getter, point.data());
+        component->ProcessEvent(getter, point.data());
         auto player = static_cast<Unreal::AActor*>(pawn)->K2_GetActorLocation();
         auto board = static_cast<Unreal::AActor*>(actor)->K2_GetActorLocation();
         const auto near = [&](double x, double y, double z) {
@@ -394,7 +399,7 @@ namespace
         if (name != interaction && name != script) return;
         auto* world = scope.world.Get();
         auto* profile = wire_board_profile(world);
-        auto* box = wire_board.box.Get();
+        auto* box = wire_board.component.Get();
         if (!profile || !qualify_wire_board(world, *profile, actor, box).empty() || function->GetOuterPrivate() != actor->GetClassPrivate() ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         if (name == script)
@@ -417,8 +422,50 @@ namespace
         if (!iteration.OriginalFunctionCallPrevented() || !pawn || pawn != wire_board.pawn.Get() || hit != box ||
             object_field(pawn, STR("InteractionTarget_Component")) != box ||
             !silverfish::native_interaction_input::consume_current_press(pawn) || !wire_board.accepting ||
-            wire_sequence == max_sequence || !wire_in_reach(pawn, actor, box)) return;
+            wire_sequence == max_sequence || !interaction_in_reach(pawn, actor, box)) return;
         wire_board.pending = {++wire_sequence, Clock::now() + receipt_lifetime};
+    }
+
+    bool exact_dialogue_actor(Unreal::UObject* actor, Unreal::UObject* sphere)
+    {
+        auto* world = scope.world.Get();
+        auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        return !scope.host && live(world) && world->GetPathName() == dialogue_world
+            && live(actor) && actor->GetClassPrivate() == find<Unreal::UClass>(dialogue_class)
+            && actor->GetPathName() == dialogue_actor && destroying && !destroying->GetPropertyValueInContainer(actor)
+            && static_cast<Unreal::AActor*>(actor)->GetWorld() == world && live(sphere)
+            && sphere->GetClassPrivate() == find<Unreal::UClass>(STR("/Script/Engine.SphereComponent"))
+            && sphere->GetOuterPrivate() == actor && sphere == object_field(actor, STR("Sphere_Interact"));
+    }
+
+    void intercept_dialogue(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        if (!actor || actor != dialogue_input.actor.Get() || !function || !parameters ||
+            call.OriginalFunctionCallPrevented() || Clock::now() >= dialogue_input.expires ||
+            !live_scope(scope) || function != find<Unreal::UFunction>(dialogue_interaction)) return;
+        auto* sphere = dialogue_input.component.Get();
+        if (!exact_dialogue_actor(actor, sphere) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        auto* component = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        if (!player || !component || player->GetPropertyClass().Get() != find<Unreal::UClass>(pawn_path) ||
+            component->GetPropertyClass().Get() != find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"))) return;
+        auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
+        if (!pawn || pawn != dialogue_input.pawn.Get() || pawn != scope.pawn.Get()) return;
+        call.PreventOriginalFunctionCall();
+        auto* hit = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
+        if (!call.OriginalFunctionCallPrevented() || hit != sphere || !dialogue_input.accepting ||
+            object_field(pawn, STR("InteractionTarget_Component")) != sphere || dialogue_sequence == max_sequence ||
+            !interaction_in_reach(pawn, actor, sphere) ||
+            !silverfish::native_interaction_input::consume_current_press(pawn)) return;
+        dialogue_input.pending = {++dialogue_sequence, Clock::now() + receipt_lifetime};
+    }
+
+    void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        intercept_wire_board(iteration, actor, function, parameters);
+        intercept_dialogue(iteration, actor, function, parameters);
     }
 
     bool exact_dispatch(Unreal::UObject* pawn, Unreal::UFunction* function)
@@ -447,7 +494,7 @@ namespace
         if (!available()) return;
         if (!exact_dispatch(pawn, function))
         {
-            intercept_wire_board(iteration, pawn, function, parameters);
+            route_interaction(iteration, pawn, function, parameters);
             return;
         }
         if (event_depth++ == 0)
@@ -475,7 +522,7 @@ namespace
         {
             if (!event_depth) record(iteration, pawn, frame.Locals());
         }
-        else intercept_wire_board(iteration, pawn, frame.Node(), frame.Locals());
+        else route_interaction(iteration, pawn, frame.Node(), frame.Locals());
     }
 
     int report(const Lua& lua, bool ok, std::string_view status)
@@ -529,6 +576,18 @@ namespace
         return 0;
     }
 
+    void bind_interaction(ScopedInteraction& target, Unreal::UObject* actor, Unreal::UObject* component,
+                          Unreal::UObject* pawn, bool accepting, Clock::time_point now)
+    {
+        if (actor != target.actor.Get() || component != target.component.Get() || pawn != target.pawn.Get() ||
+            !accepting || target.expires <= now) target.pending = {};
+        target.actor = actor;
+        target.component = component;
+        target.pawn = pawn;
+        target.accepting = accepting;
+        target.expires = now + lease;
+    }
+
     int set_wire_board(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_bool(3))
@@ -546,33 +605,55 @@ namespace
         auto* actor = find<Unreal::AActor>(profile->actor);
         auto* box = object_field(actor, STR("Box"));
         if (const auto reason = qualify_wire_board(world, *profile, actor, box); !reason.empty()) return report(lua, false, reason);
-        if (actor != wire_board.actor.Get() || box != wire_board.box.Get() || pawn != wire_board.pawn.Get() ||
-            !accepting || wire_board.expires <= now) wire_board.pending = {};
-        wire_board.actor = actor;
-        wire_board.box = box;
-        wire_board.pawn = pawn;
-        wire_board.accepting = accepting;
-        wire_board.expires = now + lease;
+        bind_interaction(wire_board, actor, box, pawn, accepting, now);
         return report(lua, true, "ready");
     }
 
-    int take_wire_board_press(const Lua& lua)
+    int take_interaction_press(const Lua& lua, ScopedInteraction& target)
     {
         if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto requested = lua.get_integer();
-        auto* pawn = wire_board.pawn.Get();
+        auto* pawn = target.pawn.Get();
         const auto now = Clock::now();
-        if (!pawn || address(pawn) != requested || pawn != scope.pawn.Get() || !wire_board.accepting ||
-            now >= wire_board.expires || !wire_board.pending.sequence || now >= wire_board.pending.expires ||
+        if (!pawn || address(pawn) != requested || pawn != scope.pawn.Get() || !target.accepting ||
+            now >= target.expires || !target.pending.sequence || now >= target.pending.expires ||
             !live_scope(scope) || !standing(pawn)) return 0;
-        lua.set_integer(static_cast<std::int64_t>(wire_board.pending.sequence));
-        wire_board.pending = {};
+        lua.set_integer(static_cast<std::int64_t>(target.pending.sequence));
+        target.pending = {};
         return 1;
     }
+
+    int take_wire_board_press(const Lua& lua) { return take_interaction_press(lua, wire_board); }
 
     int clear_wire_board(const Lua&)
     {
         if (Unreal::IsInGameThreadRaw()) wire_board = {};
+        return 0;
+    }
+
+    int set_dialogue_scope(const Lua& lua)
+    {
+        const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
+        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2))
+            return respond(false);
+        const auto requested = lua.get_integer();
+        const auto accepting = lua.get_bool();
+        auto* pawn = scope.pawn.Get();
+        const auto now = Clock::now();
+        if (scope.host || !pawn || address(pawn) != requested || now >= scope.expires || !live_scope(scope))
+            return respond(false);
+        auto* actor = find<Unreal::AActor>(dialogue_actor);
+        auto* sphere = object_field(actor, STR("Sphere_Interact"));
+        if (!exact_dialogue_actor(actor, sphere)) return respond(false);
+        bind_interaction(dialogue_input, actor, sphere, pawn, accepting, now);
+        return respond(true);
+    }
+
+    int take_dialogue_press(const Lua& lua) { return take_interaction_press(lua, dialogue_input); }
+
+    int clear_dialogue_scope(const Lua&)
+    {
+        if (Unreal::IsInGameThreadRaw()) dialogue_input = {};
         return 0;
     }
 
@@ -735,6 +816,9 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeWireBoardScope", set_wire_board);
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
+        lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
+        lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
+        lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 
@@ -744,6 +828,7 @@ namespace silverfish::native_interaction_input
         if (!Unreal::IsInGameThreadRaw()) return;
         scope = {};
         wire_board = {};
+        dialogue_input = {};
         first = count = event_depth = 0;
         event_source_matches = event_consumed = false;
     }
