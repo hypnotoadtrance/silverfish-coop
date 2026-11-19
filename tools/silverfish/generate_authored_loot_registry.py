@@ -93,9 +93,14 @@ def main() -> None:
     repo = Path(__file__).resolve().parents[2]
     if arguments.audit:
         maps, placed, defaults = survey(arguments.audit.read_text(encoding="utf-8-sig"))
-        rejected = [full_name(area, actor) for area, actor, salt in PLACEMENTS if defaults.get((area, actor)) != salt]
-        if rejected:
-            parser.exit(1, "Crates failed the cooked placement audit\n" + "\n".join(rejected) + "\n")
+        registered = {(area, actor): salt for area, actor, salt in PLACEMENTS}
+        rejected = [full_name(area, actor) for (area, actor), salt in registered.items()
+                    if defaults.get((area, actor)) != salt]
+        missing = [full_name(area, actor) for area, actor in defaults.keys() - registered.keys()]
+        if rejected or missing:
+            errors = [*(f"Unexpected profile {name}" for name in sorted(rejected)),
+                      *(f"Missing profile {name}" for name in sorted(missing))]
+            parser.exit(1, "Crates failed the cooked placement audit\n" + "\n".join(errors) + "\n")
         print(f"{len(maps)} maps surveyed, {len(placed)} placed small crates, {len(defaults)} default candidates "
               f"on {len({area for area, _ in defaults})} qualified maps, {len(PLACEMENTS)} registered")
     for relative, expected in outputs().items():

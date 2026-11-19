@@ -1,4 +1,4 @@
-"""Verify the stock LookTrace and Interact path on three authored crate maps."""
+"""Verify the stock LookTrace and Interact path on authored crate maps."""
 
 import argparse
 import asyncio
@@ -25,6 +25,9 @@ SCENES = {
     "city": (CITY, ("LootCrate_Small_BP_C_5", "LootCrate_Small_BP_C_7")),
     "rail-yard": (RAIL_YARD, ("LootCrate_Small_BP_C_3",)),
     "cistern": (CISTERN, ("LootCrate_Small_BP_C_7",)),
+    "beach": ("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P", ("LootCrate_Small_BP_C_10",)),
+    "southeast-road": ("/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P", ("LootCrate_Small_BP_C_0",)),
+    "trench": ("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P", ("LootCrate_Small_BP_C_1", "LootCrate_Small_BP_C_3")),
 }
 
 
@@ -244,7 +247,7 @@ async def main(arguments):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--area", action="append", choices=SCENES, help="play this scene instead of running all three")
+    parser.add_argument("--area", action="append", choices=SCENES, help="play this scene instead of running every supported smoke scenario")
     parser.add_argument("--vanilla-saved", type=Path)
     parser.add_argument("--baseline", help="resume a copy of a matching crate smoke checkpoint in this lab")
     parser.add_argument("--force-stock-roll", action="store_true", help="use the scoped Rail Yard stock stream fixture")

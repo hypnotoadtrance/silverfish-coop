@@ -21,7 +21,7 @@ OPERATION = "f" * 32
 class AuthoredCrateRegistryTests(unittest.TestCase):
     def test_first_three_profiles_and_rollout_counts_match_generated_files(self):
         self.assertEqual(tuple(CRATES)[:3], (LEGACY_CRATE, OTHER_CRATE, BRIDGE_CRATE))
-        self.assertEqual(len(PLACEMENTS), 22)
+        self.assertEqual(len(PLACEMENTS), 287)
         self.assertEqual({area: tuple(CRATES.values()).count(area) for area in (CITY, RAIL_YARD, CISTERN)},
                          {CITY: 7, RAIL_YARD: 7, CISTERN: 5})
         repository = Path(__file__).resolve().parents[1]
@@ -90,7 +90,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(native_loot.fixture_selection(f"guest2@{OTHER_CRATE}", CROSSROADS), ("guest2", OTHER_CRATE))
 
     def test_snapshot_reads_multiple_exact_crates_with_legacy_field(self):
-        unsupported = full_name(CROSSROADS, "LootCrate_Small_BP_C_18")
+        unsupported = full_name(CROSSROADS, "LootCrate_Small_BP_C_10")
         data = [
             ("schema", "1"), ("session", "client", "connected", CROSSROADS, "0", "1"),
             ("native-loot-crate-input", CROSSROADS, LEGACY_CRATE, "exhausted"),
@@ -171,10 +171,11 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
 
         bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
         final = await native_loot.project_opened(bridge, game, rolls)
+        local_crates = [crate for crate, area in native_loot.CRATES.items() if area == CROSSROADS]
         self.assertEqual(bridge.command.await_args_list, [
-            call("native-loot-crate-project", "exhausted", LEGACY_CRATE, timeout=4),
-            call("native-loot-crate-project", "exhausted", OTHER_CRATE, timeout=4),
+            call("native-loot-crate-project", "exhausted", crate, timeout=4) for crate in local_crates
         ])
+        self.assertTrue(all(final["native_loot_crates"][crate]["state"] == "exhausted" for crate in local_crates))
         self.assertEqual(final["native_loot_crates"][BRIDGE_CRATE]["state"], "ready")
 
     async def test_view_claim_follows_rendered_crate_even_when_another_is_nearer(self):
