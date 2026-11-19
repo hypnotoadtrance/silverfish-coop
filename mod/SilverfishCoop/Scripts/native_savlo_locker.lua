@@ -96,8 +96,8 @@ local function inspect(state, phase)
         if not component(box, actor, "Box", "BoxComponent") or not same(box, actor.Box)
             or not same(box:GetAttachParent(), frame) then return nil, "stock_box_identity" end
     end
-    return {actor = actor, box = box, pawn = pawn, world = state.world, hosting = hosting, locked = actor.Locked,
-        closed = box and door_angle(door, 0), open = count == 0 and door_angle(door, 95)}
+    return {actor = actor, box = box, door = door, pawn = pawn, world = state.world, hosting = hosting,
+        locked = actor.Locked, closed = box and door_angle(door, 0), open = count == 0 and door_angle(door, 95)}
 end
 
 local function same_projection(scene)
@@ -153,7 +153,14 @@ function locker.rows(state, phase, status)
         name = "stock_opened"
     end
     if not name then return {} end
-    return {status("native-savlo-locker", name, area, actor_name, scene.pawn:GetFullName(), epoch, scene.locked and 1 or 0)}
+    local report = {status("native-savlo-locker", name, area, actor_name, scene.pawn:GetFullName(), epoch, scene.locked and 1 or 0)}
+    if name == "opening" or name == "projecting" then
+        local angle = scene.door.RelativeRotation
+        local detail = ("box=%s;pitch=%s;yaw=%s;roll=%s"):format(scene.box and "present" or "retired",
+            tostring(angle.Pitch), tostring(angle.Yaw), tostring(angle.Roll))
+        report[2] = status("native-savlo-locker-diagnostic", area, detail)
+    end
+    return report
 end
 
 return locker
