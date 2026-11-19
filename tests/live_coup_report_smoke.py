@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from tools.silverfish import native_host_save
+from tools.silverfish import native_dust_cabinet as stock_cabinet, native_host_save
 from tools.silverfish import native_computer_board as collections
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from tools.silverfish.native_authored_pickup import DEAD_END, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
@@ -36,6 +37,7 @@ class CollectionSmoke:
     stock_pickup: bool = False
     stackable: bool = False
     advantage: tuple[tuple[str, int], ...] = ()
+    cabinet: stock_cabinet.Cabinet | None = None
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -242,7 +244,28 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
 
         async def collect_pickup():
             selected = ("--pickup-source", source)
+            profile = plan.cabinet
+            if profile:
+                assert plan.stock_pickup and (profile.source, profile.area) == (source, pickup_map)
+                for directory in (run, client_run):
+                    await wait(directory, lambda s: stock_cabinet.observed(s.get("game", {}), "closed"))
+                blocked = await action(guest, "native-authored-pickup-claim", "--target", source, accepted=False)
+                assert blocked["error"] == f"native_authored_pickup_{profile.kind}_cabinet_closed", blocked
+                opened = (await action(host, profile.fixture))[profile.key]
+                assert (opened["state"], opened["actor"], opened["map"]) == ("opened", profile.actor, pickup_map), opened
+                clear = await wait(client_run, lambda s: stock_cabinet.observed(
+                    s.get("game", {}), "projected").get("epoch") == current["zone_epoch"])
+                evidence["stock_pickup_cabinet"] = {"authority": opened, "replica": clear["game"][profile.key]}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
+            if profile:
+                def near(state, role, point, radius):
+                    game = state.get("game", {})
+                    position = game.get("pawns", {}).get(role, {}).get("location")
+                    return game.get("map") == pickup_map and position and math.dist(position, point) <= radius
+
+                approached = await wait(run, lambda state: near(state, "guest", profile.pickup_location, 240))
+                authority = approached["game"]["pawns"]["guest"]["location"]
+                await wait(client_run, lambda state: near(state, "local", authority, 25))
             if plan.stock_pickup:
                 await wait(client_run, lambda state: state.get("game", {}).get("native_authored_pickup_sources", {})
                            .get(source, {}).get("state") == "available")

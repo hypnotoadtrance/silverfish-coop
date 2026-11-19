@@ -566,7 +566,7 @@ class Host:
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
         if cabinet := native_dust_cabinet.frame(self):
-            view[native_dust_cabinet.FRAME_KEY] = cabinet
+            view[native_dust_cabinet.frame_key(cabinet["map"])] = cabinet
         world_view = self.last_game.get("native_world_view")
         area = self.last_game.get("map")
         if (world_view and world_view.get("mode") == "sample" and world_view.get("map") == area
@@ -2098,8 +2098,8 @@ class Host:
                 elif action == native_authored_pickup.ACTION:
                     result = await native_authored_pickup.claim(self, bridge, "host", request.get("target"),
                                                                request.get("operation_id") or path.stem)
-                elif action == native_dust_cabinet.FIXTURE and self.fixtures:
-                    result = await native_dust_cabinet.open_fixture(self, bridge)
+                elif action in native_dust_cabinet.FIXTURES and self.fixtures:
+                    result = await native_dust_cabinet.open_fixture(self, bridge, action)
                 elif action in native_authored_pickup.FIXTURE_ENTRIES and self.fixtures:
                     source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
                     self.last_game = await bridge.command(action, source, timeout=5)

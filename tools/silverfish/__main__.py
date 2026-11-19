@@ -140,7 +140,7 @@ def parser() -> argparse.ArgumentParser:
         "native-return-to-rest", "native-dream-nothing-position",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
         "native-authored-pickup-claim", "native-authored-pickup-fixture", "native-authored-pickup-stock-fixture", "native-authored-pickup-approach",
-        "native-dust-cabinet-stock-fixture",
+        "native-dust-cabinet-stock-fixture", "native-molasses-cabinet-stock-fixture",
         "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
         "native-broker-grant-manifest",
         "native-broker-drill-issue-fixture", "native-broker-drill-seed-fixture", "native-broker-drill-inspect",

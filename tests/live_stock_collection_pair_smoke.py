@@ -8,6 +8,7 @@ from live_coup_report_smoke import CollectionSmoke, exercise
 
 from tools.silverfish.native_authored_pickup import TRENCH
 from tools.silverfish.native_computer_board import MOLASSES, SAVLO_KEYCARD
+from tools.silverfish.native_dust_cabinet import MOLASSES as MOLASSES_CABINET
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, NORTHEAST_RAIL, OBSERVATORY, SHOPKEEP
 
 
@@ -15,7 +16,7 @@ ANNEX = "/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
 MOLASSES_RUN = CollectionSmoke(
     "molasses", MOLASSES, (SHOPKEEP, NORTHEAST_RAIL, SHOPKEEP), {},
-    accept_before_pickup=True, stock_pickup=True,
+    accept_before_pickup=True, stock_pickup=True, cabinet=MOLASSES_CABINET,
 )
 SAVLO_KEYCARD_RUN = CollectionSmoke(
     "savlo-keycard", SAVLO_KEYCARD,

@@ -1471,10 +1471,10 @@ class Bridge:
                         "offset": int(fields[5]), "pending_event": int(fields[6]), "wanted_offset": int(fields[7]),
                         "render_event": int(fields[8]),
                     }
-                elif fields[0] == "native-dust-cabinet":
-                    key = native_dust_cabinet.KEY
+                elif fields[0] in native_dust_cabinet.STATUS_KEYS:
+                    key = native_dust_cabinet.STATUS_KEYS[fields[0]]
                     if key in data:
-                        raise ValueError("Repeated stock Dust Filter cabinet report")
+                        raise ValueError("Repeated stock cabinet report")
                     data[key] = native_dust_cabinet.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-authored-pickup" and len(fields) == 6:
                     source, area, actor, item_class, state = fields[1:]

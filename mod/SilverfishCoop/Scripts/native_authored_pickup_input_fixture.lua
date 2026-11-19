@@ -16,11 +16,14 @@ local sources = {
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local dust_filter = "railyard-dust-filter"
+local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
 local precise_distances = {
     [dust_filter] = {125, 160, 195},
+    [molasses] = {80, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
 }
+local cabinet_front = {[dust_filter] = 0, [molasses] = 180}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 local function valid(object)
@@ -129,7 +132,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_clear_sight(state, pawn, actor, box, label, distances)
+local function approach_clear_sight(state, pawn, actor, box, label, distances, front)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -161,7 +164,7 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances)
     local checked, placed = pcall(function()
         for _, distance in ipairs(distances) do
             for _, angle in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
-                local heading = math.rad(angle)
+                local heading = math.rad((front or 0) + angle)
                 local x, y = center.X + distance * math.cos(heading), center.Y + distance * math.sin(heading)
                 local top, bottom = center.Z + 160, center.Z - 240
                 local hit = cast(trace, pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom}, 0, false, floor_ignored)
@@ -212,7 +215,7 @@ function input.precise_approach(state, phase, profile, pawn, actor)
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
-    approach_clear_sight(state, pawn, actor, actor.Box, label, distances)
+    approach_clear_sight(state, pawn, actor, actor.Box, label, distances, cabinet_front[profile.source])
     return "stock pickup floor and interaction sight verified"
 end
 
@@ -266,23 +269,25 @@ local function press_stock(state, pawn, box, precise_aim, label, dispatch)
     return reason
 end
 
-function input.open_dust_cabinet(state, phase, pawn, actor, box)
+function input.open_cabinet(state, phase, pawn, actor, box, source)
     local press = SilverfishProbeNativeInteractInput
-    if not approach_scope(state, phase, pawn, actor, sources[dust_filter]) or not same(pawn, state.local_pawn.pawn)
+    local label = source == dust_filter and "authored_dust_cabinet" or "authored_molasses_cabinet"
+    if not cabinet_front[source] or not approach_scope(state, phase, pawn, actor, sources[source])
+        or not same(pawn, state.local_pawn.pawn)
         or not owned(pawn.Camera, pawn, "CameraComponent") or type(press) ~= "function" then
-        error("authored_dust_cabinet_fixture_scope_unavailable", 0)
+        error(label .. "_fixture_scope_unavailable", 0)
     end
-    local origin, facing = approach_clear_sight(state, pawn, actor, box, "authored_dust_cabinet_fixture",
-        precise_distances[dust_filter])
-    local ok, receipt = pcall(press_stock, state, pawn, box, true, "authored_dust_cabinet_stock_input", function()
+    local origin, facing = approach_clear_sight(state, pawn, actor, box, label .. "_fixture",
+        precise_distances[source], cabinet_front[source])
+    local ok, receipt = pcall(press_stock, state, pawn, box, true, label .. "_stock_input", function()
         local delivered, why, sequence = press(pawn:GetAddress(), false)
         if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
-            error("mutation_unverified_authored_dust_cabinet_stock_input:" .. tostring(why), 0)
+            error("mutation_unverified_" .. label .. "_stock_input:" .. tostring(why), 0)
         end
         return sequence
     end)
     if not restore_position(pawn, origin, facing) then
-        error("mutation_unverified_authored_dust_cabinet_fixture_rollback", 0)
+        error("mutation_unverified_" .. label .. "_fixture_rollback", 0)
     end
     if not ok then error(receipt, 0) end
     return receipt

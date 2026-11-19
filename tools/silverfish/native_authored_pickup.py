@@ -118,8 +118,9 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
-    if target == DUST_FILTER and not native_dust_cabinet.observed(host.last_game, "opened"):
-        raise party.RuleError("native_authored_pickup_dust_cabinet_closed")
+    blocker = native_dust_cabinet.SOURCES.get(target)
+    if blocker and not native_dust_cabinet.observed(host.last_game, "opened"):
+        raise party.RuleError(f"native_authored_pickup_{blocker.kind}_cabinet_closed")
     if _displayed(host.last_game, target).get("state") != "available":
         raise party.RuleError("native_authored_pickup_unavailable")
     if (host.party["wipe"] is not None or character in host.party["pending_spawns"]

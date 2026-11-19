@@ -1,11 +1,26 @@
 local cabinet = {}
 local stock_input = require("native_authored_pickup_input_fixture")
 
-local area = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
-local world_path = area .. ".RailYard_P"
-local actor_path = world_path .. ":PersistentLevel.LootCabnet_Small_BP_C_36"
-local actor_name = "LootCabnet_Small_BP_C " .. actor_path
-local cabinet_class = "/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"
+local maps = {
+    ["/Game/Classes/Maps/Maps_OverWorld/RailYard_P"] = {
+        kind = "dust", level = "RailYard_P", class = "LootCabnet_Small_BP", suffix = 36,
+        salt = -1540208128, source = "railyard-dust-filter",
+    },
+    ["/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"] = {
+        kind = "molasses", level = "NorthEast_Rail_P", class = "LootCabnet_Large_BP", suffix = 4,
+        salt = -1439313920, source = "northeast-rail-molasses", loot_override = "Office",
+    },
+}
+for area, profile in pairs(maps) do
+    profile.area = area
+    profile.world = area .. "." .. profile.level
+    profile.path = profile.world .. ":PersistentLevel." .. profile.class .. "_C_" .. profile.suffix
+    profile.name = profile.class .. "_C " .. profile.path
+    profile.class_path = "/Game/Classes/Actors/Lootables/" .. profile.class .. "." .. profile.class .. "_C"
+    profile.tag = "native-" .. profile.kind .. "-cabinet"
+    profile.error = "stock_" .. profile.kind .. "_cabinet"
+end
+local loot_table = "/Game/Classes/Libraries/DataTables/LootTables_DT.LootTables_DT"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -27,9 +42,9 @@ local function exact(object, class)
     return valid(object) and same(object:GetClass(), StaticFindObject(class))
 end
 
-local function component(object, actor, suffix, class)
+local function component(object, actor, profile, suffix, class)
     return exact(object, "/Script/Engine." .. class) and same(object:GetOwner(), actor)
-        and object:GetFullName() == class .. " " .. actor_path .. "." .. suffix
+        and object:GetFullName() == class .. " " .. profile.path .. "." .. suffix
 end
 
 local function angle_is(actual, expected)
@@ -42,8 +57,9 @@ local function door_roll(door, expected)
 end
 
 local function inspect(state, phase)
-    if not enabled or state.map ~= area or not state.listening or not valid(state.world)
-        or state.world:GetFullName() ~= "World " .. world_path then return end
+    local profile = maps[state.map]
+    if not enabled or not profile or not state.listening or not valid(state.world)
+        or state.world:GetFullName() ~= "World " .. profile.world then return end
     local host = phase == "hosting" and state.server == false
     if not host and (phase ~= "connected" or state.server ~= true) then return end
     local detail, controller = state.local_pawn, state.controller
@@ -59,8 +75,8 @@ local function inspect(state, phase)
             return nil, "client_connection"
         end
     end
-    local actor = StaticFindObject(actor_path)
-    if not exact(actor, cabinet_class) or actor:GetFullName() ~= actor_name or actor:IsActorBeingDestroyed()
+    local actor = StaticFindObject(profile.path)
+    if not exact(actor, profile.class_path) or actor:GetFullName() ~= profile.name or actor:IsActorBeingDestroyed()
         or not same(actor:GetWorld(), state.world) or not same(actor:GetOuter(), state.world.PersistentLevel) then
         return nil, "actor_identity"
     end
@@ -70,12 +86,20 @@ local function inspect(state, phase)
     if (host and not authority) or replicates ~= false then
         return nil, "actor_role:" .. tostring(authority) .. ":" .. tostring(replicates)
     end
-    if actor.SpawnSalt ~= -1540208128 or type(actor.Looted) ~= "boolean" then return nil, "actor_stock_fields" end
+    if actor.SpawnSalt ~= profile.salt or type(actor.Looted) ~= "boolean" then return nil, "actor_stock_fields" end
+    if profile.loot_override then
+        local row = actor.Loot_Override
+        local name = row and row.RowName
+        if type(name) == "userdata" and type(name.ToString) == "function" then name = name:ToString() end
+        if name ~= profile.loot_override or not same(row.DataTable, StaticFindObject(loot_table)) then
+            return nil, "actor_loot_override"
+        end
+    end
     local first, second = actor.SM_Prop_Cabinet_Small_Door_01, actor.SM_Prop_Cabinet_Small_Door_02
     local frame = actor.SM_Prop_Cabinet_Small_02
-    if not component(first, actor, "SM_Prop_Cabinet_Small_Door_01", "StaticMeshComponent")
-        or not component(second, actor, "SM_Prop_Cabinet_Small_Door_02", "StaticMeshComponent")
-        or not component(frame, actor, "SM_Prop_Cabinet_Small_02", "StaticMeshComponent")
+    if not component(first, actor, profile, "SM_Prop_Cabinet_Small_Door_01", "StaticMeshComponent")
+        or not component(second, actor, profile, "SM_Prop_Cabinet_Small_Door_02", "StaticMeshComponent")
+        or not component(frame, actor, profile, "SM_Prop_Cabinet_Small_02", "StaticMeshComponent")
         or not same(first:GetAttachParent(), frame) or not same(second:GetAttachParent(), frame) then
         return nil, "door_identity"
     end
@@ -94,7 +118,7 @@ local function inspect(state, phase)
         if type(box) == "userdata" and type(box.type) == "function" and box:type() == "RemoteUnrealParam" then
             box = box:get()
         end
-        if not component(box, actor, "Box", "BoxComponent") or not same(box, actor.Box)
+        if not component(box, actor, profile, "Box", "BoxComponent") or not same(box, actor.Box)
             or not same(box:GetAttachParent(), frame) then return nil, "box_identity" end
     end
     local closed = box and not actor.Looted and door_roll(first, 0) and door_roll(second, 0)
@@ -119,41 +143,49 @@ end
 
 function cabinet.command(fields, state, phase)
     local command = fields[2]
-    if command ~= "native-dust-cabinet-stock-fixture" and command ~= "native-dust-cabinet-project" then return end
+    local kind = type(command) == "string" and command:match("^native%-(%l+)%-cabinet%-")
+    if kind ~= "dust" and kind ~= "molasses" then return end
+    local fixture = command == "native-" .. kind .. "-cabinet-stock-fixture"
+    if not fixture and command ~= "native-" .. kind .. "-cabinet-project" then return end
+    local profile = maps[state.map]
+    if not profile or profile.kind ~= kind then error("stock_cabinet_exact_map_required", 0) end
     local scene, reason = inspect(state, phase)
-    if command == "native-dust-cabinet-stock-fixture" then
+    if fixture then
         if #fields ~= 3 or not host_fixture or not scene or not scene.host or not scene.closed
             or scene.pawn:GetFullName() ~= fields[3] or scene.pawn.Dead ~= false then
-            error("stock_dust_cabinet_fixture_requires_exact_closed_host_cabinet:" .. (reason or "scope"), 0)
+            error(profile.error .. "_fixture_requires_exact_closed_host_cabinet:" .. (reason or "scope"), 0)
         end
-        stock_input.open_dust_cabinet(state, phase, scene.pawn, scene.actor, scene.box)
+        stock_input.open_cabinet(state, phase, scene.pawn, scene.actor, scene.box, profile.source)
         return "stock host cabinet Interact dispatched"
     end
 
     local epoch = fields[3]
     if #fields ~= 5 or not client_fixture or not scene or scene.host or not qualified_epoch(epoch)
-        or fields[4] ~= actor_name or fields[5] ~= scene.pawn:GetFullName() then
-        error("stock_dust_cabinet_projection_requires_exact_client_visit:" .. (reason or "scope"), 0)
+        or fields[4] ~= profile.name or fields[5] ~= scene.pawn:GetFullName() then
+        error(profile.error .. "_projection_requires_exact_client_visit:" .. (reason or "scope"), 0)
     end
     if same_projection(scene) and projection.epoch == epoch and not scene.looted then
-        return "stock Dust Filter cabinet presentation already requested"
+        return "stock cabinet presentation already requested"
     end
-    if not scene.closed or not valid(StaticFindObject(cabinet_class .. ":ClearLoot")) then
-        error("stock_dust_cabinet_projection_requires_pristine_replica", 0)
+    if not scene.closed or not valid(StaticFindObject(profile.class_path .. ":ClearLoot")) then
+        error(profile.error .. "_projection_requires_pristine_replica", 0)
     end
     -- This class's ClearLoot entry retires its own Box and animates its
     -- doors. Stock SpawnLoot, Resolve_Respawn and Event_SignalOpened are
     -- reached by the separate actual Interact entry.
     scene.actor:ClearLoot()
-    if scene.actor.Looted ~= false then error("mutation_unverified_stock_dust_cabinet_projection", 0) end
+    if scene.actor.Looted ~= false then error("mutation_unverified_" .. profile.error .. "_projection", 0) end
     projection = { epoch = epoch, world = scene.world, actor = scene.actor, pawn = scene.pawn }
-    return "stock Dust Filter cabinet presentation requested"
+    return "stock cabinet presentation requested"
 end
 
 function cabinet.rows(state, phase, status_row)
+    local profile = maps[state.map]
+    if not profile then return {} end
+    local tag, area = profile.tag, profile.area
     local scene, reason = inspect(state, phase)
     if not scene then
-        return reason and {status_row("native-dust-cabinet-diagnostic", area, reason)} or {}
+        return reason and {status_row(tag .. "-diagnostic", area, reason)} or {}
     end
     local name, epoch
     if scene.closed then
@@ -163,14 +195,14 @@ function cabinet.rows(state, phase, status_row)
     elseif not scene.host and not scene.looted and same_projection(scene) then
         name, epoch = scene.box_retired and "projected" or "projecting", projection.epoch
     else
-        return {status_row("native-dust-cabinet-diagnostic", area, "stock_animation_or_box", scene.looted,
+        return {status_row(tag .. "-diagnostic", area, "stock_animation_or_box", scene.looted,
             scene.box ~= nil)}
     end
-    local rows = {status_row("native-dust-cabinet", name, area, actor_name, scene.pawn:GetFullName(), epoch or "-",
+    local rows = {status_row(tag, name, area, profile.name, scene.pawn:GetFullName(), epoch or "-",
         scene.closed and "closed" or scene.doors_open and "open" or "unverified")}
     if not scene.closed and not scene.doors_open then
         local first, second = scene.first_rotation or {}, scene.second_rotation or {}
-        rows[#rows + 1] = status_row("native-dust-cabinet-diagnostic", area, "stock_door_angles",
+        rows[#rows + 1] = status_row(tag .. "-diagnostic", area, "stock_door_angles",
             first.Pitch or "-", first.Yaw or "-", first.Roll or "-", second.Pitch or "-", second.Yaw or "-", second.Roll or "-")
     end
     return rows

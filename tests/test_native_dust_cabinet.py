@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_authored_pickup, native_dust_cabinet as cabinet, party
-from tools.silverfish.travel import RAIL_YARD
+from tools.silverfish.travel import NORTHEAST_RAIL, RAIL_YARD
 
 
 PAWN = f"Player_FP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Player_FP_C_1"
@@ -74,4 +74,21 @@ class NativeDustCabinetTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(command=AsyncMock())
         with self.assertRaisesRegex(party.RuleError, "native_authored_pickup_dust_cabinet_closed"):
             await native_authored_pickup.claim(host, bridge, "host", native_authored_pickup.DUST_FILTER, "12" * 16)
+        bridge.command.assert_not_awaited()
+
+    async def test_molasses_requires_its_own_exact_cabinet(self):
+        profile = cabinet.MOLASSES
+        pawn = f"Player_FP_C {NORTHEAST_RAIL}.NorthEast_Rail_P:PersistentLevel.Player_FP_C_1"
+        fields = [profile.tag, "closed", NORTHEAST_RAIL, profile.actor, pawn, "-", "closed"]
+        report = cabinet.parse(fields, "hosting", NORTHEAST_RAIL)
+        for different in (cabinet.DUST.tag, "native-other-cabinet"):
+            with self.subTest(tag=different), self.assertRaises(ValueError):
+                cabinet.parse([different, *fields[1:]], "hosting", NORTHEAST_RAIL)
+        state = {"state": "hosting", "map": NORTHEAST_RAIL, "pawns": {"local": {"name": pawn}}, profile.key: report}
+        host = host_stub(state)
+        bridge = SimpleNamespace(command=AsyncMock())
+        with self.assertRaisesRegex(ValueError, "stock cabinet fixture is unavailable"):
+            await cabinet.open_fixture(host, bridge, cabinet.FIXTURE)
+        with self.assertRaisesRegex(party.RuleError, "native_authored_pickup_molasses_cabinet_closed"):
+            await native_authored_pickup.claim(host, bridge, "host", native_authored_pickup.MOLASSES, "12" * 16)
         bridge.command.assert_not_awaited()
