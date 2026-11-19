@@ -223,7 +223,8 @@ function loot.qualify(state, phase, pawn_name, requested_crate, allow_distant)
     local pawn = participant(state, pawn_name, host, world)
     local crate = find_crate(world, profile)
     local box = crate.Box
-    if crate.Looted ~= false or crate.SpawnedValue ~= 0 or crate.GuaranteeSpawn ~= false or crate.IgnoreKarma ~= false
+    if crate.Looted ~= false or crate.SpawnedValue ~= 0 or crate.GuaranteeSpawn ~= (profile.guarantee_spawn == true)
+        or crate.IgnoreKarma ~= false or profile.replenish_mode and crate.Replenish_Mode ~= profile.replenish_mode
         or not same(crate["As Game Instance FP"], instance) or not exact(box, StaticFindObject(box_class))
         or not same(box:GetOwner(), crate) then error("native_loot_crate_not_ready", 0) end
     local collision = box:GetCollisionEnabled()

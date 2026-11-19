@@ -42,6 +42,7 @@ namespace
     constexpr auto instance_class = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_class = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto replenish_enum = STR("/Game/Classes/Libraries/Enums_Lib/RespawnSetting_Enum.RespawnSetting_Enum");
     constexpr auto open_path =
         STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor");
     constexpr auto crate_script_path =
@@ -148,6 +149,7 @@ namespace
         Unreal::UObject* instance{};
         std::array<Unreal::UObject*, 2> spawners{};
         bool lucky{};
+        bool guarantee_spawn{};
     };
 
     bool qualified_connection(const Context& context, Unreal::UObject* driver, Unreal::UClass* controller_type)
@@ -313,6 +315,7 @@ namespace
         if (!value || value->GetPropertyValueInContainer(context.crate) != 0 ||
             !read_bool(context.crate, STR("Looted"), false) ||
             !silverfish::shared_loot::qualified_crate_settings(context.crate)) return "stock_crate_not_ready";
+        context.guarantee_spawn = read_bool(context.crate, STR("GuaranteeSpawn"), true);
 
         if (const auto error = qualify_opener(pawn, save, stock, context); !error.empty()) return error;
         context.box = object_field(context.crate, STR("Box"));
@@ -352,6 +355,7 @@ namespace
         Unreal::FObjectProperty* hit_component{};
         Unreal::FObjectProperty* opener{};
         Unreal::FObjectProperty* item{};
+        Unreal::FBoolProperty* guaranteed{};
         Unreal::FNameProperty* effect{};
         Unreal::FBoolProperty* count{};
         Unreal::FBoolProperty* active{};
@@ -394,6 +398,7 @@ namespace
         schema.hit_component =
             argument<Unreal::FObjectProperty>(schema.open, STR("HitComponent"), false, offsetof(OpenParams, hit));
         schema.item = argument<Unreal::FObjectProperty>(schema.spawn, STR("Object"), true, 0x68);
+        schema.guaranteed = argument<Unreal::FBoolProperty>(schema.spawn, STR("GuaranteedLoot"), false, 0x60);
         schema.effect = argument<Unreal::FNameProperty>(schema.passive, STR("EffectName"), false, 0);
         schema.count = argument<Unreal::FBoolProperty>(schema.passive, STR("CountInstances"), false, 8);
         schema.active = argument<Unreal::FBoolProperty>(schema.passive, STR("EffectActive"), true, 9);
@@ -401,7 +406,7 @@ namespace
         return schema.opener && schema.opener->GetPropertyClass().Get() == context.pawn->GetClassPrivate() &&
                schema.hit_component && schema.hit_component->GetPropertyClass().Get() == scene_type &&
                schema.item && schema.item->GetPropertyClass().Get() == schema.actor_type &&
-               schema.effect && schema.count && schema.active && schema.instances;
+               (!context.guarantee_spawn || schema.guaranteed) && schema.effect && schema.count && schema.active && schema.instances;
     }
 
     // Its first UE FRandomStream fraction is exactly zero. Check this on a
@@ -732,9 +737,12 @@ namespace
         if (index < 0) return;
         auto* caller = frame.PreviousFrame();
         auto* out = find_output(frame, scope.schema.item);
+        const auto* locals = scope.context.guarantee_spawn ? frame.Locals() : nullptr;
+        const bool guaranteed_branch = !scope.context.guarantee_spawn ||
+            (locals && scope.schema.guaranteed->GetPropertyValueInContainer(locals));
         const auto slot = static_cast<std::size_t>(index);
         if (!caller || caller->Object() != scope.context.crate || caller->Node() != scope.schema.script ||
-            frame.Object() != component || !out || reinterpret_cast<Address>(out) % alignof(void*) != 0 ||
+            frame.Object() != component || !out || reinterpret_cast<Address>(out) % alignof(void*) != 0 || !guaranteed_branch ||
             iteration.OriginalFunctionCallPrevented() || ++scope.spawns[slot] != 1)
         {
             scope.problem = "stock_loot_spawner_frame_unverified";
@@ -863,6 +871,8 @@ namespace
             else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
             else if (scope.accounts != 1) scope.problem = "stock_loot_open_karma_query_unverified";
             else if (scope.spawns != std::array{1, 1}) scope.problem = "stock_loot_open_roll_calls_unverified";
+            else if (context.guarantee_spawn && scope.rolls != std::array{0, 0})
+                scope.problem = "stock_loot_guaranteed_karma_branch_changed";
             else if (object_field(context.crate, STR("Player")) != context.pawn)
                 scope.problem = "stock_loot_open_opener_changed";
             else if (object_field(context.world, STR("OwningGameInstance")) != context.instance ||
@@ -1014,7 +1024,7 @@ namespace silverfish::shared_loot
     bool qualified_crate_settings(Unreal::UObject* crate)
     {
         const auto* profile = profile_for(crate);
-        if (!profile || !read_bool(crate, STR("GuaranteeSpawn"), false) ||
+        if (!profile || !read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn) ||
             !read_bool(crate, STR("IgnoreKarma"), false)) return false;
         // Keep the previously live-qualified stock route on its existing guards.
         if (profile == &authored_loot::profiles.front()) return true;
@@ -1024,9 +1034,16 @@ namespace silverfish::shared_loot
 
         auto* replenish = crate->GetPropertyByNameInChain(STR("Replenish_Mode"));
         auto* handle = field<Unreal::FStructProperty>(crate, STR("Loot_Override"));
-        if (!replenish || replenish->GetArrayDim() != 1 || !handle ||
-            !replenish->Identical(replenish->ContainerPtrToValuePtr<void>(crate),
-                                  replenish->ContainerPtrToValuePtr<void>(defaults))) return false;
+        if (!replenish || replenish->GetArrayDim() != 1 || !handle) return false;
+        if (profile->replenish_override)
+        {
+            auto* mode = Unreal::CastField<Unreal::FByteProperty>(replenish);
+            auto* stock_enum = find<Unreal::UEnum>(replenish_enum);
+            if (!mode || mode->GetSize() != 1 || !stock_enum || mode->GetEnum().Get() != stock_enum ||
+                mode->GetPropertyValueInContainer(crate) != profile->replenish_override) return false;
+        }
+        else if (!replenish->Identical(replenish->ContainerPtrToValuePtr<void>(crate),
+                                       replenish->ContainerPtrToValuePtr<void>(defaults))) return false;
         auto* live_handle = handle->ContainerPtrToValuePtr<void>(crate);
         if (!profile->loot_override)
             return handle->Identical(live_handle, handle->ContainerPtrToValuePtr<void>(defaults));

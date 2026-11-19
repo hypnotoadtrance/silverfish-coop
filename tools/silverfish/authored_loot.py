@@ -451,7 +451,45 @@ OVERRIDDEN_PLACEMENTS = tuple(
     for area, placements in _OVERRIDDEN_DEFAULTS.items()
     for index, salt, row in placements
 )
-CRATE_PROFILES = tuple((*placement, None) for placement in PLACEMENTS) + OVERRIDDEN_PLACEMENTS
+
+# GuaranteeSpawn still uses both exact stock child spawners. Cooked mode 2
+# makes the parent save exhaustion permanently by actor name and map.
+_GUARANTEED_DEFAULT_MODE = {
+    "/Game/Classes/Maps/Maps_OverWorld/PineRidge_P": ((1, -1175450944),),
+    "/Game/Classes/Maps/Maps_OverWorld/Swamp_01_P": ((5, -268135680),),
+}
+_GUARANTEED_PERMANENT = {
+    "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P": ((2, -1403973504, None), (4, -1728202176, None)),
+    "/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P": ((1, -1629383200, "Common_Special"),),
+    "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P": ((0, -526139136, None), (1, -428724096, None), (3, -356456192, None)),
+    "/Game/Classes/Maps/Maps_Dungeons/TutTnl_01_P": ((1, -1029511424, None),),
+    "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P": tuple(
+        (index, -421338496, "FishCannery") for index in (6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20)
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P": ((3, -1826471760, "Industrial"),),
+    "/Game/Classes/Maps/Maps_OverWorld/Observitory_P": ((1, -616840064, None),),
+    "/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P": ((13, -1771477408, None),),
+    RAIL_YARD: (
+        (2, -894558592, None), (6, -1634937600, "Luxury"), (7, -512833024, "Industrial"),
+        (8, -577593344, "Industrial"), (9, -621784064, None), (10, -964140800, None),
+        (13, -122112, "Millitary_Common"), (19, -751670784, None), (21, -46571264, None),
+    ),
+    "/Game/Classes/Maps/Maps_OverWorld/Slums_P": ((2, -1379009344, None),),
+}
+
+GUARANTEED_PLACEMENTS = tuple(
+    (area, f"LootCrate_Small_BP_C_{index}", salt, None, None)
+    for area, entries in _GUARANTEED_DEFAULT_MODE.items()
+    for index, salt in entries
+) + tuple(
+    (area, f"LootCrate_Small_BP_C_{index}", salt, row, 2)
+    for area, entries in _GUARANTEED_PERMANENT.items()
+    for index, salt, row in entries
+)
+GUARANTEED_REPLENISHMENT = {(area, actor): replenish for area, actor, _, _, replenish in GUARANTEED_PLACEMENTS}
+CRATE_PROFILES = tuple((*placement, None) for placement in PLACEMENTS) + OVERRIDDEN_PLACEMENTS + tuple(
+    (area, actor, salt, row) for area, actor, salt, row, _ in GUARANTEED_PLACEMENTS
+)
 
 
 def full_name(area: str, actor: str) -> str:
