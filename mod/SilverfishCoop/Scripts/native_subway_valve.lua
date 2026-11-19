@@ -43,7 +43,7 @@ local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local faction_flags = {[2] = "Rep_Commune", [4] = "Rep_State", [5] = "Rep_Coup"}
 local reward_rep = {[2] = 150, [4] = -40, [5] = -50}
 local factions = {2, 4, 5}
-local action_reply, board_reply, reward_reply, projected, fixture_reply
+local action_reply, board_reply, reward_reply, projected, fixture_reply, retirement
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
 local function same(first, second) return valid(first) and valid(second) and first:GetAddress() == second:GetAddress() end
@@ -198,6 +198,24 @@ local function placed(world, path, class)
     return actor, "present"
 end
 
+local function owned_audio(actor)
+    local component = actor.AudioComponent
+    if exact(component, "/Script/Engine.AudioComponent") and same(component:GetOwner(), actor) then return component end
+end
+
+local function dormant(actor)
+    return actor.bHidden == true and actor:GetActorEnableCollision() == false and actor:IsActorTickEnabled() == false
+end
+
+local function retired(world, actor, kind)
+    if not actor or not retirement or not same(retirement.world, world) or not same(retirement[kind], actor) or not dormant(actor) then
+        return false
+    end
+    if kind == "sludge" then return true end
+    local audio = owned_audio(actor)
+    return same(retirement.component, audio) and audio:IsPlaying() == false
+end
+
 local function subway_scene(state)
     local world = state.world
     if not enabled or state.map ~= area or state.listening ~= true or not valid(world)
@@ -221,16 +239,32 @@ local function subway_scene(state)
     local sludge, sludge_state = placed(world, sludge_path, sludge_class)
     local audio, audio_state = placed(world, audio_path, audio_class)
     if sludge_state == "foreign" or audio_state == "foreign" then return end
+    if retired(world, sludge, "sludge") then sludge, sludge_state = nil, "retired" end
+    if retired(world, audio, "audio") then audio, audio_state = nil, "retired" end
     return {world = world, control = control, box = box, sludge = sludge, audio = audio,
         sludge_state = sludge_state, audio_state = audio_state,
         closed = count == 0 and not sludge and not audio, present = count == 1 and sludge ~= nil and audio ~= nil}
 end
 
 local function qualified_retirement(scene)
-    return (not scene.sludge or scene.sludge.bReplicates == false) and (not scene.audio or scene.audio.bReplicates == false)
+    return (not scene.sludge or scene.sludge.bReplicates == false)
+        and (not scene.audio or scene.audio.bReplicates == false and valid(owned_audio(scene.audio)))
 end
 
 local function retire_scene_actors(scene)
+    local receipt = {world = scene.world, sludge = scene.sludge, audio = scene.audio,
+        component = scene.audio and owned_audio(scene.audio)}
+    for _, kind in ipairs({"sludge", "audio"}) do
+        local actor = receipt[kind]
+        if actor then
+            actor:SetActorEnableCollision(false)
+            actor:SetActorTickEnabled(false)
+            actor:SetActorHiddenInGame(true)
+            if not dormant(actor) then error("mutation_unverified_stock_subway_valve_" .. kind .. "_retirement", 0) end
+        end
+    end
+    if receipt.component then receipt.component:Stop() end
+    retirement = receipt
     if scene.sludge then scene.sludge:K2_DestroyActor() end
     if scene.audio then scene.audio:K2_DestroyActor() end
 end
@@ -594,7 +628,7 @@ local function fixture(state, phase, pawn_name, operation)
 end
 
 function valve.clear()
-    action_reply, board_reply, reward_reply, projected, fixture_reply = nil, nil, nil, nil, nil
+    action_reply, board_reply, reward_reply, projected, fixture_reply, retirement = nil, nil, nil, nil, nil, nil
 end
 
 function valve.command(fields, state, phase)

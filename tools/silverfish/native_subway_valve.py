@@ -217,6 +217,9 @@ async def activate(host, bridge, character, epoch):
             await asyncio.sleep(1)  # Preserve the exact stock audio component's one-second FadeOut.
             try:
                 closed = await _call(host, bridge, FINALIZE, SUBWAY, pawn, epoch)
+                if closed.get("ack", {}).get("message") != "exact Flood Control authority presentation requested":
+                    raise RuntimeError("The stock Flood Control scene finalization did not acknowledge its exact transaction")
+                host.control.event("native_subway_valve_presentation_requested", pawn=pawn, epoch=epoch, scene=closed.get(SCENE, {}))
                 if not verified(closed):
                     closed = await bridge.wait_for(verified, 5)
             except (party.RuleError, TimeoutError) as error:

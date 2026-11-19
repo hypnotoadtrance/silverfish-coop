@@ -90,7 +90,8 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         proof = objective()
         closed = snapshot("closed", proof)
         settling = snapshot("settling", proof)
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=[settling, settling]), wait_for=AsyncMock(return_value=closed))
+        finalized = dict(settling, ack={"message": "exact Flood Control authority presentation requested"})
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[settling, finalized]), wait_for=AsyncMock(return_value=closed))
         with self.assertRaisesRegex(party.RuleError, "stale_visit"):
             await valve.activate(host, bridge, CHARACTER, OTHER)
         bridge.command.assert_not_awaited()
@@ -111,7 +112,8 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_post_dispatch_result_fences_the_current_save(self):
         host = authority()
-        bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot("settling", objective())),
+        settling = dict(snapshot("settling", objective()), ack={"message": "exact Flood Control authority presentation requested"})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=settling),
                                  wait_for=AsyncMock(side_effect=asyncio.CancelledError))
         with patch.object(valve.asyncio, "sleep", new_callable=AsyncMock), self.assertRaises(asyncio.CancelledError):
             await valve.activate(host, bridge, "host", EPOCH)
