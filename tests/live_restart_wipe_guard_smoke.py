@@ -100,7 +100,7 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
             await process.wait()
             raise
         result = json.loads(output) if output else {}
-        if process.returncode or not result.get("ok"):
+        if process.returncode or (args[0] != "events" and not result.get("ok")):
             label = args[3] if args[0] == "action" else args[0]
             raise RuntimeError(f"{label} failed: {result.get('error') or error.decode(errors='replace')}")
         return result

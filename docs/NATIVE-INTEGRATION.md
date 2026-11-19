@@ -156,6 +156,8 @@ The headless inventory-input run opened the guest overlay through the stock menu
 
 The Bomber Jacket run used the stock inventory input and two Home confirmations to equip the authentic owned row. The guest's backpack lost that row and the armor slot gained the same GUID. The host verified 0.2 slash and acid resistance and the stock 0.25 carry weight reduction. A second jacket was refused while the slot was occupied. After restart, the exact row and resistance values restored on the guest and the host inventory matched its starting snapshot.
 
+The guest equipped their earned HazOp Gear, swapped to the Bomber Jacket, then used the stock inventory controls to switch back. Each swap moved the previous armor to the backpack with its original GUID. The HazOp stats, both items, and the completed quest restored after restart. The host kept its own HazOp reward and inventory throughout.
+
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
 ## Pending live verification
