@@ -28,7 +28,7 @@ With native travel enabled, the pre-consumption guard makes both Dream Dust vari
 
 The loopback run covered rejection with the cube still in the backpack, consuming that same GUID through the stock inventory card's Use action after regrouping, reconnecting with the same character, restarting in Gold Nexus, and taking the stock exit back. A separate staged run interrupted the coordinator after the native debit and verified recovery from the committed receipt.
 
-A two-player run used a Golden Cube to enter Gold Nexus and exercised the exact NorthEast Rail pad. The guest's swept capsule hit the co-op wall. The regrouped host crossed the same stock overlap and carried the party to the authored Rail marker. The cube stayed consumed, and the original save hashes matched.
+Seven two-player runs used a Golden Cube to enter Gold Nexus and exercised each exact stock pad. At every pad the guest's swept capsule hit the co-op wall. The regrouped host crossed the same stock overlap and carried the party to the authored marker in CrossRoads, NorthEast Rail, Swamp, Slums, or Beach. Three pads use the same CrossRoads tag, and the test selected each exact actor separately. Every cube stayed consumed, and the original save hashes matched in all seven runs.
 
 The Blue Cube reads the canonical host save's `RespawnLevel` and exact `Bed` ID. It can carry the party to the qualified Observatory or DeadBridge rest. An empty rest selection sends the party to the Observatory. The arrival uses the bed Arrow or the stock alternate spawn based on the host's faction reputation. When the alternate position intersects terrain, the mod keeps its horizontal coordinates and tries the nearest safe capsule height. If the party is already in the destination map, both players move without changing pawns or reconnecting. The campaign keeps the qualified rest ID and the cube receipts across restart. The loopback fixture sets the two stock rest fields directly. The native sleep flow and stock teleport event side effects still need campaign coverage.
 
@@ -140,6 +140,6 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 
 - The shipped Black Market board hides the `MeetBroker` template because both stock visibility flags are false. A live start request reached the correct board and was refused by its offer check. An already-active stock row qualifies for the typed starter kit and XP path in offline tests. Its live redemption remains unverified.
 
-- The authored travel registry covers 145 directed exits across 55 worlds. The seven Golden Nexus pads use their stock destination markers and one-step travel time. The three CrossRoads pads share an entrance tag, so headless position and wall probes require the exact pad actor.
+- The authored travel registry covers 145 directed exits across 55 worlds. Live coverage beyond the tested routes remains open.
 
 The stock Silverfish build ships Unreal's Null subsystem. A Steam Invite test needs an authorized Steamworks integration under the game's App ID and two separately entitled Steam sessions for a real invite round-trip. The existing Direct IP path supports local two-process testing without Steam. [Steamworks setup](https://partner.steamgames.com/doc/sdk/api) · [Steam lobby invites](https://partner.steamgames.com/doc/api/ISteamMatchmaking#InviteUserToLobby)
