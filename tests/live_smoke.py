@@ -27,6 +27,7 @@ options.add_argument("--native-zones", action="store_true", help="exercise a sto
 options.add_argument("--native-walls", action="store_true", help="verify swept physical exit collision")
 options.add_argument("--authored-zone", action="store_true", help="start from CrossRoads and take the stock DeadBridge exit")
 options.add_argument("--native-door", action="store_true", help="exercise the stock CrossRoads to Cistern transition door")
+options.add_argument("--observatory-zone", action="store_true", help="exercise both stock CrossRoads and Observatory exits")
 options.add_argument("--native-transport", action="store_true", help="verify pre-consumption guards for Stardust and four cubes")
 options.add_argument("--native-gold", action="store_true", help="exercise a Golden Cube round trip and its durable charge")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
@@ -64,8 +65,10 @@ if args.native_door and (not args.native_zones or args.authored_zone):
     options.error("--native-door requires --native-zones and its own run")
 if args.native_transport and not args.native_zones:
     options.error("--native-transport requires --native-zones")
-if args.native_gold and (not args.native_zones or args.authored_zone or args.native_door):
+if args.native_gold and (not args.native_zones or args.authored_zone or args.native_door or args.observatory_zone):
     options.error("--native-gold requires --native-zones and its own authored route")
+if args.observatory_zone and (not args.native_zones or args.authored_zone or args.native_door):
+    options.error("--observatory-zone requires --native-zones and its own authored route")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -76,6 +79,7 @@ records = []
 processes = []
 deadline = 40
 crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 
 def note(label, summary):
@@ -191,9 +195,10 @@ async def wait_gold_event(guid, *, after=0):
     raise TimeoutError(f"No Golden Cube request outcome for {guid} after sequence {after}")
 
 
-async def position_for_native_exit(target, where):
+async def position_for_native_exit(target, where, *, entrance=None):
+    selection = ["--entrance", entrance] if entrance else []
     return await command("action", "--campaign", campaign, "native-exit-position",
-                         "--target", target, "--exit-position", where)
+                         "--target", target, "--exit-position", where, *selection)
 
 
 async def golden_cube_departure(character_id, host_session):
@@ -228,11 +233,11 @@ async def golden_cube_departure(character_id, host_session):
     await wait(run, lambda status: party_in_zone(status, crossroads)
                and math.dist(status["game"]["pawns"]["local"]["location"],
                              status["game"]["pawns"]["guest"]["location"]) <= 1500)
-    request = await gold_action("use-probe", guid)
+    request = await gold_action("action-probe", guid)
     assert request["state"] == "requested" and request["pawn"] == host_pawn, request
     approved = await wait_gold_event(guid, after=denied["sequence"])
     outcome = approved["result"]
-    assert approved["source"] == crossroads and approved["entry"] == "use_held_item", approved
+    assert approved["source"] == crossroads and approved["entry"] == "action_use", approved
     assert outcome["ok"] and outcome["map"] == gold_nexus and outcome["entrance"] == "PlayerStart_1", outcome
     arrived = await wait(run, lambda status: party_in_zone(status, gold_nexus)
                          and gold_ledger(status) == {"pending": None, "spent": {guid: "arrived"}})
@@ -277,6 +282,76 @@ async def golden_cube_return(guid, character_id, host_session):
                for event in events["events"]), events
     assert (await gold_action("inspect", guid))["state"] == "absent"
     note("golden_cube_stock_exit_returns_party", {"map": crossroads, "entrance": "Nexus_CrossRoads", "guid": guid})
+
+
+async def observatory_round_trip(character_id, host_session):
+    entrance = "Obsv_Etr"
+
+    async def sweep(target):
+        response = await command("action", "--campaign", campaign, "native-exit-wall-probe",
+                                 "--target", target, "--entrance", entrance)
+        return response["native_zone_wall"]["outcome"]
+
+    directions = (
+        (crossroads, observatory, "LevelExit_Spawn_BP_C_1", (-5531.339, 7142.031, -655.404)),
+        (observatory, crossroads, "LevelExit_Spawn_BP_C_2", (-21300, -2250, -50)),
+    )
+    for source, destination, marker, location in directions:
+        ready = await wait(run, lambda status: party_in_zone(status, source)
+                           and status["game"].get("native_zone", {}).get("state") == "ready")
+        denied_count = ready["game"]["native_zone"]["guest_denied"]
+        await position_for_native_exit("guest", "near", entrance=entrance)
+        if args.native_walls:
+            await wait(run, lambda status: status["game"].get("native_zone_wall", {}).get("state") == "ready")
+            assert await sweep("guest") == "wall"
+            blocked_guest = await wait(run, lambda status: party_in_zone(status, source))
+        else:
+            await position_for_native_exit("guest", "inside", entrance=entrance)
+            blocked_guest = await wait(run, lambda status: party_in_zone(status, source)
+                                       and status["game"]["native_zone"]["guest_denied"] > denied_count)
+        assert blocked_guest["zone_epoch"] == ready["zone_epoch"]
+
+        await position_for_native_exit("guest", "far", entrance=entrance)
+        await position_for_native_exit("host", "near", entrance=entrance)
+        distant = await wait(run, lambda status: party_in_zone(status, source)
+                             and math.dist(status["game"]["pawns"]["local"]["location"],
+                                           status["game"]["pawns"]["guest"]["location"]) > 1500)
+        if args.native_walls:
+            assert await sweep("host") == "wall"
+            blocked_party = await wait(run, lambda status: party_in_zone(status, source))
+        else:
+            far_count = distant["game"]["native_zone"]["too_far"]
+            await position_for_native_exit("host", "inside", entrance=entrance)
+            blocked_party = await wait(run, lambda status: party_in_zone(status, source)
+                                       and status["game"]["native_zone"]["too_far"] > far_count)
+        assert blocked_party["zone_epoch"] == ready["zone_epoch"]
+
+        await position_for_native_exit("host", "near", entrance=entrance)
+        await position_for_native_exit("guest", "near", entrance=entrance)
+        await wait(run, lambda status: party_in_zone(status, source)
+                   and math.dist(status["game"]["pawns"]["local"]["location"],
+                                 status["game"]["pawns"]["guest"]["location"]) <= 1500)
+        if args.native_walls:
+            await wait(run, lambda status: status["game"].get("native_zone_wall", {}).get("host_open"))
+            assert await sweep("host") == "clear"
+        else:
+            await position_for_native_exit("host", "inside", entrance=entrance)
+        arrived = await wait(run, lambda status: party_in_zone(status, destination)
+                             and status.get("zone_epoch") != ready["zone_epoch"])
+        host_location = arrived["game"]["pawns"]["local"]["location"]
+        assert math.dist(host_location[:2], location[:2]) <= 350, (marker, host_location)
+        assert abs(host_location[2] - location[2]) <= 600, (marker, host_location)
+        peer = await wait(client_run, lambda status: status.get("state") == "connected"
+                          and status.get("game", {}).get("map") == destination)
+        assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
+        events = await command("events", "--campaign", campaign)
+        assert any(event["event"] == "zone_travel_ready" and event.get("source") == source
+                   and event.get("destination") == destination and event.get("entrance") == entrance
+                   for event in events["events"]), events
+        note("observatory_stock_exit_matches_destination_arrow", {
+            "source": source, "map": destination, "entrance": entrance, "marker": marker,
+            "host": host_location, "guest_blocked": True, "distant_party_blocked": True,
+        })
 
 
 async def gameplay_slice(host_status, character_id):
@@ -355,7 +430,8 @@ async def smoke():
             fixtures += ["--native-zone-walls"]
         if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
-        initial_zone = ["--start-zone", crossroads] if args.authored_zone or args.native_door or args.native_gold else []
+        authored_route = args.authored_zone or args.native_door or args.native_gold or args.observatory_zone
+        initial_zone = ["--start-zone", crossroads] if authored_route else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
@@ -685,6 +761,8 @@ async def smoke():
         if args.native_gold:
             gold_guid = await golden_cube_departure(chosen, guest["host_session"])
             expected_map = gold_nexus
+        elif args.observatory_zone:
+            await observatory_round_trip(chosen, guest["host_session"])
         elif args.native_door:
             destination = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
             expected_map = destination

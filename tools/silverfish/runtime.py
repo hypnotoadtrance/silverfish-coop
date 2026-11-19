@@ -389,7 +389,10 @@ class Bridge:
                     or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
             source, pawn, guid, entry = fields[2:6]
-            location = tuple(_finite(value) for value in fields[6:])
+            try:
+                location = tuple(_finite(value) for value in fields[6:])
+            except ValueError:
+                continue
             if (valid_guid(guid) and entry in INVENTORY_ENTRIES and 0 < len(pawn) <= 512
                     and all(value is not None and abs(value) <= 1e8 for value in location)):
                 requests.append(GoldRequest(int(fields[1]), source, pawn, guid, entry, location))

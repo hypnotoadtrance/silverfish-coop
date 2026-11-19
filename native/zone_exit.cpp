@@ -52,6 +52,9 @@ namespace
         RC::StringViewType entrance;
         RC::StringViewType door_destination{};
         std::array<RC::StringViewType, 2> alternate_exits{};
+        RC::StringViewType secondary_exit{};
+        RC::StringViewType secondary_destination{};
+        RC::StringViewType secondary_entrance{};
     };
 
     constexpr std::array routes{
@@ -59,7 +62,8 @@ namespace
         Route{STR("/Game/Classes/Maps/PlaytestMap_02.PlaytestMap_02"), STR("Level_Exit_BP_C_0"), {}, {}},
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Level_Exit_BP_C_275"),
               STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"), STR("DB_CR"),
-              STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P")},
+              STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"), {}, STR("Level_Exit_BP_C_2"),
+              STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Obsv_Etr")},
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"), STR("Level_Exit_BP_C_3"),
               STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("DB_CR")},
         Route{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"), {}, {}, {},
@@ -67,6 +71,8 @@ namespace
         Route{STR("/Game/Classes/Maps/Dreams/GoldNexus_P.GoldNexus_P"), STR("Level_Exit_BP_C_178"),
               STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Nexus_CrossRoads"), {},
               {STR("Level_Exit_BP_C_181"), STR("Level_Exit_BP_C_182")}},
+        Route{STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Level_Exit_BP_C_1"),
+              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Obsv_Etr")},
     };
 
     std::atomic<std::uint64_t> generation{};
@@ -220,10 +226,16 @@ namespace
         return path.GetSubPathString().IsEmpty() && RC::StringViewType{*destination} == target && RC::StringViewType{*entrance} == tag;
     }
 
-    bool matches_authored_route(const Scope& current, Unreal::UObject* exit)
+    bool is_secondary_exit(const Scope& current, Unreal::UObject* exit)
     {
-        return current.route->destination.empty() || matches_target(exit, current.next_level, current.entrance_tag,
-                                                                     current.route->destination, current.route->entrance);
+        return !current.route->secondary_exit.empty() && exit->GetName() == current.route->secondary_exit;
+    }
+
+    bool matches_authored_route(const Scope& current, Unreal::UObject* exit, bool secondary)
+    {
+        const auto destination = secondary ? current.route->secondary_destination : current.route->destination;
+        const auto entrance = secondary ? current.route->secondary_entrance : current.route->entrance;
+        return destination.empty() || matches_target(exit, current.next_level, current.entrance_tag, destination, entrance);
     }
 
     bool in_persistent_level(Unreal::UObject* actor, Unreal::UWorld* world)
@@ -239,7 +251,10 @@ namespace
             return false;
         }
         const auto name = actor->GetName();
-        if (name == current.route->exit) return true;
+        if (name == current.route->exit || (!current.route->secondary_exit.empty() && name == current.route->secondary_exit))
+        {
+            return true;
+        }
         for (const auto alternate : current.route->alternate_exits)
         {
             if (!alternate.empty() && name == alternate) return true;
@@ -468,13 +483,14 @@ namespace
             scope.event = "too_far";
             return;
         }
-        if (!matches_authored_route(scope, context))
+        const bool secondary = is_secondary_exit(scope, context);
+        if (!matches_authored_route(scope, context, secondary))
         {
             scope.event = "destination_mismatch";
             return;
         }
         scope.request_latched = true;
-        scope.event = "request";
+        scope.event = secondary ? "secondary_request" : "request";
     }
 
     int lua_set_scope(const Lua& lua)

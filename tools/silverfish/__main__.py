@@ -100,7 +100,7 @@ def parser() -> argparse.ArgumentParser:
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
         "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
         "native-exit-position", "native-exit-wall-probe", "native-host-damage", "native-friendly-fire",
-        "native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
+        "native-gold-seed", "native-gold-inspect", "native-gold-use-probe", "native-gold-action-probe",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
         "native-weapon-roundtrip",
         "native-shop-approach", "native-shop-buy",
@@ -116,6 +116,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--milliseconds", type=int, help="movement duration, from 50 to 1000")
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
+    action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
     return cli
 
 
@@ -176,7 +177,8 @@ async def execute(opts):
         retained[item] = int(count)
     return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
                         amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
-                        retained=retained if opts.action == "keep" else None, exit_position=opts.exit_position)
+                        retained=retained if opts.action == "keep" else None,
+                        exit_position=opts.exit_position, entrance=opts.entrance)
 
 
 def main() -> int:

@@ -7,6 +7,7 @@ local event_path
 local heartbeat_path
 local armed
 local fixture
+local secondary_fixture
 local sequence = 0
 local requests = 0
 local guest_denied = 0
@@ -64,6 +65,7 @@ local function clear()
     end
     armed = nil
     fixture = nil
+    secondary_fixture = nil
 end
 
 local function wait_for_scope(detail)
@@ -95,9 +97,13 @@ local function handle_event(map, hosting)
         guest_denied = guest_denied + 1
     elseif value == "too_far" then
         too_far = too_far + 1
-    elseif value == "request" or value == "door_request" then
+    elseif value == "request" or value == "door_request" or value == "secondary_request" then
         local route = routes[map]
         if value == "door_request" then route = route.door end
+        if value == "secondary_request" then
+            route = route.secondary
+            decision = "request"
+        end
         if not hosting or not heartbeat_fresh() or not emit(map, route) then
             SilverfishReleaseNativeZoneRequest()
             decision = "request_unavailable"
@@ -164,7 +170,13 @@ function zone.sync(state, phase)
     end
 
     local accepting = host and heartbeat_fresh()
-    wall.sync(state, phase, exit, accepting)
+    local world = local_pawn:GetWorld()
+    if not route.secondary then
+        secondary_fixture = nil
+    elseif not valid(secondary_fixture) or not same(secondary_fixture:GetWorld(), world) then
+        secondary_fixture = placed_actor("Level_Exit_BP_C", route.secondary.fixture, world)
+    end
+    wall.sync(state, phase, exit, accepting, secondary_fixture)
     local refreshed = SilverfishSetNativeZoneScope(local_pawn:GetAddress(), remote and remote:GetAddress() or 0,
         valid(exit) and exit:GetAddress() or 0, host, accepting)
     if not refreshed then
@@ -308,10 +320,17 @@ function zone.command(fields, state, phase)
         SilverfishReleaseNativeZoneRequest()
         return "native exit request released"
     end
-    local slot, position = fields[3], fields[4]
-    if #fields ~= 4 or (slot ~= "local" and slot ~= "guest")
+    local slot, position, entrance = fields[3], fields[4], fields[5]
+    if (#fields ~= 4 and #fields ~= 5) or (slot ~= "local" and slot ~= "guest")
         or (position ~= "near" and position ~= "inside" and position ~= "far") then
-        error("Expected native-exit-position local|guest near|inside|far", 0)
+        error("Expected native-exit-position local|guest near|inside|far [entrance]", 0)
+    end
+    local route = routes[state.map]
+    if entrance and route.entrance ~= entrance then
+        if not route.secondary or route.secondary.entrance ~= entrance then
+            error("The requested entrance does not select an authored exit in this map", 0)
+        end
+        route = route.secondary
     end
     local pawn
     for _, details in ipairs(state.pawns) do
@@ -320,23 +339,24 @@ function zone.command(fields, state, phase)
             pawn = details.pawn
         end
     end
-    if not valid(pawn) or not valid(fixture) or not valid(fixture.Box)
-        or not same(pawn:GetWorld(), fixture:GetWorld()) then
+    if not valid(pawn) then error("The authoritative pawn is unavailable", 0) end
+    local world = pawn:GetWorld()
+    local exit = route == routes[state.map] and fixture or secondary_fixture
+    if not valid(exit) or not valid(exit.Box) or not same(world, exit:GetWorld()) then
         error("The authoritative pawn or exit geometry is unavailable", 0)
     end
 
-    local center = fixture.Box:K2_GetComponentLocation()
+    local center = exit.Box:K2_GetComponentLocation()
     local offsets = position == "inside" and {{0, 0}} or position == "far" and
         {{2250, 0}, {-2250, 0}, {0, 2250}, {0, -2250}} or {{-350, 0}, {350, 0}, {0, -350}, {0, 350}}
     if position == "near" and state.map == "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P" then
         offsets[1], offsets[2] = offsets[2], offsets[1]
     end
     local rotation = pawn:K2_GetActorRotation()
-    local route = routes[state.map]
     if route.player_start then
         if position == "near" then offsets[1], offsets[4] = offsets[4], offsets[1] end
         if position == "far" then
-            local marker = player_start(route, pawn:GetWorld())
+            local marker = player_start(route, world)
             if not valid(marker) then error("The Nexus PlayerStart_1 is unavailable", 0) end
             local target = marker:K2_GetActorLocation()
             if not pawn:K2_TeleportTo({ X = target.X, Y = target.Y, Z = target.Z }, rotation) then
@@ -346,8 +366,32 @@ function zone.command(fields, state, phase)
             return "positioned " .. slot .. " far from the native exit"
         end
     end
+    local height = center.Z
+    if route.probe_arrival then
+        local marker = placed_actor("LevelExit_Spawn_BP_C", route.probe_arrival, world)
+        if not valid(marker) or not valid(marker.Arrow) or not marker.EntranceTag
+            or marker.EntranceTag:ToString() ~= route.entrance then
+            error("The authored exit ground reference is unavailable", 0)
+        end
+        local marker_location = marker.Arrow:K2_GetComponentLocation()
+        height = marker_location.Z
+        local forward = exit:GetActorForwardVector()
+        local tangent_x, tangent_y = -forward.Y, forward.X
+        local lane = (marker_location.X - center.X) * tangent_x + (marker_location.Y - center.Y) * tangent_y
+        local clearance = math.max(0, exit.Box:GetScaledBoxExtent().Y - 250)
+        lane = math.max(-clearance, math.min(lane, clearance))
+        center.X, center.Y = center.X + lane * tangent_x, center.Y + lane * tangent_y
+        if position ~= "inside" then
+            local distance = (position == "near" and 350 or 2250) * route.probe_approach
+            local x, y = distance * forward.X, distance * forward.Y
+            local separation = slot == "guest" and position == "near" and 200 or 0
+            offsets = {{x + separation * tangent_x, y + separation * tangent_y},
+                {x - (separation + 150) * tangent_x, y - (separation + 150) * tangent_y},
+                {-x + separation * tangent_x, -y + separation * tangent_y}}
+        end
+    end
     for _, offset in ipairs(offsets) do
-        local destination = {X = center.X + offset[1], Y = center.Y + offset[2], Z = center.Z}
+        local destination = {X = center.X + offset[1], Y = center.Y + offset[2], Z = height}
         if pawn:K2_TeleportTo(destination, rotation) then
             pawn:ForceNetUpdate()
             return "positioned " .. slot .. " " .. position .. " the native exit"

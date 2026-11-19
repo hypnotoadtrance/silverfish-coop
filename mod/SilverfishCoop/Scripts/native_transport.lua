@@ -17,6 +17,9 @@ local artifacts = {
     gold = "Art_Tesseract_Gold",
 }
 local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
+local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C"
+local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
+local menu_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local gold_path = "/Game/Classes/Items/Artifacts/Art_Tesseract_Gold.Art_Tesseract_Gold_C"
 local gold_source = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -26,6 +29,7 @@ local gold_actions = {
     ["native-gold-debit"] = "debit",
     ["native-gold-seed"] = "seed",
     ["native-gold-use-probe"] = "use-probe",
+    ["native-gold-action-probe"] = "action-probe",
 }
 
 local function valid(value)
@@ -165,7 +169,7 @@ local function scratch_manager(state)
     local manager = widgets:Create(pawn, load_class(manager_path), controller)
     if not valid(manager) then error("Could not create the isolated stock item manager", 0) end
     manager.Player_FP = pawn
-    return manager
+    return manager, widgets, pawn, controller
 end
 
 local function gold_command(fields, state, phase, action)
@@ -176,7 +180,7 @@ local function gold_command(fields, state, phase, action)
         or not host or host.name ~= fields[3] or not exact_guid(guid) then
         error("Golden Cube operations require the exact active host pawn and item GUID", 0)
     end
-    if (action == "seed" or action == "use-probe") and not fixtures then
+    if (action == "seed" or action == "use-probe" or action == "action-probe") and not fixtures then
         error("This Golden Cube command requires the isolated fixture host", 0)
     end
 
@@ -195,6 +199,19 @@ local function gold_command(fields, state, phase, action)
     elseif action == "use-probe" and type(SilverfishProbeNativeGoldTransport) == "function" then
         local manager = scratch_manager(state)
         ok, detail = SilverfishProbeNativeGoldTransport(address, manager:GetAddress(), guid)
+        if ok then detail = "requested" end
+    elseif action == "action-probe" and type(SilverfishProbeNativeGoldActionUse) == "function" then
+        local manager, widgets, pawn, controller = scratch_manager(state)
+        local panel = widgets:Create(pawn, load_class(panel_path), controller)
+        local card = widgets:Create(pawn, load_class(card_path), controller)
+        if not valid(manager.ItemContextMenu) then
+            manager.ItemContextMenu = widgets:Create(pawn, load_class(menu_path), controller)
+        end
+        if not valid(panel) or not valid(card) or not valid(manager.ItemContextMenu) then
+            error("The isolated stock inventory widgets are unavailable", 0)
+        end
+        ok, detail = SilverfishProbeNativeGoldActionUse(address, manager:GetAddress(), panel:GetAddress(),
+            card:GetAddress(), guid)
         if ok then detail = "requested" end
     else
         error("The qualified native Golden Cube bridge is unavailable", 0)

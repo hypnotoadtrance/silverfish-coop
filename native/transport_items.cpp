@@ -803,6 +803,37 @@ namespace
                !function->HasAnyFunctionFlags(Unreal::FUNC_Net) ? function : nullptr;
     }
 
+    class RestoreItem
+    {
+    public:
+        static bool supports(Unreal::FStructProperty* property, const Unreal::UScriptStruct* type)
+        {
+            return item_struct(property, type) && property->GetSize() > 0 && property->GetSize() <= capacity &&
+                   property->GetMinAlignment() <= alignof(std::max_align_t);
+        }
+
+        RestoreItem(Unreal::FStructProperty* property, void* value) : property(property), value(value)
+        {
+            property->InitializeValue(original.data());
+            property->CopyCompleteValue(original.data(), value);
+        }
+
+        ~RestoreItem()
+        {
+            property->CopyCompleteValue(value, original.data());
+            property->DestroyValue(original.data());
+        }
+
+        RestoreItem(const RestoreItem&) = delete;
+        RestoreItem& operator=(const RestoreItem&) = delete;
+
+    private:
+        static constexpr int capacity = 256;
+        Unreal::FStructProperty* property;
+        void* value;
+        alignas(std::max_align_t) std::array<std::byte, capacity> original{};
+    };
+
     int lua_inspect_gold(const Lua& lua)
     {
         Guid guid{};
@@ -945,9 +976,7 @@ namespace
         auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
         const GuidFields fields(match.item);
         auto* function = stock_no_args(manager, entries->use_held);
-        constexpr std::size_t capacity = 256;
-        if (!item_struct(held, match.item) || !function || held->GetSize() <= 0 || held->GetSize() > capacity ||
-            held->GetMinAlignment() > alignof(std::max_align_t))
+        if (!RestoreItem::supports(held, match.item) || !function)
         {
             return probe_result(lua, false, "stock_held_item_schema_unavailable");
         }
@@ -956,24 +985,7 @@ namespace
         {
             return probe_result(lua, false, "local_item_manager_is_holding_an_item");
         }
-        struct RestoreItem
-        {
-            Unreal::FStructProperty* property;
-            void* value;
-            alignas(std::max_align_t) std::array<std::byte, capacity> original{};
-
-            RestoreItem(Unreal::FStructProperty* property, void* value) : property(property), value(value)
-            {
-                property->InitializeValue(original.data());
-                property->CopyCompleteValue(original.data(), value);
-            }
-
-            ~RestoreItem()
-            {
-                property->CopyCompleteValue(value, original.data());
-                property->DestroyValue(original.data());
-            }
-        } restore(held, value);
+        const RestoreItem restore(held, value);
 
         // First prove this instance's stock entry is intercepted while the GUID is unusable.
         match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.gold_class);
@@ -989,6 +1001,145 @@ namespace
         const bool queued = receipt.count == before + 2 && receipt.reason == "gold_request_queued" && gold_request &&
                             gold_request->guid == guid && gold_request_current(*gold_request, save);
         return probe_result(lua, queued, queued ? "stock_gold_use_queued" : "stock_gold_use_did_not_queue");
+    }
+
+    int lua_probe_gold_action(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !fixtures_enabled() || lua.get_stack_size() != 5 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_integer(4) || !lua.is_string(5))
+        {
+            return probe_result(lua, false, "gold_action_probe_widgets_required_on_game_thread");
+        }
+        Guid guid{};
+        if (!parse_guid(lua.get_string(5), guid))
+        {
+            return probe_result(lua, false, "invalid_gold_guid");
+        }
+        const auto card_address = lua.get_integer(4);
+        const auto panel_address = lua.get_integer(3);
+        const auto manager_address = lua.get_integer(2);
+        if (card_address <= 0 || panel_address <= 0 || manager_address <= 0 || !current_host_argument(lua.get_integer(1)))
+        {
+            return probe_result(lua, false, "current_transport_host_and_widgets_required");
+        }
+
+        auto* manager = find_object(static_cast<std::uintptr_t>(manager_address), manager_path);
+        auto* panel = find_object(static_cast<std::uintptr_t>(panel_address), panel_path);
+        auto* card = find_object(static_cast<std::uintptr_t>(card_address), card_path);
+        auto* menu = object_field(manager, STR("ItemContextMenu"));
+        if (!manager || !panel || !card || !live(menu) || !exact_class(menu, context_menu_path) ||
+            !same_widget_player(manager) || !same_widget_player(panel) || !same_widget_player(card))
+        {
+            return probe_result(lua, false, "owned_stock_inventory_widgets_required");
+        }
+
+        auto* save = canonical_host_save();
+        GoldInventory match;
+        if (const auto error = locate_gold(save, guid, match); !error.empty())
+        {
+            return probe_result(lua, false, error);
+        }
+        if (!match.record)
+        {
+            return probe_result(lua, false, "owned_backpack_cube_required");
+        }
+        if (gold_request && gold_request_current(*gold_request, save))
+        {
+            return probe_result(lua, false, "another_gold_request_pending");
+        }
+
+        auto* choose_card = field<Unreal::FObjectProperty>(menu, STR("Item Card"));
+        auto* card_panel = field<Unreal::FObjectProperty>(card, STR("InventoryWidget"));
+        auto* panel_target = field<Unreal::FObjectProperty>(panel, STR("Target"));
+        auto* panel_manager = field<Unreal::FObjectProperty>(panel, STR("ItemManager"));
+        auto* panel_index = field<Unreal::FIntProperty>(panel, STR("InventoryIndex"));
+        auto* item = field<Unreal::FStructProperty>(card, STR("Item"));
+        auto* function = stock_no_args(manager, entries->action_use);
+        if (!choose_card || !card_panel || !panel_target || !panel_manager || !panel_index ||
+            !RestoreItem::supports(item, match.item) || !function || panel_index->GetPropertyValueInContainer(panel) != 0)
+        {
+            return probe_result(lua, false, "stock_inventory_action_schema_unavailable");
+        }
+
+        const GuidFields fields(match.item);
+        auto* value = item->ContainerPtrToValuePtr<void>(card);
+        if (object_value(match.item_class, value) || fields.read(value) != Guid{} || object_value(choose_card, menu) ||
+            object_value(card_panel, card) || object_value(panel_target, panel) || object_value(panel_manager, panel))
+        {
+            return probe_result(lua, false, "empty_scratch_inventory_widgets_required");
+        }
+
+        struct ScratchLinks
+        {
+            struct Link
+            {
+                Unreal::FObjectProperty* property;
+                void* address;
+                Unreal::UObject* target;
+            };
+
+            explicit ScratchLinks(std::array<Link, 4> links) : links(links)
+            {
+                for (const auto& link : links)
+                {
+                    link.property->SetObjectPropertyValue(link.address, link.target);
+                }
+            }
+
+            ~ScratchLinks()
+            {
+                for (const auto& link : links)
+                {
+                    link.property->SetObjectPropertyValue(link.address, nullptr);
+                }
+            }
+
+            std::array<Link, 4> links;
+        };
+        const ScratchLinks links(std::array{
+            ScratchLinks::Link{panel_target, panel_target->ContainerPtrToValuePtr<void>(panel), scope.instance.Get()},
+            ScratchLinks::Link{panel_manager, panel_manager->ContainerPtrToValuePtr<void>(panel), manager},
+            ScratchLinks::Link{card_panel, card_panel->ContainerPtrToValuePtr<void>(card), panel},
+            ScratchLinks::Link{choose_card, choose_card->ContainerPtrToValuePtr<void>(menu), card},
+        });
+        const RestoreItem restore(item, value);
+
+        // Stock TakeCard looks up even zero GUIDs. Prove this hook using a GUID checked absent.
+        auto unowned_guid = guid;
+        unowned_guid.front() ^= 0x80000000U;
+        if (unowned_guid == Guid{})
+        {
+            unowned_guid.back() = 1;
+        }
+        GoldInventory unowned;
+        if (!locate_gold(save, unowned_guid, unowned).empty() || unowned.record)
+        {
+            return probe_result(lua, false, "gold_action_canary_guid_not_absent");
+        }
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.gold_class);
+        fields.write(value, unowned_guid);
+        const auto before = receipt.count;
+        manager->ProcessEvent(function, nullptr);
+        if (receipt.count != before + 1 || receipt.role != "host" || receipt.item != gold.name ||
+            receipt.entry != "action_use" || receipt.reason != "owned_backpack_cube_required")
+        {
+            return probe_result(lua, false, "stock_scratch_inventory_action_did_not_report_expected_denial");
+        }
+
+        item->CopyCompleteValue(value, match.record);
+        manager->ProcessEvent(function, nullptr);
+        GoldInventory after;
+        const bool intact = locate_gold(canonical_host_save(), guid, after).empty() && after.record &&
+                            after.save == save && item->Identical(value, after.record);
+        const bool queued = receipt.count == before + 2 && receipt.reason == "gold_request_queued" && gold_request &&
+                            gold_request->entry == "action_use" && gold_request->guid == guid &&
+                            gold_request_current(*gold_request, save);
+        if (!intact || !queued)
+        {
+            gold_request.reset();
+            return probe_result(lua, false, intact ? "stock_gold_action_use_did_not_queue" : "stock_backpack_item_was_changed");
+        }
+        return probe_result(lua, true, "stock_gold_action_use_queued");
     }
 
     int lua_probe_held_item(const Lua& lua)
@@ -1128,6 +1279,7 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         {
             lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_gold);
             lua.register_function("SilverfishProbeNativeGoldTransport", lua_probe_gold);
+            lua.register_function("SilverfishProbeNativeGoldActionUse", lua_probe_gold_action);
         }
     }
 }

@@ -7,13 +7,13 @@ local no_collision, query_only = 0, 1
 local world_static, pawn_channel = 0, 2
 local ignore, block = 0, 2
 local range_squared = 1500 * 1500
-local record
+local records = {}
 local status, failure = "inactive", ""
 local observation
-local retry_at = 0
+local retry_at = {}
 
 local function valid(object)
-    return object ~= nil and object:IsValid()
+    return object ~= nil and object ~= false and object:IsValid()
 end
 
 local function same(first, second)
@@ -43,14 +43,20 @@ local function set_ignore(component, actor, should_ignore)
     end
 end
 
+local function clear_record(index)
+    local record = records[index]
+    if not record then return end
+    pcall(set_ignore, record.host_capsule, record.actor, false)
+    if valid(record.actor) then pcall(function() record.actor:K2_DestroyActor() end) end
+    records[index] = nil
+    retry_at[index] = nil
+    if observation and observation.index == index then observation = nil end
+end
+
 function wall.clear()
-    if record then
-        pcall(set_ignore, record.host_capsule, record.actor, false)
-        if valid(record.actor) then
-            pcall(function() record.actor:K2_DestroyActor() end)
-        end
-    end
-    record = nil
+    clear_record(1)
+    clear_record(2)
+    retry_at = {}
     observation = nil
     status, failure = "inactive", ""
 end
@@ -117,7 +123,38 @@ local function host_can_pass(state, local_pawn, world, accepting)
     return finite(squared) and squared <= range_squared
 end
 
-function wall.sync(state, phase, fixture, accepting)
+local function sync_shape(index, world, fixture, desired)
+    local record = records[index]
+    if not valid(fixture) then
+        clear_record(index)
+        return true
+    end
+    if record and (not same(record.fixture, fixture) or not same(record.world, world) or not valid(record.actor)) then
+        clear_record(index)
+        record = nil
+    end
+    local ok, ready = pcall(function()
+        if not record then
+            if os.time() < (retry_at[index] or 0) then return false end
+            retry_at[index] = os.time() + 2
+            record = create(world, fixture)
+            records[index] = record
+        end
+        if not same(record.host_capsule, desired) then
+            set_ignore(record.host_capsule, record.actor, false)
+            set_ignore(desired, record.actor, true)
+            record.host_capsule = desired
+        end
+        return true
+    end)
+    if not ok then
+        clear_record(index)
+        return false, tostring(ready)
+    end
+    return ready
+end
+
+function wall.sync(state, phase, fixture, accepting, secondary)
     if not enabled then return end
     local hosting = phase == "hosting"
     local local_pawn = state.local_pawn and state.local_pawn.pawn
@@ -126,41 +163,35 @@ function wall.sync(state, phase, fixture, accepting)
         return
     end
     local world = local_pawn:GetWorld()
-    if not same(world, fixture:GetWorld()) or not capsule(local_pawn) then
+    if not same(world, fixture:GetWorld()) or (valid(secondary) and not same(world, secondary:GetWorld()))
+        or not capsule(local_pawn) then
         wall.clear()
         status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
         return
     end
-    if record and (not same(record.fixture, fixture) or not same(record.world, world) or not valid(record.actor)) then
-        wall.clear()
-    end
-
-    local ok, reason = pcall(function()
-        if not record then
-            if os.time() < retry_at then return end
-            retry_at = os.time() + 2
-            record = create(world, fixture)
-        end
-        local desired = hosting and host_can_pass(state, local_pawn, world, accepting) and capsule(local_pawn) or nil
-        if not same(record.host_capsule, desired) then
-            set_ignore(record.host_capsule, record.actor, false)
-            set_ignore(desired, record.actor, true)
-            record.host_capsule = desired
-        end
+    local desired = hosting and host_can_pass(state, local_pawn, world, accepting) and capsule(local_pawn) or nil
+    local primary_ready, primary_error = sync_shape(1, world, fixture, desired)
+    local secondary_ready, secondary_error = sync_shape(2, world, secondary, desired)
+    local reason = primary_error or secondary_error
+    if reason then
+        status, failure = "error", reason
+    elseif primary_ready and secondary_ready then
         status, failure = "ready", ""
-    end)
-    if not ok then
-        wall.clear()
-        status, failure = "error", tostring(reason)
+    else
+        status, failure = "arming", "Waiting for matching exit wall geometry"
     end
 end
 
 function wall.command(fields, state, phase)
     if fields[2] ~= "native-exit-wall-probe" then return end
     local slot = fields[3]
-    if not enabled or phase ~= "hosting" or status ~= "ready" or not record or #fields ~= 3
+    local route, tag = zones[state.map], fields[4]
+    local index = not tag and 1 or route and route.entrance == tag and 1
+        or route and route.secondary and route.secondary.entrance == tag and 2
+    local record = index and records[index]
+    if not enabled or phase ~= "hosting" or status ~= "ready" or not record or #fields > 4
         or (slot ~= "local" and slot ~= "guest") then
-        error("Expected native-exit-wall-probe local|guest on the staged native zone host", 0)
+        error("Expected native-exit-wall-probe local|guest with an optional authored entrance tag", 0)
     end
     local pawn
     for _, details in ipairs(state.pawns) do
@@ -173,7 +204,18 @@ function wall.command(fields, state, phase)
         error("The authoritative pawn capsule is unavailable", 0)
     end
     local center = record.component:K2_GetComponentLocation()
-    local from = distance_squared(pawn:K2_GetActorLocation(), center)
+    local start = pawn:K2_GetActorLocation()
+    local approach = index == 2 and route.secondary or route
+    -- Tall authored boxes are entered at terrain height, well below their center.
+    if approach.probe_arrival then
+        local extent = record.component:GetScaledBoxExtent()
+        local forward = record.fixture:GetActorForwardVector()
+        local normal_distance = (start.X - center.X) * forward.X + (start.Y - center.Y) * forward.Y
+        center.X, center.Y = start.X - normal_distance * forward.X, start.Y - normal_distance * forward.Y
+        local clearance = math.max(0, extent.Z - 100)
+        center.Z = math.max(center.Z - clearance, math.min(start.Z, center.Z + clearance))
+    end
+    local from = distance_squared(start, center)
     if not finite(from) or from > 1250 * 1250 or record.fixture.Box:IsOverlappingActor(pawn) then
         error("Position the pawn near the exit before the swept wall probe", 0)
     end
@@ -183,13 +225,22 @@ function wall.command(fields, state, phase)
     local component = hit.Component and hit.Component:Get()
     local outcome = hit.bBlockingHit and (same(component, record.component) and "wall" or "other") or "clear"
     local remaining = distance_squared(pawn:K2_GetActorLocation(), center)
-    observation = { slot = slot, outcome = outcome, remaining = finite(remaining) and math.sqrt(remaining) or -1 }
+    observation = { index = index, slot = slot, outcome = outcome,
+        remaining = finite(remaining) and math.sqrt(remaining) or -1 }
+    if outcome == "other" then
+        local name = valid(component) and component:GetFullName() or "unknown component"
+        return string.format("native exit sweep other (%s, start %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
+            name, start.X, start.Y, start.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
+    end
     return "native exit sweep " .. outcome
 end
 
 function wall.rows(status_row)
     if not enabled then return {} end
-    return {status_row("native-zone-wall", status, record and valid(record.host_capsule) and 1 or 0,
+    local primary, secondary = records[1], records[2]
+    local host_open = status == "ready" and primary and valid(primary.host_capsule)
+        and (not secondary or valid(secondary.host_capsule))
+    return {status_row("native-zone-wall", status, host_open and 1 or 0,
         observation and observation.slot or "-", observation and observation.outcome or "-",
         observation and observation.remaining or "-", failure)}
 end

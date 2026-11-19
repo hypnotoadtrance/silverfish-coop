@@ -25,7 +25,7 @@ POSITION_MAX_AGE = 3.0
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin")
 TRANSPORT_FIXTURES = ("stardust", "green", "blue", "red", "gold")
 GOLD_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
-                "seed": ("seeded", "present"), "use-probe": ("requested",)}
+                "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
 
 
 def _identity(directory: Path):
@@ -713,20 +713,31 @@ class Host:
                     success = result.pop("ok")
                     self.control.respond(path, success, **result)
                     continue
-                elif action == "native-exit-position" and self.native_zones and self.fixtures:
+                elif action in ("native-exit-position", "native-exit-wall-probe") and self.native_zones and self.fixtures:
                     target = request.get("target")
-                    position = request.get("exit_position")
-                    if target not in ("host", "guest") or position not in ("near", "inside", "far"):
-                        raise ValueError("Specify a host or guest and an exit fixture position")
-                    snapshot = await bridge.command(action, "local" if target == "host" else "guest",
-                                                    position, timeout=4)
-                    result = {"native_zone": snapshot.get("native_zone"), "target": target, "position": position}
-                elif action == "native-exit-wall-probe" and self.native_zones and self.fixtures:
-                    target = request.get("target")
+                    entrance = request.get("entrance")
                     if target not in ("host", "guest"):
-                        raise ValueError("Specify the host or guest for the exit sweep")
-                    snapshot = await bridge.command(action, "local" if target == "host" else "guest", timeout=4)
-                    result = {"native_zone_wall": snapshot.get("native_zone_wall")}
+                        raise ValueError("Specify the host or guest for the exit fixture")
+                    if entrance is not None and not any(
+                        source == self.last_game.get("map") and tag == entrance
+                        for (source, _), tag in AUTHORED_EXITS.items()
+                    ):
+                        raise ValueError("Choose an authored exit entrance tag in the host's current map")
+                    arguments = [action, "local" if target == "host" else "guest"]
+                    position = request.get("exit_position")
+                    placing = action == "native-exit-position"
+                    if placing:
+                        if position not in ("near", "inside", "far"):
+                            raise ValueError("Choose a position for the exit fixture")
+                        arguments.append(position)
+                    if entrance:
+                        arguments.append(entrance)
+                    snapshot = await bridge.command(*arguments, timeout=4)
+                    if placing:
+                        result = {"native_zone": snapshot.get("native_zone"), "target": target,
+                                  "position": position, "entrance": entrance}
+                    else:
+                        result = {"native_zone_wall": snapshot.get("native_zone_wall")}
                 elif action in ("native-door-position", "native-door-probe") and self.native_zones and self.fixtures:
                     target = request.get("target")
                     if target not in ("host", "guest"):
@@ -741,7 +752,8 @@ class Host:
                     result = {"native_zone": snapshot.get("native_zone"), "native_door": snapshot.get("native_door")}
                 elif action == "native-transport-probe" and self.native_zones and self.fixtures:
                     result = await probe_transport(bridge, request.get("target"))
-                elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe")
+                elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
+                                 "native-gold-action-probe")
                       and self.native_zones and self.fixtures and GOLD_NEXUS in self.allowed_maps):
                     operation = action.removeprefix("native-gold-")
                     _, item = await self.checked_gold(bridge, operation, request.get("target"))
