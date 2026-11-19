@@ -17,7 +17,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup
+from . import native_authored_pickup, native_downed_markers
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .native_guest_weapon import PRIMARY_KINDS
@@ -747,7 +747,9 @@ class Bridge:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
-            matrix_rows = []
+            matrix_rows, marker_rows = [], []
+            marker_frame = None
+            malformed_markers = False
             for line in text.splitlines():
                 fields = line.split("\t")
                 if fields[0] == "schema" and fields[1:] == ["1"]:
@@ -773,6 +775,16 @@ class Bridge:
                     data.setdefault("player_visuals", {})[fields[1]] = {
                         "input_gate": fields[2] == "1", "marker": fields[3] == "1",
                     }
+                elif fields[0] == "player-marker-frame":
+                    if len(fields) == 4 and marker_frame is None:
+                        marker_frame = fields
+                    else:
+                        malformed_markers = True
+                elif fields[0] == "player-marker":
+                    if len(fields) == 7 and len(marker_rows) < native_downed_markers.MAX_MARKERS:
+                        marker_rows.append(fields)
+                    else:
+                        malformed_markers = True
                 elif fields[0] == "native-inventory-canary" and len(fields) == 4:
                     data["native_inventory_canary"] = {
                         "state": fields[1], "binding_restored": fields[2] == "1", "detail": fields[3],
@@ -1435,6 +1447,9 @@ class Bridge:
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
             if data.get("schema") == 1 and "state" in data:
+                if marker_frame is not None and not malformed_markers:
+                    with contextlib.suppress(ValueError):
+                        data[native_downed_markers.KEY] = native_downed_markers.parse(marker_frame, marker_rows, data.get("map"))
                 placed = data.get(native_authored_pickup.SOURCES_KEY, {})
                 intents = data.get(native_authored_pickup.INTERACTIONS_KEY, {})
                 configured = native_authored_pickup.MAP_SOURCES.get(data.get("map"), ())

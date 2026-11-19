@@ -13,7 +13,8 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
+from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_downed_markers,
+               native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
                native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
@@ -129,6 +130,8 @@ async def project_players(bridge: Bridge, game: dict, public: dict, *, client: b
     exact_names = public.get("native_pawns")
     for role, player in public.get("players", {}).items():
         local = role == (viewer_role if client else "host")
+        if client and not local and native_downed_markers.KEY in public:
+            continue
         if exact_names is not None:
             name = pawns.get("local", {}).get("name") if local else exact_names.get(role)
             bridge_role = next((alias for alias, body in pawns.items() if name and body.get("name") == name), None)
@@ -1337,8 +1340,13 @@ class Host:
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
-        character = self.roles().get(role, "")
+        roles = self.roles()
+        character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
+        if "native_pawns" in gameplay:
+            positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
+            gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
+                gameplay, positions, self.last_game["map"], self.zone_epoch, character)
         member = self.native_recipients().get(character) if self.native_guest else None
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
@@ -3129,6 +3137,7 @@ class Client:
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
+        self.downed_markers = native_downed_markers.MarkerView()
         self.shop_view = native_shop_view.ShopView() if invite.get("native_shop_view") else None
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
@@ -3540,6 +3549,7 @@ class Client:
                                                   *(str(axis) for axis in loot["position"]), timeout=3)
                         self.loot_tracking = tracking
                 await project_players(self.bridge, self.last_game, self.gameplay, client=True, viewer_role=self.viewer_role)
+                await self.downed_markers.sync(self)
                 if time.monotonic() - self.gameplay_seen < 3:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))

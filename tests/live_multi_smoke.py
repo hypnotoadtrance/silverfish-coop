@@ -26,7 +26,7 @@ def saved_hashes(root: Path) -> dict[str, str]:
 
 
 async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False, rest_ui: bool = False,
-                   rest_guest_denial: bool = False, guest_count: int = 2) -> None:
+                   rest_guest_denial: bool = False, guest_count: int = 2, downed_markers: bool = False) -> None:
     campaign = "party-" + uuid.uuid4().hex[:8]
     guest_roles = ("guest", *(f"guest{index}" for index in range(2, guest_count + 1)))
     profiles = [f"{campaign}-{index}" for index in range(1, guest_count + 1)]
@@ -84,6 +84,39 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
         return next((pawn for pawn in state.get("game", {}).get("pawns", {}).values()
                      if pawn["name"] == name), {})
 
+    def host_marker(state, name, visible):
+        game = state.get("game", {})
+        slot = next((alias for alias, pawn in game.get("pawns", {}).items() if pawn.get("name") == name), None)
+        return bool(slot and game.get("player_visuals", {}).get(slot, {}).get("marker") is visible)
+
+    async def guest_markers(character, host, target_id, location=None, *, target_downed=False):
+        def projected(state):
+            game = state.get("game", {})
+            frame = game.get("native_downed_markers", {})
+            area = host["game"]["map"]
+            if (state.get("character_id"), state.get("host_session"), state.get("zone_epoch"),
+                game.get("map"), frame.get("epoch"), frame.get("map")) != (
+                    character, host["generation"], host["zone_epoch"], area, host["zone_epoch"], area):
+                return False
+            expected = target_downed and character != target_id
+            markers = frame.get("markers")
+            if (not isinstance(markers, dict) or set(markers) != ({target_id} if expected else set())
+                    or frame.get("count") != len(markers)):
+                return False
+            if expected:
+                point = markers[target_id]
+                return (isinstance(point, list) and len(point) == 3 and all(math.isfinite(value) for value in point)
+                        and math.dist(point, location) <= 90)
+            if character == target_id:
+                local = game.get("player_effects", {}).get("local", {})
+                if target_downed:
+                    return local.get("state") == "downed" and local.get("crouched") is True and local.get("jump_velocity") == 0
+                return local.get("state") == "standing"
+            return True
+
+        state = await wait(clients[identities.index(character)], projected, timeout=20)
+        return state["game"]["native_downed_markers"]
+
     try:
         await start("host.txt", ("--campaign", campaign),
                     ("host", "--campaign", campaign, "--port", "0", "--headless", "--fixtures", "--native-events",
@@ -110,10 +143,23 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
         down = await wait(run, lambda status: players(status).get("guest2", {}).get("downed", False)
                           and (native_body(status, exact_pawns["guest2"]).get("health") or 0) <= 0)
         assert all(not player["downed"] for role, player in players(down).items() if role != "guest2"), down
+        if downed_markers:
+            down = await wait(run, lambda status: host_marker(status, exact_pawns["guest2"], True), timeout=15)
+            location = native_body(down, exact_pawns["guest2"])["location"]
+            projected = await asyncio.gather(*(guest_markers(character, down, identities[1], location, target_downed=True)
+                                               for character in identities))
+            evidence["downed_markers"] = {
+                "target": identities[1], "authority_position": location, "host_marker": True,
+                "guest_frames": dict(zip(identities, projected, strict=True)),
+            }
         await command("action", "--profile", profiles[0], "interact", "--target", identities[1])
         revived = await wait(run, lambda status: not players(status).get("guest2", {}).get("downed", True)
                              and native_body(status, exact_pawns["guest2"]).get("health") == 25.0)
         evidence["guest2_revived_by_guest1"] = native_body(revived, exact_pawns["guest2"])["health"]
+        if downed_markers:
+            revived = await wait(run, lambda status: host_marker(status, exact_pawns["guest2"], False), timeout=15)
+            cleared = await asyncio.gather(*(guest_markers(character, revived, identities[1]) for character in identities))
+            evidence["downed_markers"].update(host_cleared=True, guest_frames_after_revive=dict(zip(identities, cleared, strict=True)))
 
         await command("action", "--profile", profiles[0], "drop-link")
         await wait(clients[0], lambda status: not status.get("link_connected", True))
@@ -255,8 +301,11 @@ if __name__ == "__main__":
     options.add_argument("--native-rest-ui", action="store_true", help="use the stock sleep screen during the rest-wipe check")
     options.add_argument("--native-rest-guest-denial", action="store_true",
                          help="verify authority and client stock interaction denial for each guest")
+    options.add_argument("--native-downed-markers", action="store_true",
+                         help="verify exact same-map markers for every observer and cleanup on revival")
     args = options.parse_args()
     if args.native_rest_ui and not args.native_rest_wipe:
         options.error("--native-rest-ui requires --native-rest-wipe")
     asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe,
-                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial, guest_count=args.guests))
+                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial, guest_count=args.guests,
+                         downed_markers=args.native_downed_markers))

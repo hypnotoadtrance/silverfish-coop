@@ -3,6 +3,7 @@ local native_bag_projection = require("native_bag_projection")
 local native_authored_pickup = require("native_authored_pickup")
 
 local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local interact_path = player_path .. ":InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19"
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local input_subsystem_path = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
@@ -22,6 +23,8 @@ local desired = {}
 local slot_pawns = {}
 local applied = {}
 local markers = {}
+local marker_frame
+local location_markers = {}
 local local_player
 local walking
 local input_file
@@ -278,6 +281,7 @@ local function create_marker(marker, world, details)
     local class = StaticFindObject("/Script/Engine.StaticMeshActor")
     local mesh = marker_asset("/Engine/BasicShapes/Cube.Cube")
     if not valid(class) or not valid(mesh) then error("Downed marker mesh is unavailable", 0) end
+    marker.mesh = mesh
     local material = marker_asset("/Game/Assets/Materials/M_Light_Yellow.M_Light_Yellow")
 
     -- Spawn an exclamation in the viewer's world. Neither part is attached
@@ -353,6 +357,127 @@ local function sync_marker(name, details)
     end
 end
 
+local marker_frame_lifetime = 2.5
+local marker_coordinate_limit = 10000000
+
+local function marker_character(value)
+    if value == "host" then return true end
+    if type(value) ~= "string" or #value ~= 36 then return false end
+    local first, second, third, fourth, last = value:match("^([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)%-([0-9a-f]+)$")
+    return first and #first == 8 and #second == 4 and #third == 4 and #fourth == 4 and #last == 12
+end
+
+local function marker_viewer(state, phase)
+    if phase ~= "connected" or state.server ~= true or not state.listening or not valid(state.world) then return end
+    local detail, controller = state.local_pawn, state.controller
+    local pawn = detail and detail.pawn
+    if not valid(pawn) or not valid(controller) or not same(detail.controller_object, controller)
+        or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
+        or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
+        or not pawn:IsLocallyControlled() or not controller:IsLocalController() or pawn:HasAuthority()
+        or pawn:IsActorBeingDestroyed() or controller:IsActorBeingDestroyed() or detail.name ~= pawn:GetFullName()
+        or not same(pawn:GetClass(), StaticFindObject(player_path))
+        or not same(controller:GetClass(), StaticFindObject(controller_path)) then return end
+    return pawn
+end
+
+local function clear_marker_frame()
+    for _, marker in pairs(location_markers) do clear_marker(marker) end
+    marker_frame, location_markers = nil, {}
+end
+
+local function read_location_marker(marker, world, expected)
+    if not marker.visible or #marker.actors ~= #marker_parts then return end
+    local point
+    for index, actor in ipairs(marker.actors) do
+        if not valid(actor) or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world)
+            or not actor:HasAuthority() or actor.bReplicates ~= false or actor.bHidden ~= false
+            or actor:GetActorEnableCollision() ~= false then return end
+        local component = actor.StaticMeshComponent
+        if not valid(component) or not same(component:GetOwner(), actor) or not same(component.StaticMesh, marker.mesh)
+            or not component:IsVisible() or component:GetCollisionEnabled() ~= 0 then return end
+        local part, position = marker_parts[index], actor:K2_GetActorLocation()
+        local target, scale = marker_position(expected, part), actor:GetActorScale3D()
+        if not finite(position.X) or not finite(position.Y) or not finite(position.Z)
+            or math.abs(position.X - target.X) > 2 or math.abs(position.Y - target.Y) > 2
+            or math.abs(position.Z - target.Z) > 2 or math.abs(scale.X - 0.09) > 0.005
+            or math.abs(scale.Y - 0.09) > 0.005 or math.abs(scale.Z - part.scale_z) > 0.005 then return end
+        if not point then point = { x = position.X, y = position.Y, z = position.Z - part.offset_z } end
+    end
+    return point
+end
+
+local function sync_location_markers(state, phase)
+    local frame = marker_frame
+    if not frame then return end
+    local pawn = marker_viewer(state, phase)
+    if not same(pawn, frame.pawn) or not same(state.world, frame.world) or frame.map ~= state.map
+        or now(pawn) >= frame.expires then
+        clear_marker_frame()
+        return
+    end
+    for character, marker in pairs(location_markers) do
+        if not frame.positions[character] then
+            clear_marker(marker)
+            location_markers[character] = nil
+        end
+    end
+    frame.visible = {}
+    for _, character in ipairs(frame.characters) do
+        local details, marker = frame.positions[character], location_markers[character]
+        if not marker then
+            marker = { actors = {}, visible = false }
+            location_markers[character] = marker
+        end
+        local ok, point = pcall(function()
+            if marker.visible then
+                follow_marker(marker, details)
+            else
+                create_marker(marker, frame.world, details)
+            end
+            return read_location_marker(marker, frame.world, details)
+        end)
+        if ok and point then
+            frame.visible[#frame.visible + 1] = { character = character, point = point }
+        else
+            clear_marker(marker)
+            location_markers[character] = nil
+        end
+    end
+end
+
+local function apply_marker_frame(fields, state, phase)
+    local epoch, area = fields[3], fields[4]
+    local pawn = marker_viewer(state, phase)
+    if not pawn or #fields < 4 or #fields > 20 or (#fields - 4) % 4 ~= 0 or area ~= state.map
+        or type(epoch) ~= "string" or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$") then
+        error("Downed markers require the exact connected client, map and zone epoch", 0)
+    end
+    local characters, positions = {}, {}
+    for index = 5, #fields, 4 do
+        local character = fields[index]
+        local x, y, z = tonumber(fields[index + 1]), tonumber(fields[index + 2]), tonumber(fields[index + 3])
+        if not marker_character(character) or positions[character] or not finite(x) or not finite(y) or not finite(z)
+            or math.abs(x) > marker_coordinate_limit or math.abs(y) > marker_coordinate_limit
+            or math.abs(z) > marker_coordinate_limit then
+            error("Downed markers require distinct character IDs and finite in-range positions", 0)
+        end
+        characters[#characters + 1] = character
+        positions[character] = { x = x, y = y, z = z }
+    end
+    if marker_frame and (marker_frame.epoch ~= epoch or not same(marker_frame.pawn, pawn)
+        or not same(marker_frame.world, state.world) or marker_frame.map ~= area) then
+        clear_marker_frame()
+    end
+    -- Exact authenticated locations replace legacy name-based markers for remote pawns.
+    for name in pairs(desired) do
+        if name ~= state.local_pawn.name then desired[name] = nil end
+    end
+    marker_frame = { epoch = epoch, map = area, world = state.world, pawn = pawn, expires = now(pawn) + marker_frame_lifetime,
+        characters = characters, positions = positions, visible = {} }
+    return "downed marker frame accepted"
+end
+
 function players.sync(state, phase)
     local slots, names = roster(state, phase)
     if not active(phase) then walking = nil end
@@ -377,6 +502,7 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    sync_location_markers(state, phase)
     sync_native_interact(phase)
 end
 
@@ -423,6 +549,8 @@ function players.command(fields, state, phase)
             deadline = now(pawn) + milliseconds / 1000 }
         pawn:AddMovementInput(walking.world_direction, 1.0, false)
         return "walking input scheduled"
+    elseif command == "player-marker-frame" then
+        return apply_marker_frame(fields, state, phase)
     elseif command == "player-state" or command == "player-state-exact" then
         local target, next_state = fields[3], fields[4]
         local exact = command == "player-state-exact"
@@ -452,6 +580,14 @@ function players.rows(status_row)
             rows[#rows + 1] = status_row("player", slot, state, pawn.bIsCrouched and 1 or 0, speed, movement.JumpZVelocity)
             rows[#rows + 1] = status_row("player-visual", slot,
                 record and record.gate and 1 or 0, marker and marker.visible and 1 or 0)
+        end
+    end
+    local frame = marker_frame
+    if frame then
+        rows[#rows + 1] = status_row("player-marker-frame", frame.epoch, frame.map, #frame.visible)
+        for _, item in ipairs(frame.visible) do
+            rows[#rows + 1] = status_row("player-marker", frame.epoch, frame.map, item.character,
+                item.point.x, item.point.y, item.point.z)
         end
     end
     return rows
