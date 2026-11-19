@@ -6,6 +6,7 @@ local loot = require("loot")
 local native_bed = require("native_bed")
 local native_bag_projection = require("native_bag_projection")
 local native_authored_pickup = require("native_authored_pickup")
+local native_dust_cabinet = require("native_dust_cabinet")
 local native_blue = require("native_blue")
 local native_death = require("native_death")
 local native_dream = require("native_dream")
@@ -420,6 +421,7 @@ local function run_command(fields, state, current_phase)
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_mosby_station.clear() end
+    if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
     if command == "join" or command == "leave" then
         native_world_view.clear()
         native_inventory_view.clear()
@@ -808,6 +810,7 @@ local function run_command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
         or native_bag_projection.command(fields, state, current_phase)
         or native_authored_pickup.command(fields, state, current_phase)
+        or native_dust_cabinet.command(fields, state, current_phase)
         or native_finite_shop.command(fields, state, current_phase)
         or native_wipe_inventory.command(fields, state, current_phase)
         or native_pickup.command(fields, state, current_phase)
@@ -948,6 +951,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_bag_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_authored_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_dust_cabinet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_finite_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

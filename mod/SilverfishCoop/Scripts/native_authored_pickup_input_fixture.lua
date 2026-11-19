@@ -116,25 +116,26 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
     return false, valid(component) and "interact:" .. component_name(component) or obstruction or "interact:-"
 end
 
-function input.approach_dust_filter(state, phase, profile, pawn, actor)
-    local world = state.world
-    if not (headless and host_fixtures) or phase ~= "hosting" or not state.listening or state.server ~= false or profile.source ~= dust_filter
-        or sources[dust_filter] ~= state.map or not same(pawn:GetWorld(), world) or not same(actor:GetWorld(), world)
-        or pawn.Dead ~= false or not pawn:HasAuthority() then
-        error("authored_pickup_dust_filter_fixture_scope_unavailable", 0)
-    end
+local function restore_position(pawn, origin, facing)
+    local returned = pawn:K2_TeleportTo(origin, facing) and vector(pawn:K2_GetActorLocation())
+    if not returned or square(returned, origin) > 18^2 then return false end
+    pawn:ForceNetUpdate()
+    return true
+end
+
+local function approach_railyard(state, pawn, actor, box, label)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    local capsule, camera, box = pawn.CapsuleComponent, pawn.Camera, actor.Box
+    local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
-        or not owned(box, actor, "BoxComponent") or not same(box, actor.RootComponent) then
-        error("authored_pickup_dust_filter_fixture_components_unavailable", 0)
+        or not owned(box, actor, "BoxComponent") then
+        error(label .. "_components_unavailable", 0)
     end
     local origin, initial_eye = vector(pawn:K2_GetActorLocation()), vector(camera:K2_GetComponentLocation())
     local facing, center = rotation(pawn:K2_GetActorRotation()), vector(box:K2_GetComponentLocation())
     local half_height, limit = capsule:GetScaledCapsuleHalfHeight(), pawn.InteractionRange
     if not origin or not initial_eye or not facing or not center or not finite(half_height) or half_height < 20 or half_height > 150
         or not finite(limit) or limit <= 0 or limit > 1000 or square(initial_eye, origin) > 150^2 then
-        error("authored_pickup_dust_filter_fixture_geometry_unavailable", 0)
+        error(label .. "_geometry_unavailable", 0)
     end
     local floor_ignored, sight_ignored = {actor}, {pawn}
     for _, detail in ipairs(state.pawns) do
@@ -180,20 +181,31 @@ function input.approach_dust_filter(state, phase, profile, pawn, actor)
             end
         end
     end)
-    if checked and placed then return "exact stock Dust Filter floor and interaction sight verified" end
-    if moved then
-        local returned = pawn:K2_TeleportTo(origin, facing) and vector(pawn:K2_GetActorLocation())
-        if not returned or square(returned, origin) > 18^2 then
-            error("mutation_unverified_authored_pickup_dust_filter_fixture_rollback", 0)
-        end
-        pawn:ForceNetUpdate()
+    if checked and placed then return origin, facing end
+    if moved and not restore_position(pawn, origin, facing) then
+        error("mutation_unverified_" .. label .. "_rollback", 0)
     end
     if not checked then error(placed, 0) end
     local names = {}
     for reason in pairs(blockers) do names[#names + 1] = reason end
     table.sort(names)
-    error(string.format("authored_pickup_dust_filter_fixture_no_clear_sight:floor=%d:%s", candidates,
+    error(string.format("%s_no_clear_sight:floor=%d:%s", label, candidates,
         table.concat(names, "|", 1, math.min(#names, 4))), 0)
+end
+
+local function railyard_fixture(state, phase, pawn, actor)
+    return headless and host_fixtures and phase == "hosting" and state.listening and state.server == false
+        and sources[dust_filter] == state.map and same(pawn:GetWorld(), state.world) and same(actor:GetWorld(), state.world)
+        and pawn.Dead == false and pawn:HasAuthority()
+end
+
+function input.approach_dust_filter(state, phase, profile, pawn, actor)
+    if profile.source ~= dust_filter or not railyard_fixture(state, phase, pawn, actor)
+        or not same(actor.Box, actor.RootComponent) then
+        error("authored_pickup_dust_filter_fixture_scope_unavailable", 0)
+    end
+    approach_railyard(state, pawn, actor, actor.Box, "authored_pickup_dust_filter_fixture")
+    return "exact stock Dust Filter floor and interaction sight verified"
 end
 
 local function restored(camera, original)
@@ -203,6 +215,68 @@ local function restored(camera, original)
         if math.abs((current[axis] - original[axis] + 180) % 360 - 180) > 0.05 then return false end
     end
     return true
+end
+
+local function press_stock(state, pawn, box, precise_aim, label, dispatch)
+    local camera = pawn.Camera
+    local original = rotation(camera.RelativeRotation)
+    local eye, center, position = vector(camera:K2_GetComponentLocation()), vector(box:K2_GetComponentLocation()),
+        vector(pawn:K2_GetActorLocation())
+    if not original or not eye or not center or not position or square(position, center) > 250^2 then
+        error(label .. "_outside_verified_reach", 0)
+    end
+
+    local ok, reason = pcall(function()
+        -- LookTrace reads the Camera transform and fills the ordinary stock interaction focus.
+        for _, point in ipairs(points(box, center, precise_aim)) do
+            local view = aim(eye, point)
+            if view then
+                camera:K2_SetWorldRotation(view, false, {}, true)
+                pawn:LookTrace()
+                if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, box) then
+                    return dispatch()
+                end
+            end
+        end
+        local focused = pawn.InteractionTarget_Component
+        local failure = label .. "_focus_unavailable:" .. component_name(focused)
+        if precise_aim then
+            failure = failure .. string.format(":eye=(%.1f,%.1f,%.1f):box=(%.1f,%.1f,%.1f)",
+                eye.X, eye.Y, eye.Z, center.X, center.Y, center.Z)
+        end
+        error(failure, 0)
+    end)
+    local recovered, match = pcall(function()
+        if not owned(camera, pawn, "CameraComponent") or not same(pawn.Camera, camera)
+            or not same(pawn:GetWorld(), state.world) then return false end
+        camera:K2_SetRelativeRotation(original, false, {}, true)
+        pawn:LookTrace()
+        return restored(camera, original)
+    end)
+    if not recovered or not match then error("mutation_unverified_" .. label .. "_camera_restore", 0) end
+    if not ok then error(reason, 0) end
+    return reason
+end
+
+function input.open_dust_cabinet(state, phase, pawn, actor, box)
+    local press = SilverfishProbeNativeInteractInput
+    if not railyard_fixture(state, phase, pawn, actor) or not same(pawn, state.local_pawn.pawn)
+        or not owned(pawn.Camera, pawn, "CameraComponent") or type(press) ~= "function" then
+        error("authored_dust_cabinet_fixture_scope_unavailable", 0)
+    end
+    local origin, facing = approach_railyard(state, pawn, actor, box, "authored_dust_cabinet_fixture")
+    local ok, receipt = pcall(press_stock, state, pawn, box, true, "authored_dust_cabinet_stock_input", function()
+        local delivered, why, sequence = press(pawn:GetAddress(), false)
+        if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
+            error("mutation_unverified_authored_dust_cabinet_stock_input:" .. tostring(why), 0)
+        end
+        return sequence
+    end)
+    if not restore_position(pawn, origin, facing) then
+        error("mutation_unverified_authored_dust_cabinet_fixture_rollback", 0)
+    end
+    if not ok then error(receipt, 0) end
+    return receipt
 end
 
 function input.press(state, phase, profile)
@@ -224,56 +298,21 @@ function input.press(state, phase, profile)
         or not same(actor:GetClass(), StaticFindObject(profile.class)) or pawn.Dead ~= false then
         error("authored_pickup_stock_input_exact_pawn_or_actor_unavailable", 0)
     end
-    local box, camera = actor.Box, pawn.Camera
+    local box = actor.Box
     local active, claimed, before = inspect(profile.source)
     if active ~= true or claimed ~= false or not math.tointeger(before)
         or not owned(box, actor, "BoxComponent") or not same(box, actor.RootComponent)
-        or not owned(camera, pawn, "CameraComponent") then
+        or not owned(pawn.Camera, pawn, "CameraComponent") then
         error("authored_pickup_stock_input_exact_box_or_camera_unavailable", 0)
     end
-    local original = rotation(camera.RelativeRotation)
-    local eye, center, position = vector(camera:K2_GetComponentLocation()), vector(box:K2_GetComponentLocation()),
-        vector(pawn:K2_GetActorLocation())
-    if not original or not eye or not center or not position or
-        (position.X - center.X) ^ 2 + (position.Y - center.Y) ^ 2 + (position.Z - center.Z) ^ 2 > 250 ^ 2 then
-        error("authored_pickup_stock_input_outside_verified_reach", 0)
-    end
-
-    local ok, reason = pcall(function()
-        -- LookTrace reads the Camera transform and fills the ordinary stock interaction focus.
-        for _, point in ipairs(points(box, center, profile.source == dust_filter)) do
-            local view = aim(eye, point)
-            if view then
-                camera:K2_SetWorldRotation(view, false, {}, true)
-                pawn:LookTrace()
-                if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, box) then
-                    local consumed, why = press(pawn:GetAddress(), true)
-                    local still_active, still_claimed, sequence, fixture = inspect(profile.source)
-                    if consumed ~= true or why ~= "stock_started_consumed" or still_active ~= true
-                        or still_claimed ~= false or fixture ~= false or not math.tointeger(sequence) or sequence <= before then
-                        error("authored_pickup_stock_input_unverified:" .. tostring(why), 0)
-                    end
-                    return
-                end
-            end
+    press_stock(state, pawn, box, profile.source == dust_filter, "authored_pickup_stock_input", function()
+        local consumed, why = press(pawn:GetAddress(), true)
+        local still_active, still_claimed, sequence, fixture = inspect(profile.source)
+        if consumed ~= true or why ~= "stock_started_consumed" or still_active ~= true
+            or still_claimed ~= false or fixture ~= false or not math.tointeger(sequence) or sequence <= before then
+            error("authored_pickup_stock_input_unverified:" .. tostring(why), 0)
         end
-        local focused = pawn.InteractionTarget_Component
-        local failure = "authored_pickup_stock_input_focus_unavailable:" .. component_name(focused)
-        if profile.source == dust_filter then
-            failure = failure .. string.format(":eye=(%.1f,%.1f,%.1f):box=(%.1f,%.1f,%.1f)",
-                eye.X, eye.Y, eye.Z, center.X, center.Y, center.Z)
-        end
-        error(failure, 0)
     end)
-    local recovered, match = pcall(function()
-        if not owned(camera, pawn, "CameraComponent") or not same(pawn.Camera, camera)
-            or not same(pawn:GetWorld(), state.world) then return false end
-        camera:K2_SetRelativeRotation(original, false, {}, true)
-        pawn:LookTrace()
-        return restored(camera, original)
-    end)
-    if not recovered or not match then error("mutation_unverified_authored_pickup_stock_camera_restore", 0) end
-    if not ok then error(reason, 0) end
     return "exact stock loose pickup input consumed"
 end
 

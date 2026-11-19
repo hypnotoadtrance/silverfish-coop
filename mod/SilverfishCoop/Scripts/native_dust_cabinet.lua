@@ -1,0 +1,151 @@
+local cabinet = {}
+local stock_input = require("native_authored_pickup_input_fixture")
+
+local area = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
+local world_path = area .. ".RailYard_P"
+local actor_path = world_path .. ":PersistentLevel.LootCabnet_Small_BP_C_36"
+local actor_name = "LootCabnet_Small_BP_C " .. actor_path
+local cabinet_class = "/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"
+local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_INPUT") == "1"
+local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local client_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
+local projection
+
+local function valid(object)
+    return object ~= nil and object ~= false and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function exact(object, class)
+    return valid(object) and same(object:GetClass(), StaticFindObject(class))
+end
+
+local function component(object, actor, suffix, class)
+    return exact(object, "/Script/Engine." .. class) and same(object:GetOwner(), actor)
+        and object:GetFullName() == class .. " " .. actor_path .. "." .. suffix
+end
+
+local function angle_is(actual, expected)
+    return type(actual) == "number" and math.abs((actual - expected + 180) % 360 - 180) <= 0.15
+end
+
+local function door_roll(door, expected)
+    local angle = door.RelativeRotation
+    return angle and angle_is(angle.Pitch, 0) and angle_is(angle.Yaw, 0) and angle_is(angle.Roll, expected)
+end
+
+local function inspect(state, phase)
+    if not enabled or state.map ~= area or not state.listening or not valid(state.world)
+        or state.world:GetFullName() ~= "World " .. world_path then return end
+    local host = phase == "hosting" and state.server == false
+    if not host and (phase ~= "connected" or state.server ~= true) then return end
+    local detail, controller = state.local_pawn, state.controller
+    local pawn = detail and detail.pawn
+    if not exact(pawn, pawn_class) or not exact(controller, controller_class) or pawn:HasAuthority() ~= host
+        or detail.name ~= pawn:GetFullName() or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
+        or not pawn:IsLocallyControlled() or not controller:IsLocalController()
+        or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn) then return end
+    local actor = StaticFindObject(actor_path)
+    if not exact(actor, cabinet_class) or actor:GetFullName() ~= actor_name or not actor:HasAuthority()
+        or actor.bReplicates ~= false or actor.SpawnSalt ~= -1540208128 or type(actor.Looted) ~= "boolean"
+        or not same(actor:GetWorld(), state.world) or not same(actor:GetOuter(), state.world.PersistentLevel) then return end
+    local first, second = actor.SM_Prop_Cabinet_Small_Door_01, actor.SM_Prop_Cabinet_Small_Door_02
+    local frame = actor.SM_Prop_Cabinet_Small_02
+    if not component(first, actor, "SM_Prop_Cabinet_Small_Door_01", "StaticMeshComponent")
+        or not component(second, actor, "SM_Prop_Cabinet_Small_Door_02", "StaticMeshComponent")
+        or not component(frame, actor, "SM_Prop_Cabinet_Small_02", "StaticMeshComponent")
+        or not same(first:GetAttachParent(), frame) or not same(second:GetAttachParent(), frame) then return end
+    local box_type = StaticFindObject("/Script/Engine.BoxComponent")
+    if not valid(box_type) then return end
+    -- DestroyComponent can leave the Blueprint Box member pointing at a
+    -- retired component. Census the actor's owned live components instead.
+    local boxes = actor:K2_GetComponentsByClass(box_type)
+    local shape = type(boxes)
+    if shape == "userdata" and type(boxes.type) == "function" then shape = boxes:type() end
+    local count = (shape == "table" or shape == "TArray") and #boxes or nil
+    if count ~= 0 and count ~= 1 then return end
+    local box
+    if count == 1 then
+        box = boxes[1]
+        if type(box) == "userdata" and type(box.type) == "function" and box:type() == "RemoteUnrealParam" then
+            box = box:get()
+        end
+        if not component(box, actor, "Box", "BoxComponent") or not same(box, actor.Box)
+            or not same(box:GetAttachParent(), frame) then return end
+    end
+    local closed = box and not actor.Looted and door_roll(first, 0) and door_roll(second, 0)
+    local opened = not box and door_roll(first, 95) and door_roll(second, -95)
+    return { actor = actor, pawn = pawn, world = state.world, box = box, host = host,
+        closed = closed, opened = opened, looted = actor.Looted }
+end
+
+local function qualified_epoch(value)
+    return type(value) == "string" and #value == 32 and not value:find("[^0-9a-f]") and value:find("[^0]")
+end
+
+local function same_projection(scene)
+    return projection and same(scene.world, projection.world) and same(scene.actor, projection.actor)
+        and same(scene.pawn, projection.pawn)
+end
+
+function cabinet.clear()
+    projection = nil
+end
+
+function cabinet.command(fields, state, phase)
+    local command = fields[2]
+    if command ~= "native-dust-cabinet-stock-fixture" and command ~= "native-dust-cabinet-project" then return end
+    local scene = inspect(state, phase)
+    if command == "native-dust-cabinet-stock-fixture" then
+        if #fields ~= 3 or not host_fixture or not scene or not scene.host or not scene.closed
+            or scene.pawn:GetFullName() ~= fields[3] or scene.pawn.Dead ~= false then
+            error("stock_dust_cabinet_fixture_requires_exact_closed_host_cabinet", 0)
+        end
+        stock_input.open_dust_cabinet(state, phase, scene.pawn, scene.actor, scene.box)
+        return "stock host cabinet Interact dispatched"
+    end
+
+    local epoch = fields[3]
+    if #fields ~= 5 or not client_fixture or not scene or scene.host or not qualified_epoch(epoch)
+        or fields[4] ~= actor_name or fields[5] ~= scene.pawn:GetFullName() then
+        error("stock_dust_cabinet_projection_requires_exact_client_visit", 0)
+    end
+    if same_projection(scene) and projection.epoch == epoch and not scene.looted then
+        return "stock Dust Filter cabinet presentation already requested"
+    end
+    if not scene.closed or not valid(StaticFindObject(cabinet_class .. ":ClearLoot")) then
+        error("stock_dust_cabinet_projection_requires_pristine_replica", 0)
+    end
+    -- This class's ClearLoot entry retires its own Box and animates its
+    -- doors. Stock SpawnLoot, Resolve_Respawn and Event_SignalOpened are
+    -- reached by the separate actual Interact entry.
+    scene.actor:ClearLoot()
+    if scene.actor.Looted ~= false then error("mutation_unverified_stock_dust_cabinet_projection", 0) end
+    projection = { epoch = epoch, world = scene.world, actor = scene.actor, pawn = scene.pawn }
+    return "stock Dust Filter cabinet presentation requested"
+end
+
+function cabinet.rows(state, phase, status_row)
+    local scene = inspect(state, phase)
+    if not scene then return {} end
+    local name, epoch
+    if scene.closed then
+        name = "closed"
+    elseif scene.host and scene.opened and scene.looted then
+        name = "opened"
+    elseif not scene.host and not scene.looted and same_projection(scene) then
+        name, epoch = scene.opened and "projected" or "projecting", projection.epoch
+    else
+        return {}
+    end
+    return {status_row("native-dust-cabinet", name, area, actor_name, scene.pawn:GetFullName(), epoch or "-")}
+end
+
+return cabinet

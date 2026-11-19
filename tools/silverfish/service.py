@@ -27,7 +27,7 @@ from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
-from . import native_borough_barter, native_mosby_station_view, native_mosby_tape, native_smg_hold
+from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -565,6 +565,8 @@ class Host:
             view["shared_wallet"] = balance
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
+        if cabinet := native_dust_cabinet.frame(self):
+            view[native_dust_cabinet.FRAME_KEY] = cabinet
         world_view = self.last_game.get("native_world_view")
         area = self.last_game.get("map")
         if (world_view and world_view.get("mode") == "sample" and world_view.get("map") == area
@@ -2091,6 +2093,8 @@ class Host:
                 elif action == native_authored_pickup.ACTION:
                     result = await native_authored_pickup.claim(self, bridge, "host", request.get("target"),
                                                                request.get("operation_id") or path.stem)
+                elif action == native_dust_cabinet.FIXTURE and self.fixtures:
+                    result = await native_dust_cabinet.open_fixture(self, bridge)
                 elif action in native_authored_pickup.FIXTURE_ENTRIES and self.fixtures:
                     source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
                     self.last_game = await bridge.command(action, source, timeout=5)
@@ -3834,6 +3838,7 @@ class Client:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
+                    await native_dust_cabinet.project_client(self)
                     await native_flood_jammer.project_client(self)
                     await native_enemy_loot.project_client(self)
                     if self.invite.get("native_loot_input"):

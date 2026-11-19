@@ -19,6 +19,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_dust_cabinet
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -1444,6 +1445,11 @@ class Bridge:
                         "offset": int(fields[5]), "pending_event": int(fields[6]), "wanted_offset": int(fields[7]),
                         "render_event": int(fields[8]),
                     }
+                elif fields[0] == "native-dust-cabinet":
+                    key = native_dust_cabinet.KEY
+                    if key in data:
+                        raise ValueError("Repeated stock Dust Filter cabinet report")
+                    data[key] = native_dust_cabinet.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-authored-pickup" and len(fields) == 6:
                     source, area, actor, item_class, state = fields[1:]
                     placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})

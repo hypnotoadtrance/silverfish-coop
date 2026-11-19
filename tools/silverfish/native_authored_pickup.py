@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_host_save, party
+from . import native_dust_cabinet, native_host_save, party
 from .native_gold import valid_guid
 from .travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
@@ -115,6 +115,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
+    if target == DUST_FILTER and not native_dust_cabinet.observed(host.last_game, "opened"):
+        raise party.RuleError("native_authored_pickup_dust_cabinet_closed")
     if _displayed(host.last_game, target).get("state") != "available":
         raise party.RuleError("native_authored_pickup_unavailable")
     if (host.party["wipe"] is not None or character in host.party["pending_spawns"]

@@ -15,6 +15,7 @@ from live_multi_smoke import saved_hashes
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish import native_authored_pickup as pickup
+from tools.silverfish import native_dust_cabinet as cabinet
 from tools.silverfish.native_guest_armor import ACTION, CLASS_PATH, DUST_FILTER_PATH, FIXTURE, HELMET_ACTION, effects, helmet_effects
 from tools.silverfish.travel import OBSERVATORY, RAIL_YARD
 
@@ -125,6 +126,15 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
         evidence["initial_guest_inventory"] = initial
 
         if dust_filter:
+            await wait(run, lambda state: cabinet.observed(state.get("game", {}), "closed") != {})
+            await wait(client_run, lambda state: cabinet.observed(state.get("game", {}), "closed") != {})
+            blocked = await act(client, pickup.ACTION, "--target", pickup.DUST_FILTER, success=False)
+            assert blocked["error"] == "native_authored_pickup_dust_cabinet_closed", blocked
+            opened = (await act(host, cabinet.FIXTURE))[cabinet.KEY]
+            assert (opened["state"], opened["actor"], opened["map"]) == ("opened", cabinet.ACTOR, area), opened
+            clear = await wait(client_run, lambda state: cabinet.observed(
+                state.get("game", {}), "projected").get("epoch") == first["zone_epoch"])
+            evidence["stock_cabinet"] = {"authority": opened, "replica": clear["game"][cabinet.KEY]}
             step = await act(host, pickup.APPROACH, "--target", "guest", "--pickup-source", pickup.DUST_FILTER)
             assert step["actor"] == pickup.SOURCES[pickup.DUST_FILTER][1], step
             source_position = (-8423.943, -30074.585, 264.038)
