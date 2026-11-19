@@ -7,17 +7,21 @@ local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local jacket = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
 local hazop = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
+local hunter_jacket = "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"
 local dust_filter = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"
+local basic_helmet = "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"
+local goggles = "/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"
+local seed_profiles = {["hunter-jacket"] = hunter_jacket, ["basic-helmet"] = basic_helmet, goggles = goggles}
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local projected, observation = {body = {}, head = {}}, nil
 
 function armor.is_body_path(path)
-    return path == jacket or path == hazop
+    return path == jacket or path == hazop or path == hunter_jacket
 end
 
 function armor.is_helmet_path(path)
-    return path == dust_filter
+    return path == dust_filter or path == basic_helmet or path == goggles
 end
 
 local function guid_text(parts)
@@ -33,11 +37,13 @@ local function guid_text(parts)
 end
 
 local function native_report(map, pawn, guid, action, ok, status, before, after, carry_before, carry_after, minimum, slash, acid,
-                             profile, replaced_profile, replaced_guid, torso_profile, combined_slash, combined_acid, combined_poison)
+                             profile, replaced_profile, replaced_guid, torso_profile, combined_slash, combined_acid, combined_poison,
+                             voice_filter)
     return {map = map, pawn = pawn, guid = guid, action = action, ok = ok == true, status = status,
         before = before, after = after, carry_before = carry_before, carry_after = carry_after,
         minimum = minimum, slash = slash, acid = acid, profile = profile, replaced_profile = replaced_profile, replaced_guid = replaced_guid,
-        torso_profile = torso_profile, combined_slash = combined_slash, combined_acid = combined_acid, combined_poison = combined_poison}
+        torso_profile = torso_profile, combined_slash = combined_slash, combined_acid = combined_acid,
+        combined_poison = combined_poison, voice_filter = voice_filter}
 end
 
 function armor.command(fields, state, phase)
@@ -46,8 +52,9 @@ function armor.command(fields, state, phase)
     if action ~= "native-guest-armor-equip" and action ~= "native-guest-armor-fixture" and not head then return end
     observation = nil
     local seed = action == "native-guest-armor-fixture"
-    local pawn_name, guid = fields[3], fields[4]
-    if not enabled or phase ~= "hosting" or #fields ~= 4 or not pawn_name
+    local pawn_name, guid, seed_profile = fields[3], fields[4], fields[5]
+    local valid_count = #fields == 4 or (#fields == 5 and seed and seed_profiles[seed_profile])
+    if not enabled or phase ~= "hosting" or not valid_count or not pawn_name
         or not guid or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
         or (seed and not fixtures) then error("native_guest_armor_exact_context_required", 0) end
     local invoke
@@ -58,11 +65,13 @@ function armor.command(fields, state, phase)
     local qualified, pawn, save = pcall(guest_save.exact_item_context, state, phase, pawn_name)
     if not qualified or not pawn or not save then error("native_guest_armor_exact_owner_required", 0) end
     if seed then
-        local class = StaticFindObject(jacket)
-        if not class or not class:IsValid() then LoadAsset(jacket) end
+        local path = seed_profile and seed_profiles[seed_profile] or jacket
+        local class = StaticFindObject(path)
+        if not class or not class:IsValid() then LoadAsset(path) end
     end
+    local arguments = {pawn:GetAddress(), save:GetAddress(), guid, seed_profile}
     observation = native_report(state.map, pawn_name, guid, seed and "seed" or "equip",
-        invoke(pawn:GetAddress(), save:GetAddress(), guid))
+        invoke(table.unpack(arguments)))
     observation.head = head
     return "native guest armor operation reported"
 end
@@ -124,6 +133,7 @@ local function row(tag, report, status_row)
     if report.head then
         fields[18] = report.torso_profile
         fields[19], fields[20], fields[21] = report.combined_slash, report.combined_acid, report.combined_poison
+        if type(report.voice_filter) == "boolean" then fields[22] = report.voice_filter and 1 or 0 end
     end
     return status_row(table.unpack(fields))
 end

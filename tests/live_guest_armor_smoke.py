@@ -1,4 +1,4 @@
-"""Verify exact guest Bomber Jacket equip, refusal, and detached restoration."""
+"""Verify exact guest stock gear equip, refusal, and detached restoration."""
 
 import argparse
 import asyncio
@@ -16,12 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_dust_cabinet as cabinet
-from tools.silverfish.native_guest_armor import ACTION, CLASS_PATH, DUST_FILTER_PATH, FIXTURE, HELMET_ACTION, effects, helmet_effects
+from tools.silverfish.native_guest_armor import (
+    ACTION, BASIC_HELMET_PATH, CLASS_PATH, DUST_FILTER_PATH, FIXTURE, GOGGLES_PATH, HELMET_ACTION, SEED_PROFILES,
+    effects, helmet_effects,
+)
 from tools.silverfish.travel import OBSERVATORY, RAIL_YARD
 
 
-async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
-    name = ("stock-guest-helmet-" if dust_filter else "stock-guest-armor-") + uuid.uuid4().hex[:8]
+async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, gear_profiles=False):
+    dust_filter = dust_filter or gear_profiles
+    kind = "gear" if gear_profiles else "helmet" if dust_filter else "armor"
+    name = f"stock-guest-{kind}-" + uuid.uuid4().hex[:8]
     area = RAIL_YARD if dust_filter else OBSERVATORY
     host = ("--campaign", name)
     client = ("--profile", name)
@@ -68,16 +73,21 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
         assert len(rows) == page["total"], page
         return rows
 
-    def jacket(rows, guid, source):
+    def gear_row(rows, guid, source, class_path=CLASS_PATH):
         row = rows.get(guid)
         assert row and (row["class_path"], row["source"], row["quantity"], row["stackable"]) == (
-            CLASS_PATH, source, 1, False
+            class_path, source, 1, False
         ), rows
         return row
 
-    async def seed():
+    async def seed(profile=None):
         guid = uuid.uuid4().hex.upper()
-        result = (await act(host, FIXTURE, "--target", "guest", "--item-guid", guid))["native_guest_armor"]
+        extra = ("--kind", profile) if profile else ()
+        result = (await act(host, FIXTURE, "--target", "guest", "--item-guid", guid, *extra))["native_guest_armor"]
+        if profile:
+            assert (result["profile"], result["class_path"]) == (profile, SEED_PROFILES[profile].class_path), result
+            gear_row(await inventory(client, character), guid, "backpack", result["class_path"])
+            evidence.setdefault("headless_stock_gear_seeds", {})[profile] = result
         assert result["guid"] == guid and result["status"] == "seeded", result
         return guid
 
@@ -174,16 +184,50 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
             replay = (HELMET_ACTION, "--target", helmet_guid, "--operation-id", input_receipt["operation_id"])
             assert (await act(client, *replay))["native_guest_helmet"] == head_applied
 
-            body_guid = await seed()
-            body_operation = (ACTION, "--target", body_guid, "--operation-id", uuid.uuid4().hex)
-            body_applied = (await act(client, *body_operation))["native_guest_armor"]
+            torso = "hunter-jacket" if gear_profiles else "bomber"
+            body_guid = await seed(torso if gear_profiles else None)
+            if gear_profiles:
+                body_input = await equip_from_overlay(body_guid, "native_guest_armor")
+                body_operation_id, body_applied = body_input["operation_id"], body_input["native_guest_armor"]
+            else:
+                body_operation_id = uuid.uuid4().hex
+                body_applied = (await act(client, ACTION, "--target", body_guid, "--operation-id",
+                                          body_operation_id))["native_guest_armor"]
+            body_operation = (ACTION, "--target", body_guid, "--operation-id", body_operation_id)
             assert body_applied["status"] == "equipped" and effects(body_applied), body_applied
-            both_status = await wait(run, lambda state: projection(state, helmet_guid, head=True, torso="bomber"))
-            both = projection(both_status, helmet_guid, head=True, torso="bomber")
+            both_status = await wait(run, lambda state: projection(state, helmet_guid, head=True, torso=torso))
+            both = projection(both_status, helmet_guid, head=True, torso=torso)
             saved = await inventory(client, character)
             assert (saved[helmet_guid]["source"], saved[body_guid]["source"]) == ("helmet", "armor"), saved
             assert set(saved) == set(initial) | {helmet_guid, body_guid} and await inventory(host, "host") == host_before
             evidence.update(stock_pickup=pressed, helmet_alone=head_applied, body=body_applied, combined=both)
+
+            worn_helmet = helmet_guid
+            swaps = []
+            if gear_profiles:
+                assert head_applied["voice_filter"] is True and both["voice_filter"] is True, (head_applied, both)
+                body_row = gear_row(saved, body_guid, "armor", SEED_PROFILES[torso].class_path)
+                for profile, previous_path in (("basic-helmet", DUST_FILTER_PATH), ("goggles", BASIC_HELMET_PATH)):
+                    new_helmet = await seed(profile)
+                    input_event = await equip_from_overlay(new_helmet, "native_guest_helmet")
+                    proof = input_event["native_guest_helmet"]
+                    operation = (HELMET_ACTION, "--target", new_helmet, "--operation-id", input_event["operation_id"])
+                    assert (proof["profile"], proof["status"], proof["replaced_guid"], proof["replaced_class_path"],
+                            proof["torso_profile"], proof["voice_filter"]) == (
+                        profile, "swapped", worn_helmet, previous_path, torso, False), proof
+                    assert helmet_effects(proof), proof
+                    saved = await inventory(client, character)
+                    gear_row(saved, new_helmet, "helmet", SEED_PROFILES[profile].class_path)
+                    gear_row(saved, worn_helmet, "backpack", previous_path)
+                    assert gear_row(saved, body_guid, "armor", SEED_PROFILES[torso].class_path) == body_row, saved
+                    assert (await act(client, *operation))["native_guest_helmet"] == proof
+                    swaps.append((operation, proof))
+                    worn_helmet = new_helmet
+                owned_gear = {helmet_guid, body_guid, *(proof["guid"] for _, proof in swaps)}
+                assert {guid: row for guid, row in saved.items() if guid not in owned_gear} == initial, saved
+                assert set(saved) == set(initial) | owned_gear and await inventory(host, "host") == host_before
+                evidence["helmet_swaps"] = [proof for _, proof in swaps]
+                evidence["guest_gear_before_restart"] = {guid: saved[guid] for guid in owned_gear}
 
             await stop(host, authority)
             await stop(client, guest)
@@ -193,18 +237,24 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
             assert renewed["character_id"] == character
             await launch(client, "guest-restart", "join", *client, "--invite", renewed["invite_file"], *client_flags)
             await enroll()
-            restored = await wait(run, lambda state: projection(state, helmet_guid, head=True, torso="bomber")
+            restored = await wait(run, lambda state: projection(state, worn_helmet, head=True, torso=torso)
                                   and projection(state, body_guid))
             assert await inventory(client, character) == saved and await inventory(host, "host") == host_before
             assert (await act(client, *replay))["native_guest_helmet"] == head_applied
             assert (await act(client, *body_operation))["native_guest_armor"] == body_applied
-            evidence.update(verified=True, restored_helmet=projection(restored, helmet_guid, head=True, torso="bomber"),
+            for operation, proof in swaps:
+                assert (await act(client, *operation))["native_guest_helmet"] == proof
+            restored_helmet = projection(restored, worn_helmet, head=True, torso=torso)
+            if gear_profiles:
+                assert (restored_helmet["class_path"], restored_helmet["voice_filter"]) == (GOGGLES_PATH, False), restored_helmet
+                assert await inventory(client, character) == saved
+            evidence.update(verified=True, restored_helmet=restored_helmet,
                             restored_body=projection(restored, body_guid))
             return
 
         guid = await seed()
         backpack = await inventory(client, character)
-        evidence["backpack_row"] = jacket(backpack, guid, "backpack")
+        evidence["backpack_row"] = gear_row(backpack, guid, "backpack")
         assert {key: row for key, row in backpack.items() if key != guid} == initial, backpack
         wrong = await act(client, ACTION, "--target", "A" * 32, success=False)
         assert wrong["error"] == "native_guest_armor_exact_owned_row_required", wrong
@@ -228,7 +278,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
         assert (receipt["status"], receipt["guid"], receipt["class_path"]) == ("equipped", guid, CLASS_PATH), receipt
         assert effects(receipt), receipt
         worn = await inventory(client, character)
-        evidence["equipped_row"] = jacket(worn, guid, "armor")
+        evidence["equipped_row"] = gear_row(worn, guid, "armor")
         assert {key: row for key, row in worn.items() if key != guid} == initial, worn
         assert (await act(client, *equip))["native_guest_armor"] == receipt
         evidence["equip"] = receipt
@@ -237,8 +287,8 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
         occupied = await act(client, ACTION, "--target", other, success=False)
         assert occupied["error"] == "native_guest_armor_slot_occupied", occupied
         saved = await inventory(client, character)
-        assert jacket(saved, guid, "armor") == worn[guid]
-        evidence["blocked_second_jacket"] = jacket(saved, other, "backpack")
+        assert gear_row(saved, guid, "armor") == worn[guid]
+        evidence["blocked_second_jacket"] = gear_row(saved, other, "backpack")
         assert await inventory(host, "host") == host_before
 
         await stop(host, authority)
@@ -273,7 +323,6 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
                         process.terminate()
                         await process.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        kind = "helmet" if dust_filter else "armor"
         (run / f"live-guest-{kind}-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         assert evidence["original_saves_verified"], "The original single-player directory changed"
@@ -284,6 +333,10 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-input", action="store_true")
-    parser.add_argument("--dust-filter", action="store_true", help="verify the exact railyard helmet through stock inventory input")
+    scenario = parser.add_mutually_exclusive_group()
+    scenario.add_argument("--dust-filter", action="store_true", help="verify the exact railyard helmet through stock inventory input")
+    scenario.add_argument("--gear-profiles", action="store_true",
+                          help="verify stock Rail Yard Dust Filter pickup, headless gear seeds, helmet swaps and restart")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), stock_input=args.stock_input, dust_filter=args.dust_filter))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), stock_input=args.stock_input, dust_filter=args.dust_filter,
+                       gear_profiles=args.gear_profiles))

@@ -118,6 +118,75 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
                 frame[column] = value
                 armor.parse(frame)
 
+    def test_ordinary_gear_profiles_keep_exact_slots_and_stock_effects(self):
+        for path in (armor.BASIC_HELMET_PATH, armor.GOGGLES_PATH):
+            self.assertEqual(armor.EQUIP_ACTIONS[path], armor.HELMET_ACTION)
+        self.assertEqual(armor.EQUIP_ACTIONS[armor.HUNTER_JACKET_PATH], armor.ACTION)
+        self.assertNotIn("/Game/Classes/Armor_Items/Helm_FaceMask.Helm_FaceMask_C", armor.EQUIP_ACTIONS)
+
+        jacket = self.report(profile="hunter-jacket", class_path=armor.HUNTER_JACKET_PATH, carry_before=6, carry_after=5.4,
+                             minimum=25, slash=.1, acid=.05)
+        self.assertTrue(armor.effects(jacket))
+        for change in (dict(carry_after=5.75), dict(slash=.2), dict(acid=.2), dict(class_path=armor.CLASS_PATH)):
+            self.assertFalse(armor.effects(dict(jacket, **change)))
+        self.assertTrue(armor.effects(dict(jacket, status="swapped", carry_after=5.65, replaced_profile="bomber",
+                                          replaced_guid="FA" * 16, replaced_class_path=armor.CLASS_PATH)))
+
+        pawn = f"Player_FP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Player_FP_C_7"
+        frame = ["native-guest-helmet", RAIL_YARD, pawn, "FA" * 16, "project", "1", "reapplied",
+                 "1", "1", "6", "6", "25", ".1", ".1", "basic-helmet", "-", "-", "hunter-jacket", ".2", ".15", "0"]
+        proof = armor.parse(frame)
+        self.assertEqual(proof["class_path"], armor.BASIC_HELMET_PATH)
+        self.assertFalse(armor.helmet_effects(dict(proof, status="equipped", carry_after=5.3)))
+        self.assertFalse(armor.helmet_effects(dict(proof, combined_poison=.5)))
+        self.assertFalse(armor.helmet_effects(dict(proof, torso_profile="bomber")))
+
+    async def test_goggles_replace_distinct_dust_filter_and_require_exact_guest_checkpoint(self):
+        frame = ["native-guest-helmet", "area", "Player_FP_C area.World:PersistentLevel.Player_FP_C_1",
+                 "AB" * 16, "equip", "1", "swapped", "2", "2", "5", "5.15", "32", "0", ".1",
+                 "goggles", "dust-filter", "FA" * 16, "hazop", ".2", ".3", ".1", "0"]
+        proof = armor.parse(frame)
+        self.assertEqual((proof["class_path"], proof["replaced_class_path"]), (armor.GOGGLES_PATH, armor.DUST_FILTER_PATH))
+        self.assertIs(proof["voice_filter"], False)
+        for value in ("1", "-"):
+            with self.assertRaises(ValueError):
+                armor.parse([*frame[:-1], value])
+        for change in (dict(replaced_guid=proof["guid"]), dict(replaced_class_path=armor.BASIC_HELMET_PATH),
+                       dict(replaced_profile="goggles"), dict(combined_poison=.6), dict(carry_after=5)):
+            self.assertFalse(armor.helmet_effects(dict(proof, **change)))
+        host = self.host()
+        host.native_recipients = lambda: {"guest-id": {"connected": True, "pawn": proof["pawn"]}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": "area", "native_guest_helmet": proof,
+        }))
+        args = (host, bridge, "guest-id", "d" * 32, armor.HELMET_ACTION, proof["guid"])
+        self.assertEqual(await armor.perform(*args), {"native_guest_helmet": proof})
+        self.assertEqual(await armor.perform(*args), {"native_guest_helmet": proof})
+        bridge.command.assert_awaited_once_with(armor.HELMET_ACTION, proof["pawn"], proof["guid"], timeout=5)
+        self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest-id"})})
+
+    async def test_named_stock_fixture_only_accepts_exact_profile_and_replays_its_own_receipt(self):
+        proof = armor.parse(["native-guest-armor", "area", "exact pawn", "AB" * 16, "seed", "1", "seeded",
+                             "3", "4", "-1", "-1", "-1", "-1", "-1", "basic-helmet", "-", "-"])
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": "area", "native_guest_armor": proof,
+        }))
+        host = self.host()
+        args = (host, bridge, "guest-id", "e" * 32, armor.FIXTURE, proof["guid"])
+        with self.assertRaisesRegex(party.RuleError, "native_guest_armor_unavailable"):
+            await armor.perform(*args, seed_kind="basic-helmet")
+        host.fixtures = True
+        with self.assertRaisesRegex(party.RuleError, "native_guest_armor_fixture_profile_unavailable"):
+            await armor.perform(*args, seed_kind="face-mask")
+        bridge.command.assert_not_awaited()
+        result = await armor.perform(*args, seed_kind="basic-helmet")
+        self.assertEqual(result["native_guest_armor"]["class_path"], armor.BASIC_HELMET_PATH)
+        self.assertEqual(await armor.perform(*args, seed_kind="basic-helmet"), result)
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await armor.perform(*args, seed_kind="goggles")
+        bridge.command.assert_awaited_once_with(armor.FIXTURE, proof["pawn"], proof["guid"], "basic-helmet", timeout=5)
+        self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest-id"})})
+
     async def test_helmet_checkpoint_and_replay_use_separate_intent(self):
         host = self.host()
         proof = self.report(profile="dust-filter", class_path=armor.DUST_FILTER_PATH, torso_profile="bomber",

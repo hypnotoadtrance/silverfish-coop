@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .control import select_run, status, submit
 from .authored_routes import MAPS as EXPANDED_MAPS
+from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
 from .native_guest_weapon import SEED_KINDS
 from .native_host_save import STOCK_START_MODES
 from .runtime import REPO, prepare_game
@@ -201,7 +202,8 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--target", help="character ID, loot ID, destination map path, or quoted GUID|AMOUNT|EXPECTED for an ammo split")
     action.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID to retry an interaction")
     action.add_argument("--amount", type=int, help="quantity or lane index for the selected fixture")
-    action.add_argument("--kind", choices=sorted(SEED_KINDS), help="stock weapon class for a headless weapon seed")
+    action.add_argument("--kind", choices=sorted(SEED_KINDS | ARMOR_SEED_PROFILES.keys()),
+                        help="stock weapon or gear profile for a headless seed fixture")
     action.add_argument("--x", type=float, help="normalized world X movement")
     action.add_argument("--y", type=float, help="normalized world Y movement")
     action.add_argument("--milliseconds", type=int, help="controlled movement or SMG hold duration")
@@ -277,8 +279,10 @@ async def execute(opts):
         return status(directory)
     if operation == "events":
         return _events(directory, opts.tail)
-    if opts.kind is not None and opts.action != "native-guest-weapon-seed":
-        raise ValueError("--kind applies only to the headless native guest weapon seed")
+    if opts.kind is not None:
+        valid_kinds = {"native-guest-weapon-seed": SEED_KINDS, "native-guest-armor-fixture": ARMOR_SEED_PROFILES}
+        if opts.kind not in valid_kinds.get(opts.action, ()):
+            raise ValueError("--kind must select a stock profile supported by this headless seed fixture")
     if opts.exit_actor is not None and (not opts.entrance or opts.action not in ("native-exit-position", "native-exit-wall-probe")):
         raise ValueError("--exit-actor requires --entrance and a headless exit position or wall probe")
     if opts.pickup_source is not None and opts.action not in ("native-authored-pickup-approach", "native-authored-pickup-fixture",

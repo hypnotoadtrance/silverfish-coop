@@ -81,6 +81,12 @@ namespace
         ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"), "dust-filter",
             0.4, 1.0, 1.0, 0.0, 80, {0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2, 0.0}, true,
             STR("/Game/Assets/Sounds/AudioEffects/GasMask_Filter_01.GasMask_Filter_01")},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"), "basic-helmet",
+            1.4, 1.0, 1.0, 0.0, 250, {0.2, 0.0, 0.2, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.1, 0.1}, true},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"), "goggles",
+            0.1, 1.0, 1.0, 0.0, 30, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0}, true},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"), "hunter-jacket",
+            1.2, 0.9, 0.75, 5.0, 250, {0.0, 0.0, 0.05, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0}},
     };
     constexpr auto& bomber = armor_profiles[0];
     constexpr std::size_t slashing = 4, poison = 6, acid = 9;
@@ -354,7 +360,7 @@ namespace
         return passives.Num() == 0 ? cdo : nullptr;
     }
 
-    bool stock_helmet_row(const Inventory& inventory, const void* row, U::UObject* cdo, const ArmorProfile& profile)
+    bool stock_gear_row(const Inventory& inventory, const void* row, U::UObject* cdo, const ArmorProfile& profile)
     {
         auto* type = inventory.item->GetStruct().Get();
         auto* rounds = field<U::FIntProperty>(type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
@@ -574,6 +580,7 @@ namespace
         Guid replaced{};
         const ArmorProfile* torso{};
         std::array<double, damage_fields.size()> combined{};
+        bool voice_filter{};
     };
 
     int report(const Lua& lua, bool ok, std::string_view status, const Report& result = {})
@@ -595,15 +602,18 @@ namespace
         lua.set_number(result.combined[slashing]);
         lua.set_number(result.combined[acid]);
         lua.set_number(result.combined[poison]);
-        return 16;
+        lua.set_bool(result.voice_filter);
+        return 17;
     }
 
-    int seed(const Lua& lua, const Scope& scope, const Inventory& inventory, U::UObject* defaults, const Guid& id)
+    int seed(const Lua& lua, const Scope& scope, const Inventory& inventory, const ArmorProfile& profile,
+             U::UObject* defaults, const Guid& id)
     {
         if (!fixtures()) return report(lua, false, "native_guest_armor_fixtures_disabled");
         int index{};
         bool worn{};
-        if (!inventory.locate(scope.guest, id, index, worn) || index >= 0 || worn || !isolated_rows(scope, inventory, id))
+        if (!inventory.locate(scope.guest, id, index, worn, profile.helmet) || index >= 0 || worn ||
+            !isolated_rows(scope, inventory, id))
             return report(lua, false, "native_guest_armor_guid_conflict");
         auto* library = find<U::UObject>(library_path);
         auto* function = find<U::UFunction>(factory_path);
@@ -625,11 +635,12 @@ namespace
         library->ProcessEvent(function, args);
         auto* row = item->ContainerPtrToValuePtr<void>(args);
         const bool generated = scope.current() && inventory.item_class(row) == defaults->GetClassPrivate() &&
-            inventory.item_guid(row) != Guid{} && inventory.weight->GetPropertyValueInContainer(row) == bomber.weight;
+            inventory.item_guid(row) != Guid{} && inventory.weight->GetPropertyValueInContainer(row) == profile.weight &&
+            (&profile == &bomber || stock_gear_row(inventory, row, defaults, profile));
         auto* destination = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
         U::FScriptArrayHelper bag(inventory.backpack, destination);
         Report proof{bag.Num(), bag.Num()};
-        proof.selected = &bomber;
+        proof.selected = &profile;
         if (!generated || bag.Num() >= max_items)
         {
             item->DestroyValue_InContainer(args);
@@ -680,7 +691,7 @@ namespace
             if (!profile || profile->helmet != is_helmet || inventory.item_guid(row) == Guid{} ||
                 inventory.weight->GetPropertyValueInContainer(row) != profile->weight) return nullptr;
             auto* cdo = armor_defaults(*profile);
-            return cdo && (!is_helmet || stock_helmet_row(inventory, row, cdo, *profile)) ? profile : nullptr;
+            return cdo && (!is_helmet || stock_gear_row(inventory, row, cdo, *profile)) ? profile : nullptr;
         };
         const auto empty = [&](U::FStructProperty* property, const void* row) {
             return !inventory.item_class(row) && inventory.item_guid(row) == Guid{} &&
@@ -781,7 +792,11 @@ namespace
                 projection.minimum->GetPropertyValueInContainer(scope.pawn) == proof.minimum &&
                 (!voice_slot || vox->GetObjectPropertyValue(voice_slot) == next_voice);
         };
-        if (worn && matches()) return report(lua, true, "already_applied", proof);
+        const auto success = [&](std::string_view status) {
+            proof.voice_filter = voice_slot && vox->GetObjectPropertyValue(voice_slot);
+            return report(lua, true, status, proof);
+        };
+        if (worn && matches()) return success("already_applied");
 
         // The two saved rows remain independent. Only the guest pawn's derived stats combine them.
         if (!worn)
@@ -795,7 +810,7 @@ namespace
         if (voice_slot) vox->SetObjectPropertyValue(voice_slot, next_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
-        if (scope.current() && matches()) return report(lua, true, previous ? "swapped" : worn ? "reapplied" : "equipped", proof);
+        if (scope.current() && matches()) return success(previous ? "swapped" : worn ? "reapplied" : "equipped");
 
         if (!worn)
         {
@@ -820,7 +835,10 @@ namespace
 
     template <Operation operation> int run(const Lua& lua)
     {
-        if (!enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+        constexpr bool seed_operation = operation == Operation::Seed;
+        const auto arguments = lua.get_stack_size();
+        const bool named_seed = seed_operation && arguments == 4 && lua.is_string(4);
+        if (!enabled() || !U::IsInGameThreadRaw() || (arguments != 3 && !named_seed) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
             return report(lua, false, "native_guest_armor_exact_context_required");
         const auto pawn = lua.get_integer();
@@ -844,11 +862,22 @@ namespace
         Inventory inventory;
         if (!inventory.bind(scope.guest))
             return report(lua, false, "native_guest_armor_stock_schema_unqualified");
-        if constexpr (operation == Operation::Seed)
+        if constexpr (seed_operation)
         {
-            auto* defaults = armor_defaults(bomber);
+            const ArmorProfile* profile = &bomber;
+            if (named_seed)
+            {
+                const auto name = lua.get_string();
+                if (name != "basic-helmet" && name != "goggles" && name != "hunter-jacket")
+                    return report(lua, false, "native_guest_armor_fixture_profile_unavailable");
+                const auto selected = std::ranges::find(armor_profiles, name, &ArmorProfile::name);
+                if (selected == armor_profiles.end())
+                    return report(lua, false, "native_guest_armor_fixture_profile_unavailable");
+                profile = &*selected;
+            }
+            auto* defaults = armor_defaults(*profile);
             if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
-            return seed(lua, scope, inventory, defaults, guid);
+            return seed(lua, scope, inventory, *profile, defaults, guid);
         }
         return apply(lua, scope, inventory, guid, project, head);
     }

@@ -2310,7 +2310,7 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()
                     result = await native_guest_armor.perform(self, bridge, character, request.get("operation_id") or path.stem,
-                                                              action, guid)
+                                                              action, guid, seed_kind=request.get("kind"))
                 elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY) and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_melee.perform(self, bridge, action, character, request.get("item_guid"),
