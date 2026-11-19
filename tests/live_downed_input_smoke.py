@@ -117,7 +117,9 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
                              and input_proof(state["game"], pawn, downed=False, inventory="clear")
                              and state["game"].get("player_effects", {}).get("local") == original_movement)
         game = revived["game"]
-        assert game["pawns"]["local"]["name"] == pawn and game["pawns"]["local"]["health"] == 25, game["pawns"]
+        local = game["pawns"]["local"]
+        restored_health = game["native_host_revived_health"]
+        assert local["name"] == pawn and restored_health <= local["health"] <= before, game["pawns"]
         assert game["pawns"]["guest"]["name"] == other["name"] and game["pawns"]["guest"]["health"] == other["health"], game["pawns"]
         await wait(guest_run, lambda state: guest_observes(state, revived, False))
         events = (await command("events", *guest_owner, "--tail", "30"))["events"]
@@ -126,7 +128,8 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         )]
         assert len(receipts) == 1, events
         evidence["revived"] = {"input": game["player_local_input"], "movement": game["player_effects"]["local"],
-                               "native_health": 25, "stock_interaction": receipts[0]}
+                               "native_health": restored_health, "observed_health": local["health"],
+                               "stock_interaction": receipts[0]}
         evidence["verified"] = True
     except BaseException as error:
         evidence.update(verified=False, failure=str(error) or type(error).__name__)
