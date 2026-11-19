@@ -53,6 +53,7 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
             process = await asyncio.create_subprocess_exec(*cli, role, *owner, *args, cwd=REPO, stdout=log, stderr=log,
                                                              creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((process, owner))
+        return process
 
     async def action(owner, verb, target=None, expected=True):
         select = ("--target", target) if target is not None else ()
@@ -69,20 +70,30 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
     def view(status):
         return status.get("game", {}).get("native_dialogue_view", {})
 
-    def exact_position(status, pawn):
-        rows = status.get("game", {}).get("pawns", {}).values()
+    def exact_position(status, pawn, *, local=False):
+        pawns = status.get("game", {}).get("pawns", {})
+        rows = (pawns.get("local", {}),) if local else pawns.values()
         return next((row["location"] for row in rows if row.get("name") == pawn
                      and len(row.get("location", ())) == 3
                      and all(type(axis) in (int, float) and math.isfinite(axis) for axis in row["location"])), None)
 
+    def connected(status, character):
+        return (status.get("state") == "connected" and status.get("link_connected") is True
+                and status.get("character_id") == character and status.get("host_session") == authority["generation"]
+                and status.get("zone_epoch") == authority["zone_epoch"]
+                and status.get("game", {}).get("map") == dialogue.OBSERVATORY)
+
     async def stock_press(target, expected_row):
+        client = clients[0]
         pending = (await action(profiles[0], dialogue.FIXTURE, target))["native_dialogue_view"]
-        assert pending["pawn"] == local_pawns[0] and pending["state"] == "pending", pending
+        assert pending["pawn"] == client["pawn"] and pending["state"] == "pending", pending
         sequence = pending["sequence"]
         expected_state = "open" if expected_row else "closed"
-        current = await wait(guest_runs[0], lambda status: (
-            view(status).get("state"), view(status).get("sequence"), view(status).get("row"), view(status).get("pawn")) == (
-            expected_state, sequence, expected_row or "-", local_pawns[0]), timeout=14)
+        current = await wait(guest_runs[0], lambda status: connected(status, client["character"])
+                             and status.get("generation") == client["generation"]
+                             and (view(status).get("state"), view(status).get("sequence"), view(status).get("row"),
+                                  view(status).get("pawn")) == (expected_state, sequence, expected_row or "-", client["pawn"]),
+                             timeout=14)
         result = view(current)
         evidence["stock_input"].append({key: result[key] for key in ("pawn", "state", "sequence", "row")})
         return result
@@ -93,7 +104,7 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         return {"quests": quests["quests"], "total": quests["total"], "cash": state["game"]["native_wallet"],
                 "reputation": state["game"].get("native_reputation")}
 
-    local_pawns, characters = [], []
+    clients = []
     try:
         await launch("host", host, "host", "--port", "0", "--start-zone", dialogue.OBSERVATORY,
                      "--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--max-guests", "2")
@@ -101,23 +112,21 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         for index, profile in enumerate(profiles):
             invite = await command("invite", *host, "--name", f"Castaway visitor {index + 1}",
                                    "--character", f"Castaway player {index + 1}")
-            await launch("join", profile, f"guest-{index + 1}", "--invite", invite["invite_file"], "--headless", "--native-zones")
+            process = await launch("join", profile, f"guest-{index + 1}", "--invite", invite["invite_file"], "--headless", "--native-zones")
             character = invite["character_id"]
-            characters.append(character)
-            joined = await wait(guest_runs[index], lambda status: status.get("state") == "connected"
-                                and status.get("link_connected") is True and status.get("character_id") == character
-                                and status.get("host_session") == authority["generation"]
-                                and status.get("zone_epoch") == authority["zone_epoch"]
-                                and status.get("game", {}).get("map") == dialogue.OBSERVATORY, timeout=65)
-            local_pawns.append(joined["game"]["pawns"]["local"]["name"])
+            joined = await wait(guest_runs[index], lambda status: connected(status, character) and status.get("generation"), timeout=65)
+            clients.append({"character": character, "generation": joined["generation"], "pid": process.pid,
+                            "pawn": joined["game"]["pawns"]["local"]["name"]})
             await wait(host_run, lambda status: active(status, index + 1), timeout=55)
-        assert len(set(local_pawns)) == 2
+        for identity in ("character", "generation", "pid"):
+            assert len({client[identity] for client in clients}) == 2, f"Expected two distinct authenticated client {identity} values"
         before = await effects()
         roster = await wait(host_run, lambda status: active(status, 2)
                             and all(status.get("gameplay", {}).get("native_pawns", {}).get(role) for role in ("guest", "guest2")))
         authority_pawns = roster["gameplay"]["native_pawns"]
         assert len({authority_pawns["guest"], authority_pawns["guest2"]}) == 2
-        for run, pawn, role, character in zip(guest_runs, local_pawns, ("guest", "guest2"), characters, strict=True):
+        for run, role, client in zip(guest_runs, ("guest", "guest2"), clients, strict=True):
+            pawn, character = client["pawn"], client["character"]
             assert roster["gameplay"]["players"][role]["character_id"] == character
             authority_pawn = authority_pawns[role]
             receipt = (await action(host, dialogue.APPROACH, role))["native_dialogue_approach"]
@@ -125,11 +134,12 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
             approached = await wait(host_run, lambda status: (point := exact_position(status, authority_pawn)) is not None
                                     and math.dist(point, CASTAWAY_PLACEMENT) <= 160)
             position = exact_position(approached, authority_pawn)
-            armed = await wait(run, lambda status: status.get("character_id") == character
+            armed = await wait(run, lambda status: connected(status, character) and status.get("generation") == client["generation"]
                                and view(status).get("state") == "armed" and view(status).get("pawn") == pawn
-                               and (point := exact_position(status, pawn)) is not None and math.dist(point, position) <= 60)
-            evidence["approaches"].append({"character": character, "authority_pawn": authority_pawn, "client_pawn": pawn,
-                                           "authority_location": position, "client_location": exact_position(armed, pawn)})
+                               and (point := exact_position(status, pawn, local=True)) is not None and math.dist(point, position) <= 60)
+            evidence["approaches"].append({"character": character, "client_generation": client["generation"],
+                                           "authority_pawn": authority_pawn, "client_pawn": pawn,
+                                           "authority_location": position, "client_location": exact_position(armed, pawn, local=True)})
 
         first = await stock_press("open", dialogue.ROOT)
         other = (await action(profiles[1], dialogue.OPEN, dialogue.PROFILE))["native_dialogue"]
@@ -153,7 +163,7 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         assert serials == sorted(set(serials)), serials
         after = await effects()
         assert after == before, {"before": before, "after": after}
-        evidence.update(characters=characters, story=other_story["lines"], authority_state=after, verified=True)
+        evidence.update(characters=[client["character"] for client in clients], story=other_story["lines"], authority_state=after, verified=True)
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
         raise
