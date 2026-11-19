@@ -113,6 +113,13 @@ namespace
             STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"),
             73.05513264620163, 2566.409056792115, 307.29826126640774, 1, 1, true,
         },
+        Profile{
+            "railyard-dust-filter",
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Helm_DustFilter_C_1"),
+            STR("/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"),
+            -8423.943177033869, -30074.58542281168, 264.03804398884085, 6,
+        },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");

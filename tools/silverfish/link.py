@@ -50,6 +50,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-finite-shop-sell": 15.0,
     "native-guest-bandage": 15.0,
     "native-guest-armor-equip": 20.0,
+    "native-guest-helmet-equip": 20.0,
     "native-quest-interact": 15.0,
     "native-quest-list": 15.0,
     "native-turret-photo-capture": 20.0,

@@ -31,6 +31,7 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto armor_base = STR("/Game/Classes/Armor_Items/Item_ArmorMaster_BP.Item_ArmorMaster_BP_C");
+    constexpr auto helmet_base = STR("/Game/Classes/Armor_Items/Item_HelmetMaster_BP.Item_HelmetMaster_BP_C");
     constexpr auto armor_type = STR("/Game/Classes/Libraries/Structs/Armor_Struct.Armor_Struct");
     constexpr auto helmet_type = STR("/Game/Classes/Libraries/Structs/Helmet_Struct.Helmet_Struct");
     constexpr auto damage_type = STR("/Game/Classes/Libraries/Structs/Damage_Struct.Damage_Struct");
@@ -39,6 +40,10 @@ namespace
     constexpr auto resistance = STR("Resistance_2_2E35E4354FE2AD598EB8A48221FD001E");
     constexpr auto armor_weight = STR("Weight_36_1CC3CC9C4DAD1ADFEBC9D5B45765C95D");
     constexpr auto carry_bonus = STR("CaryBonus_43_3DF7AA974A13A7ADF22D3BA63B29FEF2");
+    constexpr auto helmet_light = STR("FlashLight_41_E2EDC7A04D5942755A28FE9479BE0793");
+    constexpr auto helmet_hud = STR("FullHUD_39_6852FE6E4BFD0ADB2A5474983720198A");
+    constexpr auto helmet_visibility = STR("VisibilityMod_13_E33F6D50463CE2650C61E29B5C66545D");
+    constexpr auto helmet_light_origin = STR("LightLocation_47_C3B1387F4CE0EF84D4C4CB996C535017");
     constexpr std::array guid_words{STR("A"), STR("B"), STR("C"), STR("D")};
     struct ResistanceField
     {
@@ -65,15 +70,18 @@ namespace
         double weight, noise, visibility, bonus;
         int value;
         std::array<double, damage_fields.size()> damage;
+        bool helmet{};
     };
     constexpr std::array armor_profiles{
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"), "bomber",
             0.5, 0.9, 0.9, 5.0, 325, {0.0, 0.0, 0.0, 0.1, 0.2, 0.1, 0.0, 0.1, 0.0, 0.2, 0.0}},
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"), "hazop",
             2.0, 1.2, 0.9, 12.0, 1400, {0.25, 0.0, 0.1, 0.3, 0.2, 0.2, 0.1, 0.15, 0.25, 0.2, 0.1}},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"), "dust-filter",
+            0.4, 1.0, 1.0, 0.0, 80, {0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2, 0.0}, true},
     };
     constexpr auto& bomber = armor_profiles[0];
-    constexpr std::size_t slashing = 4, acid = 9;
+    constexpr std::size_t slashing = 4, poison = 6, acid = 9;
     constexpr int max_items = 4096;
     constexpr int max_clients = 4;
 
@@ -260,15 +268,15 @@ namespace
             return result;
         }
 
-        bool locate(U::UObject* save, const Guid& wanted, int& backpack_index, bool& worn) const
+        bool locate(U::UObject* save, const Guid& wanted, int& backpack_index, bool& worn, bool head = false) const
         {
             U::FScriptArrayHelper bag(backpack, backpack->ContainerPtrToValuePtr<void>(save));
             U::FScriptArrayHelper gear(equipment, equipment->ContainerPtrToValuePtr<void>(save));
             if (bag.Num() < 0 || bag.Num() > max_items || gear.Num() < 0 || gear.Num() > max_items) return false;
-            if (item_guid(helmet->ContainerPtrToValuePtr<void>(save)) == wanted) return false;
+            if (item_guid((head ? armor : helmet)->ContainerPtrToValuePtr<void>(save)) == wanted) return false;
             for (int i = 0; i < gear.Num(); ++i)
                 if (item_guid(gear.GetRawPtr(i)) == wanted) return false;
-            worn = item_guid(armor->ContainerPtrToValuePtr<void>(save)) == wanted;
+            worn = item_guid((head ? helmet : armor)->ContainerPtrToValuePtr<void>(save)) == wanted;
             backpack_index = -1;
             for (int i = 0; i < bag.Num(); ++i)
             {
@@ -312,20 +320,52 @@ namespace
     U::UObject* armor_defaults(const ArmorProfile& profile)
     {
         auto* klass = find<U::UClass>(profile.path);
-        auto* base = find<U::UClass>(armor_base);
+        auto* base = find<U::UClass>(profile.helmet ? helmet_base : armor_base);
         auto* cdo = klass ? klass->GetClassDefaultObject().Get() : nullptr;
         auto* type = field<U::FByteProperty>(cdo, STR("ItemType"));
         auto* value = field<U::FIntProperty>(cdo, STR("Value"));
         auto* disguise = field<U::FByteProperty>(cdo, STR("DisguiseFaction"));
         auto* effects = field<U::FArrayProperty>(cdo, STR("PassiveEffects"));
         if (!base || !cdo || cdo->GetClassPrivate() != klass || !klass->IsChildOf(base) ||
-            !cdo->HasAnyFlags(U::RF_ClassDefaultObject) || !type || type->GetPropertyValueInContainer(cdo) != 7 ||
-            !value || value->GetPropertyValueInContainer(cdo) != profile.value || !disguise ||
-            disguise->GetPropertyValueInContainer(cdo) != 0 || !effects ||
-            !field<U::FClassProperty>(cdo, STR("PowerArmor")) || object(cdo, STR("PowerArmor")) ||
+            !cdo->HasAnyFlags(U::RF_ClassDefaultObject) || !type ||
+            type->GetPropertyValueInContainer(cdo) != (profile.helmet ? 6 : 7) ||
+            !value || value->GetPropertyValueInContainer(cdo) != profile.value || !effects ||
             !boolean(cdo, STR("Stacks"), false)) return nullptr;
+        if (!profile.helmet && (!disguise || disguise->GetPropertyValueInContainer(cdo) != 0 ||
+            !field<U::FClassProperty>(cdo, STR("PowerArmor")) || object(cdo, STR("PowerArmor")))) return nullptr;
+        if (profile.helmet)
+        {
+            auto* factions = field<U::FArrayProperty>(cdo, STR("DisguisableFactions"));
+            auto* reputation = field<U::FMapProperty>(cdo, STR("RepBonus"));
+            if (!factions || !reputation || !field<U::FObjectProperty>(cdo, STR("VoxEffect")) || object(cdo, STR("VoxEffect")))
+                return nullptr;
+            U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(cdo));
+            if (list.Num() || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
+        }
         U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
         return passives.Num() == 0 ? cdo : nullptr;
+    }
+
+    bool stock_helmet_row(const Inventory& inventory, const void* row, U::UObject* cdo, const ArmorProfile& profile)
+    {
+        auto* type = inventory.item->GetStruct().Get();
+        auto* rounds = field<U::FIntProperty>(type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+        auto* default_rounds = field<U::FIntProperty>(cdo, STR("Ammo"));
+        auto* value = field<U::FIntProperty>(type, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
+        auto* tag = field<U::FNameProperty>(type, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"));
+        auto* default_tag = field<U::FNameProperty>(cdo, STR("DataTag"));
+        auto* payload = field<U::FStructProperty>(type, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
+        auto* default_payload = field<U::FStructProperty>(cdo, STR("DataStruct"));
+        auto* structure = find<U::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+        auto* never = field<U::FBoolProperty>(type, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
+        auto* default_never = field<U::FBoolProperty>(cdo, STR("NeverDrop"));
+        return rounds && default_rounds && default_rounds->GetPropertyValueInContainer(cdo) == 1 &&
+            rounds->GetPropertyValueInContainer(row) == 1 && value && value->GetPropertyValueInContainer(row) == profile.value &&
+            tag && default_tag && tag->GetPropertyValueInContainer(row) == default_tag->GetPropertyValueInContainer(cdo) &&
+            payload && default_payload && structure && payload->GetStruct().Get() == structure &&
+            default_payload->GetStruct().Get() == structure &&
+            payload->Identical(payload->ContainerPtrToValuePtr<void>(row), default_payload->ContainerPtrToValuePtr<void>(cdo)) &&
+            never && default_never && never->GetPropertyValueInContainer(row) == default_never->GetPropertyValueInContainer(cdo);
     }
 
     bool isolated_rows(const Scope& scope, const Inventory& inventory, const Guid& selected, const Guid& replaced = {})
@@ -368,11 +408,12 @@ namespace
     struct Projection
     {
         U::FStructProperty *body{}, *helm{}, *resist{};
-        U::FDoubleProperty *carry{}, *minimum{}, *helm_weight{};
-        U::UScriptStruct *body_type{}, *resist_type{};
-        U::FStructProperty *body_resist{}, *helm_resist{}, *default_resist{};
+        U::FDoubleProperty *carry{}, *minimum{}, *helm_weight{}, *body_weight{}, *bonus{};
+        U::UScriptStruct *body_type{}, *helm_type{}, *resist_type{};
+        U::FStructProperty *body_resist{}, *helm_resist{};
+        U::UObject* baseline{};
 
-        std::string_view bind(U::UObject* pawn, U::UObject* defaults)
+        std::string_view bind(U::UObject* pawn)
         {
             body = field<U::FStructProperty>(pawn, STR("Armor_Struct"));
             helm = field<U::FStructProperty>(pawn, STR("Helm_Struct"));
@@ -380,29 +421,47 @@ namespace
             carry = field<U::FDoubleProperty>(pawn, STR("Inventory_CarryWeight"));
             minimum = field<U::FDoubleProperty>(pawn, STR("MinPenaltyWeight"));
             body_type = find<U::UScriptStruct>(armor_type);
-            auto* helm_type = find<U::UScriptStruct>(helmet_type);
+            helm_type = find<U::UScriptStruct>(helmet_type);
             resist_type = find<U::UScriptStruct>(damage_type);
             body_resist = field<U::FStructProperty>(body_type, resistance);
             helm_resist = field<U::FStructProperty>(helm_type, resistance);
-            default_resist = field<U::FStructProperty>(defaults, STR("Resistance"));
+            body_weight = field<U::FDoubleProperty>(body_type, armor_weight);
             helm_weight = field<U::FDoubleProperty>(helm_type, armor_weight);
-            if (!body || !body_type || body->GetStruct().Get() != body_type)
+            bonus = field<U::FDoubleProperty>(body_type, carry_bonus);
+            baseline = pawn->GetClassPrivate()->GetClassDefaultObject().Get();
+            if (!body || !body_type || !body_weight || !bonus || body->GetStruct().Get() != body_type)
                 return "native_guest_armor_body_struct_unqualified";
             if (!helm || !helm_type || !helm_weight || helm->GetStruct().Get() != helm_type)
                 return "native_guest_armor_helmet_struct_unqualified";
-            if (!resist || !resist_type || !body_resist || !helm_resist || !default_resist ||
+            if (!resist || !resist_type || !body_resist || !helm_resist ||
                 resist->GetStruct().Get() != resist_type || body_resist->GetStruct().Get() != resist_type ||
-                helm_resist->GetStruct().Get() != resist_type || default_resist->GetStruct().Get() != resist_type)
+                helm_resist->GetStruct().Get() != resist_type)
                 return "native_guest_armor_damage_struct_unqualified";
-            if (!carry || !minimum)
+            if (!carry || !minimum || !baseline || !baseline->HasAnyFlags(U::RF_ClassDefaultObject) ||
+                baseline->GetClassPrivate() != pawn->GetClassPrivate())
                 return "native_guest_armor_weight_fields_unqualified";
             if (!field<U::FObjectProperty>(pawn, STR("PowerArmor")) || object(pawn, STR("PowerArmor")))
                 return "native_guest_armor_power_armor_unqualified";
             return {};
         }
 
-        std::string_view prepare(U::UObject* pawn, U::UObject* defaults, const ArmorProfile& profile, void* next_body, void* next_resist,
-                                 double& helmet_weight, double& threshold) const
+        std::string_view copy_resistance(U::UObject* defaults, const ArmorProfile& profile,
+                                        U::FStructProperty* destination, void* prepared) const
+        {
+            auto* source = field<U::FStructProperty>(defaults, STR("Resistance"));
+            if (!source || source->GetStruct().Get() != resist_type) return "native_guest_armor_damage_struct_unqualified";
+            const auto* value = source->ContainerPtrToValuePtr<void>(defaults);
+            for (std::size_t i = 0; i < damage_fields.size(); ++i)
+            {
+                auto* component = field<U::FDoubleProperty>(resist_type, damage_fields[i].name);
+                if (!component || component->GetPropertyValueInContainer(value) != profile.damage[i])
+                    return damage_fields[i].refusal;
+            }
+            destination->CopyCompleteValue(destination->ContainerPtrToValuePtr<void>(prepared), value);
+            return {};
+        }
+
+        std::string_view prepare_body(U::UObject* defaults, const ArmorProfile& profile, void* next) const
         {
             struct Scalar { const U::TCHAR* source; const U::TCHAR* dest; std::string_view refusal; double value; };
             const std::array scalars{
@@ -417,7 +476,7 @@ namespace
                 auto* source = field<U::FDoubleProperty>(defaults, scalar.source);
                 auto* dest = field<U::FDoubleProperty>(body_type, scalar.dest);
                 if (!source || !dest || source->GetPropertyValueInContainer(defaults) != scalar.value) return scalar.refusal;
-                dest->SetPropertyValueInContainer(next_body, scalar.value);
+                dest->SetPropertyValueInContainer(next, scalar.value);
             }
             auto* sprint = field<U::FBoolProperty>(body_type, STR("CanSprint_8_6852FE6E4BFD0ADB2A5474983720198A"));
             auto* walk = field<U::FObjectProperty>(body_type, STR("WalkSFXLayer_40_5B99B98249FDD245846185B23C70CE5F"));
@@ -426,25 +485,74 @@ namespace
                 return "native_guest_armor_sprint_unqualified";
             if (!walk || !defaults_walk || walk->GetPropertyClass().Get() != defaults_walk->GetPropertyClass().Get())
                 return "native_guest_armor_walk_sound_unqualified";
-            sprint->SetPropertyValueInContainer(next_body, true);
-            walk->SetObjectPropertyValue(walk->ContainerPtrToValuePtr<void>(next_body), object(defaults, STR("Walk_SFXLayer")));
-            const auto* default_damage = default_resist->ContainerPtrToValuePtr<void>(defaults);
-            const auto* worn_helmet = helm->ContainerPtrToValuePtr<void>(pawn);
-            const auto* helmet_damage = helm_resist->ContainerPtrToValuePtr<void>(worn_helmet);
-            helmet_weight = helm_weight->GetPropertyValueInContainer(worn_helmet);
-            if (helmet_weight != 0.0) return "native_guest_armor_helmet_weight_unqualified";
-            body_resist->CopyCompleteValue(body_resist->ContainerPtrToValuePtr<void>(next_body), default_damage);
-            for (std::size_t index = 0; index < damage_fields.size(); ++index)
+            sprint->SetPropertyValueInContainer(next, true);
+            walk->SetObjectPropertyValue(walk->ContainerPtrToValuePtr<void>(next), object(defaults, STR("Walk_SFXLayer")));
+            return copy_resistance(defaults, profile, body_resist, next);
+        }
+
+        std::string_view prepare_helmet(U::UObject* defaults, const ArmorProfile& profile, void* next) const
+        {
+            auto* weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+            auto* source_visible = field<U::FDoubleProperty>(defaults, STR("VisibilityMod"));
+            auto* target_visible = field<U::FDoubleProperty>(helm_type, helmet_visibility);
+            auto* source_light = field<U::FByteProperty>(defaults, STR("FlashLightType"));
+            auto* target_light = field<U::FByteProperty>(helm_type, helmet_light);
+            auto* hud = field<U::FBoolProperty>(helm_type, helmet_hud);
+            auto* source_origin = field<U::FStructProperty>(defaults, STR("FlashlightLocation"));
+            auto* target_origin = field<U::FStructProperty>(helm_type, helmet_light_origin);
+            auto* vector_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            auto* x = field<U::FDoubleProperty>(vector_type, STR("X"));
+            auto* y = field<U::FDoubleProperty>(vector_type, STR("Y"));
+            auto* z = field<U::FDoubleProperty>(vector_type, STR("Z"));
+            if (!weight || weight->GetPropertyValueInContainer(defaults) != profile.weight || !source_visible || !target_visible ||
+                source_visible->GetPropertyValueInContainer(defaults) != profile.visibility ||
+                !hud || !boolean(defaults, STR("FullHUD"), false) || !source_light || !target_light ||
+                source_light->GetPropertyValueInContainer(defaults) != 0 ||
+                !source_origin || !target_origin || !vector_type || source_origin->GetStruct().Get() != vector_type ||
+                target_origin->GetStruct().Get() != vector_type || !x || !y || !z) return "native_guest_armor_helmet_stats_unqualified";
+            const auto* origin = source_origin->ContainerPtrToValuePtr<void>(defaults);
+            if (x->GetPropertyValueInContainer(origin) != 0.0 || y->GetPropertyValueInContainer(origin) != 0.0 ||
+                z->GetPropertyValueInContainer(origin) != 170.0) return "native_guest_armor_helmet_light_unqualified";
+            helm_weight->SetPropertyValueInContainer(next, profile.weight);
+            target_visible->SetPropertyValueInContainer(next, profile.visibility);
+            hud->SetPropertyValueInContainer(next, false);
+            target_light->SetPropertyValueInContainer(next, 0);
+            target_origin->CopyCompleteValue(target_origin->ContainerPtrToValuePtr<void>(next), origin);
+            return copy_resistance(defaults, profile, helm_resist, next);
+        }
+
+        std::string_view compose(const ArmorProfile* torso, const ArmorProfile* head, void* next_body, void* next_helmet,
+                                 void* next_resist, std::array<double, damage_fields.size()>& totals, double& threshold) const
+        {
+            if (torso)
             {
-                const auto& damage = damage_fields[index];
-                auto* property = field<U::FDoubleProperty>(resist_type, damage.name);
-                if (!property || property->GetPropertyValueInContainer(default_damage) != profile.damage[index])
-                    return damage.refusal;
-                if (property->GetPropertyValueInContainer(helmet_damage) != 0.0)
-                    return "native_guest_armor_helmet_damage_unqualified";
-                property->SetPropertyValueInContainer(next_resist, profile.damage[index]);
+                if (const auto error = prepare_body(armor_defaults(*torso), *torso, next_body); !error.empty()) return error;
             }
-            threshold = 20.0 + profile.bonus;
+            else body->CopyCompleteValue(next_body, body->ContainerPtrToValuePtr<void>(baseline));
+            if (head)
+            {
+                if (const auto error = prepare_helmet(armor_defaults(*head), *head, next_helmet); !error.empty()) return error;
+            }
+            else helm->CopyCompleteValue(next_helmet, helm->ContainerPtrToValuePtr<void>(baseline));
+
+            if (body_weight->GetPropertyValueInContainer(next_body) != (torso ? torso->weight : 0.0) ||
+                helm_weight->GetPropertyValueInContainer(next_helmet) != (head ? head->weight : 0.0) ||
+                bonus->GetPropertyValueInContainer(next_body) != (torso ? torso->bonus : 0.0))
+                return "native_guest_armor_stock_default_weights_unqualified";
+            const auto* torso_resist = body_resist->ContainerPtrToValuePtr<void>(next_body);
+            const auto* head_resist = helm_resist->ContainerPtrToValuePtr<void>(next_helmet);
+            for (std::size_t i = 0; i < damage_fields.size(); ++i)
+            {
+                auto* component = field<U::FDoubleProperty>(resist_type, damage_fields[i].name);
+                if (!component) return damage_fields[i].refusal;
+                const double first = component->GetPropertyValueInContainer(torso_resist);
+                const double second = component->GetPropertyValueInContainer(head_resist);
+                if (first != (torso ? torso->damage[i] : 0.0) || second != (head ? head->damage[i] : 0.0))
+                    return damage_fields[i].refusal;
+                totals[i] = first + second;
+                component->SetPropertyValueInContainer(next_resist, totals[i]);
+            }
+            threshold = 20.0 + (torso ? torso->bonus : 0.0);
             return {};
         }
     };
@@ -456,6 +564,8 @@ namespace
         const ArmorProfile* selected{};
         const ArmorProfile* previous{};
         Guid replaced{};
+        const ArmorProfile* torso{};
+        std::array<double, damage_fields.size()> combined{};
     };
 
     int report(const Lua& lua, bool ok, std::string_view status, const Report& result = {})
@@ -473,7 +583,11 @@ namespace
         lua.set_string(result.previous ? result.previous->name : "-");
         lua.set_string(result.replaced == Guid{} ? std::string{"-"} : std::format("{:08X}{:08X}{:08X}{:08X}",
             result.replaced[0], result.replaced[1], result.replaced[2], result.replaced[3]));
-        return 12;
+        lua.set_string(result.torso ? result.torso->name : "-");
+        lua.set_number(result.combined[slashing]);
+        lua.set_number(result.combined[acid]);
+        lua.set_number(result.combined[poison]);
+        return 16;
     }
 
     int seed(const Lua& lua, const Scope& scope, const Inventory& inventory, U::UObject* defaults, const Guid& id)
@@ -537,104 +651,129 @@ namespace
         return report(lua, true, "seeded", proof);
     }
 
-    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id, bool restore_only)
+    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id, bool restore_only, bool head)
     {
         int index{};
         bool worn{};
-        if (!inventory.locate(scope.guest, id, index, worn) || (!worn && (restore_only || index < 0)))
+        if (!inventory.locate(scope.guest, id, index, worn, head) || (!worn && (restore_only || index < 0)))
             return report(lua, false, "native_guest_armor_exact_owned_row_required");
         auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
-        auto* armor = inventory.armor->ContainerPtrToValuePtr<void>(scope.guest);
-        const auto* helmet = inventory.helmet->ContainerPtrToValuePtr<void>(scope.guest);
+        auto* slot = head ? inventory.helmet : inventory.armor;
+        auto* companion = head ? inventory.armor : inventory.helmet;
+        auto* active = slot->ContainerPtrToValuePtr<void>(scope.guest);
+        const auto* other = companion->ContainerPtrToValuePtr<void>(scope.guest);
         auto* save_defaults = scope.guest->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!save_defaults || save_defaults->GetClassPrivate() != scope.guest->GetClassPrivate() ||
-            !save_defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            inventory.item_class(helmet) || inventory.item_guid(helmet) != Guid{} ||
-            !inventory.helmet->Identical(helmet, inventory.helmet->ContainerPtrToValuePtr<void>(save_defaults)))
-            return report(lua, false, "native_guest_armor_slot_occupied");
+            !save_defaults->HasAnyFlags(U::RF_ClassDefaultObject))
+            return report(lua, false, "native_guest_armor_stock_defaults_unqualified");
+
+        const auto qualify = [&](const void* row, bool is_helmet) -> const ArmorProfile* {
+            const auto* profile = profile_for(inventory.item_class(row));
+            if (!profile || profile->helmet != is_helmet || inventory.item_guid(row) == Guid{} ||
+                inventory.weight->GetPropertyValueInContainer(row) != profile->weight) return nullptr;
+            auto* cdo = armor_defaults(*profile);
+            return cdo && (!is_helmet || stock_helmet_row(inventory, row, cdo, *profile)) ? profile : nullptr;
+        };
+        const auto empty = [&](U::FStructProperty* property, const void* row) {
+            return !inventory.item_class(row) && inventory.item_guid(row) == Guid{} &&
+                property->Identical(row, property->ContainerPtrToValuePtr<void>(save_defaults));
+        };
+        const auto exact_worn = [&](const Guid& guid, bool is_helmet) {
+            int source{};
+            bool held{};
+            return inventory.locate(scope.guest, guid, source, held, is_helmet) && held && source < 0;
+        };
+
         U::FScriptArrayHelper current(inventory.backpack, bag);
-        const auto* approved = worn ? armor : current.GetRawPtr(index);
-        const auto* selected = profile_for(inventory.item_class(approved));
-        if (!selected || inventory.weight->GetPropertyValueInContainer(approved) != selected->weight)
-            return report(lua, false, "native_guest_armor_exact_class_required");
-        auto* defaults = armor_defaults(*selected);
-        if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
+        const auto* approved = worn ? active : current.GetRawPtr(index);
+        const auto* selected = qualify(approved, head);
+        if (!selected) return report(lua, false, "native_guest_armor_exact_class_required");
         const ArmorProfile* previous{};
         Guid replaced{};
-        const bool empty = !inventory.item_class(armor) && inventory.item_guid(armor) == Guid{} &&
-            inventory.armor->Identical(armor, inventory.armor->ContainerPtrToValuePtr<void>(save_defaults));
-        if (!worn && !empty)
+        if (!worn && !empty(slot, active))
         {
-            previous = profile_for(inventory.item_class(armor));
-            replaced = inventory.item_guid(armor);
-            int prior_index{};
-            bool prior_worn{};
-            if (!previous || previous == selected || replaced == Guid{} || !armor_defaults(*previous) ||
-                inventory.weight->GetPropertyValueInContainer(armor) != previous->weight ||
-                !inventory.locate(scope.guest, replaced, prior_index, prior_worn) || !prior_worn || prior_index >= 0)
+            previous = qualify(active, head);
+            replaced = inventory.item_guid(active);
+            if (!previous || previous == selected || !exact_worn(replaced, head))
                 return report(lua, false, "native_guest_armor_slot_occupied");
         }
-        if (!isolated_rows(scope, inventory, id, replaced)) return report(lua, false, "native_guest_armor_exact_owned_row_required");
+
+        const auto* other_profile = qualify(other, !head);
+        if (other_profile ? !exact_worn(inventory.item_guid(other), !head) : !empty(companion, other))
+            return report(lua, false, "native_guest_armor_companion_slot_unqualified");
+        if (!isolated_rows(scope, inventory, id, replaced) ||
+            (other_profile && !isolated_rows(scope, inventory, inventory.item_guid(other))))
+            return report(lua, false, "native_guest_armor_exact_owned_row_required");
+
+        const auto* torso = head ? other_profile : selected;
+        const auto* helmet = head ? selected : other_profile;
         Projection projection;
-        if (const auto error = projection.bind(scope.pawn, defaults); !error.empty())
-            return report(lua, false, error);
+        if (const auto error = projection.bind(scope.pawn); !error.empty()) return report(lua, false, error);
         auto* body = projection.body->ContainerPtrToValuePtr<void>(scope.pawn);
+        auto* helm = projection.helm->ContainerPtrToValuePtr<void>(scope.pawn);
         auto* resist = projection.resist->ContainerPtrToValuePtr<void>(scope.pawn);
         Copy original_bag(inventory.backpack, bag);
         Copy next_bag(inventory.backpack, bag);
-        Copy original_armor(inventory.armor, armor);
-        Copy next_armor(inventory.armor, approved);
+        Copy original_slot(slot, active);
+        Copy next_slot(slot, approved);
         Copy original_body(projection.body, body);
+        Copy original_helm(projection.helm, helm);
         Copy original_resist(projection.resist, resist);
         Copy next_body(projection.body);
+        Copy next_helm(projection.helm);
         Copy next_resist(projection.resist);
-        if (!original_bag.value || !next_bag.value || !original_armor.value || !next_armor.value ||
-            !original_body.value || !original_resist.value || !next_body.value || !next_resist.value)
+        if (!original_bag.value || !next_bag.value || !original_slot.value || !next_slot.value ||
+            !original_body.value || !original_helm.value || !original_resist.value || !next_body.value || !next_helm.value || !next_resist.value)
             return report(lua, false, "native_guest_armor_copy_unavailable");
 
         Report proof{current.Num(), current.Num()};
         proof.selected = selected;
         proof.previous = previous;
         proof.replaced = replaced;
-        double helmet_weight{};
+        proof.torso = torso;
         U::FScriptArrayHelper prepared(inventory.backpack, next_bag.value);
-        if (previous) inventory.item->CopyCompleteValue(prepared.GetRawPtr(index), armor);
+        if (previous) inventory.item->CopyCompleteValue(prepared.GetRawPtr(index), active);
         else if (!worn) prepared.RemoveValues(index, 1);
         proof.after = prepared.Num();
         if (previous && (proof.after != proof.before || inventory.item_guid(prepared.GetRawPtr(index)) != replaced ||
-            !inventory.item->Identical(prepared.GetRawPtr(index), original_armor.value)))
+            !inventory.item->Identical(prepared.GetRawPtr(index), original_slot.value)))
             return report(lua, false, "native_guest_armor_prepared_swap_unqualified", proof);
-        if (const auto error = projection.prepare(
-                scope.pawn, defaults, *selected, next_body.value, next_resist.value, helmet_weight, proof.minimum); !error.empty())
+        if (const auto error = projection.compose(torso, helmet, next_body.value, next_helm.value, next_resist.value,
+                                                  proof.combined, proof.minimum); !error.empty())
             return report(lua, false, error, proof);
-        const auto prior_weight = worn ? selected->weight : previous ? previous->weight : 0.0;
-        if (!inventory.carry(scope.guest, bag, prior_weight, helmet_weight, proof.carry_before) ||
-            !inventory.carry(scope.guest, next_bag.value, selected->weight, helmet_weight, proof.carry_after))
+
+        const double old_weight = worn ? selected->weight : previous ? previous->weight : 0.0;
+        const double torso_weight = torso ? torso->weight : 0.0;
+        const double helmet_weight = helmet ? helmet->weight : 0.0;
+        if (!inventory.carry(scope.guest, bag, head ? torso_weight : old_weight, head ? old_weight : helmet_weight, proof.carry_before) ||
+            !inventory.carry(scope.guest, next_bag.value, torso_weight, helmet_weight, proof.carry_after))
             return report(lua, false, "native_guest_armor_carry_weights_unqualified", proof);
         if (!scope.current()) return report(lua, false, "native_guest_armor_exact_owner_required", proof);
         proof.slash = selected->damage[slashing];
         proof.acid = selected->damage[acid];
+
         const auto old_carry = projection.carry->GetPropertyValueInContainer(scope.pawn);
         const auto old_minimum = projection.minimum->GetPropertyValueInContainer(scope.pawn);
         const auto matches = [&] {
-            int selected_index{}, restored_index{};
-            bool selected_worn{}, restored_worn{};
-            return inventory.locate(scope.guest, id, selected_index, selected_worn) && selected_worn && selected_index < 0 &&
-                (!previous || (inventory.locate(scope.guest, replaced, restored_index, restored_worn) && !restored_worn && restored_index == index)) &&
-                next_bag.matches(bag) && next_armor.matches(armor) && next_body.matches(body) && next_resist.matches(resist) &&
+            int restored_index{};
+            bool restored_worn{};
+            return exact_worn(id, head) &&
+                (!previous || (inventory.locate(scope.guest, replaced, restored_index, restored_worn, head) &&
+                               !restored_worn && restored_index == index)) &&
+                next_bag.matches(bag) && next_slot.matches(active) && next_body.matches(body) && next_helm.matches(helm) && next_resist.matches(resist) &&
                 projection.carry->GetPropertyValueInContainer(scope.pawn) == proof.carry_after &&
                 projection.minimum->GetPropertyValueInContainer(scope.pawn) == proof.minimum;
         };
         if (worn && matches()) return report(lua, true, "already_applied", proof);
 
-        // The cooked stock UI changes its canonical Save and caches. Here only the
-        // exact detached Backpack/armor and the corresponding derived guest body change.
+        // The two saved rows remain independent. Only the guest pawn's derived stats combine them.
         if (!worn)
         {
-            next_armor.restore(armor);
+            next_slot.restore(active);
             next_bag.restore(bag);
         }
         next_body.restore(body);
+        next_helm.restore(helm);
         next_resist.restore(resist);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
@@ -642,21 +781,22 @@ namespace
 
         if (!worn)
         {
-            original_armor.restore(armor);
+            original_slot.restore(active);
             original_bag.restore(bag);
         }
         original_body.restore(body);
+        original_helm.restore(helm);
         original_resist.restore(resist);
         projection.carry->SetPropertyValueInContainer(scope.pawn, old_carry);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, old_minimum);
-        const bool rolled_back = scope.current() && original_bag.matches(bag) && original_armor.matches(armor) &&
-            original_body.matches(body) && original_resist.matches(resist) &&
+        const bool rolled_back = scope.current() && original_bag.matches(bag) && original_slot.matches(active) &&
+            original_body.matches(body) && original_helm.matches(helm) && original_resist.matches(resist) &&
             projection.carry->GetPropertyValueInContainer(scope.pawn) == old_carry &&
             projection.minimum->GetPropertyValueInContainer(scope.pawn) == old_minimum;
         return report(lua, false, rolled_back ? "native_guest_armor_rolled_back" : "mutation_unverified_guest_armor_equip", proof);
     }
 
-    enum class Operation { Equip, Project, Seed };
+    enum class Operation { Equip, Project, Seed, EquipHelmet, ProjectHelmet };
 
     template <Operation operation> int run(const Lua& lua)
     {
@@ -670,7 +810,9 @@ namespace
         if (pawn <= 0 || guest <= 0 || !read_guid(lua.get_string(), guid) ||
             !scope.bind(static_cast<std::uintptr_t>(pawn), static_cast<std::uintptr_t>(guest)))
             return report(lua, false, "native_guest_armor_exact_owner_required");
-        if constexpr (operation != Operation::Project)
+        constexpr bool project = operation == Operation::Project || operation == Operation::ProjectHelmet;
+        constexpr bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet;
+        if constexpr (!project)
         {
             auto* health = field<U::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
             if (!health || !std::isfinite(health->GetPropertyValueInContainer(scope.guest)) ||
@@ -688,7 +830,7 @@ namespace
             if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
             return seed(lua, scope, inventory, defaults, guid);
         }
-        return apply(lua, scope, inventory, guid, operation == Operation::Project);
+        return apply(lua, scope, inventory, guid, project, head);
     }
 }
 
@@ -697,5 +839,7 @@ void silverfish::native_guest_armor::register_lua(RC::LuaMadeSimple::Lua& lua)
     if (!enabled()) return;
     lua.register_function("SilverfishEquipNativeGuestArmor", run<Operation::Equip>);
     lua.register_function("SilverfishProjectNativeGuestArmor", run<Operation::Project>);
+    lua.register_function("SilverfishEquipNativeGuestHelmet", run<Operation::EquipHelmet>);
+    lua.register_function("SilverfishProjectNativeGuestHelmet", run<Operation::ProjectHelmet>);
     if (fixtures()) lua.register_function("SilverfishSeedNativeGuestArmor", run<Operation::Seed>);
 }

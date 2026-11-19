@@ -164,6 +164,20 @@ function enemy_loot.departure_pending(state, phase)
         type(SilverfishNativeCqcEnemyLootPending) == "function" and SilverfishNativeCqcEnemyLootPending() == true
 end
 
+function enemy_loot.revive_fixture_context(state, phase, expected, name)
+    if not enabled or not ordinary or phase ~= "hosting" or state.map ~= dead_bridge or not cqc_paths[expected]
+        or state.server ~= false or not state.listening or not valid(state.world)
+        or state.world:GetFullName() ~= worlds[dead_bridge] then return end
+    local details = transport.scoped_host(state, phase)
+    local host = details and details.pawn
+    if not same(host, state.local_pawn and state.local_pawn.pawn) or not same(host:GetWorld(), state.world) then return end
+    local guest, detached = member(state, phase, host, name)
+    local health = valid(detached) and detached.PlayerHealth
+    if not valid(guest) or not same(guest:GetWorld(), state.world) or guest.Dead ~= false or guest.IsWeaponBlocked ~= true
+        or type(health) ~= "number" or health ~= health or health == -math.huge or health > 1 then return end
+    return host, guest, cqc_actor(state, expected)
+end
+
 function enemy_loot.watched_cqc(state, phase, expected, receipt)
     local host, guest = participants(state, phase)
     local scoped = watches[expected] or watch

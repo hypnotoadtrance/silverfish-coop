@@ -158,7 +158,7 @@ local function page(fields)
         seen[guid] = true
         local equippable = ((source == "backpack" or source == "equipment")
             and (weapon_profiles.kinds[class] ~= nil or class == camera_path))
-            or (source == "backpack" and body_armor.is_body_path(class))
+            or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = item:gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or mre_enabled and class == mre_path and "MRE"
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil

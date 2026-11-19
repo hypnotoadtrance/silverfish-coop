@@ -49,7 +49,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
-                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_armor.ACTION)
+                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT,
+                        native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
                 "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
@@ -1501,7 +1502,7 @@ class Host:
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
-            elif action == native_guest_armor.ACTION:
+            elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action in native_guest_consumable.RESULT:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
@@ -2204,6 +2205,18 @@ class Host:
                     result = {"native_guest_sickness_fixture": receipt, "native_guest_sickness": proof}
                 elif action in ("native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture") and self.native_guest and self.fixtures:
                     target = request.get("target")
+                    character = self.roles().get("guest")
+                    if (action == "native-bandit-aim-fixture" and self.native_dead_bridge_enemy_loot
+                            and self.last_game.get("map") == DEAD_BRIDGE and target in native_enemy_loot.CQC_ACTORS
+                            and self.party["players"].get(character, {}).get("downed") is True):
+                        owner = self.native_recipients().get(character, {})
+                        if not owner.get("connected") or not owner.get("pawn") or self.transitioning or self.party["wipe"]:
+                            raise ValueError("Choose the exact enrolled downed guest in the current Dead Bridge visit")
+                        self.last_game = await bridge.command("native-cqc-revive-approach", target, owner["pawn"], timeout=5)
+                        self.last_seen = time.monotonic()
+                        result = {"native_cqc_revive_approach": {"map": DEAD_BRIDGE, "pawn": owner["pawn"]}}
+                        self.control.respond(path, True, **result)
+                        continue
                     if action in ("native-enemy-loot-watch", "native-bandit-aim-fixture"):
                         bandit = native_enemy_loot.watch_target(self.last_game, target)
                         if not bandit:
@@ -3650,7 +3663,7 @@ class Client:
             return
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
-        armor = item_class in native_guest_armor.CLASS_PATHS
+        armor = native_guest_armor.EQUIP_ACTIONS.get(item_class)
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
                 or not native_gold.valid_guid(guid) or not (armor or item_class in native_guest_weapon.CLASS_PATHS)):
@@ -3665,9 +3678,10 @@ class Client:
                     or not any(row["guid"] == guid and row["class_path"] == item_class
                                and (not armor or row["source"] == "backpack") for row in page["items"])):
                 raise ValueError("The selected stock item is no longer on the authenticated inventory page")
-            action = native_guest_armor.ACTION if armor else "native-guest-weapon-equip"
+            action = armor or "native-guest-weapon-equip"
             equipped = await self.gameplay_action(action, operation, guid)
-            if armor and equipped.get("native_guest_armor", {}).get("class_path") != item_class:
+            key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
+            if armor and equipped.get(key, {}).get("class_path") != item_class:
                 raise ValueError("The host did not verify the exact selected stock armor class")
             outcome = "equipped"
             self.control.event("native_guest_inventory_equipped", operation_id=operation, view_sequence=sequence, **equipped)

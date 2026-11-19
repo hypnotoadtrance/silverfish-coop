@@ -8,6 +8,7 @@ local sources = {
     ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["borough-mre"] = "/Game/Classes/Maps/Maps_SafeZones/Borough",
+    ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"

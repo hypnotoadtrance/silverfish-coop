@@ -89,6 +89,14 @@ local profiles = {
         name = "Item_MRE_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
+    {
+        map = depot,
+        source = "railyard-dust-filter",
+        path = depot .. ".RailYard_P:PersistentLevel.Helm_DustFilter_C_1",
+        class = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C",
+        name = "Helm_DustFilter_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
 }
 local map_profiles = {}
 for _, profile in ipairs(profiles) do

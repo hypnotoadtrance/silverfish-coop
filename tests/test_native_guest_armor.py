@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from tools.silverfish import link, native_guest_armor as armor, party
+from tools.silverfish.travel import RAIL_YARD
 
 
 class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
@@ -99,3 +100,38 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(armor.effects(proof))
         with self.assertRaisesRegex(ValueError, "Invalid exact stock armor profile"):
             armor.parse([*new[:-2], "bomber", "-"])
+
+    def test_exact_helmet_and_existing_body_compose_only_their_stock_values(self):
+        pawn = f"Player_FP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Player_FP_C_7"
+        picked_up = ["native-guest-helmet", RAIL_YARD, pawn, "FA" * 16, "equip", "1", "equipped",
+                     "2", "1", "6", "5.8", "20", ".1", ".2", "dust-filter", "-", "-", "-", ".1", ".2", ".5"]
+        alone = armor.parse(picked_up)
+        self.assertEqual(alone["class_path"], armor.DUST_FILTER_PATH)
+        self.assertTrue(armor.helmet_effects(alone))
+        self.assertTrue(armor.helmet_effects(dict(alone, torso_profile="bomber", minimum=25, combined_slash=.3, combined_acid=.4)))
+        self.assertTrue(armor.helmet_effects(dict(alone, torso_profile="hazop", minimum=32,
+                                                 combined_slash=.3, combined_acid=.4, combined_poison=.6)))
+        for column, value in [(2, "foreign pawn"), (10, "6"), (11, "25"), (14, "hazop"),
+                              (18, ".3"), (19, ".5"), (20, "nan")]:
+            with self.subTest(column=column), self.assertRaises(ValueError):
+                frame = picked_up.copy()
+                frame[column] = value
+                armor.parse(frame)
+
+    async def test_helmet_checkpoint_and_replay_use_separate_intent(self):
+        host = self.host()
+        proof = self.report(profile="dust-filter", class_path=armor.DUST_FILTER_PATH, torso_profile="bomber",
+                            carry_before=5.0, carry_after=4.8, slash=.1, acid=.2,
+                            combined_slash=.3, combined_acid=.4, combined_poison=.5)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"state": "hosting", "map": "area", "native_guest_helmet": proof}))
+        args = (host, bridge, "guest-id", "a" * 32, armor.HELMET_ACTION, proof["guid"])
+        equipped = await armor.perform(*args)
+        self.assertEqual(equipped["native_guest_helmet"], proof)
+        self.assertEqual(host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({"guest-id"}))
+        self.assertEqual(await armor.perform(*args), equipped)
+        bridge.command.assert_awaited_once_with(armor.HELMET_ACTION, "exact pawn", proof["guid"], timeout=5)
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await armor.perform(host, bridge, "guest-id", "a" * 32, armor.ACTION, proof["guid"])
+        self.assertGreaterEqual(link.checkpoint_action_timeout(
+            {"action": armor.HELMET_ACTION, "operation_id": "a" * 32, "target": proof["guid"]}
+        ), 20)

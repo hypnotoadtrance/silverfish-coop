@@ -187,8 +187,9 @@ end
 
 local function approach_revive(host, guest, bandit, trace)
     local capsule = host.CapsuleComponent
-    local guest_location, bandit_location = guest:K2_GetActorLocation(), bandit:K2_GetActorLocation()
     local original = host:K2_GetActorLocation()
+    local guest_location = guest:K2_GetActorLocation()
+    local bandit_location = valid(bandit) and bandit:K2_GetActorLocation() or original
     local orientation = rotation(host:K2_GetActorRotation())
     if host.Dead ~= false or host.IsWeaponBlocked ~= false or not valid(trace)
         or not owned_component(capsule, host, "CapsuleComponent")
@@ -426,6 +427,13 @@ end
 
 function npc.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-cqc-revive-approach" then
+        local host, guest, enemy = enemy_loot.revive_fixture_context(state, phase, fields[3], fields[4])
+        if not enabled or not fixtures or #fields ~= 4 or not host or not guest then
+            error("native_cqc_revive_exact_downed_guest_required", 0)
+        end
+        return approach_revive(host, guest, enemy, StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"))
+    end
     if action ~= "native-bandit-position" and action ~= "native-bandit-spawn" and action ~= "native-bandit-client-spawner-probe"
         and action ~= "native-bandit-aim-fixture" and action ~= "native-bandit-shot-fixture" then return end
     if state.map ~= map and (action == "native-bandit-aim-fixture" or action == "native-bandit-shot-fixture") then

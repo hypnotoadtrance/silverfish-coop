@@ -176,3 +176,25 @@ ready = true
 refused(fixture, shot, "native_bandit_shot_watch_required")
 assert(inspect_count == 2)
 print("Dead Bridge stock shot fixture reads the automatic watcher and requires the exact live actor and guest")
+
+local recover = {"request", "native-cqc-revive-approach", second:GetFullName(), scout:GetFullName()}
+state.local_pawn = {pawn = host, name = host:GetFullName()}
+scout.GetWorld = host.GetWorld
+refused(fixture, recover, "native_cqc_revive_exact_downed_guest_required")
+
+scout.IsWeaponBlocked, scout_save.PlayerHealth = true, 1
+host.Dead, host.IsWeaponBlocked = false, false
+local capsule, capsule_type = object(19, "host capsule"), object(20, "Class /Script/Engine.CapsuleComponent")
+capsule.GetClass, capsule.GetOwner = function() return capsule_type end, function() return host end
+host.CapsuleComponent = capsule
+host.K2_GetActorLocation = function() return {X = 0, Y = 0, Z = 90} end
+host.K2_GetActorRotation = function() return {Pitch = 0, Yaw = 0, Roll = 0} end
+scout.K2_GetActorLocation = function() return {X = 130, Y = 0, Z = 90} end
+objects[second_path] = nil
+objects["/Script/Engine.Default__KismetSystemLibrary"] = object(21, "stock trace")
+SilverfishReadNativeEnemyLoot = function() error("Revive placement must not depend on combat watch") end
+assert(fixture.command(recover, state, "hosting") == "stock Bandit revive approach verified")
+recover[4] = shooter:GetFullName()
+refused(fixture, recover, "native_cqc_revive_exact_downed_guest_required")
+assert(scout_save.PlayerHealth == 1 and scout.IsWeaponBlocked)
+print("Exact downed guest's stock revive approach is independent of either CQC watcher")

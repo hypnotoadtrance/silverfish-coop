@@ -21,6 +21,7 @@ POCKET_WATCH = "crossroads-pocket-watch"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
 BOROUGH_MRE = "borough-mre"
+DUST_FILTER = "railyard-dust-filter"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -39,6 +40,8 @@ SOURCES = {
                  "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
     BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
                   "/Game/Classes/Items/Item_MRE.Item_MRE_C"),
+    DUST_FILTER: (RAIL_YARD, f"Helm_DustFilter_C {RAIL_YARD}.RailYard_P:PersistentLevel.Helm_DustFilter_C_1",
+                  "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

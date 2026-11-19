@@ -1003,6 +1003,19 @@ class Bridge:
                         data["native_guest_armor"] = report
                     else:
                         data.setdefault("native_guest_armor_projection", {})[report["pawn"]] = report
+                elif fields[0] in ("native-guest-helmet", "native-guest-helmet-projection"):
+                    report = parse_guest_armor(fields)
+                    if data.get("state") != "hosting" or data.get("map") != report["map"]:
+                        raise ValueError("Invalid stock helmet report scope")
+                    if fields[0] == "native-guest-helmet":
+                        if "native_guest_helmet" in data or report["action"] != "equip":
+                            raise ValueError("Invalid stock helmet equip receipt")
+                        data["native_guest_helmet"] = report
+                    else:
+                        projected = data.setdefault("native_guest_helmet_projection", {})
+                        if report["pawn"] in projected or report["action"] != "project":
+                            raise ValueError("Invalid stock helmet projection receipt")
+                        projected[report["pawn"]] = report
                 elif fields[0] == "native-guest-weapon" and len(fields) in (12, 14):
                     data["native_guest_weapon"] = {
                         "map": fields[1], "action": fields[2], "pawn": fields[3], "guid": fields[4],
