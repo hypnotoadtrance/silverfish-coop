@@ -45,6 +45,7 @@ namespace
         double x, y, z;
         int item_type;
         int stack_units{};
+        bool physics{};
     };
 
     constexpr std::array profiles{
@@ -95,7 +96,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1"),
             STR("/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
-            9338.318763111682, 8669.320108298598, 391.93632416768173, 11, 1,
+            9338.318763111682, 8669.320108298598, 391.93632416768173, 11, 1, true,
+        },
+        Profile{
+            "savlo-estate-evil-eye-ring",
+            STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1"),
+            STR("/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
+            125.08236158222627, 2704.0395701013076, 474.9005913197349, 0,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -251,26 +259,41 @@ namespace
         return match != scopes.end() && local_scope(*match) ? &*match : nullptr;
     }
 
-    bool exact_source(U::UObject* actor, U::UObject* world, const Profile& profile)
+    const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
-            !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !boolean(actor, STR("Physics"), false) ||
-            !boolean(actor, STR("Stacks"), profile.stack_units != 0)) return false;
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "authored_pickup_stock_actor_identity_unqualified";
+        if (!boolean(actor, STR("Physics"), profile.physics)) return "authored_pickup_stock_physics_unqualified";
+        if (!boolean(actor, STR("Stacks"), profile.stack_units != 0)) return "authored_pickup_stock_stacking_unqualified";
         if (profile.stack_units)
         {
             auto* count = field<U::FIntProperty>(actor, STR("Ammo"));
-            if (!count || count->GetPropertyValueInContainer(actor) != profile.stack_units) return false;
+            if (!count || count->GetPropertyValueInContainer(actor) != profile.stack_units)
+                return "authored_pickup_stock_amount_unqualified";
         }
         auto* item = static_cast<U::AActor*>(actor);
         auto* category = field<U::FByteProperty>(actor, STR("ItemType"));
-        if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel")) ||
-            !category || category->GetPropertyValueInContainer(actor) != profile.item_type) return false;
+        if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel")))
+            return "authored_pickup_stock_world_unqualified";
+        if (!category || category->GetPropertyValueInContainer(actor) != profile.item_type)
+            return "authored_pickup_stock_category_unqualified";
+        // The watch can settle from its authored table toward the cabin floor under stock physics.
+        // A claimed watch may fall when collision is disabled. Its exact scoped object stays hidden.
+        if (profile.physics && !require_placement) return nullptr;
         auto position = item->K2_GetActorLocation();
         const auto dx = position.GetX() - profile.x;
         const auto dy = position.GetY() - profile.y;
         const auto dz = position.GetZ() - profile.z;
-        const auto squared = dx * dx + dy * dy + dz * dz;
-        return std::isfinite(squared) && squared <= 25.0;
+        const auto horizontal = dx * dx + dy * dy;
+        const bool located = profile.physics ?
+            horizontal <= 75.0 * 75.0 && dz >= -100.0 && dz <= 12.0 :
+            horizontal + dz * dz <= 25.0;
+        return located ? nullptr : "authored_pickup_stock_placement_unqualified";
+    }
+
+    bool exact_source(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
+    {
+        return source_fault(actor, world, profile, require_placement) == nullptr;
     }
 
     U::UObject* source_box(U::UObject* actor)
@@ -315,7 +338,8 @@ namespace
     bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (!local_scope(scope) || !exact_source(actor, scope.world.Get(), *scope.profile)) return false;
+        if (!local_scope(scope) || !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
+            return false;
         const bool hidden = claimed || scope.original_hidden;
         const bool collision = !claimed && scope.original_collision;
         actor->SetActorHiddenInGame(hidden);
@@ -773,10 +797,20 @@ namespace
         if (!live(world) || world->GetPathName() != profile.world)
             return result(lua, false, "authored_pickup_source_world_unavailable");
         auto* actor = find<U::AActor>(profile.actor);
+        if (const auto* fault = source_fault(actor, world, profile))
+        {
+            if (live(actor) && std::string_view(fault) == "authored_pickup_stock_placement_unqualified")
+            {
+                const auto point = actor->K2_GetActorLocation();
+                return result(lua, false, std::format("{}:{:.1f},{:.1f},{:.1f}", fault, point.GetX(), point.GetY(), point.GetZ()));
+            }
+            return result(lua, false, fault);
+        }
         auto* box = source_box(actor);
-        if (!box || !exact_source(actor, world, profile) || !interaction() ||
-            !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
-            return result(lua, false, "authored_pickup_stock_actor_unavailable");
+        if (!box) return result(lua, false, "authored_pickup_stock_root_box_unqualified");
+        if (!interaction()) return result(lua, false, "authored_pickup_stock_interaction_unqualified");
+        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
+            return result(lua, false, "authored_pickup_stock_visibility_unqualified");
         Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
             &profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
         if (!local_scope(next)) return result(lua, false, "authored_pickup_local_controller_unavailable");
@@ -814,7 +848,8 @@ namespace
     int status(const Lua& lua)
     {
         auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
-        const bool active = scope && local_scope(*scope) && exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile);
+        const bool active = scope && local_scope(*scope) &&
+            exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile, !scope->claimed);
         const bool emitted = active && Clock::now() < scope->observed.expires;
         lua.set_bool(active);
         lua.set_bool(active && scope->claimed);

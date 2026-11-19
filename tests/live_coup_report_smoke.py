@@ -155,7 +155,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         offered = (await action(guest, spec.command("preflight")))[spec.key]
         assert offered["board"] == board and offered["step_after"] is None, offered
         host_xp = offered["xp_before"]
-        assert (host_xp == 0 if plan.accept_before_pickup else host_xp >= 3), offered
+        expected = spec.fixture_xp or 0
+        assert (host_xp == expected if plan.accept_before_pickup else host_xp >= 3), offered
         offset = 0
         while offset is not None:
             catalog = (await action(guest, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
@@ -216,6 +217,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
 
         if plan.accept_before_pickup:
             assert start_area == redemption and pickup_map != start_area
+            if spec.fixture_xp:
+                await action(host, spec.command("approach"), "--target", "host")
+                hidden = await action(host, spec.command("preflight"), accepted=False)
+                assert "quest_not_offered" in hidden["error"], hidden
+                qualified = (await action(host, spec.command("xp-fixture")))[spec.key]
+                assert (qualified["xp_before"], qualified["xp_after"]) == (0, spec.fixture_xp), qualified
+                assert qualified["step_before"] is None and qualified["step_after"] is None, qualified
+                evidence["stock_xp_setup"] = {"before": hidden["error"], "after": qualified}
             await accept()
             refused = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
             assert "objective_required" in refused["error"], refused

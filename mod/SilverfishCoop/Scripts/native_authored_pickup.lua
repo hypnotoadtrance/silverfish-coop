@@ -10,6 +10,7 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local savlo_estate = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
@@ -69,6 +70,14 @@ local profiles = {
         path = crossroads .. ".CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1",
         class = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C",
         name = "Item_PocketWatch_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = savlo_estate,
+        source = "savlo-estate-evil-eye-ring",
+        path = savlo_estate .. ".SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
+        class = "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C",
+        name = "Art_EvilEyeRing_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

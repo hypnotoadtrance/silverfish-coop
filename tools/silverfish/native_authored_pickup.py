@@ -18,6 +18,8 @@ COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
 SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
 POCKET_WATCH = "crossroads-pocket-watch"
+SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
+SAVLO_RING = "savlo-estate-evil-eye-ring"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -32,6 +34,8 @@ SOURCES = {
                            "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
     POCKET_WATCH: (CROSSROADS, f"Item_PocketWatch_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1",
                    "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
+    SAVLO_RING: (SAVLO_ESTATE, f"Art_EvilEyeRing_C {SAVLO_ESTATE}.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
+                 "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

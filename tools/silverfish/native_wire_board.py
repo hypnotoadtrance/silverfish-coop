@@ -20,7 +20,8 @@ DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 QUESTS = {
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
-    SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id}),
+    SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
+                         native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id}),
 }
 PREFLIGHTS = {

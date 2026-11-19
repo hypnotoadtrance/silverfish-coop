@@ -11,6 +11,7 @@ local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local wire, computer, photo = "Clt_Wire", "Clt_ComputerBoard", "Photo_DB_Turrets"
 local report, depot, brandy = "Clt_CoupReport_01", "DepotDocs", "Clt_Brandy"
 local pocket_watch = "Clt_Watch"
+local ring = "Clct_EvilEye"
 local readings = "Clt_Tape_StoneMaze_01"
 local function board_profile(area, level, suffix, id, quests, display_global)
     local world = area .. "." .. level
@@ -21,12 +22,12 @@ end
 local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
-    [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch}, true),
+    [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy}, true),
 }
 local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
-    [pocket_watch] = "Pocket Watch"}
+    [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -78,6 +79,11 @@ local contract_prompt = {
         offer = "Find the pocket watch in the Crossroads farm cabin.\nInteract again to accept the contract.",
         missing = "Bring the pocket watch in your backpack.\nInteract to check the contract again.",
         ready = "Turn in the pocket watch for 1,000 shared cash.\nInteract again to turn it in.",
+    },
+    [ring] = {
+        offer = "Find Savlo's ring in the manor near Trinsdal.\nInteract again to accept the contract.",
+        missing = "Bring Savlo's ring in your backpack.\nInteract to check the contract again.",
+        ready = "Turn in the ring for 20,000 shared cash.\nInteract again to turn it in.",
     },
     [readings] = {
         not_offered = "Speak to Dr. Mosby to start this contract.",

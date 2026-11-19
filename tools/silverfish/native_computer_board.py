@@ -36,6 +36,7 @@ class CollectionContract:
     consumed_field: str
     pickup_source: str | None = None
     board_maps: frozenset[str] = BOROUGH_SCIENTIST_BOARDS
+    fixture_xp: int | None = None
 
     @property
     def key(self) -> str:
@@ -59,10 +60,14 @@ BRANDY = CollectionContract("Clt_Brandy", "native-brandy", "Fine Vintage", BLACK
 POCKET_WATCH = CollectionContract("Clt_Watch", "native-pocket-watch", "Pocket Watch", SCAV_BAR,
                                   "scav_bar_redemption_required", 1000, frozenset(), "consumed_watch",
                                   native_authored_pickup.POCKET_WATCH, frozenset({SCAV_BAR}))
-CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH)}
+SAVLO_RING = CollectionContract("Clct_EvilEye", "native-savlo-ring", "Savlo's Ring", SCAV_BAR,
+                                "scav_bar_redemption_required", 20000, frozenset({"5"}), "consumed_ring",
+                                native_authored_pickup.SAVLO_RING, frozenset({SCAV_BAR}), fixture_xp=10)
+CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH, SAVLO_RING)}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
 AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source}
+XP_FIXTURES = {spec.command("xp-fixture"): spec for spec in CONTRACTS.values() if spec.fixture_xp is not None}
 
 
 def _scope(host, actor: str, spec: CollectionContract, *, turning_in: bool = False) -> tuple[str, str]:
@@ -143,6 +148,27 @@ async def approach(host, bridge, actor: str, *, spec: CollectionContract = COMPU
         raise RuntimeError(f"The {spec.title} approach left the qualified listen world")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return {f"{spec.key}_approach": {"pawn": pawn, "board": BOARDS[area]}}
+
+
+async def xp_fixture(host, bridge, spec: CollectionContract) -> dict:
+    pawn, area = _scope(host, "host", spec)
+    if not host.fixtures or spec.fixture_xp is None or host.party.get("native_quests"):
+        raise party.RuleError(f"{spec.key}_xp_fixture_unavailable")
+    await host.checkpoint_native(bridge)
+    host.native_checkpoint_unsafe = True
+    try:
+        proof = await _command(host, bridge, spec, "xp-fixture", pawn, area)
+        if ((proof["step_before"], proof["step_after"], proof["xp_before"], proof["xp_after"])
+                != (None, None, 0, spec.fixture_xp) or proof["cash_before"] != proof["cash_after"]
+                or any(row["before"] != row["after"] for row in proof["reputation"].values())):
+            raise RuntimeError(f"The stock {spec.title} fixture did not verify XP-only eligibility")
+        revision = await host.checkpoint_native(bridge)
+        host.native_checkpoint_unsafe = False
+        return {spec.key: proof, "revision": revision}
+    except (OSError, RuntimeError, ValueError, KeyError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
 
 
 async def start(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:

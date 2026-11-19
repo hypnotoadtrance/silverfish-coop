@@ -56,6 +56,15 @@ local recipes = {
         redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
         stage_objective = "SilverfishStagePocketWatchObjective",
     },
+    ["native-savlo-ring"] = {
+        id = "Clct_EvilEye", title = "Savlo's Ring", fault = "savlo_ring",
+        objective_path = "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C",
+        cash = 20000, difficulty = 10, fail_on_death = false, redeem = 10, fixture_xp = 10,
+        offered_boards = {0, 10}, scoped_boards = {10}, factions = {5}, reputation = {[5] = -200},
+        reputation_flags = {[5] = "Rep_Coup"}, advantage = {}, no_track_flag = true,
+        redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
+        stage_objective = "SilverfishStageSavloRingObjective",
+    },
 }
 local operations = {}
 for prefix, spec in pairs(recipes) do
@@ -70,6 +79,7 @@ for prefix, spec in pairs(recipes) do
     for _, action in ipairs({"preflight", "approach", "start", "turn-in"}) do
         operations[prefix .. "-" .. action] = {spec = spec, action = action}
     end
+    if spec.fixture_xp then operations[prefix .. "-xp-fixture"] = {spec = spec, action = "xp-fixture"} end
 end
 local keys = {
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
@@ -200,6 +210,26 @@ local function valid_transition(spec, before, after, step, cash, xp, expected_re
     return true
 end
 
+local function xp_fixture(spec, context, before, offered)
+    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
+        or not same(context.interactor, context.host) or before.step ~= "-" or before.xp ~= 0
+        or not context.save.ActiveQuests or #context.save.ActiveQuests ~= 0 or offered then
+        refuse(spec, "xp_fixture_fresh_host_required")
+    end
+    local checked, after = pcall(function()
+        context.instance:GivePlayer_XP(spec.fixture_xp)
+        context.board:Configure_Stock()
+        local newly_offered = wire.stock_row(context.board.Contracts, context.key)
+        local observed = progress(spec, context)
+        if not newly_offered or newly_offered[keys.step] ~= 1 or not recipe(spec, newly_offered)
+            or not unchanged(context) or #context.save.ActiveQuests ~= 0
+            or not valid_transition(spec, before, observed, "-", 0, spec.fixture_xp) then return end
+        return observed
+    end)
+    if not checked or not after then error("mutation_unverified_stock_" .. spec.fault .. "_xp_fixture", 0) end
+    return after
+end
+
 local function redeem(spec, context, before, objective, identity, owner)
     local library = StaticFindObject(library_path)
     if not valid(library) or library:GetFullName() ~= "FL_CodeLib01_C " .. library_path then refuse(spec, "turn_in_library_unavailable") end
@@ -259,11 +289,14 @@ function contract.command(fields, state, phase)
     local objective = recipe(spec, row)
     if row[keys.step] ~= 1 then refuse(spec, "template_step_unqualified") end
     local before = progress(spec, context)
+    local offered
     if before.step == "-" then
         context.board:Configure_Stock()
-        local offered = wire_check(spec, wire.stock_row, context.board.Contracts, context.key)
-        if not offered or offered[keys.step] ~= 1 then refuse(spec, "quest_not_offered") end
-        recipe(spec, offered)
+        offered = wire_check(spec, wire.stock_row, context.board.Contracts, context.key)
+        if action ~= "xp-fixture" then
+            if not offered or offered[keys.step] ~= 1 then refuse(spec, "quest_not_offered") end
+            recipe(spec, offered)
+        end
     end
     local identity, owner
     if before.step == 1 or before.step == 2 then
@@ -271,7 +304,9 @@ function contract.command(fields, state, phase)
         if identity then owner = same(context.receiving_save, context.save) and "host" or "guest" end
     end
     local after = before
-    if action == "start" and before.step == "-" then
+    if action == "xp-fixture" then
+        after = xp_fixture(spec, context, before, offered)
+    elseif action == "start" and before.step == "-" then
         local checked, observed = pcall(function()
             context.instance:AddQuest_ByName(context.key)
             return progress(spec, context)

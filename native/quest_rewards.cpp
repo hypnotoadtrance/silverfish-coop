@@ -45,6 +45,7 @@ namespace
     constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
     constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
     constexpr auto pocket_watch_item_path = STR("/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C");
+    constexpr auto savlo_ring_item_path = STR("/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
@@ -674,6 +675,8 @@ namespace
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
     constexpr ObjectiveQuest pocket_watch_objective{"pocket_watch", PartyWorld::scav_bar, STR("Clt_Watch"),
         pocket_watch_item_path, 1000, nullptr, 1, true};
+    constexpr ObjectiveQuest savlo_ring_objective{"savlo_ring", PartyWorld::scav_bar, STR("Clct_EvilEye"),
+        savlo_ring_item_path, 20000};
     constexpr ObjectiveQuest stone_maze_objective{"stone_maze", PartyWorld::scientist, stone_maze_id,
         stone_maze_tape_path, 7500, stone_maze_armor_path, 3};
 
@@ -1158,6 +1161,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
+    lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);
     lua.register_function("SilverfishCaptureStoneMazeReward", capture_stone_maze_reward);
     lua.register_function("SilverfishVerifyStoneMazeReward", verify_stone_maze_reward);

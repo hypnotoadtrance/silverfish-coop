@@ -2344,6 +2344,8 @@ class Host:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action in native_computer_board.PREFLIGHTS and request.get("target") is None:
                     result = await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.PREFLIGHTS[action])
+                elif action in native_computer_board.XP_FIXTURES and self.fixtures and request.get("target") is None:
+                    result = await native_computer_board.xp_fixture(self, bridge, native_computer_board.XP_FIXTURES[action])
                 elif action in native_computer_board.AUTHORED_APPROACHES and self.fixtures:
                     actor = request.get("target") or "host"
                     result = await native_computer_board.approach(self, bridge, actor, spec=native_computer_board.AUTHORED_APPROACHES[action])

@@ -5,6 +5,8 @@ local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
     ["scientist-blank-data-tape"] = scientist,
+    ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
+    ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
