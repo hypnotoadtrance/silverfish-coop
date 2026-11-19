@@ -893,11 +893,13 @@ class Bridge:
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
-                                    "native-guest-melee-aim-fixture"):
+                                    "native-guest-melee-aim-fixture", "native-guest-melee-contact-fixture"):
                     parsed = parse_guest_melee(fields)
                     if parsed:
                         key, row = parsed
-                        data[key] = row
+                        if (fields[0] != "native-guest-melee-contact-fixture"
+                                or (data.get("state"), data.get("map")) == ("hosting", row["map"])):
+                            data[key] = row
                 elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
                     with contextlib.suppress(ValueError):
                         row = native_smg_hold.parse(fields)

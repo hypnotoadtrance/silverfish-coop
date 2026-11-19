@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish.native_authored_pickup import ACTION, APPROACH, OLD_PIPE, SOURCES, SOURCES_KEY
 from tools.silverfish.native_gold import valid_guid
 from tools.silverfish import native_host_save
-from tools.silverfish.native_guest_melee import (AIM_FIXTURE, AIM_KEY, CANARY, CANARY_KEY, DAMAGE, EQUIP,
+from tools.silverfish.native_guest_melee import (AIM_FIXTURE, AIM_KEY, CANARY, CANARY_KEY, CONTACT_KEY, DAMAGE, EQUIP,
                                                 EQUIP_KEY, KIND, SWING, SWING_KEY, verified_damage, verified_miss)
 from tools.silverfish.enemy_loot_profiles import BY_MAP as CQC_ZONES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
@@ -83,8 +83,16 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
             event = next((row for row in rows if row.get("sequence") == press["sequence"]
                           and row["event"] in ("native_guest_melee_input", "native_guest_melee_input_rejected")), None)
             if event:
+                if target != "-":
+                    proof["headless_contact_input"] = event
                 assert event["event"] == "native_guest_melee_input", event
                 swing = event[SWING_KEY]
+                if target != "-":
+                    diagnostic = await wait(host_run, lambda state: (row := state.get("game", {}).get(CONTACT_KEY, {}))
+                                            and (row["map"], row["pawn"], row["guid"], row["serial"], row["target"]) == (
+                                                DEAD_BRIDGE, swing["pawn"], guid, swing["serial"], target)
+                                            and row["stage"] != "awaiting_contact", timeout=5)
+                    proof["headless_contact"] = diagnostic["game"][CONTACT_KEY]
                 assert (swing["map"], swing["guid"], swing["status"], swing["presses"], swing["releases"],
                         swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
                     DEAD_BRIDGE, guid, expected, 1, 1, 1, 1, True, True), swing

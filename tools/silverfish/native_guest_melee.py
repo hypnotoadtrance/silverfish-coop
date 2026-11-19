@@ -14,12 +14,18 @@ CANARY = "native-guest-melee-canary"
 DAMAGE = "native-guest-melee-damage-canary"
 SWING = "native-guest-melee-swing"
 AIM_FIXTURE = "native-guest-melee-aim-fixture"
+CONTACT_FIXTURE = "native-guest-melee-contact-fixture"
 KIND = "old-pipe"
 EQUIP_KEY = "native_guest_melee_equip"
 CANARY_KEY = "native_guest_melee_canary"
 SWING_KEY = "native_guest_melee_swing"
 AIM_KEY = "native_guest_melee_aim_fixture"
+CONTACT_KEY = "native_guest_melee_contact_fixture"
 TARGET = BY_MAP[DEAD_BRIDGE].actors[0]
+CONTACT_STAGES = frozenset({"awaiting_contact", "camera_identity", "camera_vector_abi", "hit_result_abi",
+                            "line_call_abi", "sphere_call_abi", "trace_parameters_abi", "line_contact", "line_too_near",
+                            "sphere_empty", "sphere_bounds", "sphere_contact", "sphere_other_actor",
+                            "target_health", "target_identity", "selected_contact"})
 
 
 def registered_target(area: str, target: str) -> bool:
@@ -46,6 +52,26 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
         return EQUIP_KEY, dict(zip(("map", "pawn", "guid"), fields[1:4]), ok=fields[4] == "1", status=fields[5])
     if fields[0] == AIM_FIXTURE and len(fields) == 5 and registered_target(fields[1], fields[4]) and valid_guid(fields[3]):
         return AIM_KEY, dict(zip(("map", "pawn", "guid", "target"), fields[1:]))
+    if fields[0] == CONTACT_FIXTURE and len(fields) == 14:
+        area, pawn, guid, serial, target, stage, component = fields[1:8]
+        if (not registered_target(area, target) or not valid_guid(guid) or stage not in CONTACT_STAGES
+                or not pawn.startswith("Player_FP_C " + area + ".") or len(pawn) > 512
+                or not component or len(component) > 512 or len(serial) > 16 or not serial.isascii() or not serial.isdecimal()):
+            return None
+        try:
+            initial, current, selected, eye_drift, facing, target_drift = map(float, fields[8:])
+        except ValueError:
+            return None
+        if (not 1 <= int(serial) < 2**53 or not 100 <= initial <= 160 or not -1 <= current <= 1_000_000
+                or not -1 <= selected <= 1_000_000 or not -1 <= eye_drift <= 1_000_000
+                or not (facing == -2 or -1 <= facing <= 1) or not -1 <= target_drift <= 1_000_000):
+            return None
+        return CONTACT_KEY, dict(map=area, pawn=pawn, guid=guid, serial=int(serial), target=target, stage=stage,
+                                 component=component, initial_health=initial, contact_health=None if current == -1 else current,
+                                 selected_health=None if selected == -1 else selected,
+                                 camera_displacement=None if eye_drift == -1 else eye_drift,
+                                 camera_direction_dot=None if facing == -2 else facing,
+                                 target_displacement=None if target_drift == -1 else target_drift)
     ordinary = fields[0] == SWING
     if (fields[0] in (CANARY, SWING) and len(fields) in ((18,) if ordinary else (12, 18))
             and fields[10] in ("0", "1") and fields[11] in ("0", "1")):

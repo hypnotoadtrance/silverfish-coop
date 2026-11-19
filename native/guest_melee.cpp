@@ -279,11 +279,19 @@ namespace
         U::UObject* first{};
     };
 
+    struct TraceDiagnostic
+    {
+        std::optional<Vector> origin, direction;
+        U::FWeakObjectPtr component;
+        std::string_view reason{"awaiting_contact"};
+    };
+
     std::optional<TraceProof> stock_trace(U::UObject* pipe, U::UObject* pawn, U::UObject* enemy,
-                                          std::string_view* refusal = nullptr)
+                                          std::string_view* refusal = nullptr, TraceDiagnostic* diagnostic = nullptr)
     {
         const auto reject = [&](std::string_view reason) -> std::optional<TraceProof> {
             if (refusal) *refusal = reason;
+            if (diagnostic) diagnostic->reason = reason;
             return {};
         };
         auto* camera = object(pawn, STR("Camera"));
@@ -294,6 +302,11 @@ namespace
         const auto direction = component_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
         if (!origin || !direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
             return reject("camera_vector_abi");
+        if (diagnostic)
+        {
+            diagnostic->origin = origin;
+            diagnostic->direction = direction;
+        }
         const SweepHit hit;
         TraceCall line, sphere;
         if (!hit.bound()) return reject("hit_result_abi");
@@ -327,6 +340,7 @@ namespace
         if (line.returned->GetPropertyValueInContainer(data))
         {
             const auto* row = line_hit->ContainerPtrToValuePtr<void>(data);
+            if (diagnostic) diagnostic->component = hit.component->GetPropertyValueInContainer(row).Get();
             const auto impact = read_vector(hit.impact, row, impact_vector_path);
             if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.contact_component(row))
                 return reject("line_contact");
@@ -350,7 +364,9 @@ namespace
         U::UObject* first{};
         for (int index = 0; index < contacted.Num(); ++index)
         {
-            auto* component = hit.contact_component(contacted.GetRawPtr(index));
+            const auto* row = contacted.GetRawPtr(index);
+            if (diagnostic) diagnostic->component = hit.component->GetPropertyValueInContainer(row).Get();
+            auto* component = hit.contact_component(row);
             if (!component) return reject("sphere_contact");
             auto* owner = component->GetOuterPrivate();
             if (!live(owner) || (enemy && owner != enemy)) return reject("sphere_other_actor");
@@ -361,6 +377,7 @@ namespace
             }
         }
         if (refusal) *refusal = "ready";
+        if (diagnostic) diagnostic->reason = "ready";
         return TraceProof{*origin, *direction, first};
     }
 
@@ -521,6 +538,16 @@ namespace
         return property && property->GetOffset_Internal() == offset ? property : nullptr;
     }
 
+    struct FixtureContact
+    {
+        U::FWeakObjectPtr target;
+        std::string name, component{"-"};
+        std::string_view stage{"awaiting_contact"};
+        Vector eye{}, direction{}, target_origin{};
+        double initial_health{-1}, contact_health{-1}, selected_health{-1};
+        double eye_drift{-1}, direction_dot{-2}, target_drift{-1};
+    };
+
     struct Swing
     {
         U::FWeakObjectPtr pawn{}, save{}, canonical{}, game{}, world{}, pipe{}, mesh{}, animation{};
@@ -534,6 +561,7 @@ namespace
         double host_health{}, guest_health{};
         bool pending{}, settled{}, passive_free{};
         SwingMode mode{SwingMode::surface_fixture};
+        std::optional<FixtureContact> fixture;
         struct Damage
         {
             U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
@@ -615,6 +643,31 @@ namespace
     {
         auto* actor = find<U::AActor>(damage_target_path);
         return qualified_enemy(actor, world) ? actor : nullptr;
+    }
+
+    U::UObject* fixture_target(U::UWorld* world, std::int64_t address)
+    {
+        if (address <= 0 || !silverfish::native_guest_melee::ordinary_world(world)) return nullptr;
+        for (const auto& row : cqc::actors)
+        {
+            if (world->GetPathName() != row.world) continue;
+            auto* actor = find<U::AActor>(row.path);
+            if (reinterpret_cast<std::uintptr_t>(actor) == static_cast<std::uintptr_t>(address) && qualified_enemy(actor, world))
+                return actor;
+        }
+        return nullptr;
+    }
+
+    bool nonlethal_health(double value) { return std::isfinite(value) && value >= 100.0 && value <= 160.0; }
+
+    std::optional<Vector> enemy_origin(U::UObject* actor)
+    {
+        return live(actor) ? component_vector(actor, STR("/Script/Engine.Actor:K2_GetActorLocation")) : std::nullopt;
+    }
+
+    double displacement(const Vector& first, const Vector& second)
+    {
+        return std::hypot(first[0] - second[0], first[1] - second[1], first[2] - second[2]);
     }
 
     void* output(U::FFrame& frame, U::FProperty* property)
@@ -748,16 +801,39 @@ namespace
         auto* world = static_cast<U::UWorld*>(swing.world.Get());
         auto* enemy = swing.damage.target.Get();
         const auto eligible = [world](U::UObject* actor) {
-            if (!qualified_enemy(actor, world)) return false;
-            const auto hp = enemy_health(actor);
-            return std::isfinite(hp) && hp >= 100.0 && hp <= 160.0;
+            return qualified_enemy(actor, world) && nonlethal_health(enemy_health(actor));
         };
         if (!passives_unchanged(swing) || (!ordinary && (!eligible(enemy) ||
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
-        const auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy);
+        TraceDiagnostic diagnostic;
+        const auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, nullptr,
+            swing.fixture ? &diagnostic : nullptr);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
-        if (!trace || (ordinary && !eligible(enemy)))
+        const bool allowed = trace && (!ordinary || eligible(enemy));
+        if (swing.fixture)
+        {
+            auto& staged = *swing.fixture;
+            auto* expected = staged.target.Get();
+            const bool registered = trace && qualified_enemy(enemy, world);
+            const auto hp = enemy_health(expected);
+            const auto selected_hp = registered ? enemy_health(enemy) : -1;
+            staged.contact_health = std::isfinite(hp) ? hp : -1;
+            staged.selected_health = std::isfinite(selected_hp) ? selected_hp : -1;
+            staged.stage = !trace ? diagnostic.reason : allowed ? "selected_contact" :
+                registered ? "target_health" : "target_identity";
+            auto* component = trace ? trace->first : diagnostic.component.Get();
+            if (live(component)) staged.component = RC::to_utf8_string(component->GetFullName());
+            if (diagnostic.origin) staged.eye_drift = displacement(staged.eye, *diagnostic.origin);
+            if (diagnostic.direction)
+            {
+                const auto& facing = *diagnostic.direction;
+                staged.direction_dot = std::clamp(staged.direction[0] * facing[0] + staged.direction[1] * facing[1] +
+                    staged.direction[2] * facing[2], -1.0, 1.0);
+            }
+            if (const auto origin = enemy_origin(expected)) staged.target_drift = displacement(staged.target_origin, *origin);
+        }
+        if (!allowed)
         {
             if (!ordinary) return refuse("stock_damage_aim_fenced");
             call.PreventOriginalFunctionCall();
@@ -945,6 +1021,7 @@ namespace
     {
         bool clear = false;
         std::string_view status = "arguments";
+        double observed_health{-1};
         const auto argc = lua.get_stack_size();
         if (fixture_enabled() && U::IsInGameThreadRaw() && (argc == 1 || (argc == 2 && lua.is_integer(2))) && lua.is_integer(1))
         {
@@ -953,21 +1030,9 @@ namespace
             auto* canonical = object(object(pawn, STR("As Game Instance FP")), STR("SaveSlot_Ref"));
             auto* pipe = object(pawn, STR("EquipedItem"));
             auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
-            U::UObject* target{};
-            if (argc == 1) target = placed_enemy(world);
-            else if (const auto requested = lua.get_integer(); requested > 0 && silverfish::native_guest_melee::ordinary_world(world))
-            {
-                for (const auto& row : cqc::actors)
-                {
-                    if (world->GetPathName() != row.world) continue;
-                    auto* actor = find<U::AActor>(row.path);
-                    if (reinterpret_cast<std::uintptr_t>(actor) == static_cast<std::uintptr_t>(requested) && qualified_enemy(actor, world))
-                    {
-                        target = actor;
-                        break;
-                    }
-                }
-            }
+            auto* target = argc == 1 ? placed_enemy(world) : fixture_target(world, lua.get_integer());
+            const auto hp = enemy_health(target);
+            if (std::isfinite(hp)) observed_health = hp;
             if (!target) status = "placed_target";
             else if (!pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world ||
                 !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical))
@@ -975,24 +1040,30 @@ namespace
             else if (!live(pipe) || pipe->GetClassPrivate() != find<U::UClass>(pipe_path) ||
                 object(pipe, STR("Player_Ref")) != pawn || object(pipe, STR("Owner")) != pawn)
                 status = "equipped_pipe";
+            else if (!nonlethal_health(observed_health)) status = "target_health";
             else clear = stock_trace(pipe, pawn, target, &status).has_value();
         }
         lua.set_bool(clear);
         lua.set_string(status);
-        return 2;
+        lua.set_number(observed_health);
+        return 3;
     }
 
     template <SwingMode mode> int start(const Lua& lua)
     {
         constexpr bool damage = mode != SwingMode::surface_fixture;
         constexpr bool ordinary = mode == SwingMode::ordinary;
-        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) ||
+        const auto argc = lua.get_stack_size();
+        const bool fixture = ordinary && argc == 4 && fixture_enabled() && lua.is_integer(4);
+        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || (argc != 3 && !fixture) ||
+            !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
         if (swing.pending || (!ordinary && swing.serial && swing.pipe.Get()))
             return proof(lua, false, "native_guest_melee_fixture_already_bound");
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         const auto guid = lua.get_string();
+        const auto target_address = fixture ? lua.get_integer() : 0;
         Swing candidate;
         candidate.mode = mode;
         if (pawn_address <= 0 || save_address <= 0 || !guid_from(guid, candidate.guid))
@@ -1072,7 +1143,7 @@ namespace
             auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
             auto* contact_graph = local_function(pipe, master, STR("ExecuteUbergraph_MeleeWep_Master_BP"), 1);
             const auto hp = enemy_health(enemy);
-            if ((!ordinary && (!enemy || !std::isfinite(hp) || hp < 100.0 || hp > 160.0 || !deal || !stock_trace(pipe, pawn, enemy))) ||
+            if ((!ordinary && (!enemy || !nonlethal_health(hp) || !deal || !stock_trace(pipe, pawn, enemy))) ||
                 (enemy && !deal) || !contact_graph || !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
                 library->GetClassPrivate() != find<U::UClass>(effects_class) || !sweep ||
                 sweep->GetOuterPrivate() != library->GetClassPrivate() || sweep->GetNumParms() != 7 ||
@@ -1085,6 +1156,21 @@ namespace
             if (enemy) candidate.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
             candidate.damage.library = library;
             candidate.damage.graph = contact_graph;
+        }
+        if (fixture)
+        {
+            auto* target = fixture_target(world, target_address);
+            const auto hp = enemy_health(target);
+            const auto origin = enemy_origin(target);
+            const auto lane = nonlethal_health(hp) ? stock_trace(pipe, pawn, target) : std::nullopt;
+            if (!lane || !origin) return proof(lua, false, "native_guest_melee_stock_fixture_contact_baseline_unqualified");
+            auto& staged = candidate.fixture.emplace();
+            staged.target = target;
+            staged.name = RC::to_utf8_string(target->GetFullName());
+            staged.eye = lane->origin;
+            staged.direction = lane->direction;
+            staged.target_origin = *origin;
+            staged.initial_health = hp;
         }
         std::erase_if(fenced_pipes, [](const PipeFence& fence) { return !fence.pipe.Get() || !fence.contact.Get(); });
         const bool new_pipe = std::ranges::none_of(fenced_pipes, [&](const PipeFence& fence) { return fence.pipe.Get() == pipe; });
@@ -1139,6 +1225,23 @@ namespace
         else tick();
         return report(lua);
     }
+
+    int observe_fixture(const Lua& lua)
+    {
+        if (!fixture_enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            !swing.fixture || swing.serial != lua.get_integer()) return 0;
+        const auto& staged = *swing.fixture;
+        lua.set_string(staged.name);
+        lua.set_string(staged.stage);
+        lua.set_string(staged.component);
+        lua.set_number(staged.initial_health);
+        lua.set_number(staged.contact_health);
+        lua.set_number(staged.selected_health);
+        lua.set_number(staged.eye_drift);
+        lua.set_number(staged.direction_dot);
+        lua.set_number(staged.target_drift);
+        return 9;
+    }
 }
 
 bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
@@ -1157,6 +1260,7 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<SwingMode::surface_fixture>);
         lua.register_function("SilverfishStartNativeGuestMeleeDamageCanary", start<SwingMode::damage_fixture>);
         lua.register_function("SilverfishCheckNativeGuestMeleeDamagePose", damage_pose);
+        lua.register_function("SilverfishReadNativeGuestMeleeContactFixture", observe_fixture);
     }
     lua.register_function("SilverfishReadNativeGuestMeleeCanary", observe<false>);
     lua.register_function("SilverfishAbortNativeGuestMeleeCanary", observe<true>);

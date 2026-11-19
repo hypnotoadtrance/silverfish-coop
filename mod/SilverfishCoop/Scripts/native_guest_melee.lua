@@ -8,6 +8,7 @@ local npc_name = cqc[dead_bridge].names[1]
 local damage_start = "native-guest-melee-damage-canary-start"
 local swing_start = "native-guest-melee-swing-start"
 local fixture_aim = "native-guest-melee-aim-fixture"
+local fixture_contact = "native-guest-melee-contact-fixture"
 local actions = {
     ["native-guest-melee-canary-equip"] = true,
     ["native-guest-melee-canary-start"] = true,
@@ -163,7 +164,7 @@ local function damage_pose(state, pawn, name)
     local bearing = math.atan(forward.Y, forward.X) + math.pi
     local moved = false
     local floor_hits, floors, teleports, eyes, probes = 0, 0, 0, 0, 0
-    local refusals = {}
+    local refusals, observed_health = {}, -1
     local ran, clear = pcall(function()
         for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 180}) do
             local heading = bearing + math.rad(offset)
@@ -198,15 +199,18 @@ local function damage_pose(state, pawn, name)
                                     controller:SetControlRotation(aim)
                                     camera:K2_SetWorldRotation(aim, false, {}, true)
                                     probes = probes + 1
-                                    local ready, reason = check(pawn:GetAddress(), enemy:GetAddress())
+                                    local ready, reason, health = check(pawn:GetAddress(), enemy:GetAddress())
+                                    if finite(health) then observed_health = health end
                                     if ready == true then
                                         pawn:ForceNetUpdate()
+                                        original.target = enemy:GetAddress()
                                         return true
                                     end
                                     if type(reason) ~= "string" or #reason > 32 or not reason:match("^[a-z_]+$") then
                                         reason = "pose_probe_abi"
                                     end
                                     refusals[reason] = (refusals[reason] or 0) + 1
+                                    if reason == "target_health" then return false end
                                 end
                             end
                         end
@@ -222,8 +226,8 @@ local function damage_pose(state, pawn, name)
     local diagnostic = {}
     for reason, count in pairs(refusals) do diagnostic[#diagnostic + 1] = reason .. "=" .. count end
     table.sort(diagnostic)
-    error(("native_guest_melee_stock_damage_sight_unavailable:hits=%d:floor=%d:teleport=%d:eyes=%d:probes=%d:%s")
-        :format(floor_hits, floors, teleports, eyes, probes, table.concat(diagnostic, ",")), 0)
+    error(("native_guest_melee_stock_damage_sight_unavailable:hits=%d:floor=%d:teleport=%d:eyes=%d:probes=%d:health=%.3f:%s")
+        :format(floor_hits, floors, teleports, eyes, probes, observed_health, table.concat(diagnostic, ",")), 0)
 end
 
 local function read(scope, abort)
@@ -288,7 +292,10 @@ function melee.command(fields, state, phase, standing)
         local pose = target and damage_pose(state, pawn, target)
         local invoke = ordinary and SilverfishStartNativeGuestOldPipeSwing
             or damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
-        local called, result = pcall(function() return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid)) end)
+        local called, result = pcall(function()
+            if fixture_bound then return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid, pose.target)) end
+            return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid))
+        end)
         if not called then
             restore_pose(pose)
             error("mutation_unverified_guest_melee_start", 0)
@@ -307,7 +314,7 @@ function melee.command(fields, state, phase, standing)
             error(proof, 0)
         end
         latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage,
-            ordinary = ordinary, pose = pose, proof = proof}
+            ordinary = ordinary, pose = pose, proof = proof, fixture_target = fixture_bound and target}
         if latest.proof.status ~= "pending" and latest.pose then
             restore_pose(latest.pose)
             latest.pose = nil
@@ -348,6 +355,12 @@ function melee.rows(state, phase, status_row, standing)
         fields[16], fields[17], fields[18] = proof.before, proof.after, proof.total
     end
     rows[#rows + 1] = status_row(table.unpack(fields))
+    if latest.fixture_target and type(SilverfishReadNativeGuestMeleeContactFixture) == "function" then
+        local ok, detail = pcall(function() return table.pack(SilverfishReadNativeGuestMeleeContactFixture(proof.serial)) end)
+        if ok and detail.n == 9 and detail[1] == latest.fixture_target then
+            rows[#rows + 1] = status_row(fixture_contact, state.map, latest.pawn, latest.guid, proof.serial, table.unpack(detail, 1, 9))
+        end
+    end
     return rows
 end
 

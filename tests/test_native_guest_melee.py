@@ -93,6 +93,21 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(melee.parse([*fields[:index], wrong, *fields[index+1:]]))
         self.assertIsNone(melee.parse(fields[:12]))
 
+    def test_staged_contact_trace_records_movement_and_rejects_unregistered_target(self):
+        target = melee.BY_MAP[DEAD_BRIDGE].actors[1]
+        pawn = f"Player_FP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Player_FP_C_42"
+        fields = [melee.CONTACT_FIXTURE, DEAD_BRIDGE, pawn, GUID, "12", target, "sphere_empty", "-",
+                  "160", "145", "-1", "2.5", "0.3", "161"]
+        key, proof = melee.parse(fields)
+        self.assertEqual(key, melee.CONTACT_KEY)
+        self.assertEqual((proof["target"], proof["serial"], proof["stage"]), (target, 12, "sphere_empty"))
+        self.assertEqual((proof["initial_health"], proof["contact_health"], proof["selected_health"]), (160, 145, None))
+        self.assertEqual((proof["camera_displacement"], proof["camera_direction_dot"], proof["target_displacement"]),
+                         (2.5, 0.3, 161))
+        for index, wrong in ((1, REFINERY), (2, "other pawn"), (4, "0"), (5, "foreign target"), (6, "fake_stage"),
+                             (8, "99"), (9, "x"), (10, "nan"), (12, "1.5"), (13, "-3")):
+            self.assertIsNone(melee.parse([*fields[:index], wrong, *fields[index+1:]]))
+
     async def test_damage_action_is_fixed_to_authentic_crossroads_claim_in_dead_bridge(self):
         host = self.host()
         key, result = melee.parse(self.damage_fields())
