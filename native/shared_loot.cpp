@@ -9,8 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -572,6 +574,7 @@ namespace
         const Schema& schema;
         std::array<Unreal::FWeakObjectPtr, 2> items{};
         std::array<bool, 2> produced{};
+        std::array<std::string, 2> item_classes{};
         std::array<int, 2> spawns{};
         std::array<int, 2> rolls{};
         int accounts{};
@@ -733,6 +736,7 @@ namespace
         {
             scope.produced[slot] = true;
             scope.items[slot] = actor;
+            scope.item_classes[slot] = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
         }
     }
 
@@ -760,6 +764,27 @@ namespace
         lua.set_integer(trait_calls);
         lua.set_bool(invoked);
         return 7;
+    }
+
+    std::string materialization_failure(const OpenScope& scope, const std::array<Unreal::UObject*, 2>& actors)
+    {
+        constexpr auto prefix = "stock_loot_open_spawned_item_unverified:";
+        for (std::size_t i = 0; i < actors.size(); ++i)
+        {
+            auto* actor = actors[i];
+            if (!scope.produced[i] || authority(actor, scope.context.world)) continue;
+            auto* known = actor ? actor : scope.items[i].Get(true);
+            const char* cause = "authority_changed";
+            if (!known) cause = "stale_weak_object";
+            else if (!actor) cause = "pending_kill";
+            else if (!live(actor)) cause = "destroyed_or_unreachable";
+            else if (!read_bool(actor, STR("bActorIsBeingDestroyed"), false)) cause = "actor_being_destroyed";
+            else if (static_cast<Unreal::AActor*>(actor)->GetWorld() != scope.context.world) cause = "world_changed";
+            return std::string(prefix) + (i == 0 ? "first:" : "second:") + cause + ":" + scope.item_classes[i];
+        }
+        if (actors[0] && actors[0] == actors[1])
+            return std::string(prefix) + "duplicate_child_output:" + scope.item_classes[0];
+        return {};
     }
 
     template <std::size_t Count>
@@ -816,6 +841,7 @@ namespace
         const bool looted = authority(context.crate, context.world) && read_bool(context.crate, STR("Looted"), true);
         auto* first = scope.items[0].Get();
         auto* second = scope.items[1].Get();
+        std::string item_problem;
         if (scope.problem.empty())
         {
             if (!restored) scope.problem = "stock_loot_fixture_original_stream_unverified";
@@ -828,9 +854,8 @@ namespace
                      object_field(context.instance, STR("SaveSlot_Ref")) != context.stock ||
                      object_field(context.pawn, STR("Save")) != context.save)
                 scope.problem = "stock_loot_open_save_owner_changed";
-            else if ((scope.produced[0] && !authority(first, context.world)) ||
-                     (scope.produced[1] && !authority(second, context.world)) || (first && first == second))
-                scope.problem = "stock_loot_open_spawned_item_unverified";
+            else if (item_problem = materialization_failure(scope, {first, second}); !item_problem.empty())
+                scope.problem = item_problem;
             else if (force_nonempty)
             {
                 if (scope.table_draws != std::array{1, 1} || scope.karma_draws != std::array{1, 1} ||
