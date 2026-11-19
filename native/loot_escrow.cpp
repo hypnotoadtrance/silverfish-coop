@@ -1,6 +1,7 @@
 #include "loot_escrow.hpp"
 #include "enemy_loot.hpp"
 #include "shared_loot.hpp"
+#include "stock_cash.hpp"
 #include "stock_wallet.hpp"
 
 #include <algorithm>
@@ -469,35 +470,6 @@ namespace
         return qualified;
     }
 
-    bool is_stock_cash(Unreal::UClass* type)
-    {
-        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C"));
-        return type && base && type->IsChildOf(base);
-    }
-
-    int stock_cash_value(const Inventory& inventory, const void* item, Unreal::UClass* type)
-    {
-        struct CashProfile { const Unreal::TCHAR* path; int minimum; int maximum; };
-        constexpr std::array profiles{
-            CashProfile{STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"), 6, 10},
-            CashProfile{STR("/Game/Classes/Items/Item_Money_SmallStack.Item_Money_SmallStack_C"), 30, 50},
-            CashProfile{STR("/Game/Classes/Items/Item_Money_LargeStack.Item_Money_LargeStack_C"), 100, 200},
-            CashProfile{STR("/Game/Classes/Items/Item_Money_MassivePile.Item_Money_MassivePile_C"), 3000, 5000},
-        };
-        const auto path = type->GetPathName();
-        const auto profile = std::ranges::find_if(profiles, [&](const auto& entry) { return path == entry.path; });
-        if (profile == profiles.end()) return 0;
-        auto* defaults = type->GetClassDefaultObject().Get();
-        auto* minimum = field<Unreal::FIntProperty>(defaults, STR("Value_Min"));
-        auto* maximum = field<Unreal::FIntProperty>(defaults, STR("Value_Max"));
-        if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
-            defaults->GetClassPrivate() != type || !minimum || !maximum ||
-            minimum->GetPropertyValueInContainer(defaults) != profile->minimum ||
-            maximum->GetPropertyValueInContainer(defaults) != profile->maximum) return 0;
-        const auto amount = inventory.value->GetPropertyValueInContainer(item);
-        return amount >= profile->minimum && amount <= profile->maximum ? amount : 0;
-    }
-
     Unreal::UObject* canonical_game_instance(const Owner& owner)
     {
         auto* instance_link = field<Unreal::FObjectProperty>(owner.world, STR("OwningGameInstance"));
@@ -547,9 +519,10 @@ namespace
         }
 
         auto* item_type = Unreal::Cast<Unreal::UClass>(inventory.klass(item));
-        const bool cash = !enemy && is_stock_cash(item_type);
-        const int amount = cash ? stock_cash_value(inventory, item, item_type) : 0;
-        if (cash && !amount) return result(lua, false, "native_loot_cash_payload_unqualified");
+        const bool cash = !enemy && silverfish::stock_cash::is_family(item_type);
+        const int amount = cash ? inventory.value->GetPropertyValueInContainer(item) : 0;
+        if (cash && !silverfish::stock_cash::qualified_value(item_type, amount))
+            return result(lua, false, "native_loot_cash_payload_unqualified");
 
         Match recipient;
         if (!inspect_owner(inventory, owner.save, guid, recipient) || recipient.count > 1 ||
