@@ -103,6 +103,8 @@ At Borough's board, use Interact to view your selected contract and press it aga
 
 At the Observatory Castaway, guests can use Interact to open the stock story dialogue. Use Up and Down to select a response, then press Interact to confirm it. Each guest has a separate conversation.
 
+At the Stone Maze station, face the station and press Interact to review the exact blank tape offered from your backpack. Press Interact again to exchange it. Back at the Scientist's board, select Stone Maze Readings and use the same review and confirmation sequence.
+
 ## Machine-readable controls
 
 Run the commands below on the PC with the targeted launcher. Use `--campaign` for the host and `--profile` for the guest.

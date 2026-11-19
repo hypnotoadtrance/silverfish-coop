@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
+#include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -28,7 +30,6 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
-    constexpr auto armor_path = STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C");
     constexpr auto armor_base = STR("/Game/Classes/Armor_Items/Item_ArmorMaster_BP.Item_ArmorMaster_BP_C");
     constexpr auto armor_type = STR("/Game/Classes/Libraries/Structs/Armor_Struct.Armor_Struct");
     constexpr auto helmet_type = STR("/Game/Classes/Libraries/Structs/Helmet_Struct.Helmet_Struct");
@@ -39,27 +40,40 @@ namespace
     constexpr auto armor_weight = STR("Weight_36_1CC3CC9C4DAD1ADFEBC9D5B45765C95D");
     constexpr auto carry_bonus = STR("CaryBonus_43_3DF7AA974A13A7ADF22D3BA63B29FEF2");
     constexpr std::array guid_words{STR("A"), STR("B"), STR("C"), STR("D")};
-    constexpr double bomber_slash = 0.2;
-    constexpr double bomber_acid = 0.2;
     struct ResistanceField
     {
         const U::TCHAR* name;
         std::string_view refusal;
-        double expected;
     };
     constexpr std::array damage_fields{
-        ResistanceField{STR("Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"), "native_guest_armor_kinetic_unqualified", 0.0},
-        ResistanceField{STR("ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4"), "native_guest_armor_penetration_unqualified", 0.0},
-        ResistanceField{STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772"), "native_guest_armor_blunt_unqualified", 0.0},
-        ResistanceField{STR("Stabbing_8_64710D2D4AB4232B4DD604AC3CD0219C"), "native_guest_armor_stabbing_unqualified", 0.1},
-        ResistanceField{STR("Slashing_10_58FFFE444BD41CE5D15EAA80BC0D9DF1"), "native_guest_armor_slash_unqualified", bomber_slash},
-        ResistanceField{STR("Fire_12_2B415A724C533C075B6BB390B76BF247"), "native_guest_armor_fire_unqualified", 0.1},
-        ResistanceField{STR("Poison_14_68E96E324AD705A7F95362BBC781E220"), "native_guest_armor_poison_unqualified", 0.0},
-        ResistanceField{STR("Electric_16_8F945E8C491C5825EC19E3837E266D48"), "native_guest_armor_electric_unqualified", 0.1},
-        ResistanceField{STR("Radiation_18_E8FC71B2490E3C6050B6E999C65A13CB"), "native_guest_armor_radiation_unqualified", 0.0},
-        ResistanceField{STR("Acid_20_F4C551B34F620FDF72D2F2A64DE15F3E"), "native_guest_armor_acid_unqualified", bomber_acid},
-        ResistanceField{STR("OverPressure_22_3355FA8E45511902B20DD69D844D5020"), "native_guest_armor_overpressure_unqualified", 0.0},
+        ResistanceField{STR("Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"), "native_guest_armor_kinetic_unqualified"},
+        ResistanceField{STR("ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4"), "native_guest_armor_penetration_unqualified"},
+        ResistanceField{STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772"), "native_guest_armor_blunt_unqualified"},
+        ResistanceField{STR("Stabbing_8_64710D2D4AB4232B4DD604AC3CD0219C"), "native_guest_armor_stabbing_unqualified"},
+        ResistanceField{STR("Slashing_10_58FFFE444BD41CE5D15EAA80BC0D9DF1"), "native_guest_armor_slash_unqualified"},
+        ResistanceField{STR("Fire_12_2B415A724C533C075B6BB390B76BF247"), "native_guest_armor_fire_unqualified"},
+        ResistanceField{STR("Poison_14_68E96E324AD705A7F95362BBC781E220"), "native_guest_armor_poison_unqualified"},
+        ResistanceField{STR("Electric_16_8F945E8C491C5825EC19E3837E266D48"), "native_guest_armor_electric_unqualified"},
+        ResistanceField{STR("Radiation_18_E8FC71B2490E3C6050B6E999C65A13CB"), "native_guest_armor_radiation_unqualified"},
+        ResistanceField{STR("Acid_20_F4C551B34F620FDF72D2F2A64DE15F3E"), "native_guest_armor_acid_unqualified"},
+        ResistanceField{STR("OverPressure_22_3355FA8E45511902B20DD69D844D5020"), "native_guest_armor_overpressure_unqualified"},
     };
+    struct ArmorProfile
+    {
+        const U::TCHAR* path;
+        std::string_view name;
+        double weight, noise, visibility, bonus;
+        int value;
+        std::array<double, damage_fields.size()> damage;
+    };
+    constexpr std::array armor_profiles{
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"), "bomber",
+            0.5, 0.9, 0.9, 5.0, 325, {0.0, 0.0, 0.0, 0.1, 0.2, 0.1, 0.0, 0.1, 0.0, 0.2, 0.0}},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"), "hazop",
+            2.0, 1.2, 0.9, 12.0, 1400, {0.25, 0.0, 0.1, 0.3, 0.2, 0.2, 0.1, 0.15, 0.25, 0.2, 0.1}},
+    };
+    constexpr auto& bomber = armor_profiles[0];
+    constexpr std::size_t slashing = 4, acid = 9;
     constexpr int max_items = 4096;
     constexpr int max_clients = 4;
 
@@ -287,21 +301,68 @@ namespace
         }
     };
 
-    U::UObject* bomber_defaults()
+    const ArmorProfile* profile_for(U::UObject* klass)
     {
-        auto* klass = find<U::UClass>(armor_path);
+        if (!klass) return nullptr;
+        for (const auto& profile : armor_profiles)
+            if (klass == find<U::UClass>(profile.path)) return &profile;
+        return nullptr;
+    }
+
+    U::UObject* armor_defaults(const ArmorProfile& profile)
+    {
+        auto* klass = find<U::UClass>(profile.path);
         auto* base = find<U::UClass>(armor_base);
         auto* cdo = klass ? klass->GetClassDefaultObject().Get() : nullptr;
         auto* type = field<U::FByteProperty>(cdo, STR("ItemType"));
+        auto* value = field<U::FIntProperty>(cdo, STR("Value"));
         auto* disguise = field<U::FByteProperty>(cdo, STR("DisguiseFaction"));
         auto* effects = field<U::FArrayProperty>(cdo, STR("PassiveEffects"));
         if (!base || !cdo || cdo->GetClassPrivate() != klass || !klass->IsChildOf(base) ||
             !cdo->HasAnyFlags(U::RF_ClassDefaultObject) || !type || type->GetPropertyValueInContainer(cdo) != 7 ||
-            !disguise || disguise->GetPropertyValueInContainer(cdo) != 0 || !effects ||
+            !value || value->GetPropertyValueInContainer(cdo) != profile.value || !disguise ||
+            disguise->GetPropertyValueInContainer(cdo) != 0 || !effects ||
             !field<U::FClassProperty>(cdo, STR("PowerArmor")) || object(cdo, STR("PowerArmor")) ||
             !boolean(cdo, STR("Stacks"), false)) return nullptr;
         U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
         return passives.Num() == 0 ? cdo : nullptr;
+    }
+
+    bool isolated_rows(const Scope& scope, const Inventory& inventory, const Guid& selected, const Guid& replaced = {})
+    {
+        auto* guest_data = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
+        U::FScriptArrayHelper guest_bag(inventory.backpack, guest_data);
+        auto* guest_buffer = guest_bag.Num() ? guest_bag.GetRawPtr() : nullptr;
+        const auto isolated = [&](U::UObject* save, bool guest) {
+            for (auto* property : {inventory.backpack, inventory.equipment})
+            {
+                if (guest && property == inventory.backpack) continue;
+                auto* data = property->ContainerPtrToValuePtr<void>(save);
+                U::FScriptArrayHelper rows(property, data);
+                if (rows.Num() < 0 || rows.Num() > max_items || data == guest_data ||
+                    (guest_buffer && rows.Num() && rows.GetRawPtr() == guest_buffer)) return false;
+            }
+            if (guest) return true;
+            int index{};
+            bool worn{};
+            return inventory.locate(save, selected, index, worn) && index < 0 && !worn &&
+                (replaced == Guid{} || (inventory.locate(save, replaced, index, worn) && index < 0 && !worn));
+        };
+        if (!isolated(scope.guest, true) || !isolated(scope.stock, false)) return false;
+        auto* driver = object(scope.world, STR("NetDriver"));
+        auto* connections = field<U::FArrayProperty>(driver, STR("ClientConnections"));
+        auto* entry = connections ? U::CastField<U::FObjectProperty>(connections->GetInner()) : nullptr;
+        if (!entry) return false;
+        U::FScriptArrayHelper clients(connections, connections->ContainerPtrToValuePtr<void>(driver));
+        if (clients.Num() < 1 || clients.Num() > max_clients) return false;
+        for (int i = 0; i < clients.Num(); ++i)
+        {
+            auto* connection = entry->GetObjectPropertyValue(clients.GetRawPtr(i));
+            auto* saved = object(object(object(connection, STR("PlayerController")), STR("Pawn")), STR("Save"));
+            if (connection == scope.connection || !saved || saved == scope.stock) continue;
+            if (saved == scope.guest || !exact(saved, scope.stock->GetClassPrivate()) || !isolated(saved, false)) return false;
+        }
+        return true;
     }
 
     struct Projection
@@ -340,16 +401,16 @@ namespace
             return {};
         }
 
-        std::string_view prepare(U::UObject* pawn, U::UObject* defaults, void* next_body, void* next_resist,
+        std::string_view prepare(U::UObject* pawn, U::UObject* defaults, const ArmorProfile& profile, void* next_body, void* next_resist,
                                  double& helmet_weight, double& threshold) const
         {
             struct Scalar { const U::TCHAR* source; const U::TCHAR* dest; std::string_view refusal; double value; };
-            constexpr std::array scalars{
-                Scalar{STR("Weight"), armor_weight, "native_guest_armor_body_weight_unqualified", 0.5},
+            const std::array scalars{
+                Scalar{STR("Weight"), armor_weight, "native_guest_armor_body_weight_unqualified", profile.weight},
                 Scalar{STR("SpeedMod"), STR("SpeedMod_5_3D8A954E435B2C83978893A2C5C5D69E"), "native_guest_armor_speed_unqualified", 1.0},
-                Scalar{STR("NoiseMod"), STR("Move_Noise_11_E2EDC7A04D5942755A28FE9479BE0793"), "native_guest_armor_noise_unqualified", 0.9},
-                Scalar{STR("VisibilityMod"), STR("VisibilityMod_13_E33F6D50463CE2650C61E29B5C66545D"), "native_guest_armor_visibility_unqualified", 0.9},
-                Scalar{STR("CarryWeight_Bonus"), carry_bonus, "native_guest_armor_carry_bonus_unqualified", 5.0},
+                Scalar{STR("NoiseMod"), STR("Move_Noise_11_E2EDC7A04D5942755A28FE9479BE0793"), "native_guest_armor_noise_unqualified", profile.noise},
+                Scalar{STR("VisibilityMod"), STR("VisibilityMod_13_E33F6D50463CE2650C61E29B5C66545D"), "native_guest_armor_visibility_unqualified", profile.visibility},
+                Scalar{STR("CarryWeight_Bonus"), carry_bonus, "native_guest_armor_carry_bonus_unqualified", profile.bonus},
             };
             for (const auto& scalar : scalars)
             {
@@ -373,16 +434,17 @@ namespace
             helmet_weight = helm_weight->GetPropertyValueInContainer(worn_helmet);
             if (helmet_weight != 0.0) return "native_guest_armor_helmet_weight_unqualified";
             body_resist->CopyCompleteValue(body_resist->ContainerPtrToValuePtr<void>(next_body), default_damage);
-            for (const auto& damage : damage_fields)
+            for (std::size_t index = 0; index < damage_fields.size(); ++index)
             {
+                const auto& damage = damage_fields[index];
                 auto* property = field<U::FDoubleProperty>(resist_type, damage.name);
-                if (!property || property->GetPropertyValueInContainer(default_damage) != damage.expected)
+                if (!property || property->GetPropertyValueInContainer(default_damage) != profile.damage[index])
                     return damage.refusal;
                 if (property->GetPropertyValueInContainer(helmet_damage) != 0.0)
                     return "native_guest_armor_helmet_damage_unqualified";
-                property->SetPropertyValueInContainer(next_resist, damage.expected);
+                property->SetPropertyValueInContainer(next_resist, profile.damage[index]);
             }
-            threshold = 25.0; // Stock ApplyArmorStats computes 20 plus the wearer's body carry bonus.
+            threshold = 20.0 + profile.bonus;
             return {};
         }
     };
@@ -391,6 +453,9 @@ namespace
     {
         int before{-1}, after{-1};
         double carry_before{-1.0}, carry_after{-1.0}, minimum{-1.0}, slash{-1.0}, acid{-1.0};
+        const ArmorProfile* selected{};
+        const ArmorProfile* previous{};
+        Guid replaced{};
     };
 
     int report(const Lua& lua, bool ok, std::string_view status, const Report& result = {})
@@ -404,7 +469,11 @@ namespace
         lua.set_number(result.minimum);
         lua.set_number(result.slash);
         lua.set_number(result.acid);
-        return 9;
+        lua.set_string(result.selected ? result.selected->name : "-");
+        lua.set_string(result.previous ? result.previous->name : "-");
+        lua.set_string(result.replaced == Guid{} ? std::string{"-"} : std::format("{:08X}{:08X}{:08X}{:08X}",
+            result.replaced[0], result.replaced[1], result.replaced[2], result.replaced[3]));
+        return 12;
     }
 
     int seed(const Lua& lua, const Scope& scope, const Inventory& inventory, U::UObject* defaults, const Guid& id)
@@ -412,7 +481,7 @@ namespace
         if (!fixtures()) return report(lua, false, "native_guest_armor_fixtures_disabled");
         int index{};
         bool worn{};
-        if (!inventory.locate(scope.guest, id, index, worn) || index >= 0 || worn)
+        if (!inventory.locate(scope.guest, id, index, worn) || index >= 0 || worn || !isolated_rows(scope, inventory, id))
             return report(lua, false, "native_guest_armor_guid_conflict");
         auto* library = find<U::UObject>(library_path);
         auto* function = find<U::UFunction>(factory_path);
@@ -434,10 +503,11 @@ namespace
         library->ProcessEvent(function, args);
         auto* row = item->ContainerPtrToValuePtr<void>(args);
         const bool generated = scope.current() && inventory.item_class(row) == defaults->GetClassPrivate() &&
-            inventory.item_guid(row) != Guid{} && inventory.weight->GetPropertyValueInContainer(row) == 0.5;
+            inventory.item_guid(row) != Guid{} && inventory.weight->GetPropertyValueInContainer(row) == bomber.weight;
         auto* destination = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
         U::FScriptArrayHelper bag(inventory.backpack, destination);
         Report proof{bag.Num(), bag.Num()};
+        proof.selected = &bomber;
         if (!generated || bag.Num() >= max_items)
         {
             item->DestroyValue_InContainer(args);
@@ -467,13 +537,11 @@ namespace
         return report(lua, true, "seeded", proof);
     }
 
-    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, U::UObject* defaults,
-              const Guid& id, bool restore_only)
+    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id, bool restore_only)
     {
-        int index{}, host_index{};
-        bool worn{}, host_worn{};
-        if (!inventory.locate(scope.guest, id, index, worn) || !inventory.locate(scope.stock, id, host_index, host_worn) ||
-            host_index >= 0 || host_worn || (!worn && (restore_only || index < 0)))
+        int index{};
+        bool worn{};
+        if (!inventory.locate(scope.guest, id, index, worn) || (!worn && (restore_only || index < 0)))
             return report(lua, false, "native_guest_armor_exact_owned_row_required");
         auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
         auto* armor = inventory.armor->ContainerPtrToValuePtr<void>(scope.guest);
@@ -482,15 +550,31 @@ namespace
         if (!save_defaults || save_defaults->GetClassPrivate() != scope.guest->GetClassPrivate() ||
             !save_defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
             inventory.item_class(helmet) || inventory.item_guid(helmet) != Guid{} ||
-            !inventory.helmet->Identical(helmet, inventory.helmet->ContainerPtrToValuePtr<void>(save_defaults)) ||
-            (!worn && (inventory.item_class(armor) || inventory.item_guid(armor) != Guid{} ||
-                !inventory.armor->Identical(armor, inventory.armor->ContainerPtrToValuePtr<void>(save_defaults)))))
+            !inventory.helmet->Identical(helmet, inventory.helmet->ContainerPtrToValuePtr<void>(save_defaults)))
             return report(lua, false, "native_guest_armor_slot_occupied");
         U::FScriptArrayHelper current(inventory.backpack, bag);
         const auto* approved = worn ? armor : current.GetRawPtr(index);
-        if (inventory.item_class(approved) != defaults->GetClassPrivate() ||
-            inventory.weight->GetPropertyValueInContainer(approved) != 0.5)
+        const auto* selected = profile_for(inventory.item_class(approved));
+        if (!selected || inventory.weight->GetPropertyValueInContainer(approved) != selected->weight)
             return report(lua, false, "native_guest_armor_exact_class_required");
+        auto* defaults = armor_defaults(*selected);
+        if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
+        const ArmorProfile* previous{};
+        Guid replaced{};
+        const bool empty = !inventory.item_class(armor) && inventory.item_guid(armor) == Guid{} &&
+            inventory.armor->Identical(armor, inventory.armor->ContainerPtrToValuePtr<void>(save_defaults));
+        if (!worn && !empty)
+        {
+            previous = profile_for(inventory.item_class(armor));
+            replaced = inventory.item_guid(armor);
+            int prior_index{};
+            bool prior_worn{};
+            if (!previous || previous == selected || replaced == Guid{} || !armor_defaults(*previous) ||
+                inventory.weight->GetPropertyValueInContainer(armor) != previous->weight ||
+                !inventory.locate(scope.guest, replaced, prior_index, prior_worn) || !prior_worn || prior_index >= 0)
+                return report(lua, false, "native_guest_armor_slot_occupied");
+        }
+        if (!isolated_rows(scope, inventory, id, replaced)) return report(lua, false, "native_guest_armor_exact_owned_row_required");
         Projection projection;
         if (const auto error = projection.bind(scope.pawn, defaults); !error.empty())
             return report(lua, false, error);
@@ -509,23 +593,35 @@ namespace
             return report(lua, false, "native_guest_armor_copy_unavailable");
 
         Report proof{current.Num(), current.Num()};
+        proof.selected = selected;
+        proof.previous = previous;
+        proof.replaced = replaced;
         double helmet_weight{};
         U::FScriptArrayHelper prepared(inventory.backpack, next_bag.value);
-        if (!worn) prepared.RemoveValues(index, 1);
+        if (previous) inventory.item->CopyCompleteValue(prepared.GetRawPtr(index), armor);
+        else if (!worn) prepared.RemoveValues(index, 1);
         proof.after = prepared.Num();
+        if (previous && (proof.after != proof.before || inventory.item_guid(prepared.GetRawPtr(index)) != replaced ||
+            !inventory.item->Identical(prepared.GetRawPtr(index), original_armor.value)))
+            return report(lua, false, "native_guest_armor_prepared_swap_unqualified", proof);
         if (const auto error = projection.prepare(
-                scope.pawn, defaults, next_body.value, next_resist.value, helmet_weight, proof.minimum); !error.empty())
+                scope.pawn, defaults, *selected, next_body.value, next_resist.value, helmet_weight, proof.minimum); !error.empty())
             return report(lua, false, error, proof);
-        if (!inventory.carry(scope.guest, bag, worn ? 0.5 : 0.0, helmet_weight, proof.carry_before) ||
-            !inventory.carry(scope.guest, next_bag.value, 0.5, helmet_weight, proof.carry_after))
+        const auto prior_weight = worn ? selected->weight : previous ? previous->weight : 0.0;
+        if (!inventory.carry(scope.guest, bag, prior_weight, helmet_weight, proof.carry_before) ||
+            !inventory.carry(scope.guest, next_bag.value, selected->weight, helmet_weight, proof.carry_after))
             return report(lua, false, "native_guest_armor_carry_weights_unqualified", proof);
         if (!scope.current()) return report(lua, false, "native_guest_armor_exact_owner_required", proof);
-        proof.slash = bomber_slash;
-        proof.acid = bomber_acid;
+        proof.slash = selected->damage[slashing];
+        proof.acid = selected->damage[acid];
         const auto old_carry = projection.carry->GetPropertyValueInContainer(scope.pawn);
         const auto old_minimum = projection.minimum->GetPropertyValueInContainer(scope.pawn);
         const auto matches = [&] {
-            return next_bag.matches(bag) && next_armor.matches(armor) && next_body.matches(body) && next_resist.matches(resist) &&
+            int selected_index{}, restored_index{};
+            bool selected_worn{}, restored_worn{};
+            return inventory.locate(scope.guest, id, selected_index, selected_worn) && selected_worn && selected_index < 0 &&
+                (!previous || (inventory.locate(scope.guest, replaced, restored_index, restored_worn) && !restored_worn && restored_index == index)) &&
+                next_bag.matches(bag) && next_armor.matches(armor) && next_body.matches(body) && next_resist.matches(resist) &&
                 projection.carry->GetPropertyValueInContainer(scope.pawn) == proof.carry_after &&
                 projection.minimum->GetPropertyValueInContainer(scope.pawn) == proof.minimum;
         };
@@ -542,7 +638,7 @@ namespace
         next_resist.restore(resist);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
-        if (scope.current() && matches()) return report(lua, true, worn ? "reapplied" : "equipped", proof);
+        if (scope.current() && matches()) return report(lua, true, previous ? "swapped" : worn ? "reapplied" : "equipped", proof);
 
         if (!worn)
         {
@@ -584,11 +680,15 @@ namespace
                 return report(lua, false, "native_guest_armor_pawn_ineligible");
         }
         Inventory inventory;
-        auto* defaults = bomber_defaults();
-        if (!defaults || !inventory.bind(scope.guest))
+        if (!inventory.bind(scope.guest))
             return report(lua, false, "native_guest_armor_stock_schema_unqualified");
-        if constexpr (operation == Operation::Seed) return seed(lua, scope, inventory, defaults, guid);
-        return apply(lua, scope, inventory, defaults, guid, operation == Operation::Project);
+        if constexpr (operation == Operation::Seed)
+        {
+            auto* defaults = armor_defaults(bomber);
+            if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
+            return seed(lua, scope, inventory, defaults, guid);
+        }
+        return apply(lua, scope, inventory, guid, operation == Operation::Project);
     }
 }
 

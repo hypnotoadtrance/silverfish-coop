@@ -1,6 +1,8 @@
 local dialogue = {}
 local guest_save = require("guest_save")
 local mosby = require("native_dialogue_mosby")
+local shopkeep = require("native_dialogue_shopkeep")
+local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -22,7 +24,7 @@ local castaway = {
     rows = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
         [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1, continuation = true}},
 }
-local profiles = {[observatory] = castaway, [mosby.map] = mosby}
+local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep}
 
 local npc_lines = "NPC_Dialogue_3_CE4B2EF741973F79EF3C89BB03B96687"
 local responses = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
@@ -35,9 +37,9 @@ local choice_text = "TextContent_2_891360234FC305CA4D09FE9EA69C8936"
 local exit_field = "Terminate_Convo_5_BAA128604982D7FC877B498C6500026C"
 local next_pointer = "NextConvo_8_59FA977C44DA6739371CD9992F385F4F"
 local activate = "Activate_Quests_22_323EA585468EFFDA9A12A188EBDF5022"
+local ping_field = "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD"
 local effect_arrays = {"Add_JournalEntries_17_E77934214DFD7B85991F729C59678191",
-    "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23",
-    "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD"}
+    "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23", ping_field}
 local effect_maps = {add = "Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7",
     require_flag = "Flags_PreReq_26_50B864DB4BE3226CB3721BB63C4D74DE",
     hide_flag = "Flags_HideIfMet_28_6501CD9247D8EA6D695B5C9F5FD8C639", rep = "Rep_Effect_33_CA3AB131482DEE2637F973B7480AA04F"}
@@ -92,8 +94,12 @@ local function catalog(state, profile, progress)
         or schema:GetFullName() ~= "UserDefinedStruct /Game/Classes/Libraries/Structs/Conversation_Struct.Conversation_Struct"
         or not exact(controller, "/Game/Classes/ScriptingActors/Dialogue_Controler_BP.Dialogue_Controler_BP_C")
         or controller:GetFullName() ~= "Dialogue_Controler_BP_C " .. profile.controller or not same(controller:GetWorld(), state.world)
-        or not pointer_matches(controller.ConversationPointer, source, profile.root) or not none(controller.Flag_OnMeet)
-        or not pointer_matches(controller.FirstMeet_Pointer, source, false) then reject("stock_scope_unqualified") end
+        or not pointer_matches(controller.ConversationPointer, source, profile.root)
+        or (profile.first_flag and named(controller.Flag_OnMeet) ~= profile.first_flag
+            or not profile.first_flag and not none(controller.Flag_OnMeet))
+        or not pointer_matches(controller.FirstMeet_Pointer, source, profile.first or false) then
+        reject("stock_scope_unqualified")
+    end
     if profile.receiver then
         local receiver = StaticFindObject(profile.receiver)
         if not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
@@ -128,7 +134,11 @@ local function catalog(state, profile, progress)
             if not choice or choice[exit_field] ~= (not following)
                 or not pointer_matches(choice[next_pointer], source, pointer) then reject("stock_choice_unqualified:" .. name) end
             for _, field in ipairs(effect_arrays) do
-                if count(choice[field]) ~= 0 then reject("stock_choice_effects_unqualified") end
+                local ping = field == ping_field and effect.ping
+                local values = choice[field]
+                if count(values) ~= (ping and 1 or 0) or ping and named(values[1]) ~= ping then
+                    reject("stock_choice_effects_unqualified")
+                end
             end
             for kind, field in pairs(effect_maps) do
                 local values, expected = choice[field], effect[kind]
@@ -288,7 +298,7 @@ function dialogue.sync(state, phase)
     if not current then if binding then dialogue.clear() end; return end
     if not same_scope(binding, current) then dialogue.clear(); binding = current end
     local standing, now = can_use(current, true), os.time()
-    local allow = standing and fresh()
+    local allow = standing and fresh() and not shop_view.reception_open(current.pawn)
     if session and (not standing or session.expires <= now
         or not allow and not session.pending and not (session.response_grace and now <= session.response_grace)) then
         session = nil; hide()
@@ -311,12 +321,15 @@ local function host_command(fields, state, phase)
     host_report = nil
     local action, name = fields[2], fields[3]
     local commit = action == "native-dialogue-commit"
-    if #fields ~= (commit and 12 or 3) then reject("arguments_unqualified") end
+    local shop_open = action == "native-dialogue-shopkeep-open"
+    local shop_cash = action == "native-dialogue-shopkeep-cash"
+    if #fields ~= (commit and 12 or shop_open and 7 or shop_cash and 6 or 3) then reject("arguments_unqualified") end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
+    if (shop_open or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
     if action == "native-dialogue-approach" then
         if not (headless and fixtures) then reject("approach_unavailable") end
         local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
-        local offsets = profile == mosby and {{-115, 0}, {-115, 95}, {-115, -95}, {0, 145}, {0, -145}, {115, 0}}
+        local offsets = profile.fixture_offsets or profile == mosby and {{-115, 0}, {-115, 95}, {-115, -95}, {0, 145}, {0, -145}, {115, 0}}
             or {{115, 0}, {-115, 0}, {0, 115}, {0, -115}}
         for _, offset in ipairs(offsets) do
             if pawn:K2_TeleportTo({X = location.X + offset[1], Y = location.Y + offset[2], Z = floor + 20},
@@ -341,6 +354,18 @@ local function host_command(fields, state, phase)
         local checked, updated = pcall(catalog, state, profile, progress)
         if not checked then error("mutation_unverified_native_dialogue_catalog:" .. tostring(updated), 0) end
         rows, effect_name = updated, effect.effect
+    elseif shop_open then
+        if identity ~= fields[4] or tostring(progress.meet) ~= fields[5] or tostring(progress.cash) ~= fields[6]
+            or tostring(progress.xp) ~= fields[7] then reject("shopkeep_open_scope_changed") end
+        progress, effect_name = profile.open(context, progress)
+    elseif shop_cash then
+        local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
+        local effect = profile.effects[row] and profile.effects[row][ordinal]
+        if not effect or not effect.ping or not rows[row].choices[ordinal] or identity ~= fields[6] then
+            reject("shopkeep_cash_scope_changed")
+        end
+        profile.grant_cash(state, phase, pawn, connection, context)
+        effect_name = "cash-granted"
     end
     host_report = {profile = profile, world = state.world, pawn = pawn, name = name, npc = npc, target = target,
         controller = controller, rows = rows, connection = identity, progress = progress, effect = effect_name}
@@ -356,7 +381,7 @@ local function stock_press(current)
     local original = camera.RelativeRotation
     original = {Pitch = original.Pitch, Yaw = original.Yaw, Roll = original.Roll}
     local eye, center = camera:K2_GetComponentLocation(), component:K2_GetComponentLocation()
-    local radius = current.profile == mosby and component:GetScaledBoxExtent().Z or component:GetScaledSphereRadius()
+    local radius = current.profile.component == "Box" and component:GetScaledBoxExtent().Z or component:GetScaledSphereRadius()
     if type(radius) ~= "number" or not (radius > 0 and radius <= 200) then reject("fixture_component_unqualified") end
     local pressed, failure = pcall(function()
         for _, lift in ipairs({0, 0.4, -0.4, 0.75}) do
@@ -392,12 +417,29 @@ end
 
 function dialogue.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit" then
+    if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit"
+        or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash" then
         return host_command(fields, state, phase)
     end
-    if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" then return end
+    local handoff = action == "native-dialogue-shopkeep-view"
+    if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" and not handoff then return end
     local current = local_context(state, phase)
-    if not same_scope(current, binding) or not can_use(current, action == "native-dialogue-render") then reject("client_scope_unavailable") end
+    if not same_scope(current, binding) or not can_use(current, action == "native-dialogue-render" or handoff) then
+        reject("client_scope_unavailable")
+    end
+    if handoff then
+        local sequence = math.tointeger(tonumber(fields[3]))
+        local effect = session and session.content and shopkeep.effects[session.row]
+        effect = effect and effect[session.content.ordinals[selected]]
+        if current.profile ~= shopkeep or #fields ~= 4 or not session or not session.pending
+            or not effect or not effect.ping or session.sequence ~= sequence or session.token ~= fields[4]
+            or session.expires <= os.time() or not shop_view.reception_pending(state, phase, sequence) then
+            reject("shopkeep_client_handoff_unavailable")
+        end
+        session = nil
+        hide()
+        return "exact ShopKeep dialogue opened the local merchant view"
+    end
     if action == "native-dialogue-stock-fixture" then
         local target = fields[3]
         if not headless or #fields ~= 3 or type(SilverfishProbeNativeInteractInput) ~= "function"
@@ -426,6 +468,7 @@ function dialogue.command(fields, state, phase)
     end
     local profile, following = current.profile, current.profile.root
     if session.content then following = profile.rows[session.row].next[session.content.ordinals[selected]] end
+    if not session.content and profile.first and row == profile.first then following = profile.first end
     local content
     if row == "-" then
         if following ~= false or token ~= "-" or #fields ~= 5 then reject("render_unqualified") end

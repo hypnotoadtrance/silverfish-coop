@@ -6,9 +6,14 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local jacket = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
+local hazop = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local projected, observation = {}, nil
+
+function armor.is_body_path(path)
+    return path == jacket or path == hazop
+end
 
 local function guid_text(parts)
     if not parts then return end
@@ -22,10 +27,11 @@ local function guid_text(parts)
     return text:find("[^0]") and text or nil
 end
 
-local function native_report(map, pawn, guid, action, ok, status, before, after, carry_before, carry_after, minimum, slash, acid)
+local function native_report(map, pawn, guid, action, ok, status, before, after, carry_before, carry_after, minimum, slash, acid,
+                             profile, replaced_profile, replaced_guid)
     return {map = map, pawn = pawn, guid = guid, action = action, ok = ok == true, status = status,
         before = before, after = after, carry_before = carry_before, carry_after = carry_after,
-        minimum = minimum, slash = slash, acid = acid}
+        minimum = minimum, slash = slash, acid = acid, profile = profile, replaced_profile = replaced_profile, replaced_guid = replaced_guid}
 end
 
 function armor.command(fields, state, phase)
@@ -56,7 +62,7 @@ local function exact_worn(state, phase, name)
     if not pawn or not save then return end
     local row = save.PlayerArmor
     local class = row and row[class_field]
-    if not class or not class:IsValid() or class:GetFullName():match("^%S+ (%S+)$") ~= jacket then return end
+    if not class or not class:IsValid() or not armor.is_body_path(class:GetFullName():match("^%S+ (%S+)$")) then return end
     return pawn:GetAddress(), save:GetAddress(), guid_text(row[guid_field])
 end
 
@@ -87,9 +93,12 @@ function armor.sync(state, phase)
 end
 
 local function row(tag, report, status_row)
-    return status_row(tag, report.map, report.pawn, report.guid, report.action, report.ok and 1 or 0,
-        report.status, report.before, report.after, report.carry_before, report.carry_after, report.minimum,
-        report.slash, report.acid)
+    local fields = {tag, report.map, report.pawn, report.guid, report.action, report.ok and 1 or 0,
+        report.status, report.before, report.after, report.carry_before, report.carry_after, report.minimum, report.slash, report.acid}
+    if report.profile then
+        fields[15], fields[16], fields[17] = report.profile, report.replaced_profile, report.replaced_guid
+    end
+    return status_row(table.unpack(fields))
 end
 
 function armor.rows(state, phase, status_row)

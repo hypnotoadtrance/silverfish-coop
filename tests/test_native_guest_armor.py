@@ -67,3 +67,35 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(host.stopping)
         self.assertTrue(host.native_checkpoint_unsafe)
         self.assertEqual(host.party["receipts"], {})
+
+    async def test_stock_hazop_equip_and_distinct_armor_swap_keep_exact_replacement(self):
+        old_guid = "FE" * 16
+        equip = self.report(profile="hazop", carry_before=6.0, carry_after=5.0, minimum=32.0)
+        swap = dict(equip, status="swapped", before=2, after=2, carry_after=5.25,
+                    replaced_profile="bomber", replaced_guid=old_guid)
+        reverse = self.report(guid=old_guid, profile="bomber", status="swapped", before=2, after=2,
+                              carry_before=5.25, carry_after=6.0, minimum=25.0, replaced_profile="hazop", replaced_guid=equip["guid"])
+        for proof in (equip, swap, reverse):
+            with self.subTest(proof=proof):
+                host = self.host()
+                bridge = SimpleNamespace(command=AsyncMock(return_value={"state": "hosting", "map": "area", "native_guest_armor": proof}))
+                args = (host, bridge, "guest-id", "c" * 32, armor.ACTION, proof["guid"])
+                result = await armor.perform(*args)
+                self.assertTrue(armor.effects(result["native_guest_armor"]))
+                self.assertEqual(result["native_guest_armor"]["class_path"], armor.PROFILES[proof["profile"]].class_path)
+                self.assertEqual(result["native_guest_armor"].get("replaced_guid"), proof.get("replaced_guid"))
+                self.assertEqual(await armor.perform(*args), result)
+                self.assertEqual(bridge.command.await_count, 1)
+        for replacement in (dict(replaced_profile="hazop"), dict(replaced_guid=equip["guid"]), dict(carry_after=5.0),
+                            dict(replaced_class_path=armor.HAZOP_CLASS_PATH)):
+            self.assertFalse(armor.effects({**swap, **replacement}))
+
+    def test_legacy_and_exact_profile_status_frames(self):
+        old = ["native-guest-armor", "area", "pawn", "AB" * 16, "equip", "1", "equipped", "2", "1", "6", "5.75", "25", ".2", ".2"]
+        self.assertTrue(armor.effects(armor.parse(old)))
+        new = [*old[:6], "swapped", "2", "2", "6", "5.25", "32", ".2", ".2", "hazop", "bomber", "FE" * 16]
+        proof = armor.parse(new)
+        self.assertEqual((proof["class_path"], proof["replaced_class_path"]), (armor.HAZOP_CLASS_PATH, armor.CLASS_PATH))
+        self.assertTrue(armor.effects(proof))
+        with self.assertRaisesRegex(ValueError, "Invalid exact stock armor profile"):
+            armor.parse([*new[:-2], "bomber", "-"])

@@ -1,4 +1,5 @@
 local view = {}
+local shopkeep = require("native_dialogue_shopkeep")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -23,6 +24,8 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
     "Shop_Scientist_01", "Shop_BP_C_2", "Science_ShopData", "Scientist Shop camera", "Barter_BP_C_107")
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
     "Shop_Gunsmith_P", "Shop_BP_C_1", "AmmoShopData", "Gunsmith shop", "Barter_BP_C_1")
+register_merchant(shopkeep.map, "Shop_ShopKeep_P", "Shop_BP_C_1", "StrangeJunkShopData", "ShopKeep", "Barter_BP_C_1")
+profiles[shopkeep.map].reception = shopkeep.target
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
@@ -102,7 +105,8 @@ local function qualified_actor(current)
         local collision = actor.Box:GetCollisionEnabled()
         if not exact(barter, "/Game/Classes/Actors/Barter_BP.Barter_BP_C")
             or not same(actor.BarterReplacement, barter) or not same(barter:GetWorld(), current.world)
-            or not same(barter.MerchantData, actor.MerchantData) or (collision ~= 1 and collision ~= 3) then return nil end
+            or not same(barter.MerchantData, actor.MerchantData)
+            or not profile.reception and (collision ~= 1 and collision ~= 3) then return nil end
     end
     return actor
 end
@@ -116,6 +120,14 @@ end
 local function in_reach(current)
     local actor = qualified_actor(current)
     if not actor then return false end
+    if current.profile.reception then
+        actor = StaticFindObject(current.profile.reception)
+        if not exact(actor, shopkeep.target_class) or not same(actor:GetWorld(), current.world)
+            or actor:IsActorBeingDestroyed() or not exact(actor.Box, shopkeep.component_class)
+            or not same(actor.Box:GetOwner(), actor) then return false end
+        local collision = actor.Box:GetCollisionEnabled()
+        if collision ~= 1 and collision ~= 3 then return false end
+    end
     local here, target = current.pawn:K2_GetActorLocation(), actor.Box:K2_GetComponentLocation()
     local radius = current.pawn.InteractionRange
     if not here or not target or type(radius) ~= "number" or radius <= 0 or radius > 1000 then return false end
@@ -179,8 +191,32 @@ local function read_press(current)
     return true
 end
 
+function view.reception_pending(state, phase, sequence)
+    local current = context(state, phase)
+    if not current or not current.profile.reception or not same_context(current, binding) or not can_open(current)
+        or not in_reach(current) or not math.tointeger(sequence) or sequence < 1 or sequence > max_sequence then return false end
+    if active() then close() end
+    session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0,
+        expires = os.time() + 29}
+    held = {}
+    request("open", "pending", 0)
+    return session.state == "pending"
+end
+
+function view.reception_open(pawn)
+    return active() and session.context.profile.reception and same(session.context.pawn, pawn)
+end
+
 function view.sync(state, phase)
     local current = context(state, phase)
+    if current and current.profile.reception then
+        if current.host then view.clear(); return end
+        if not same_context(current, binding) then view.clear() end
+        renew_lease()
+        binding = current
+        if active() and (not can_open(current) or not in_reach(current) or os.time() > session.expires) then close() end
+        return
+    end
     if not current or type(SilverfishSetNativeShopViewScope) ~= "function"
         or type(SilverfishTakeNativeShopViewPress) ~= "function" then
         view.clear()
@@ -314,6 +350,7 @@ end
 local function fixture(current, action)
     if not headless or not can_open(current) or not in_reach(current) then error("The staged merchant view fixture is unavailable", 0) end
     if action == "open" then
+        if current.profile.reception then error("Use the exact ShopKeep dialogue response to open this view", 0) end
         local actor = qualified_actor(current)
         local probe = SilverfishProbeNativeInteractInput
         if not actor or type(probe) ~= "function" then error("The exact staged stock merchant input is unavailable", 0) end

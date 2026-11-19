@@ -957,7 +957,7 @@ class Bridge:
                     }
                     if len(fields) == 9 and fields[8]:
                         data["native_dream_effects"]["stock_event"] = fields[8]
-                elif fields[0] in ("native-guest-armor", "native-guest-armor-projection") and len(fields) == 14:
+                elif fields[0] in ("native-guest-armor", "native-guest-armor-projection") and len(fields) in (14, 17):
                     report = parse_guest_armor(fields)
                     if fields[0] == "native-guest-armor":
                         data["native_guest_armor"] = report
@@ -1685,6 +1685,37 @@ class Bridge:
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")
         return status
+
+    async def held_fire_command(self, operation: str, *arguments: str) -> dict:
+        """Use the game-thread input lane without replacing campaign commands."""
+        if operation not in {"start", "observe", "stop", "renew"} or any(
+            len(value) > 512 or any(character in value for character in "\t\r\n") for value in arguments
+        ):
+            raise ValueError("Invalid stock held-fire command")
+        nonce = uuid.uuid4().hex
+        fields = (nonce, f"native-guest-smg-hold-{operation}", *arguments)
+        write_text(self.directory / "held-fire-command.tsv", "\t".join(fields) + "\n")
+        reply = self.directory / "held-fire-reply.tsv"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.2
+        while loop.time() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError("The native host exited during a stock held-fire command")
+            try:
+                with reply.open("r", encoding="utf-8") as stream:
+                    raw = stream.read(8193)
+            except (FileNotFoundError, PermissionError):
+                raw = ""
+            if 0 < len(raw) <= 8192 and raw.endswith("\n"):
+                head, *rows = [line.split("\t") for line in raw.splitlines()]
+                if len(head) == 5 and head[:2] == ["held-fire-ack", nonce]:
+                    _, _, result, area, message = head
+                    if result != "accepted":
+                        raise RuntimeError(message or "Stock held fire was refused")
+                    proof = [native_smg_hold.parse(row) for row in rows if row[0] == "native-guest-smg-hold"]
+                    return {"state": "hosting", "map": area, native_smg_hold.ALL: {row["pawn"]: row for row in proof}}
+            await asyncio.sleep(.025)
+        raise TimeoutError("The native game did not acknowledge stock held fire")
 
     async def walk(self, x: float, y: float, milliseconds: int) -> None:
         if type(x) not in {int, float} or type(y) not in {int, float}:

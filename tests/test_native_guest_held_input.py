@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -5,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 import uuid
 
-from tools.silverfish.native_smg_hold import ACTION, KEY, GuestInput
+from tools.silverfish.native_smg_hold import ACTION, ALL, KEY, GuestInput
 from tools.silverfish.runtime import Bridge, MAP
 
 
@@ -101,3 +102,23 @@ class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
         client.gameplay_action.assert_awaited_once()
         action, _, target = client.gameplay_action.await_args.args
         self.assertEqual((action, target), ("native-guest-weapon-fire", GUID))
+
+    async def test_authority_lane_ignores_stale_ack_and_leaves_campaign_command(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            bridge = Bridge(directory, Mock(poll=Mock(return_value=None)))
+            ordinary, command, reply = (directory / name for name in (
+                "command.tsv", "held-fire-command.tsv", "held-fire-reply.tsv",
+            ))
+            ordinary.write_text("checkpoint\n", encoding="utf-8")
+            reply.write_text(f"held-fire-ack\t{'a' * 32}\taccepted\t{MAP}\tstale\n", encoding="utf-8")
+            pending = asyncio.create_task(bridge.held_fire_command("stop", "1"))
+            await asyncio.sleep(0)
+            nonce, action, serial = command.read_text(encoding="utf-8").strip().split("\t")
+            self.assertEqual((action, serial), ("native-guest-smg-hold-stop", "1"))
+            self.assertFalse(pending.done())
+            reply.write_text(f"held-fire-ack\t{nonce}\taccepted\t{MAP}\tverified\n"
+                             f"native-guest-smg-hold\t{MAP}\t{PAWN}\t{GUID}\t1\treleased\t5\t3\t2\t2\n",
+                             encoding="utf-8")
+            self.assertEqual((await pending)[ALL][PAWN]["projectiles"], 2)
+            self.assertEqual(ordinary.read_text(encoding="utf-8"), "checkpoint\n")

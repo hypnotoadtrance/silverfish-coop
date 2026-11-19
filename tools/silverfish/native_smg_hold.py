@@ -59,13 +59,38 @@ class Authority:
 
     def __init__(self, host):
         self.host = host
+        self.bridge = None
+        self.lock = asyncio.Lock()
         self.strokes: dict[str, Stroke] = {}
+        self.frames: dict[int, dict] = {}
         self.used: dict[str, None] = {}
 
-    async def _command(self, bridge, action: str, *arguments: str) -> dict:
-        snapshot = await bridge.command(f"native-guest-smg-hold-{action}", *arguments, timeout=2)
-        self.host.last_game, self.host.last_seen = snapshot, time.monotonic()
-        return snapshot
+    async def authenticated(self, guest_id: str, target: str | None) -> dict:
+        async with self.lock:
+            identity = self.host.authenticated_guest(guest_id)
+            ending = isinstance(target, str) and target.rpartition("@")[2] in {"release", "cancel"}
+            if (not identity or not self.bridge or self.host.stopping
+                    or self.host.native_checkpoint_unsafe and not ending):
+                return {"ok": False, "error": "native_guest_held_fire_scope_unavailable"}
+            try:
+                reply = await self.request(identity[1], target)
+            except (OSError, RuntimeError, ValueError) as error:
+                return {"ok": False, "error": str(error)}
+            return {"ok": True, **reply}
+
+    def _update(self, stroke: Stroke, snapshot: dict) -> dict:
+        proof = stroke.receipt(snapshot)
+        self.frames[stroke.serial] = proof
+        return proof
+
+    def _observed(self, stroke: Stroke) -> dict:
+        prior = self.frames[stroke.serial]
+        snapshot = self.host.last_game
+        current = snapshot.get(ALL, {}).get(stroke.pawn, {})
+        if (prior["status"] in LIVE and current.get("serial") == stroke.serial
+                and current.get("rounds", -1) >= prior["rounds"]):
+            return self._update(stroke, snapshot)
+        return prior
 
     def _eligible(self, character: str, area: str, pawn: str, guid: str) -> bool:
         host = self.host
@@ -80,7 +105,7 @@ class Authority:
     def _fail_closed(self):
         self.host.native_checkpoint_unsafe = self.host.stopping = True
 
-    async def request(self, bridge, character: str, target: str | None) -> dict:
+    async def request(self, character: str, target: str | None) -> dict:
         parts = target.split("@") if isinstance(target, str) else []
         if len(parts) != 4:
             raise party.RuleError("native_guest_held_fire_exact_stroke_required")
@@ -92,37 +117,41 @@ class Authority:
         if edge == "press":
             if current and (current.guid, current.token) == (guid, token):
                 try:
-                    return {KEY: current.receipt(self.host.last_game)}
+                    return {KEY: self._observed(current)}
                 except RuntimeError:
                     self._fail_closed()
                     raise
             area = self.host.last_game.get("map")
             pawn = self.host.native_recipients().get(character, {}).get("pawn")
             if not current and token not in self.used and pawn and self._eligible(character, area, pawn, guid):
-                return {KEY: await self._start(bridge, character, area, pawn, guid, token)}
+                return {KEY: await self._start(character, area, pawn, guid, token)}
             raise party.RuleError("native_guest_held_fire_scope_unavailable")
         if not current or (current.guid, current.token) != (guid, token):
-            if edge in {"release", "cancel"}:
+            if edge in {"release", "cancel"} or token in self.used:
                 return {KEY: {"status": "inactive"}}
             raise party.RuleError("native_guest_held_fire_exact_stroke_required")
-        renew = edge == "renew" and self._eligible(character, current.area, current.pawn, guid)
         try:
-            snapshot = await self._command(bridge, "renew" if renew else "stop", str(current.serial),
-                                           *((str(LEASE_MS),) if renew else ()))
-            return {KEY: current.receipt(snapshot)}
+            proof = self._observed(current)
+            if proof["status"] in FINISHED:
+                return {KEY: proof}
+            renew = edge == "renew" and self._eligible(character, current.area, current.pawn, guid)
+            snapshot = await self.bridge.held_fire_command("renew" if renew else "stop", str(current.serial),
+                                                           *((str(LEASE_MS),) if renew else ()))
+            return {KEY: self._update(current, snapshot)}
         except (OSError, RuntimeError, ValueError):
             self._fail_closed()
             raise
 
 
-    async def _start(self, bridge, character, area, pawn, guid, token) -> dict:
+    async def _start(self, character, area, pawn, guid, token) -> dict:
         try:
-            snapshot = await self._command(bridge, "start", pawn, guid, str(LEASE_MS))
+            snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS))
         except RuntimeError as error:
             if str(error) in {"authoritative_guest_pawn_required", "detached_guest_save_required",
                               "authenticated_guest_detached_save_required", "native_guest_smg_hold_ineligible",
                               "native_guest_smg_hold_busy", "native_guest_smg_hold_exact_owner_required",
-                              "native_guest_smg_hold_exact_weapon_required", "native_guest_smg_hold_scope_unavailable"}:
+                              "native_guest_smg_hold_exact_weapon_required", "native_guest_smg_hold_scope_unavailable",
+                              "native_guest_smg_hold_fast_scope_unavailable"}:
                 raise party.RuleError(str(error)) from error
             self._fail_closed()
             raise
@@ -132,7 +161,7 @@ class Authority:
         try:
             frame = snapshot.get(ALL, {}).get(pawn, {})
             stroke = Stroke(area, pawn, guid, token, frame["serial"])
-            proof = stroke.receipt(snapshot)
+            proof = self._update(stroke, snapshot)
             if proof["rounds"] < 1:
                 raise RuntimeError("Stock held fire did not produce a verified first round")
         except (KeyError, RuntimeError):
@@ -149,19 +178,21 @@ class Authority:
             return
         finished = {}
         try:
-            for character, stroke in self.strokes.items():
-                frame = stroke.receipt(self.host.last_game)
-                if frame["status"] in LIVE and (stop_all or not self._eligible(character, stroke.area, stroke.pawn, stroke.guid)):
-                    frame = stroke.receipt(await self._command(bridge, "stop", str(stroke.serial)))
-                if frame["status"] in FINISHED:
-                    finished[character] = frame
-                elif stop_all:
-                    raise RuntimeError("Stock held fire has an unclosed trigger at a campaign checkpoint")
+            async with self.lock:
+                for character, stroke in self.strokes.items():
+                    frame = self._observed(stroke)
+                    if frame["status"] in LIVE and (stop_all or not self._eligible(character, stroke.area, stroke.pawn, stroke.guid)):
+                        frame = self._update(stroke, await self.bridge.held_fire_command("stop", str(stroke.serial)))
+                    if frame["status"] in FINISHED:
+                        finished[character] = frame
+                    elif stop_all:
+                        raise RuntimeError("Stock held fire has an unclosed trigger at a campaign checkpoint")
             if not finished:
                 return
             revision = await self.host.checkpoint_native(bridge, require_guest_frames=frozenset(finished))
             for character, frame in finished.items():
                 del self.strokes[character]
+                del self.frames[frame["serial"]]
                 self.host.control.event("native_guest_smg_hold_committed",
                                         character_id=character, revision=revision, **frame)
         except (OSError, RuntimeError, ValueError):
@@ -208,12 +239,11 @@ class GuestInput:
                                  operation_id=operation, reason=str(error))
             return {}
 
-    def _eligible(self, active: bool):
+    def _eligible(self, active: bool, game: dict):
         client = self.client
         party_game = client.gameplay
         member = party_game.get("players", {}).get(client.viewer_role, {})
         weapon = party_game.get("native_equipped_weapon", {})
-        game = client.last_game
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         guid = weapon.get("guid")
         area = game.get("map")
@@ -224,9 +254,20 @@ class GuestInput:
                 and (weapon.get("map"), weapon.get("kind")) == (area, "smg-standard")):
             return area, pawn, guid
 
-    async def service(self, active: bool) -> None:
+    async def run(self) -> None:
         client = self.client
-        eligible = self._eligible(active)
+        while not client.stopping:
+            game = client.bridge.snapshot() or client.last_game
+            active = (client.transport.connected and game.get("state") == "connected"
+                      and not client.needs_travel and not client.server_transitioning)
+            await self.service(active, game)
+            await asyncio.sleep(.075)
+
+    async def service(self, active: bool, game: dict | None = None) -> None:
+        client = self.client
+        if game is None:
+            game = client.last_game
+        eligible = self._eligible(active, game)
         if self.stroke and (not eligible or (client.host_session, client.zone_epoch, *eligible) != (
             self.stroke.session, self.stroke.epoch, self.stroke.area, self.stroke.pawn, self.stroke.guid
         )):
@@ -237,7 +278,7 @@ class GuestInput:
         if events:
             self.last_sequence = events[-1][0]
         terminals = {row[1:4] + row[5:]: row[4] for row in events if row[4] != "press"}
-        frame = client.last_game.get(LOCAL, {})
+        frame = game.get(LOCAL, {})
         held = tuple(frame.get(key) for key in ("map", "pawn", "guid", "stroke"))
         started = False
         for sequence, area, pawn, guid, edge, number in events:
@@ -267,7 +308,7 @@ class GuestInput:
               and time.monotonic() - client.gameplay_seen < 3):
             frame = await self._send(self.stroke, "renew", self.last_sequence)
             self.renew_at = time.monotonic() + .55
-            if frame.get("status") in FINISHED:
+            if frame.get("status") in FINISHED | {"inactive"}:
                 self.stroke = None
 
 

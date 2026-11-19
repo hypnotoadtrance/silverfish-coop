@@ -40,6 +40,7 @@ namespace
         const Unreal::TCHAR* data;
         const Unreal::TCHAR* cash_barter_replacement{};
         bool camera_only{};
+        const Unreal::TCHAR* reception{};
     };
 
     constexpr std::array merchants{
@@ -70,6 +71,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1"),
             STR("/Game/Classes/Libraries/DataAssets/Merchants/AmmoShopData.AmmoShopData"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P.Shop_Gunsmith_P:PersistentLevel.Barter_BP_C_1"),
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/StrangeJunkShopData.StrangeJunkShopData"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.Barter_BP_C_1"),
+            false,
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.Generic_Interact_BP_C_1"),
         },
     };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
@@ -165,6 +174,7 @@ namespace
         Unreal::UObject* guest{};
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
+        Unreal::UObject* reception{};
         bool camera_only{}, guards_neutral_purchase{};
         bool host{};
     };
@@ -259,10 +269,11 @@ namespace
 
     bool qualified_reach(const Context& context)
     {
-        auto* box = read_object(context.shop, STR("Box"));
+        auto* counter = context.reception ? context.reception : context.shop;
+        auto* box = read_object(counter, STR("Box"));
         auto* range = field<Unreal::FDoubleProperty>(context.pawn, STR("InteractionRange"));
         if (!exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent"))) ||
-            box->GetOuterPrivate() != context.shop || !range) return false;
+            box->GetOuterPrivate() != counter || !range) return false;
         const auto distance = range->GetPropertyValueInContainer(context.pawn);
         Location guest{}, merchant{};
         if (!std::isfinite(distance) || distance <= 0 || distance > 1000 ||
@@ -331,19 +342,30 @@ namespace
             return "shop_exact_guest_and_canonical_saves_unavailable";
         if (!read_bool(context.stock, STR("BarterOnly"), false))
             return "shop_stock_cash_trade_unavailable";
+        if (profile->reception)
+        {
+            context.reception = find<Unreal::UObject>(profile->reception);
+            auto* reception_type = find<Unreal::UClass>(
+                STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C"));
+            if (!exact(context.reception, reception_type) || !authority(context.reception, context.world) ||
+                static_cast<Unreal::AActor*>(context.reception)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
+                !cash_counter_open(context.reception) || !read_bool(context.shop, STR("NoInfiniteStock"), true))
+                return "shop_shopkeep_cash_reception_unavailable";
+        }
         if (profile->cash_barter_replacement)
         {
             auto* conversion = find<Unreal::UObject>(profile->cash_barter_replacement);
             if (!exact(conversion, find<Unreal::UClass>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C"))) ||
                 !authority(conversion, context.world) || read_object(context.shop, STR("BarterReplacement")) != conversion ||
-                read_object(conversion, STR("MerchantData")) != data || !cash_counter_open(context.shop))
-                return context.camera_only ? "shop_scientist_cash_counter_unavailable" : "shop_gunsmith_cash_counter_unavailable";
+                read_object(conversion, STR("MerchantData")) != data || (!context.reception && !cash_counter_open(context.shop)))
+                return context.reception ? "shop_shopkeep_cash_reception_unavailable" :
+                    context.camera_only ? "shop_scientist_cash_counter_unavailable" : "shop_gunsmith_cash_counter_unavailable";
             if (context.guards_neutral_purchase)
             {
                 auto* faction = field<Unreal::FByteProperty>(context.shop, STR("Rep Faction"));
                 if (static_cast<Unreal::AActor*>(conversion)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
                     !read_bool(conversion, STR("AcceptCash"), true) || !faction || faction->GetPropertyValueInContainer(context.shop) != 0)
-                    return "shop_gunsmith_neutral_profile_unverified";
+                    return context.reception ? "shop_shopkeep_neutral_profile_unverified" : "shop_gunsmith_neutral_profile_unverified";
             }
         }
         if (!qualified_connection(context))
@@ -875,7 +897,8 @@ namespace
         {
             PassiveEffect skinflint{Unreal::FName{STR("Skinflint")}};
             if (!read_purchase_effect(context, skinflint) || skinflint.active)
-                return response(lua, false, "shop_gunsmith_skinflint_effect_unverified");
+                return response(lua, false, context.reception ? "shop_shopkeep_skinflint_effect_unverified" :
+                    "shop_gunsmith_skinflint_effect_unverified");
         }
         CameraReputation reputation;
         if (!reputation.bind(context, wallet, selected.price))

@@ -1,5 +1,7 @@
-"""Equip the exact guest-owned stock Bomber Jacket in the detached body slot."""
+"""Equip exact guest-owned stock body armor in the detached save."""
 
+import asyncio
+from dataclasses import dataclass
 import math
 import time
 
@@ -10,18 +12,42 @@ from .native_gold import valid_guid
 ACTION = "native-guest-armor-equip"
 FIXTURE = "native-guest-armor-fixture"
 CLASS_PATH = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
-_APPLIED = {"equipped", "reapplied", "already_applied"}
+HAZOP_CLASS_PATH = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
+_APPLIED = {"equipped", "swapped", "reapplied", "already_applied"}
+
+
+@dataclass(frozen=True)
+class BodyArmor:
+    class_path: str
+    weight: float
+    minimum: float
+
+
+PROFILES = {"bomber": BodyArmor(CLASS_PATH, 0.5, 25.0), "hazop": BodyArmor(HAZOP_CLASS_PATH, 2.0, 32.0)}
+CLASS_PATHS = frozenset(profile.class_path for profile in PROFILES.values())
 
 
 def parse(fields):
-    return {
+    proof = {
         "map": fields[1], "pawn": fields[2], "guid": fields[3], "action": fields[4],
         "ok": fields[5] == "1", "status": fields[6],
         "before": int(fields[7]), "after": int(fields[8]),
         **{key: float(value) for key, value in zip(
-            ("carry_before", "carry_after", "minimum", "slash", "acid"), fields[9:]
+            ("carry_before", "carry_after", "minimum", "slash", "acid"), fields[9:14]
         )},
     }
+    if len(fields) == 17:
+        profile, previous, guid = fields[14:]
+        if (profile not in (*PROFILES, "-") or profile == "-" and proof["ok"]
+                or previous not in (*PROFILES, "-") or not (guid == "-" if previous == "-" else valid_guid(guid))):
+            raise ValueError("Invalid exact stock armor profile receipt")
+        proof.update(profile=None if profile == "-" else profile, replaced_profile=None if previous == "-" else previous,
+                     replaced_guid=None if guid == "-" else guid)
+        if proof["profile"]:
+            proof["class_path"] = PROFILES[profile].class_path
+        if proof["replaced_profile"]:
+            proof["replaced_class_path"] = PROFILES[previous].class_path
+    return proof
 
 
 def effects(proof):
@@ -31,10 +57,25 @@ def effects(proof):
     numbers = (carry_before, carry_after, minimum, slash, acid)
     if any(type(value) not in (int, float) or not math.isfinite(value) for value in numbers):
         return False
-    debit = 0.25 if proof.get("status") == "equipped" else 0.0
+    selected, previous = proof.get("profile", "bomber"), proof.get("replaced_profile")
+    profile = PROFILES.get(selected)
+    if not profile or proof.get("class_path", profile.class_path) != profile.class_path:
+        return False
+    status = proof.get("status")
+    if status == "swapped":
+        prior = PROFILES.get(previous)
+        if (not prior or previous == selected or not valid_guid(proof.get("replaced_guid"))
+                or proof.get("replaced_guid") == proof.get("guid")
+                or proof.get("replaced_class_path", prior.class_path) != prior.class_path):
+            return False
+        debit = (profile.weight - prior.weight) / 2
+    else:
+        if previous is not None or proof.get("replaced_guid") is not None or status not in _APPLIED:
+            return False
+        debit = profile.weight / 2 if status == "equipped" else 0.0
     return (carry_before >= 0 and carry_after >= 0
             and math.isclose(carry_before - carry_after, debit, abs_tol=1e-6)
-            and (minimum, slash, acid) == (25.0, 0.2, 0.2))
+            and (minimum, slash, acid) == (profile.minimum, 0.2, 0.2))
 
 
 async def perform(host, bridge, character, operation_id, action, guid):
@@ -86,13 +127,14 @@ async def perform(host, bridge, character, operation_id, action, guid):
 
         status = proof.get("status")
         before, after = proof.get("before"), proof.get("after")
+        selected = proof.get("profile", "bomber")
         delta = 1 if seed else -1 if status == "equipped" else 0
         if (type(before) is not int or type(after) is not int or not 0 <= before <= 4096
                 or not 0 <= after <= 4096 or after != before + delta
-                or (status != "seeded" if seed else (status not in _APPLIED or not effects(proof)))):
+                or (status != "seeded" or selected != "bomber" if seed else (status not in _APPLIED or not effects(proof)))):
             raise RuntimeError("The typed stock armor slot and derived stats did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        result = {"native_guest_armor": dict(proof, class_path=CLASS_PATH)}
+        result = {"native_guest_armor": dict(proof, class_path=PROFILES[selected].class_path)}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
@@ -101,7 +143,7 @@ async def perform(host, bridge, character, operation_id, action, guid):
         host.party = candidate
         host.native_checkpoint_unsafe = False
         return result
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

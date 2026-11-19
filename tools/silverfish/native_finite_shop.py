@@ -4,7 +4,7 @@ import time
 
 from . import party
 from .native_gold import valid_guid
-from .travel import OBSERVATORY, SCIENTIST_SHOP
+from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
 ACTOR = f"Shop_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Shop_BP_C_2"
@@ -19,6 +19,7 @@ MERCHANTS = {
     BLACK_MARKET: f"Shop_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1",
     SCIENTIST_SHOP: f"Shop_BP_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.Shop_BP_C_2",
     GUNSMITH: f"Shop_BP_C {GUNSMITH}.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1",
+    SHOPKEEP: f"Shop_BP_C {SHOPKEEP}.Shop_ShopKeep_P:PersistentLevel.Shop_BP_C_1",
 }
 ACTIONS = ("native-finite-shop-list", "native-finite-shop-buy", "native-finite-shop-sale-quote", "native-finite-shop-sell")
 MAX_PRICE = (1 << 31) - 1

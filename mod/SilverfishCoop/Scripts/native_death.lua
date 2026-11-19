@@ -1,5 +1,7 @@
 local native_death = {}
 local guest_save = require("guest_save")
+local host_save = require("native_host_save")
+local players = require("players")
 local vitals = require("vitals")
 local zones = require("zone_maps")
 
@@ -77,6 +79,31 @@ end
 
 local function finite(number)
     return type(number) == "number" and number == number and math.abs(number) < math.huge
+end
+
+local function remember_restored_host(state, phase, record)
+    if not authored_routes or not record or record.restored_save or record.emitted then return end
+    local pawn = record.pawn
+    local save = pawn.Save
+    if pawn.Dead ~= false or not valid(save) or not finite(save.PlayerHealth) or save.PlayerHealth > 0 then return end
+    -- The regular capture replaces the restore receipt. Retain its exact pawn/save identity until revival.
+    local restore = host_save.rows(state, phase, function(_, kind, slot, map, owner)
+        return kind == "restored" and map == state.map and owner == record.name and slot
+    end)
+    if type(restore[1]) == "string" then record.restored_save = save end
+end
+
+local function restored_owner(state, record, save)
+    local pawn, controller = record.pawn, state.controller
+    if not same(record.restored_save, save) or not state.listening or state.server ~= false or pawn.Dead ~= false
+        or not pawn:HasAuthority() or not valid(controller) or not controller:IsLocalController()
+        or not controller:HasAuthority() or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller)
+        or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world) then
+        return false
+    end
+    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local instance = valid(statics) and statics:GetGameInstance(controller)
+    return valid(instance) and same(instance.SaveSlot_Ref, save)
 end
 
 local function heartbeat_fresh()
@@ -228,6 +255,7 @@ function native_death.sync(state, phase)
     end
     if configured_mode == "cpp" then update_cpp_status() end
     if not scoped then return end
+    remember_restored_host(state, phase, current["local"])
 
     if not drained or ambiguous then
         clear_scope()
@@ -262,17 +290,37 @@ end
 
 function native_death.project_host(state, phase, next_state)
     local record = slots["local"]
-    if not scoped or next_state ~= "standing" or not record or not record.emitted or not active(state, phase)
-        or scope_records["local"] ~= record or not state.local_pawn or not same(state.local_pawn.pawn, record.pawn) then
+    if not scoped or next_state ~= "standing" or not record or not active(state, phase)
+        or not state.local_pawn or not same(state.local_pawn.pawn, record.pawn) then
         return
     end
     local pawn = record.pawn
     local save, maximum = pawn.Save, pawn.MaxHealth
-    if valid(save) and finite(maximum) and maximum > 0 then
-        save.PlayerHealth = math.max(1, maximum * 0.1)
-        host_revived_health = save.PlayerHealth
-        pawn:ForceNetUpdate()
+    if not valid(save) or not finite(maximum) or maximum <= 0 then return end
+    local before = save.PlayerHealth
+    local restored = not record.emitted
+    if restored then
+        if players.is_downed(pawn) ~= true or not finite(before) or before > 0 then return end
+        if scope_records["local"] ~= record or not heartbeat_fresh() or not restored_owner(state, record, save) then
+            error("native_restored_host_revive_scope_unavailable", 0)
+        end
+    elseif scope_records["local"] ~= record then
+        return
     end
+    local health = math.max(1, maximum * 0.1)
+    local ok, verified = pcall(function()
+        save.PlayerHealth = health
+        if save.PlayerHealth ~= health or not same(pawn.Save, save)
+            or (restored and not restored_owner(state, record, save)) then return false end
+        pawn:ForceNetUpdate()
+        return true
+    end)
+    if not ok or not verified then
+        pcall(function() save.PlayerHealth = before end)
+        error("mutation_unverified_native_host_revive", 0)
+    end
+    record.restored_save = nil
+    host_revived_health = health
 end
 
 local function on_die(context)

@@ -1095,6 +1095,7 @@ local function observe_session()
     end)
     if not ok then
         local diagnostic = tostring(state)
+        native_guest_smg_hold.cache_context(nil)
         local cleared, failure = pcall(function()
             native_hazard.clear("game bridge observation failed")
             native_guest_sickness.clear()
@@ -1104,6 +1105,7 @@ local function observe_session()
         write_status({ map = "", clients = 0, server = false, pawns = {} }, "opening", diagnostic)
         return
     end
+    native_guest_smg_hold.cache_context(state, current_phase)
     return state, current_phase
 end
 
@@ -1189,6 +1191,7 @@ local function tick()
         state, current_phase = observe_session()
         if not state then return end
     end
+    native_guest_smg_hold.cache_context(state, current_phase)
     write_status(state, current_phase, not projected and failure or nil)
 end
 
@@ -1206,6 +1209,9 @@ native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)
 native_zone.start(bridge)
+native_guest_smg_hold.start_fast(bridge, status_row, function(state)
+    return phase(state) == "hosting" and same_object(state.world, current_world())
+end)
 LoopInGameThreadWithDelay(250, function()
     local ok, failure = pcall(tick)
     if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end

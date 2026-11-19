@@ -1,6 +1,7 @@
 local shop = {}
 local pickup = require("native_pickup")
 local players = require("players")
+local shopkeep = require("native_dialogue_shopkeep")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -20,6 +21,10 @@ local merchants = {
     },
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"] = {
         level = "Shop_Gunsmith_P", actor = "Shop_BP_C_1", data = "AmmoShopData", barter = "Barter_BP_C_1", neutral = true,
+    },
+    [shopkeep.map] = {
+        level = "Shop_ShopKeep_P", actor = "Shop_BP_C_1", data = "StrangeJunkShopData", barter = "Barter_BP_C_1",
+        neutral = true, reception = true,
     },
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
@@ -136,19 +141,25 @@ local function merchant(state, phase, pawn_name, allow_host)
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then
         refused("exact_stock_merchant_unavailable")
     end
+    local reception
+    if profile.reception then
+        reception = shopkeep.authorized_counter(state, phase, pawn, stock)
+        if not reception then refused("shopkeep_stock_dialogue_required") end
+    end
     if profile.barter then
         local replacement = StaticFindObject(world .. ":PersistentLevel." .. profile.barter)
         local collision = actor.Box:GetCollisionEnabled()
         if not exact(replacement, "/Game/Classes/Actors/Barter_BP.Barter_BP_C")
             or not same(replacement:GetWorld(), state.world) or not same(replacement, actor.BarterReplacement)
-            or not same(replacement.MerchantData, actor.MerchantData) or (collision ~= 1 and collision ~= 3) then
-            refused(profile.camera and "scientist_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
+            or not same(replacement.MerchantData, actor.MerchantData) or not reception and (collision ~= 1 and collision ~= 3) then
+            refused(profile.reception and "shopkeep_cash_reception_unavailable"
+                or profile.camera and "scientist_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
         end
         if profile.neutral and (replacement.AcceptCash ~= true or actor["Rep Faction"] ~= 0) then
-            refused("gunsmith_neutral_profile_unverified")
+            refused(profile.reception and "shopkeep_neutral_profile_unverified" or "gunsmith_neutral_profile_unverified")
         end
     end
-    return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance}
+    return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance, reception = reception}
 end
 
 local function quote_panel(context)
@@ -193,7 +204,7 @@ function shop.fixture_position(state, phase, pawn_name)
     if not fixtures then refused("fixture_unavailable") end
     local context = merchant(state, phase, pawn_name, true)
     local pawn, actor = context.pawn, context.actor
-    local anchor = actor.Box:K2_GetComponentLocation()
+    local anchor = (context.reception or actor).Box:K2_GetComponentLocation()
     local range = pawn.InteractionRange
     local capsule = pawn.CapsuleComponent
     local half_height = valid(capsule) and capsule:GetScaledCapsuleHalfHeight()

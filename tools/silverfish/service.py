@@ -162,7 +162,7 @@ class Host:
                  guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
-                 mosby_station_enabled: bool = False):
+                 mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -196,7 +196,9 @@ class Host:
         self.broker_input = broker_input
         self.wipe_view_enabled = wipe_view_enabled
         self.wire_board_enabled = wire_board_enabled
-        self.dialogue_sessions = native_dialogue.DialogueSessions(mosby=mosby_dialogue_enabled) if dialogue_enabled else None
+        self.dialogue_sessions = native_dialogue.DialogueSessions(
+            mosby=mosby_dialogue_enabled, shopkeep=shopkeep_dialogue_enabled,
+        ) if dialogue_enabled else None
         self.mosby_station_enabled = mosby_station_enabled
         self.camera_ready_at = {}
         self.host_camera_input = native_turret_photo.HostCameraInput() if host_camera_input else None
@@ -1417,9 +1419,12 @@ class Host:
         if request == {"action": "snapshot"}:
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
-        if (action in GUEST_NATIVE_ACTIONS or action == native_smg_hold.ACTION and self.smg_holds) and set(request) == {
-            "action", "operation_id", "target"
-        }:
+        if action == native_smg_hold.ACTION and self.smg_holds and set(request) == {"action", "operation_id", "target"}:
+            operation = request.get("operation_id")
+            if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+                return {"ok": False, "error": "invalid_operation_id"}
+            return self.smg_holds.authenticated(guest_id, request["target"])
+        if action in GUEST_NATIVE_ACTIONS and set(request) == {"action", "operation_id", "target"}:
             return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:
             return {"ok": False, "error": "action_unavailable"}
@@ -1461,8 +1466,6 @@ class Host:
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
-            elif action == native_smg_hold.ACTION and self.smg_holds:
-                result = await self.smg_holds.request(bridge, character, target)
             elif action == native_guest_armor.ACTION:
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_consumable.ACTION:
@@ -1778,6 +1781,7 @@ class Host:
             "native_wire_board": self.wire_board_enabled,
             "native_dialogue": self.dialogue_sessions is not None,
             "native_dialogue_mosby": bool(self.dialogue_sessions and native_dialogue.SCIENTIST_SHOP in self.dialogue_sessions.maps),
+            "native_dialogue_shopkeep": bool(self.dialogue_sessions and native_dialogue.SHOPKEEP in self.dialogue_sessions.maps),
             "native_mosby_station": self.mosby_station_enabled,
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
@@ -2921,11 +2925,12 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     dialogue_enabled = native_guest and native_zones and staged_script(work, "native_dialogue.lua")
     mosby_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_mosby.lua")
+    shopkeep_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop")
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
     if guest_held_fire and not (native_guest_controls and
-                                staged_script(work, "native_guest_smg_hold.lua", "SilverfishRenewNativeGuestSmgHold")
+                                staged_script(work, "native_guest_smg_hold.lua", "held-fire-command.tsv")
                                 and staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent")):
         raise ValueError("Stock held fire requires the current native guest controls stage")
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
@@ -3080,11 +3085,14 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
+                              shopkeep_dialogue_enabled=shopkeep_dialogue_enabled,
                               mosby_station_enabled=mosby_station_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
+            if controller.smg_holds:
+                controller.smg_holds.bridge = bridge
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
             if extraction_rules:
@@ -3169,13 +3177,16 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
-            "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby", "native_mosby_station")
+            "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby",
+            "native_mosby_station", "native_dialogue_shopkeep")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
         raise ValueError("Invitation enables stock guest controls without native zones")
     if invite.get("native_guest_held_fire") and not invite.get("native_guest_controls"):
         raise ValueError("Invitation enables held fire without stock guest controls")
+    if invite.get("native_dialogue_shopkeep") and not invite.get("native_dialogue"):
+        raise ValueError("Invitation enables the ShopKeep conversation without stock dialogue")
     return invite
 
 
@@ -3256,7 +3267,10 @@ class Client:
         self.last_crate_intent = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
-        self.dialogue_view = (native_dialogue.DialogueView(bridge, control, mosby=invite.get("native_dialogue_mosby", False))
+        self.dialogue_view = (native_dialogue.DialogueView(
+            bridge, control, mosby=invite.get("native_dialogue_mosby", False),
+            shopkeep=invite.get("native_dialogue_shopkeep", False), shopkeep_view=invite.get("native_shop_view", False),
+        )
                               if invite.get("native_dialogue") else None)
         self.mosby_station = native_mosby_station_view.StationView(bridge, control) if invite.get("native_mosby_station") else None
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
@@ -3537,7 +3551,7 @@ class Client:
             return
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
-        armor = item_class == native_guest_armor.CLASS_PATH
+        armor = item_class in native_guest_armor.CLASS_PATHS
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
                 or not native_gold.valid_guid(guid) or not (armor or item_class in native_guest_weapon.CLASS_PATHS)):
@@ -3554,6 +3568,8 @@ class Client:
                 raise ValueError("The selected stock item is no longer on the authenticated inventory page")
             action = native_guest_armor.ACTION if armor else "native-guest-weapon-equip"
             equipped = await self.gameplay_action(action, operation, guid)
+            if armor and equipped.get("native_guest_armor", {}).get("class_path") != item_class:
+                raise ValueError("The host did not verify the exact selected stock armor class")
             outcome = "equipped"
             self.control.event("native_guest_inventory_equipped", operation_id=operation, view_sequence=sequence, **equipped)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
@@ -3869,6 +3885,16 @@ class Client:
                 self.control.respond(path, False, error=str(error))
 
     async def run(self) -> None:
+        held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
+        try:
+            await self.run_session()
+        finally:
+            if held:
+                held.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await held
+
+    async def run_session(self) -> None:
         async def claim_crate(operation, guid):
             return await self.gameplay_action("native-loot-claim", operation, guid)
 
@@ -3885,10 +3911,6 @@ class Client:
             if state is not None:
                 self.last_game = state
             await self.service_requests()
-            if self.guest_held_input:
-                held_active = (self.transport.connected and self.last_game.get("state") == "connected"
-                               and not self.needs_travel and not self.server_transitioning)
-                await self.guest_held_input.service(held_active)
             if self.transport.connected and not self.stopping:
                 await self.refresh_gameplay()
             repair_needed = (not self.transport.connected or self.needs_travel
@@ -3980,6 +4002,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for stock Copper Stop interaction")
     if mosby_station_enabled and not staged_script(work, "native_mosby_station_view.lua"):
         raise ValueError("Restage the native client for stock Stone Maze station interaction")
+    if invite.get("native_dialogue_shopkeep") and not staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop"):
+        raise ValueError("Restage the native client for the stock ShopKeep counter dialogue")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):

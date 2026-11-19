@@ -2,9 +2,10 @@ local canary = {}
 local guest_save = require("guest_save")
 
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local enabled = (fixtures or os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1")
-    and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
+local native_scope = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fast_enabled = native_scope and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE") == "1"
+local enabled = native_scope and (fixtures or fast_enabled)
 local scopes = {}
 local actions = {
     ["native-guest-smg-hold-start"] = true,
@@ -13,6 +14,9 @@ local actions = {
     ["native-guest-smg-hold-renew"] = true,
 }
 local states = { active = true, closing = true, released = true, expired = true, empty = true, ineligible = true }
+
+local function valid(value) return value and value:IsValid() end
+local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 
 local function check(ok, status, serial, before, after, rounds, projectiles)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_smg_hold_")
@@ -62,7 +66,8 @@ function canary.command(fields, state, phase)
             end
         end
         if count >= 4 and oldest then scopes[oldest] = nil end
-        scopes[serial] = {map = state.map, pawn = name, guid = guid, frame = observation}
+        scopes[serial] = {map = state.map, pawn = name, guid = guid, frame = observation,
+            world = state.world, driver = state.world and state.world.NetDriver}
         return "stock guest SMG hold observed"
     end
     local serial = math.tointeger(fields[3])
@@ -86,13 +91,13 @@ function canary.command(fields, state, phase)
     return "stock guest SMG hold observed"
 end
 
-function canary.rows(state, phase, status_row)
+function canary.rows(state, phase, status_row, exact_driver)
     local rows = {}
     if phase ~= "hosting" then return rows end
     for serial, scope in pairs(scopes) do
         if scope.map ~= state.map then
             scopes[serial] = nil
-        else
+        elseif not exact_driver or same(scope.world, state.world) and same(scope.driver, exact_driver) then
             local observation = scope.frame
             if observation.status == "active" or observation.status == "closing" then
                 observation = check(SilverfishReadNativeGuestSmgHold(serial))
@@ -104,6 +109,107 @@ function canary.rows(state, phase, status_row)
         end
     end
     return rows
+end
+
+local fast_context
+
+function canary.cache_context(state, phase)
+    if not fast_enabled then return end
+    fast_context = nil
+    if phase ~= "hosting" or not state or state.listening ~= true or state.server ~= false or not valid(state.world) then return end
+    local driver = state.world.NetDriver
+    if valid(driver) then fast_context = {state = state, driver = driver, seen = os.time()} end
+end
+
+local field_counts = {
+    ["native-guest-smg-hold-start"] = 5,
+    ["native-guest-smg-hold-observe"] = 3,
+    ["native-guest-smg-hold-stop"] = 3,
+    ["native-guest-smg-hold-renew"] = 4,
+}
+
+local function parse_fast_command(content)
+    local nonce = content and content:match("^([0-9a-f]+)\t")
+    if not nonce or #nonce ~= 32 then return end
+    if #content > 2048 or not content:match("\r?\n$") then return nonce end
+    local line = content:gsub("\r?\n$", "")
+    if line:find("[\r\n]") then return nonce end
+    local fields = {}
+    for value in (line .. "\t"):gmatch("([^\t]*)\t") do
+        if #value > 512 or value:find("%c") then return nonce end
+        fields[#fields + 1] = value
+        if #fields > 5 then return nonce end
+    end
+    if field_counts[fields[2]] ~= #fields then return nonce end
+    return nonce, fields
+end
+
+local function replace_reply(path, content)
+    local temporary = path .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then return false end
+    local written = file:write(content)
+    local closed = file:close()
+    if not written or not closed then return false end
+    if os.rename(temporary, path) then return true end
+    -- Windows Lua cannot rename over an existing reply. Readers only see a complete reply.
+    os.remove(path)
+    return os.rename(temporary, path) ~= nil
+end
+
+function canary.start_fast(bridge, status_row, still_current)
+    if not fast_enabled then return end
+    local command_path, reply_path = bridge .. "/held-fire-command.tsv", bridge .. "/held-fire-reply.tsv"
+    local seen, previous_content, pending_reply = {}, nil, nil
+
+    local function reply(nonce, accepted, area, message, rows)
+        local lines = {status_row("held-fire-ack", nonce, accepted and "accepted" or "rejected", area, tostring(message):sub(1, 512))}
+        for _, row in ipairs(rows or {}) do lines[#lines + 1] = row end
+        return table.concat(lines, "\n") .. "\n"
+    end
+
+    local function handle(nonce, fields)
+        if seen[nonce] then return reply(nonce, false, "-", "native_guest_smg_hold_duplicate_nonce") end
+        seen[nonce] = true
+        if not fields then return reply(nonce, false, "-", "native_guest_smg_hold_fast_command_unqualified") end
+        local cached, now = fast_context, os.time()
+        local current, state = pcall(function()
+            if not cached or now < cached.seen or now - cached.seen > 1 or not valid(cached.state.world)
+                or not same(cached.state.world.NetDriver, cached.driver) or not same(cached.driver.World, cached.state.world)
+                or valid(cached.driver.ServerConnection) or not still_current(cached.state) then return end
+            return cached.state
+        end)
+        if not current or not state then return reply(nonce, false, "-", "native_guest_smg_hold_fast_scope_unavailable") end
+        if fields[2] ~= "native-guest-smg-hold-start" then
+            local previous = scopes[math.tointeger(fields[3])]
+            if not previous or previous.map ~= state.map or not same(previous.world, state.world) or not same(previous.driver, cached.driver) then
+                return reply(nonce, false, state.map, "native_guest_smg_hold_exact_serial_required")
+            end
+        end
+        local accepted, message = pcall(canary.command, fields, state, "hosting")
+        if not accepted then return reply(nonce, false, state.map, message) end
+        local reported, rows = pcall(canary.rows, state, "hosting", status_row, cached.driver)
+        if not reported then return reply(nonce, false, state.map, "mutation_unverified_guest_smg_hold_fast_readback") end
+        return reply(nonce, true, state.map, message, rows)
+    end
+
+    LoopInGameThreadWithDelay(50, function()
+        if pending_reply then
+            if not replace_reply(reply_path, pending_reply) then return end
+            pending_reply = nil
+        end
+        local file = io.open(command_path, "rb")
+        if not file then previous_content = nil; return end
+        local content = file:read(2049)
+        file:close()
+        if not content or content == previous_content then return end
+        previous_content = content
+        local nonce, fields = parse_fast_command(content)
+        if not nonce then return end
+        local checked, result = pcall(handle, nonce, fields)
+        pending_reply = checked and result or reply(nonce, false, "-", "mutation_unverified_guest_smg_hold_fast_handler")
+        if replace_reply(reply_path, pending_reply) then pending_reply = nil end
+    end)
 end
 
 return canary

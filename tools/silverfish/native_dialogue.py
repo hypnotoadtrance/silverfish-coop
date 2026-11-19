@@ -6,7 +6,7 @@ import time
 import uuid
 
 from . import party
-from .travel import OBSERVATORY, SCIENTIST_SHOP
+from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
 PROFILE = "castaway"
@@ -27,9 +27,22 @@ GREET, QUESTIONS, ANOMALIES, DRILL, OFFER = ("Mosby_Greet", "Mosby_Questions", "
 MOSBY_QUEST = "Clt_Tape_StoneMaze_01"
 MOSBY_ROWS = {GREET: (1, {1: None, 4: QUESTIONS}), QUESTIONS: (1, {1: GREET, 3: ANOMALIES, 5: DRILL, 6: OFFER}),
               ANOMALIES: (4, {1: QUESTIONS}), DRILL: (3, {1: QUESTIONS}), OFFER: (4, {1: None, 2: None})}
+SHOPKEEP_PROFILE = "shopkeep"
+SHOPKEEP_LEVEL = SHOPKEEP + ".Shop_ShopKeep_P:PersistentLevel."
+SHOPKEEP_NPC = "NPC_ShopKeep_C " + SHOPKEEP_LEVEL + "NPC_ShopKeep_C_1"
+SHOPKEEP_CONTROLLER = "Dialogue_Controler_BP_C " + SHOPKEEP_LEVEL + "Dialogue_Controler_BP_C_1"
+SHOPKEEP_FIRST, SHOPKEEP_ROOT = "ShopKeep_FirstMeet", "ShopKeep_Default"
+SHOPKEEP_ROWS = {SHOPKEEP_FIRST: (6, {1: SHOPKEEP_ROOT}), SHOPKEEP_ROOT: (1, {2: SHOPKEEP_ROOT})}
+SHOPKEEP_PROGRESS = ("meet", "cash", "xp")
+SHOPKEEP_OPEN = "native-dialogue-shopkeep-open"
+SHOPKEEP_CASH = "native-dialogue-shopkeep-cash"
+SHOPKEEP_VIEW = "native-dialogue-shopkeep-view"
+SHOPKEEP_COUNTER = "Shop_BP_C " + SHOPKEEP_LEVEL + "Shop_BP_C_1"
 PROGRESS_KEYS = ("topic_eather_drill", "topic_drill_data", "stone_maze_readings", "quest_step", "cash", "xp")
 EFFECTS = {(QUESTIONS, 3): "topic_eather_drill", (QUESTIONS, 5): "topic_drill_data", (OFFER, 2): "stone_maze_issued"}
-ORDINALS = tuple(str(index) for index in sorted({index for _, choices in (*ROWS.values(), *MOSBY_ROWS.values()) for index in choices}))
+ORDINALS = tuple(str(index) for index in sorted({
+    index for _, choices in (*ROWS.values(), *MOSBY_ROWS.values(), *SHOPKEEP_ROWS.values()) for index in choices
+}))
 SESSION_SECONDS = 30
 
 
@@ -44,7 +57,12 @@ class Profile:
 
 
 PROFILES = {OBSERVATORY: Profile(PROFILE, OBSERVATORY, NPC, CONTROLLER, ROOT, ROWS),
-            SCIENTIST_SHOP: Profile(MOSBY, SCIENTIST_SHOP, MOSBY_NPC, MOSBY_CONTROLLER, GREET, MOSBY_ROWS)}
+            SCIENTIST_SHOP: Profile(MOSBY, SCIENTIST_SHOP, MOSBY_NPC, MOSBY_CONTROLLER, GREET, MOSBY_ROWS),
+            SHOPKEEP: Profile(SHOPKEEP_PROFILE, SHOPKEEP, SHOPKEEP_NPC, SHOPKEEP_CONTROLLER, SHOPKEEP_ROOT, SHOPKEEP_ROWS)}
+
+
+def supported_maps(mosby: bool, shopkeep: bool) -> frozenset:
+    return frozenset(area for area, enabled in ((OBSERVATORY, True), (SCIENTIST_SHOP, mosby), (SHOPKEEP, shopkeep)) if enabled)
 
 
 def valid_token(value) -> bool:
@@ -69,13 +87,26 @@ def parse_progress(fields, pawn: str) -> dict:
     return {**result, "effect": fields[-1]}
 
 
+def parse_shopkeep_progress(fields, pawn: str) -> dict:
+    if (not fields or len(fields) != 7 or tuple(fields[1:3]) != (SHOPKEEP, pawn)
+            or fields[-1] not in ("read", "opened-first", "opened-repeat", "cash-granted")):
+        raise ValueError("Invalid stock ShopKeep progress frame")
+    result = dict(zip(SHOPKEEP_PROGRESS, map(int, fields[3:6])))
+    if (any(not 0 <= value < 2**31 for value in result.values())
+            or fields[-1] == "opened-first" and result["meet"] != 1
+            or fields[-1] == "opened-repeat" and result["meet"] < 2):
+        raise ValueError("Invalid stock ShopKeep reception state")
+    return {**result, "effect": fields[-1]}
+
+
 def parse_stock(frame, lines, choices, progress_fields=None) -> dict:
     profile = PROFILES.get(frame[1]) if len(frame) == 6 else None
     if (not profile or tuple(frame[2:4]) != (profile.npc, profile.controller) or not frame[4].startswith("Player_FP_C ")
             or not frame[5] or len(frame[5]) > 512):
         raise ValueError("Invalid stock dialogue identity")
-    progress = parse_progress(progress_fields, frame[4]) if profile.id == MOSBY else None
-    if profile.id != MOSBY and progress_fields:
+    progress = (parse_progress(progress_fields, frame[4]) if profile.id == MOSBY
+                else parse_shopkeep_progress(progress_fields, frame[4]) if profile.id == SHOPKEEP_PROFILE else None)
+    if progress is None and progress_fields:
         raise ValueError("Unexpected stock dialogue progress")
     result = {name: {"lines": {}, "choices": {}} for name in profile.rows}
     for entries, field in ((lines, "lines"), (choices, "choices")):
@@ -142,10 +173,10 @@ class Receipt:
 
 
 class DialogueSessions:
-    def __init__(self, *, mosby=True):
+    def __init__(self, *, mosby=True, shopkeep=False):
         self.sessions: dict[str, Session] = {}
         self.receipts: dict[str, Receipt] = {}
-        self.maps = frozenset(PROFILES) if mosby else frozenset((OBSERVATORY,))
+        self.maps = supported_maps(mosby, shopkeep)
 
     def forget(self, character: str) -> None:
         self.sessions.pop(character, None)
@@ -174,8 +205,10 @@ class DialogueSessions:
                 stock.get("controller"), stock.get("pawn")) != (
                 "hosting", profile.map, profile.map, profile.npc, profile.controller, pawn):
             raise RuntimeError("The stock dialogue did not verify the exact local NPC and enrolled pawn")
-        if profile.id == MOSBY and (not stock.get("progress") or command == READ and stock["progress"].get("effect") != "read"):
-            raise RuntimeError("The stock dialogue did not verify the canonical host topic and quest state")
+        if profile.id in (MOSBY, SHOPKEEP_PROFILE) and (
+            not stock.get("progress") or command == READ and stock["progress"].get("effect") != "read"
+        ):
+            raise RuntimeError("The stock dialogue did not verify its canonical host state")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         return stock
 
@@ -241,6 +274,40 @@ class DialogueSessions:
         finally:
             host.transitioning = False
 
+    async def _open_shopkeep(self, host, bridge, character, scope, stock):
+        before = stock["progress"]
+        first = before["meet"] == 0
+        marker = "opened-first" if first else "opened-repeat"
+        host.transitioning = True
+        try:
+            await host.checkpoint_native(bridge)
+            member = host.native_recipients().get(character, {})
+            if (not member.get("connected") or member.get("pawn") != scope[3] or host.stopping
+                    or (host.control.generation, host.zone_epoch, host.last_game.get("map")) != scope[:3]):
+                raise party.RuleError("native_dialogue_scope_changed")
+            host.native_checkpoint_unsafe = True
+            try:
+                observed = await self._read(host, bridge, PROFILES[SHOPKEEP], scope[3], command=SHOPKEEP_OPEN,
+                                            arguments=(scope[4], *(str(before[key]) for key in SHOPKEEP_PROGRESS)))
+            except RuntimeError as error:
+                if str(error).startswith("native_dialogue_"):
+                    host.native_checkpoint_unsafe = False
+                    raise party.RuleError(str(error)) from error
+                raise
+            if (observed["connection"] != scope[4]
+                    or observed["progress"] != dict(before, meet=before["meet"] + 1, effect=marker)):
+                raise RuntimeError("The stock ShopKeep first-meet flag did not verify")
+            revision = await host.checkpoint_native(bridge)
+            host.native_checkpoint_unsafe = False
+            host.control.event("native_dialogue_committed", revision=revision, effect=marker, character=character)
+            return observed, SHOPKEEP_FIRST if first else SHOPKEEP_ROOT, marker, revision
+        except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
+            if host.native_checkpoint_unsafe:
+                host.stopping = True
+            raise
+        finally:
+            host.transitioning = False
+
     async def act(self, host, bridge, character: str, action: str, target: str | None, operation_id: str) -> dict:
         if action not in (OPEN, CHOOSE) or not isinstance(target, str) or not valid_token(operation_id):
             raise party.RuleError("native_dialogue_request_invalid")
@@ -262,6 +329,9 @@ class DialogueSessions:
             if target != profile.id:
                 raise party.RuleError("native_dialogue_profile_unavailable")
             destination = profile.root
+            if profile.id == SHOPKEEP_PROFILE:
+                stock, destination, effect, revision = await self._open_shopkeep(host, bridge, character, scope, stock)
+                now = time.monotonic()
         else:
             token, separator, choice = target.partition("@")
             session = self.sessions.get(character)
@@ -276,10 +346,20 @@ class DialogueSessions:
             if profile.id == MOSBY and (session.row, ordinal) in EFFECTS:
                 stock, effect, revision = await self._commit(host, bridge, character, scope, stock, session.row, ordinal)
                 now = time.monotonic()
+            elif profile.id == SHOPKEEP_PROFILE:
+                observed = await self._read(host, bridge, profile, scope[-2], command=SHOPKEEP_CASH,
+                                            arguments=(session.row, str(ordinal), scope[-1]))
+                if (observed["connection"] != scope[-1] or observed["progress"] != dict(stock["progress"], effect="cash-granted")
+                        or self._scope(host, character, time.monotonic()) != scope[:4]):
+                    raise RuntimeError("The stock ShopKeep cash reception did not verify")
+                stock, effect = observed, "cash-granted"
+                host.control.event("native_shopkeep_cash_granted", character_id=character, row=session.row, ordinal=ordinal)
         report = {"profile": profile.id, "map": profile.map, "npc": profile.npc, "row": destination, "token": None,
                   "state": "closed" if destination is None else "open", "lines": [], "choices": []}
         if profile.id == MOSBY:
             report["progress"] = {key: stock["progress"][key] for key in PROGRESS_KEYS}
+        elif profile.id == SHOPKEEP_PROFILE:
+            report["progress"] = {key: stock["progress"][key] for key in SHOPKEEP_PROGRESS}
         if effect:
             report.update(effect=effect, revision=revision)
         expires = now + SESSION_SECONDS
@@ -296,11 +376,12 @@ class DialogueSessions:
 
 
 class DialogueView:
-    def __init__(self, bridge, control, *, mosby=True):
+    def __init__(self, bridge, control, *, mosby=True, shopkeep=False, shopkeep_view=False):
         self.bridge, self.control = bridge, control
         self.latest = 0
         self.pending = None
-        self.maps = frozenset(PROFILES) if mosby else frozenset((OBSERVATORY,))
+        self.maps = supported_maps(mosby, shopkeep)
+        self.shopkeep_view = shopkeep and shopkeep_view
 
     async def sync(self, snapshot, epoch, active, action):
         events = self.bridge.native_dialogue_requests()
@@ -334,13 +415,25 @@ class DialogueView:
                     or (row is None and (next_token is not None or reply.get("state") != "closed"))
                     or (row is not None and (row not in profile.rows or not valid_token(next_token) or reply.get("state") != "open"))):
                 raise RuntimeError("The host did not verify the current stock dialogue response")
-            rendered = await self.bridge.command(RENDER, str(sequence), row or "-", next_token or "-",
-                                                 *render_text(reply, profile, row), timeout=2)
-            proof = rendered.get("native_dialogue_view", {})
-            if tuple(proof.get(field) for field in ("pawn", "sequence", "row", "token", "state")) != (
-                    pawn, sequence, row or "-", next_token or "-", "open" if row else "closed"):
-                raise RuntimeError("The client did not verify its exact stock dialogue menu")
-            self.control.event("native_dialogue_interaction", profile=profile.id, sequence=sequence, action=verb, row=row)
+            text = render_text(reply, profile, row)
+            cash_handoff = (self.shopkeep_view and profile.id == SHOPKEEP_PROFILE and verb == CHOOSE
+                            and reply.get("effect") == "cash-granted" and row == SHOPKEEP_ROOT)
+            if cash_handoff:
+                rendered = await self.bridge.command(SHOPKEEP_VIEW, str(sequence), token, timeout=3)
+                proof = rendered.get("native_shop_view", {})
+                if tuple(proof.get(field) for field in ("pawn", "sequence", "map", "actor", "state")) != (
+                        pawn, sequence, SHOPKEEP, SHOPKEEP_COUNTER, "pending"):
+                    raise RuntimeError("The ShopKeep dialogue did not open its exact local merchant")
+            else:
+                rendered = await self.bridge.command(RENDER, str(sequence), row or "-", next_token or "-", *text, timeout=2)
+                proof = rendered.get("native_dialogue_view", {})
+                if tuple(proof.get(field) for field in ("pawn", "sequence", "row", "token", "state")) != (
+                        pawn, sequence, row or "-", next_token or "-", "open" if row else "closed"):
+                    raise RuntimeError("The client did not verify its exact stock dialogue menu")
+            status = {"profile": profile.id, "sequence": sequence, "action": verb, "row": row}
+            if profile.id == SHOPKEEP_PROFILE and reply.get("effect") in ("opened-first", "opened-repeat", "cash-granted"):
+                status["effect"] = reply["effect"]
+            self.control.event("native_dialogue_interaction", **status)
             return rendered
         except (OSError, ValueError, RuntimeError) as error:
             self.control.event("native_dialogue_rejected", sequence=sequence, reason=str(error))

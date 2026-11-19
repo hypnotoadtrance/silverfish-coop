@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_authored_pickup as pickup, native_dialogue as dialogue, native_mosby_tape as tape
+from tools.silverfish import native_guest_armor as armor
 from tools.silverfish import native_mosby_station_view as station_view
 from tools.silverfish import native_wire_board
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
@@ -26,7 +27,7 @@ TO_MAZE = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (DEAD_BRIDGE, "
 TO_SCIENTIST = ((DEAD_BRIDGE, "DB_SM"), (CROSSROADS, "DB_CR"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
 
 
-async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False):
+async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False, equip_reward=False):
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -37,6 +38,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     guest_flags = ("--headless", "--native-zones")
+    if equip_reward:
+        guest_flags += ("--native-guest-inventory-view",)
     processes, evidence = [], {"routes": []}
 
     async def command(*arguments, expected=True):
@@ -126,6 +129,50 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         report = (await action(client, tape.READINGS_PREFLIGHT))["native_mosby_readings"]
         assert (report["board"], report["pawn"]) == (tape.BOARD, placed["pawn"]), report
         return report
+
+    async def exercise_reward_armor(reward_guid, original_inventory):
+        backpack = (armor.HAZOP_CLASS_PATH, "backpack", 1)
+        worn = (armor.HAZOP_CLASS_PATH, "armor", 1)
+        assert original_inventory[reward_guid] == backpack
+        assert not any(row[1] in ("armor", "helmet") for row in original_inventory.values()), original_inventory
+        first = (await action(client, armor.ACTION, "--target", reward_guid))["native_guest_armor"]
+        assert (first["guid"], first["class_path"], first["status"], first["minimum"]) == (reward_guid, armor.HAZOP_CLASS_PATH, "equipped", 32.0)
+        assert armor.effects(first) and await inventory(client, character) == {**original_inventory, reward_guid: worn}
+
+        jacket_guid = uuid.uuid4().hex.upper()
+        seeded = (await action(authority, armor.FIXTURE, "--target", "guest", "--item-guid", jacket_guid))["native_guest_armor"]
+        assert (seeded["guid"], seeded["status"], seeded["class_path"]) == (jacket_guid, "seeded", armor.CLASS_PATH)
+        changed = (await action(client, armor.ACTION, "--target", jacket_guid))["native_guest_armor"]
+        assert (changed["guid"], changed["replaced_guid"], changed["status"]) == (jacket_guid, reward_guid, "swapped")
+        assert armor.effects(changed) and await inventory(client, character) == {
+            **original_inventory, jacket_guid: (armor.CLASS_PATH, "armor", 1),
+        }
+
+        await action(client, "native-inventory-view-fixture")
+        rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+        pane = rendered["game"]["native_inventory_view"]
+        selection = rendered["game"]["native_guest_inventory_equip_view"]
+        for _ in range(pane["count"]):
+            if selection["guid"] == reward_guid:
+                break
+            selection = (await action(client, "native-inventory-view-key-fixture", "--target", "down"))["native_guest_inventory_equip_view"]
+        assert (selection["guid"], selection["state"], selection["sequence"]) == (reward_guid, "selecting", pane["sequence"]), selection
+        confirmation = (await action(client, "native-inventory-view-key-fixture", "--target", "confirm"))["native_guest_inventory_equip_view"]
+        assert (confirmation["guid"], confirmation["state"], confirmation["sequence"]) == (reward_guid, "confirming", pane["sequence"])
+        await action(client, "native-inventory-view-key-fixture", "--target", "confirm")
+        await wait(client_run, lambda state: (row := state.get("game", {}).get("native_guest_inventory_equip_view", {})).get("state") == "equipped"
+                   and (row.get("guid"), row.get("sequence")) == (reward_guid, pane["sequence"]))
+        journal = (await command("events", *client, "--tail", "60"))["events"]
+        receipt, = [event for event in journal if event.get("event") == "native_guest_inventory_equipped"
+                    and event.get("view_sequence") == pane["sequence"] and event.get("native_guest_armor", {}).get("guid") == reward_guid]
+        final = receipt["native_guest_armor"]
+        assert (final["status"], final["class_path"], final["replaced_guid"], final["replaced_class_path"], final["minimum"]) == (
+            "swapped", armor.HAZOP_CLASS_PATH, jacket_guid, armor.CLASS_PATH, 32.0), final
+        assert armor.effects(final)
+        exact_items = {**original_inventory, reward_guid: worn, jacket_guid: (armor.CLASS_PATH, "backpack", 1)}
+        assert await inventory(client, character) == exact_items
+        evidence["armor_equip"] = {"earned": reward_guid, "first_equip": first, "swap_to_bomber": changed, "stock_swap_back": receipt}
+        return exact_items
 
     try:
         host_process = await launch("host", authority, "host", "--port", "0", "--start-zone", SCIENTIST_SHOP, *host_flags)
@@ -270,6 +317,9 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
             assert (revival["effect"], revival["target"], revival["health"]) == ("revive", "host", 25.0), revival
             await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("host", {}).get("downed") is False)
             evidence["revived_host_before_restart"] = revival
+        if equip_reward:
+            guest_items = await exercise_reward_armor(guest_armor, guest_items)
+            assert await inventory(authority, "host") == host_items and flags(saved()) == gained
 
         await stop(host_process, authority)
         await stop(guest_process, client)
@@ -281,6 +331,14 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         restarted = await enrolled(SCIENTIST_SHOP, (current["generation"], current["zone_epoch"]))
         assert restarted["endpoint"]["port"] == port
         assert await inventory(authority, "host") == host_items and await inventory(client, character) == guest_items
+        if equip_reward:
+            def native_hazop(state):
+                return next((row for row in state.get("game", {}).get("native_guest_armor_projection", {}).values()
+                             if row.get("ok") and (row.get("guid"), row.get("class_path"), row.get("minimum")) == (
+                                 guest_armor, armor.HAZOP_CLASS_PATH, 32.0)
+                             and row.get("status") in {"reapplied", "already_applied"} and armor.effects(row)), None)
+
+            evidence["armor_equip"]["restored_projection"] = native_hazop(await wait(run, native_hazop))
         restored = await identify_board()
         assert (restored["step_after"], restored["flag_after"], restored["objective_guid"]) == (-10, 1, None), restored
         assert tuple(restored[key] for key in ("cash_after", "xp_after")) == (gained["host"]["Player_Cash"], gained["host"]["Player_Xp"])
@@ -312,6 +370,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-pickup", action="store_true", help="exercise the stock Interact fixture if installed for Scientist tape")
     parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
     parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
+    parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
-                         stock_station=args.stock_station, stock_board=args.stock_board))
+                         stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward))

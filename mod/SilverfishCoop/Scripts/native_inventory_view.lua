@@ -12,7 +12,7 @@ local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
-local bomber_jacket_path = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
+local body_armor = require("native_guest_armor")
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
 local input_keys, held = {}, {}
@@ -156,7 +156,7 @@ local function page(fields)
         seen[guid] = true
         local equippable = ((source == "backpack" or source == "equipment")
             and (weapon_profiles.kinds[class] ~= nil or class == camera_path))
-            or (source == "backpack" and class == bomber_jacket_path)
+            or (source == "backpack" and body_armor.is_body_path(class))
         local name = item:gsub("_", " ")
         local usable = source == "backpack" and class == bandage_path
         if usable then name = "Bandage" end
