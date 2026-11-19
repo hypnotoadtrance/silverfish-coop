@@ -3622,7 +3622,9 @@ class Client:
                     if view.get("state") != "rendered" or key not in ("up", "down", "confirm", "back"):
                         raise ValueError("Select an input for the current staged inventory page")
                     self.last_game = await self.bridge.command(action, str(view["sequence"]), view["map"], key, timeout=5)
-                    result = {"native_guest_inventory_equip_view": self.last_game.get("native_guest_inventory_equip_view", {})}
+                    result = {key: self.last_game.get(key, {}) for key in (
+                        "native_guest_inventory_equip_view", "native_guest_inventory_use_view",
+                    )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")
                     if choice not in ("open", "up", "down", "enter", "back", "page-up", "page-down"):

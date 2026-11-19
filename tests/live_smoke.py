@@ -64,6 +64,7 @@ options.add_argument("--native-roster", action="store_true", help="verify the ho
 options.add_argument("--native-interact-input", action="store_true", help="revive with the stock interact input wrapper")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-bandage", action="store_true", help="use the exact owned stock Bandage after a revive")
+options.add_argument("--native-bandage-input", action="store_true", help="use the Bandage through the guest inventory overlay")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
 options.add_argument("--native-weapon-use", action="store_true", help="exercise the exact guest's stock weapon and ammunition")
 options.add_argument("--native-light-pistol", action="store_true", help="use the stock Light Pistol in the guest weapon test")
@@ -99,6 +100,10 @@ if args.native_light_pistol or args.native_primary_input or args.native_inventor
 if args.native_inventory_equip:
     args.native_inventory_list = True
     args.native_inventory_view = True
+if args.native_bandage_input:
+    if not args.native_zones:
+        options.error("--native-bandage-input requires --native-zones for the guest inventory controls")
+    args.native_bandage = True
 if args.native_bandage:
     args.native_pickup = True
     if not args.native_guest or args.native_wipe or args.native_guest_save:
@@ -1625,8 +1630,33 @@ async def smoke():
                                                       "entry": "stock_interact" if args.native_interact_input else "action"})
             if args.native_bandage:
                 use_bandage = ("action", "--profile", profile, "native-guest-bandage", "--target", awarded["guid"])
-                use_bandage_once = (*use_bandage, "--operation-id", uuid.uuid4().hex)
-                bandage_proof = (await command(*use_bandage_once))["native_guest_bandage"]
+                if args.native_bandage_input:
+                    await command("action", "--profile", profile, "native-inventory-view-fixture")
+                    rendered = await wait(client_run, lambda state: state.get("game", {}).get("native_inventory_view", {})
+                                          .get("state") == "rendered")
+                    selection = rendered["game"].get("native_guest_inventory_use_view", {})
+                    key = ("action", "--profile", profile, "native-inventory-view-key-fixture", "--target")
+                    for _ in range(rendered["game"]["native_inventory_view"]["count"]):
+                        if selection.get("guid") == awarded["guid"]:
+                            break
+                        selection = (await command(*key, "down"))["native_guest_inventory_use_view"]
+                    assert (selection.get("state"), selection.get("guid")) == ("selecting", awarded["guid"]), selection
+                    armed = (await command(*key, "confirm"))["native_guest_inventory_use_view"]
+                    assert (armed["state"], armed["guid"]) == ("confirming", awarded["guid"]), armed
+                    requested = (await command(*key, "confirm"))["native_guest_inventory_use_view"]
+                    assert (requested["state"], requested["guid"]) == ("using", awarded["guid"]), requested
+                    await wait(client_run, lambda state: state.get("game", {}).get("native_guest_inventory_use_view", {})
+                               == dict(requested, state="used"))
+                    events = await command("events", "--profile", profile, "--tail", "100")
+                    receipt = next(row for row in events["events"] if row.get("event") == "native_guest_inventory_used"
+                                   and row["view_sequence"] == requested["sequence"])
+                    bandage_proof = receipt["native_guest_bandage"]
+                    use_bandage_once = (*use_bandage, "--operation-id", receipt["operation_id"])
+                    await command(*key, "back")
+                    note("stock_inventory_input_used_selected_bandage", {"guid": awarded["guid"], "selection": requested})
+                else:
+                    use_bandage_once = (*use_bandage, "--operation-id", uuid.uuid4().hex)
+                    bandage_proof = (await command(*use_bandage_once))["native_guest_bandage"]
                 assert bandage_proof["quantity_before"] == 1 and bandage_proof["quantity_after"] == 0, bandage_proof
                 assert bandage_proof["health_before"] == bandage_proof["health_after"] > 0, bandage_proof
                 stock_gain = 27 if bandage_proof["hemophilia"] else 45
