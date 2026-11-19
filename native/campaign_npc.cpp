@@ -60,6 +60,7 @@ namespace
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
     constexpr auto combat_watch_time = std::chrono::seconds(45);
     constexpr int flayer_infection = 8;
+    constexpr int flayer_infection_reads = 2;
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto instance_class = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
@@ -819,8 +820,9 @@ namespace
         combat_watch.swing_after = after;
         const auto delta = static_cast<std::int64_t>(after.guest_sickness) - before.guest_sickness;
         combat_watch.swing_status = "stock_infection_delta_unverified";
+        // The stock ResolveMelee path in this build yields two scoped reads and one audited write.
         if (!same_stock_sickness(before, after) || !after.guest_found || delta < 1 || delta > flayer_infection ||
-            after.infect_reads - before.infect_reads != 1 || after.infect_writes - before.infect_writes != 1) return;
+            after.infect_reads - before.infect_reads != flayer_infection_reads || after.infect_writes - before.infect_writes != 1) return;
         combat_watch.swing_status = "stock_infection_verified";
         if (combat_watch.guest_hits++ == 0)
         {

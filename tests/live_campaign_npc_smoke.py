@@ -301,7 +301,7 @@ def stock_flayer_infection(server: dict, report: dict) -> bool:
     return bool(scoped and all(infection[key] == damage[key] for key in exact)
                 and 1 <= infection["guest_after"] - infection["guest_before"] <= infection["stock_dose"] == 8
                 and infection["host_before"] == infection["host_after"] == infection["host_current"] == scoped["host_sickness"]
-                and scoped["infect_reads"] >= infection["reads_after"] == infection["reads_before"] + 1
+                and scoped["infect_reads"] >= infection["reads_after"] == infection["reads_before"] + 2
                 and scoped["infect_writes"] >= infection["writes_after"] == infection["writes_before"] + 1)
 
 
