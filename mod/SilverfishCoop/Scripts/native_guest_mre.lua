@@ -36,22 +36,36 @@ local function damage_test_source(state, pawn, detached)
     return source
 end
 
+local function measurement(value)
+    if bounded(value, -10000, 10000) then return string.format("%.6g", value) end
+    if type(value) == "boolean" then return tostring(value) end
+    return type(value)
+end
+
 local function wound_test_guest(pawn, detached, host, stock, source)
     local host_health, host_regen = stock.PlayerHealth, stock.PlayerRegen
     local hp, regen = detached.PlayerHealth, detached.PlayerRegen
     local total, lethal = {}, {}
-    local called = pcall(function()
+    local called, call_error = pcall(function()
         pawn:DealDamage({Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 40}, {}, source,
             {X = 0, Y = 0, Z = 0}, false, total, lethal)
     end)
-    if not called or total.TotalDamage ~= 40 or lethal.IsLethal ~= false or pawn.Dead ~= false
-        or not same(pawn.Save, detached) or not same(host.Save, stock)
-        or detached.PlayerHealth ~= hp - 40 or detached.PlayerRegen ~= regen - 20
-        or stock.PlayerHealth ~= host_health or stock.PlayerRegen ~= host_regen then
-        error("mutation_unverified_guest_mre_fixture_stock_damage", 0)
+    local guest_hp_after, guest_regen_after = detached.PlayerHealth, detached.PlayerRegen
+    local host_hp_after, host_regen_after = stock.PlayerHealth, stock.PlayerRegen
+    local guest_bound, host_bound = same(pawn.Save, detached), same(host.Save, stock)
+    if not called or total.TotalDamage ~= 40 or lethal.IsLethal ~= false or pawn.Dead ~= false or not guest_bound or not host_bound
+        or guest_hp_after ~= hp - 40 or guest_regen_after ~= regen - 20
+        or host_hp_after ~= host_health or host_regen_after ~= host_regen then
+        local call = called and "ok" or tostring(call_error):gsub("[%c]", " "):sub(1, 144)
+        error(string.format("mutation_unverified_guest_mre_fixture_stock_damage:call=%s:damage=%s:lethal=%s:dead=%s"
+            .. ":guest_hp=%s/%s:guest_regen=%s/%s:host_hp=%s/%s:host_regen=%s/%s:bindings=%s/%s",
+            call, measurement(total.TotalDamage), measurement(lethal.IsLethal), measurement(pawn.Dead),
+            measurement(hp), measurement(guest_hp_after), measurement(regen), measurement(guest_regen_after),
+            measurement(host_health), measurement(host_hp_after), measurement(host_regen), measurement(host_regen_after),
+            tostring(guest_bound == true), tostring(host_bound == true)), 0)
     end
-    return {amount = total.TotalDamage, hp_before = hp, hp_after = detached.PlayerHealth,
-        regen_before = regen, regen_after = detached.PlayerRegen}
+    return {amount = total.TotalDamage, hp_before = hp, hp_after = guest_hp_after,
+        regen_before = regen, regen_after = guest_regen_after}
 end
 
 function mre.sync(state, phase)

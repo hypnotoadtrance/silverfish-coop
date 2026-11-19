@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -126,9 +127,26 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False):
         if dust_filter:
             step = await act(host, pickup.APPROACH, "--target", "guest", "--pickup-source", pickup.DUST_FILTER)
             assert step["actor"] == pickup.SOURCES[pickup.DUST_FILTER][1], step
+            source_position = (-8423.943, -30074.585, 264.038)
+
+            def nearby(state, role, center, radius):
+                game = state.get("game", {})
+                pawn = game.get("pawns", {}).get(role, {})
+                position = pawn.get("location")
+                source = game.get(pickup.SOURCES_KEY, {}).get(pickup.DUST_FILTER, {})
+                return (game.get("map") == area and source.get("state") == "available" and position
+                        and len(position) == 3 and math.dist(position, center) <= radius)
+
+            approached = await wait(run, lambda state: nearby(state, "guest", source_position, 240))
+            authoritative_position = approached["game"]["pawns"]["guest"]["location"]
+            replicated = await wait(client_run, lambda state: nearby(state, "local", authoritative_position, 25))
+            replica = replicated["game"]["pawns"]["local"]
             pressed = (await act(client, pickup.STOCK_FIXTURE, "--pickup-source",
                                  pickup.DUST_FILTER))["native_authored_pickup_interaction"]
-            assert (pressed["source"], pressed["map"], pressed["entry"]) == (pickup.DUST_FILTER, area, "stock"), pressed
+            assert (pressed["source"], pressed["map"], pressed["entry"], pressed["pawn"]) == (
+                pickup.DUST_FILTER, area, "stock", replica["name"],
+            ), pressed
+            evidence["stock_approach"] = {"authority": authoritative_position, "replica": replica["location"]}
 
             def claim(state):
                 return state.get("campaign", {}).get("world", {}).get("party", {}).get(pickup.STATE_KEY, {}).get(pickup.DUST_FILTER)
