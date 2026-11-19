@@ -1,9 +1,16 @@
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_computer_board, native_finite_shop, party
+from tools.silverfish.campaign import CampaignStore
+from tools.silverfish.control import Control
+from tools.silverfish.multi_host import MultiHost
+from tools.silverfish.runtime import read_json, write_json
+from tools.silverfish.service import Host
 from tools.silverfish.travel import OBSERVATORY, SCIENTIST_SHOP
 
 
@@ -76,6 +83,90 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         result = await native_finite_shop.perform(host, bridge, "host", "native-finite-shop-buy", f"{GUID}@125", OPERATION_ID)
         self.assertEqual(result["native_finite_purchase"]["wallet_after"], 875)
         self.assertEqual(host.checkpoint_native.await_args.kwargs.get("require_guest_frames", frozenset()), frozenset())
+
+    @staticmethod
+    def enqueue(control, identifier, action, **arguments):
+        name = identifier * 32 + ".json"
+        write_json(control.run / "requests" / name, {"generation": control.generation, "action": action, **arguments})
+        return control.run / "responses" / name
+
+    async def test_unsettled_shop_purchase_cannot_checkpoint_or_run_later_commands(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        wallet = 1000
+
+        async def game_command(action, *args, **kwargs):
+            nonlocal wallet
+            if action == "native-finite-shop-list":
+                return self.shop_frame(SCIENTIST_SHOP, HOST_PAWN, "listed")
+            self.assertEqual(action, "native-finite-shop-buy")
+            wallet -= 125
+            return self.shop_frame(SCIENTIST_SHOP, HOST_PAWN, "purchased", -125)
+
+        with Control(root / "run") as control, CampaignStore(root / "save") as store:
+            async def checkpoint(_bridge, proposed=None, **kwargs):
+                if proposed is not None:
+                    raise OSError("simulated paired save failure")
+                return store.save_world({"stock_wallet": wallet, "party": host.party})
+
+            host.control = control
+            host.checkpoint_native = AsyncMock(side_effect=checkpoint)
+            bridge = SimpleNamespace(command=AsyncMock(side_effect=game_command), walk=AsyncMock())
+            purchase = self.enqueue(control, "1", "native-finite-shop-buy", target=f"{GUID}@125")
+            checkpoint_reply = self.enqueue(control, "2", "checkpoint")
+            stop = self.enqueue(control, "3", "stop")
+            walk = self.enqueue(control, "4", "walk", x=1, y=0, milliseconds=500)
+
+            await Host.service_requests(host, bridge, None)
+
+            self.assertEqual(read_json(purchase)["error"], "simulated paired save failure")
+            self.assertEqual(wallet, 875)
+            for reply in (checkpoint_reply, stop, walk):
+                self.assertEqual(read_json(reply).get("error"), "native_checkpoint_unsafe")
+            bridge.walk.assert_not_awaited()
+            self.assertEqual(store.status()["revision"], 1)
+            self.assertEqual(store.status()["world"]["stock_wallet"], 1000)
+            self.assertEqual(store.status()["world"]["party"]["receipts"], {})
+            self.assertTrue(host.stopping)
+
+    async def test_orderly_stop_checkpoints_without_running_later_commands(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        host.checkpoint_native.side_effect = (4, 5)
+        bridge = SimpleNamespace(walk=AsyncMock())
+        with Control(root / "run") as control:
+            host.control = control
+            checkpoint = self.enqueue(control, "1", "checkpoint")
+            stop = self.enqueue(control, "2", "stop")
+            walk = self.enqueue(control, "3", "walk", x=1, y=0, milliseconds=500)
+            await Host.service_requests(host, bridge, None)
+            self.assertEqual(read_json(checkpoint)["revision"], 4)
+            self.assertEqual(read_json(stop)["revision"], 5)
+            self.assertEqual(read_json(walk).get("error"), "host_stopping")
+        self.assertEqual(host.checkpoint_native.await_count, 2)
+        bridge.walk.assert_not_awaited()
+        self.assertTrue(host.stopping)
+
+    def test_concurrent_guest_interaction_and_disconnect_cannot_checkpoint_pending_mutation(self):
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        host.native_checkpoint_unsafe = True
+        host.checkpoint = Mock()
+        host.store = Mock()
+        host.guest = {"guest_id": "peer", "character_id": GUEST, "lease_id": "lease", "disconnected": None}
+        host.members = Mock(grace_seconds=90)
+
+        with self.assertRaisesRegex(party.RuleError, "native_transaction_busy"):
+            Host.act(host, GUEST, OPERATION_ID, "interact", None)
+        Host.disconnected(host, "peer")
+        host.store.disconnect.assert_called_once_with("lease")
+        MultiHost.disconnected(host, "peer")
+        host.members.disconnect.assert_called_once_with("peer")
+        host.checkpoint.assert_not_called()
+
+        host.stopping = True
+        create = {"action": "create-character", "name": "Second scout", "operation_id": OPERATION_ID}
+        self.assertEqual(Host.guest_request(host, "peer", create), {"ok": False, "error": "native_checkpoint_unsafe"})
+        host.store.create_linked_character.assert_not_called()
 
     async def test_computer_board_guest_turn_in_requires_the_consumed_board_frame(self):
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)

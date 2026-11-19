@@ -85,7 +85,7 @@ class MultiHost(Host):
         member = self.members.disconnect(guest_id)
         if member:
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=self.members.grace_seconds)
-            if not self.transitioning and self.last_game.get("state") == "hosting":
+            if not self.transitioning and not self.native_checkpoint_unsafe and self.last_game.get("state") == "hosting":
                 with contextlib.suppress(OSError, RuntimeError):
                     self.checkpoint()
 

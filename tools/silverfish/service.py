@@ -283,7 +283,7 @@ class Host:
             return
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
-        if not self.transitioning:
+        if not self.transitioning and not self.native_checkpoint_unsafe:
             try:
                 self.checkpoint()
             except (OSError, RuntimeError) as error:
@@ -530,6 +530,8 @@ class Host:
     def act(self, actor: str, operation_id: str, action: str, target: str | None,
             amount: int | None = None, retained: dict | None = None, *,
             last_native_target: dict | None = None) -> dict:
+        if self.native_checkpoint_unsafe:
+            raise party.RuleError("native_transaction_busy")
         if self.stopping or self.transitioning or time.monotonic() - self.last_seen > POSITION_MAX_AGE:
             raise party.RuleError("game_snapshot_unavailable")
         roles = self.roles()
@@ -1352,6 +1354,9 @@ class Host:
 
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
+        if self.stopping:
+            reason = "native_checkpoint_unsafe" if self.native_checkpoint_unsafe else "host_stopping"
+            return {"ok": False, "error": reason}
         if request == {"action": "characters"}:
             return {"ok": True, "characters": self.store.linked_character_catalog(guest_id)}
         if request.get("action") == "create-character" and set(request) == {"action", "name", "operation_id"}:
@@ -1933,7 +1938,13 @@ class Host:
                 self.native_guest_position = (self.guest["character_id"], pawn["name"], position, self.last_seen)
 
     async def service_requests(self, bridge: Bridge, transport) -> None:
+        if self.native_checkpoint_unsafe:
+            self.stopping = True
         for path, request in self.control.requests():
+            if self.stopping:
+                reason = "native_checkpoint_unsafe" if self.native_checkpoint_unsafe else "host_stopping"
+                self.control.respond(path, False, error=reason)
+                continue
             action = request.get("action")
             try:
                 if action == "invite":
@@ -2497,6 +2508,8 @@ class Host:
                     raise ValueError("Action unavailable on the host")
                 self.control.respond(path, True, **result)
             except (ValueError, OSError, CampaignError, RuntimeError) as error:
+                if self.native_checkpoint_unsafe:
+                    self.stopping = True
                 self.control.respond(path, False, error=str(error))
 
     async def native_hazard(self, bridge: Bridge, action: str) -> dict:
@@ -2700,24 +2713,27 @@ class Host:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
                     await self.advance_dream(bridge, transport)
-            if not self.stopping:
+            if not self.stopping and not self.native_checkpoint_unsafe:
                 await self.service_guest_native_requests(bridge)
-                if self.host_camera_input:
-                    await self.host_camera_input.sync(self, bridge)
-                if wire_board:
-                    snapshot = await wire_board.sync(self.last_game, self.zone_epoch,
-                                                     not self.transitioning and not self.party["wipe"], wire_action)
-                    if snapshot is not self.last_game:
-                        self.last_game, self.last_seen = snapshot, time.monotonic()
-                if self.native_loot_input and (sequence := native_loot.interaction_sequence(self.last_game, self.last_crate_intent)):
-                    self.last_crate_intent = sequence
-                    operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}").hex
-                    try:
-                        await native_loot.perform(self, bridge, "host", "open", native_loot.CRATE, operation)
-                        self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation)
-                    except (OSError, ValueError, RuntimeError) as error:
-                        self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, reason=str(error))
+            if self.host_camera_input and not self.stopping and not self.native_checkpoint_unsafe:
+                await self.host_camera_input.sync(self, bridge)
+            if wire_board and not self.stopping and not self.native_checkpoint_unsafe:
+                snapshot = await wire_board.sync(self.last_game, self.zone_epoch,
+                                                 not self.transitioning and not self.party["wipe"], wire_action)
+                if snapshot is not self.last_game:
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
+            if (self.native_loot_input and not self.stopping and not self.native_checkpoint_unsafe
+                    and (sequence := native_loot.interaction_sequence(self.last_game, self.last_crate_intent))):
+                self.last_crate_intent = sequence
+                operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}").hex
+                try:
+                    await native_loot.perform(self, bridge, "host", "open", native_loot.CRATE, operation)
+                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation)
+                except (OSError, ValueError, RuntimeError) as error:
+                    self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, reason=str(error))
             for operation_id, target in bridge.interactions():
+                if self.stopping or self.native_checkpoint_unsafe:
+                    break
                 try:
                     if target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)

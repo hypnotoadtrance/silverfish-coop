@@ -132,6 +132,9 @@ class CampaignStore:
     prevents a second host from writing the same campaign. Use a context
     manager or call close() to release the lock. Guest IDs, character IDs, and
     state survive a host restart. Connection leases live only in memory.
+
+    Optional content validators check restored saves and new world or character
+    state before it is published. Identity-only writes reuse the accepted saves.
     """
 
     def __init__(self, directory, *, clock=time.monotonic, verify_world=None, verify_checkpoint=None):
@@ -219,11 +222,14 @@ class CampaignStore:
 
     def _read_verified(self, path):
         data = self._read(path)
+        self._verify_content(data)
+        return data
+
+    def _verify_content(self, data):
         if self._verify_world is not None:
             self._verify_world(data["world"])
         if self._verify_checkpoint is not None:
             self._verify_checkpoint(data)
-        return data
 
     @staticmethod
     def _read(path):
@@ -293,10 +299,12 @@ class CampaignStore:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
 
-    def _commit(self, candidate):
+    def _commit(self, candidate, *, verify_content=True):
         self._require_open()
         candidate["revision"] = self._data["revision"] + 1
         self._validate(candidate)
+        if verify_content:
+            self._verify_content(candidate)
         self._write(self.previous_path, self._data)
         self._write(self.path, candidate)
         self._data = candidate
@@ -329,7 +337,7 @@ class CampaignStore:
             name = _name(name)
             candidate = copy.deepcopy(self._data)
             identity = self._add_guest(candidate, name)
-            self._commit(candidate)
+            self._commit(candidate, verify_content=False)
             return identity
 
     def issue_invitation(self, guest_name, character_name):
@@ -341,7 +349,7 @@ class CampaignStore:
             candidate = copy.deepcopy(self._data)
             identity = self._add_guest(candidate, guest_name)
             character_id = self._add_character(candidate, identity["guest_id"], character_name, {})
-            self._commit(candidate)
+            self._commit(candidate, verify_content=False)
             return {**identity, "character_id": character_id}
 
     def _authenticate(self, guest_id, credential):
@@ -386,7 +394,7 @@ class CampaignStore:
             else:
                 candidate = copy.deepcopy(self._data)
                 self._add_character(candidate, guest_id, name, {}, character_id)
-                self._commit(candidate)
+                self._commit(candidate, verify_content=False)
             return {"character_id": character_id, "name": name}
 
     def list_characters(self, guest_id, credential):
@@ -409,7 +417,7 @@ class CampaignStore:
             _validate_state(state)
             candidate = copy.deepcopy(self._data)
             character_id = self._add_character(candidate, guest_id, name, state)
-            self._commit(candidate)
+            self._commit(candidate, verify_content=bool(state))
             return self._public_character(character_id)
 
     def _drop_lease(self, lease):

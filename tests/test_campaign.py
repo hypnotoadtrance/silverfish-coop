@@ -3,8 +3,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from tools.silverfish import native_host_save
 from tools.silverfish.campaign import (
     AuthenticationError,
     CampaignFormatError,
@@ -14,6 +15,7 @@ from tools.silverfish.campaign import (
     LeaseError,
     StoreBusyError,
 )
+from tools.silverfish.travel import CROSSROADS
 
 
 class CampaignStoreTests(unittest.TestCase):
@@ -24,8 +26,8 @@ class CampaignStoreTests(unittest.TestCase):
         self.directory = self.root / "Coop" / "Campaign"
         self.now = 1000.0
 
-    def open_store(self):
-        return CampaignStore(self.directory, clock=lambda: self.now)
+    def open_store(self, **validators):
+        return CampaignStore(self.directory, clock=lambda: self.now, **validators)
 
     @staticmethod
     def create_guest(store, name="Guest"):
@@ -147,6 +149,56 @@ class CampaignStoreTests(unittest.TestCase):
             self.assertEqual(store.path.read_bytes(), before)
             self.assertEqual(store.status()["world"], {})
             self.assertEqual(store.list_characters(**identity)[0]["state"], {"health": 100})
+
+    def test_missing_native_escrow_cannot_replace_committed_generations(self):
+        profile = self.root / "game-user"
+        native_host_save.directory(profile).mkdir(parents=True)
+        slot = native_host_save.new_slot()
+        native_host_save.slot_path(profile, slot).write_bytes(b"GVAS" + bytes(64))
+        frame = native_host_save.record(profile, slot, CROSSROADS)
+        world = {"map": CROSSROADS, "native_host_save": frame, "party": {}}
+
+        def verify(checkpoint):
+            native_host_save.verify_checkpoint(profile, checkpoint)
+
+        with self.open_store(verify_checkpoint=verify) as store:
+            store.save_world(dict(world, day=1))
+            revision = store.save_world(dict(world, day=2))
+            primary = store.path.read_bytes()
+            previous = store.previous_path.read_bytes()
+            escrow = dict(frame, slot=native_host_save.new_slot())
+            invalid_party = {"native_loot_rolls": {"crate": {"escrow": escrow}}}
+            with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save generation"):
+                store.save_world(dict(world, day=3, party=invalid_party))
+            self.assertEqual(store.path.read_bytes(), primary)
+            self.assertEqual(store.previous_path.read_bytes(), previous)
+            self.assertEqual(store.status()["revision"], revision)
+            store.issue_invitation("Scout", "Wanderer")
+
+        with self.open_store(verify_checkpoint=verify) as store:
+            self.assertEqual(store.status()["world"], dict(world, day=2))
+            self.assertEqual(store.status()["revision"], revision + 1)
+            self.assertFalse(store.recovered)
+
+    def test_checks_world_and_character_state_but_skips_verifiers_for_identity_only_writes(self):
+        verify_world = Mock()
+        verify_checkpoint = Mock()
+        with self.open_store(verify_world=verify_world, verify_checkpoint=verify_checkpoint) as store:
+            store.save_world({"day": 1})
+            verify_world.assert_called_once_with({"day": 1})
+            verify_checkpoint.assert_called_once()
+
+            identity = store.issue_guest("Scout")
+            store.issue_invitation("Medic", "Wanderer")
+            store.create_linked_character(identity["guest_id"], "Character", "a" * 32)
+            store.create_character(name="Empty", **identity)
+            self.assertEqual(verify_checkpoint.call_count, 1)
+            self.assertEqual(verify_world.call_count, 1)
+
+            character = store.create_character(name="With state", state={"health": 37}, **identity)
+            self.assertEqual(verify_checkpoint.call_count, 2)
+            self.assertEqual(verify_checkpoint.call_args.args[0]["characters"][character["character_id"]]["state"],
+                             {"health": 37})
 
     def test_failed_primary_replace_leaves_committed_revision(self):
         with self.open_store() as store:
