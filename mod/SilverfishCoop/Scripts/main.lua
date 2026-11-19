@@ -23,6 +23,7 @@ local native_mosby_station = require("native_mosby_station_view")
 local native_computer_board = require("native_computer_board")
 local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
+local native_lenny = require("native_lenny")
 local native_flood_jammer_projection = require("native_flood_jammer_projection")
 local native_turret_photo_quest = require("native_turret_photo_quest")
 local native_authored_arrival = require("native_authored_arrival")
@@ -836,6 +837,7 @@ local function run_command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
         or native_meet_broker.command(fields, state, current_phase)
         or native_flood_jammer.command(fields, state, current_phase)
+        or native_lenny.command(fields, state, current_phase)
         or native_flood_jammer_projection.command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
@@ -976,6 +978,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_meet_broker.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_lenny.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

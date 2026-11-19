@@ -87,9 +87,7 @@ local function align(context, center)
                     Z = muzzle.Z + forward.Z * reach}
                 local hit = trace(context, muzzle, finish, 2, true, {context.pawn, context.weapon})
                 local contact = hit and hit.Component and hit.Component:Get()
-                if valid(contact) and component(contact, context.jammer,
-                    same(contact, context.jammer.Capsule) and "CapsuleComponent" or "StaticMeshComponent")
-                    and (same(contact, context.jammer.Capsule) or same(contact, context.jammer.StaticMesh)) then
+                if same(contact, context.target_capsule) or same(contact, context.target_mesh) then
                     return distance, contact:GetFullName()
                 end
             end
@@ -97,23 +95,21 @@ local function align(context, center)
     end
 end
 
-function fixture.aim(state, phase, name, guid, profile)
+function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule, target_mesh)
     last = nil
     if not enabled or phase ~= "hosting" or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^A-F0-9]") then
         refuse("headless_fixture_and_guid_required")
     end
-    local host = state.local_pawn and state.local_pawn.pawn
-    if not valid(host) or type(SilverfishReadFloodJammer) ~= "function"
-        or SilverfishReadFloodJammer(host:GetAddress()) ~= "watching" then refuse("exact_native_watch_required") end
-    local jammer = StaticFindObject(profile.jammer_path)
-    if not valid(jammer) or jammer:GetFullName() ~= profile.jammer_name or not same(jammer:GetWorld(), state.world)
-        or not jammer:HasAuthority() or jammer:IsActorBeingDestroyed() or not finite(jammer.Health) or jammer.Health <= 0
-        or not component(jammer.Capsule, jammer, "CapsuleComponent") then refuse("living_authored_jammer_required") end
+    if not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
+        or actor:IsActorBeingDestroyed() or not finite(actor.Health) or actor.Health <= 0
+        or not component(target_capsule, actor, "CapsuleComponent") then refuse("living_authored_target_required") end
+    local mesh_class = tag == "native-lenny" and "SkeletalMeshComponent" or "StaticMeshComponent"
+    if not component(target_mesh, actor, mesh_class) then target_mesh = nil end
 
     local context = equipped(state, phase, name, guid)
-    context.trace, context.jammer = StaticFindObject(trace_path), jammer
-    context.ignored = {context.pawn, context.weapon, jammer}
-    local center = jammer.Capsule:K2_GetComponentLocation()
+    context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
+    context.ignored = {context.pawn, context.weapon, actor}
+    local center = target_capsule:K2_GetComponentLocation()
     local radius, height = context.capsule:GetScaledCapsuleRadius(), context.capsule:GetScaledCapsuleHalfHeight()
     local original = {point = context.pawn:K2_GetActorLocation(), actor = rotation(context.pawn:K2_GetActorRotation()),
         control = rotation(context.controller:GetControlRotation()), camera = rotation(context.camera.RelativeRotation),
@@ -159,9 +155,18 @@ function fixture.aim(state, phase, name, guid, profile)
         refuse(checked and "no_stock_sight_line" or "geometry_call_failed")
     end
     if not pcall(function() context.pawn:ForceNetUpdate() end) then error("mutation_unverified_stock_flood_jammer_aim_net_update", 0) end
-    last = {world = state.world, map = state.map, pawn = name, jammer = profile.jammer_name, tag = profile.tag, guid = guid,
+    last = {world = state.world, map = state.map, pawn = name, target = actor:GetFullName(), tag = tag, guid = guid,
         distance = distance, component = hit}
-    return "verified stock line of fire to the authored jammer"
+    return "verified stock line of fire to the authored target"
+end
+
+function fixture.aim(state, phase, name, guid, profile)
+    local host = state.local_pawn and state.local_pawn.pawn
+    if not valid(host) or type(SilverfishReadFloodJammer) ~= "function"
+        or SilverfishReadFloodJammer(host:GetAddress()) ~= "watching" then refuse("exact_native_watch_required") end
+    local actor = StaticFindObject(profile.jammer_path)
+    if not valid(actor) or actor:GetFullName() ~= profile.jammer_name then refuse("living_authored_jammer_required") end
+    return fixture.aim_target(state, phase, name, guid, profile.tag, actor, actor.Capsule, actor.StaticMesh)
 end
 
 function fixture.row(state, phase, status_row)
@@ -171,7 +176,7 @@ function fixture.row(state, phase, status_row)
         last = nil
         return
     end
-    return status_row(proof.tag .. "-aim", proof.map, proof.pawn, proof.jammer, proof.guid, proof.distance, proof.component)
+    return status_row(proof.tag .. "-aim", proof.map, proof.pawn, proof.target, proof.guid, proof.distance, proof.component)
 end
 
 return fixture

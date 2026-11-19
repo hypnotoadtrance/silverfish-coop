@@ -14,6 +14,7 @@ local pocket_watch = "Clt_Watch"
 local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
 local lake_jammer = "Jmr_Lake"
+local lenny = "Asn_Lenny_01"
 local readings = "Clt_Tape_StoneMaze_01"
 local function board_profile(area, level, suffix, id, quests, display_global)
     local world = area .. "." .. level
@@ -25,11 +26,11 @@ local profiles = {
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
-    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer}, true),
+    [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny}, true),
 }
 local titles = {[wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
-    [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake"}
+    [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake", [lenny] = "Lenny's House"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -96,6 +97,11 @@ local contract_prompt = {
         offer = "Disable the signal jammer at Black Lake.\nInteract again to accept the contract.",
         missing = "Disable the signal jammer at Black Lake.\nInteract to check the contract again.",
         ready = "Turn in the contract for 400 shared cash.\nInteract again to turn it in.",
+    },
+    [lenny] = {
+        offer = "Find Lenny in the Rail Yard.\nInteract again to accept the contract.",
+        missing = "Take out Lenny in the Rail Yard.\nInteract to check the contract again.",
+        ready = "Turn in the contract for 2,500 shared cash.\nInteract again to turn it in.",
     },
     [readings] = {
         not_offered = "Speak to Dr. Mosby to start this contract.",

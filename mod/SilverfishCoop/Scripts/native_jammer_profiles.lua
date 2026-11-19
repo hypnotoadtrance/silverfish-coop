@@ -24,7 +24,15 @@ local flood = profile("flood", "Jmr_FloodPlains", "RuinFeilds_P", "RuinFeilds_P"
 local lake = profile("lake", "Jmr_Lake", "Lake_01_P", "Lake_01_P",
     "Shop_BlackMarket_01", "Shop_BlackMarket_01", "0", 1, {0, 1, 3}, true, 400, 80, 8)
 
+local lenny = {
+    tag = "native-lenny", error_tag = "stock_lenny_", quest_id = "Asn_Lenny_01",
+    map = lake.map, world_path = lake.world_path, board_path = lake.board_path, board_name = lake.board_name,
+    board_id = lake.board_id, global_contracts = true, board_order = {0, 1, 2, 7},
+    cash = 2500, penalty = 300, difficulty = 4, factions = {8, 5},
+    reward_rep = {[8] = 15, [5] = 50}, completion_flag = "LennyDead",
+}
+
 return {
-    by_tag = {[flood.tag] = flood, [lake.tag] = lake},
+    by_tag = {[flood.tag] = flood, [lake.tag] = lake, [lenny.tag] = lenny},
     by_map = {[flood.objective_map] = flood, [lake.objective_map] = lake},
 }

@@ -14,7 +14,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
-               native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
+               native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
@@ -2405,6 +2405,9 @@ class Host:
                 elif action in native_flood_jammer.APPROACHES and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_flood_jammer.approach(self, bridge, actor, native_flood_jammer.COMMANDS[action])
+                elif action == native_lenny.AIM:
+                    actor = self.roles().get(request.get("target") or "guest")
+                    result = await native_lenny.aim_fixture(self, bridge, actor, request.get("item_guid"))
                 elif action in native_flood_jammer.AIMS:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_flood_jammer.aim_fixture(self, bridge, actor, request.get("item_guid"), native_flood_jammer.COMMANDS[action])
@@ -2914,6 +2917,7 @@ class Host:
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             await native_flood_jammer.observe(self, bridge)
+            await native_lenny.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True

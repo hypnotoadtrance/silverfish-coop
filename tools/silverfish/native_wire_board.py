@@ -18,21 +18,23 @@ MAPS = frozenset(BOARDS)
 COUP_REPORT = native_computer_board.COUP_REPORT
 DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
+LENNY = native_flood_jammer.LENNY
 QUESTS = {
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
                          native_computer_board.SAVLO_RING.quest_id}),
-    BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id, LAKE_JAMMER.quest}),
+    BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id, LAKE_JAMMER.quest, LENNY.quest}),
 }
 PREFLIGHTS = {
     LAKE_JAMMER.quest: (LAKE_JAMMER.command("preflight"), LAKE_JAMMER.key),
+    LENNY.quest: (LENNY.command("preflight"), LENNY.key),
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
     native_mosby_tape.MOSBY_QUEST: (native_mosby_tape.READINGS_PREFLIGHT, "native_mosby_readings"),
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
-HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered",
+HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
                  *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
 
 
@@ -157,7 +159,7 @@ class WireBoardView:
             return "offer"
         if step == -10:
             return "completed"
-        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest):
+        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, LENNY.quest):
             return "ready" if step == last else "missing"
         spec = native_computer_board.CONTRACTS[quest]
         if proof.get("can_turn_in") is not (area == spec.redeem_map):

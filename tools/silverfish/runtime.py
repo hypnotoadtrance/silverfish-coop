@@ -1112,6 +1112,21 @@ class Bridge:
                     data["native_meet_broker"] = dict(proof, weapon_guid=fields[12])
                 elif fields[0] == "native-meet-broker-reputation" and len(fields) == 3 and "native_meet_broker" in data:
                     data["native_meet_broker"].update(reputation_before=int(fields[1]), reputation_after=int(fields[2]))
+                elif fields[0] == "native-lenny-objective" and len(fields) == 16 and fields[12] in ("host", "guest", "-"):
+                    numbers = ("step_before", "step_after", "flag_before", "flag_after", "xp_before", "xp_after")
+                    data["native_lenny_objective"] = {
+                        **dict(zip(("map", "spawner", "target", "state"), fields[1:5])),
+                        "replicated": fields[5] == "1",
+                        **{key: None if value == "-" else int(value) for key, value in zip(numbers, fields[6:12])},
+                        "shooter_role": fields[12], "shooter": fields[13], "projectile": fields[14],
+                        "health": None if fields[15] == "-" else _finite(fields[15]),
+                    }
+                elif fields[0] == "native-lenny-client" and len(fields) == 5:
+                    data["native_lenny_client"] = {"map": fields[1], "spawner": fields[2],
+                                                   "local": int(fields[3]), "simulated": int(fields[4])}
+                elif fields[0] == "native-lenny-aim" and len(fields) == 7 and valid_guid(fields[4]):
+                    data["native_lenny_aim"] = dict(zip(("map", "pawn", "target", "guid"), fields[1:5]),
+                                                   distance=_finite(fields[5]), component=fields[6])
                 elif fields[0] in JAMMER_ROWS:
                     spec, kind = JAMMER_ROWS[fields[0]]
                     key = spec.key

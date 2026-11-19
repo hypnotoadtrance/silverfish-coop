@@ -5,11 +5,11 @@ import time
 
 from . import native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
-from .travel import BLACK_MARKET, BOROUGH, LAKE
+from .travel import BLACK_MARKET, BOROUGH, LAKE, RAIL_YARD
 
 
 @dataclass(frozen=True)
-class JammerProfile:
+class StockKillContract:
     quest: str
     key: str
     board_map: str
@@ -18,6 +18,13 @@ class JammerProfile:
     cash: int
     factions: frozenset[str]
 
+    def command(self, verb=""):
+        base = self.key.replace("_", "-")
+        return f"{base}-{verb}" if verb else base
+
+
+@dataclass(frozen=True)
+class JammerProfile(StockKillContract):
     @property
     def jammer(self):
         return self._actor("SignalJammer_BP_C")
@@ -30,24 +37,22 @@ class JammerProfile:
         level = self.objective_map.rsplit("/", 1)[1]
         return f"{kind} {self.objective_map}.{level}:PersistentLevel.{kind}_1"
 
-    def command(self, verb=""):
-        base = self.key.replace("_", "-")
-        return f"{base}-{verb}" if verb else base
-
 
 FLOOD_PLAINS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
 FLOOD = JammerProfile("Jmr_FloodPlains", "native_flood_jammer", BOROUGH, native_wire_quest.BOARD, FLOOD_PLAINS, 350, frozenset({"2", "5"}))
 BLACK_MARKET_BOARD = f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"
 BLACK_LAKE = JammerProfile("Jmr_Lake", "native_lake_jammer", BLACK_MARKET, BLACK_MARKET_BOARD, LAKE, 400, frozenset({"5", "8"}))
-CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE)}
-OBJECTIVES = {spec.objective_map: spec for spec in CONTRACTS.values()}
+LENNY = StockKillContract("Asn_Lenny_01", "native_lenny", BLACK_MARKET, BLACK_MARKET_BOARD, RAIL_YARD, 2500, frozenset({"5", "8"}))
+CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, LENNY)}
+OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE)}
 COMMANDS = {
     spec.command(verb): spec
-    for spec in CONTRACTS.values() for verb in ("preflight", "approach", "aim", "start", "turn-in")
+    for spec in CONTRACTS.values() for verb in ("preflight", "approach", "start", "turn-in")
 }
+COMMANDS.update((spec.command("aim"), spec) for spec in OBJECTIVES.values())
 PREFLIGHTS = frozenset(spec.command("preflight") for spec in CONTRACTS.values())
 APPROACHES = frozenset(spec.command("approach") for spec in CONTRACTS.values())
-AIMS = frozenset(spec.command("aim") for spec in CONTRACTS.values())
+AIMS = frozenset(spec.command("aim") for spec in OBJECTIVES.values())
 
 QUEST_ID, JAMMER, TRIGGER = FLOOD.quest, FLOOD.jammer, FLOOD.trigger
 PREFLIGHT, APPROACH, AIM, START, TURN_IN = map(FLOOD.command, ("preflight", "approach", "aim", "start", "turn-in"))

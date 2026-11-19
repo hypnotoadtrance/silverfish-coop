@@ -61,11 +61,17 @@ end
 local function recipe(profile, row)
     if not row then refuse(profile, "quest_row_unavailable") end
     local boards, rep, advantage = row[keys.boards], row[keys.rep], row[keys.advantage]
+    local flags = row[keys.flags]
+    local completion = profile.completion_flag and FName(profile.completion_flag, EFindName.FNAME_Find)
+    if not flags or #flags ~= (completion and 1 or 0)
+        or completion and (completion:GetComparisonIndex() == 0 or not flags:Contains(completion) or flags:Find(completion):get() ~= 1) then
+        refuse(profile, "quest_completion_flag_unqualified")
+    end
     if row[keys.final] ~= 2 or row[keys.cash] ~= profile.cash or row[keys.xp] ~= 1 or row[keys.redeem] ~= 0
-        or row[keys.kind] ~= 2 or row[keys.difficulty] ~= 0 or row[keys.fail] ~= false or row[keys.penalty] ~= profile.penalty
+        or row[keys.kind] ~= 2 or row[keys.difficulty] ~= (profile.difficulty or 0) or row[keys.fail] ~= false or row[keys.penalty] ~= profile.penalty
         or row[keys.global] ~= true or row[keys.consume] ~= false or count(row[keys.items]) ~= 0
         or count(row[keys.objective]) ~= 0 or count(row[keys.quests]) ~= 0
-        or not row[keys.prereq] or #row[keys.prereq] ~= 0 or not row[keys.flags] or #row[keys.flags] ~= 0
+        or not row[keys.prereq] or #row[keys.prereq] ~= 0
         or name_text(row[keys.ping]) ~= "None" or name_text(row[keys.tracked_flag]) ~= "None"
         or count(boards) ~= #profile.board_order or not rep or #rep ~= #profile.factions or not advantage or #advantage ~= 0 then
         refuse(profile, "quest_recipe_unqualified")
@@ -105,7 +111,8 @@ local function progress(context)
         rep[faction] = flag_snapshot(context, characters, faction, false)
         advantage[faction] = flag_snapshot(context, characters, faction, true)
     end
-    return {step = step, cash = wire_check(profile, wire.stock_flag, context.instance, "Player_Cash"),
+    local completion = profile.completion_flag and wire_check(profile, wire.stock_flag, context.instance, profile.completion_flag)
+    return {step = step, completion = completion, cash = wire_check(profile, wire.stock_flag, context.instance, "Player_Cash"),
         xp = wire_check(profile, wire.stock_flag, context.instance, "Player_Xp"), rep = rep, advantage = advantage}
 end
 
@@ -119,7 +126,8 @@ local function same_flag(first, second)
 end
 
 local function transition(profile, before, after, step, cash, xp, expected_rep)
-    if after.step ~= step or after.cash ~= before.cash + cash or after.xp ~= before.xp + xp then return false end
+    if after.step ~= step or after.cash ~= before.cash + cash or after.xp ~= before.xp + xp
+        or before.completion ~= after.completion then return false end
     for _, faction in ipairs(profile.factions) do
         local actual = after.rep[faction]
         if not same_flag(after.advantage[faction], before.advantage[faction])
@@ -161,9 +169,10 @@ function quest.command(fields, state, phase)
     local full_operation = fields[2]
     if type(full_operation) ~= "string" then return end
     local tag, operation = full_operation:match("^(native%-%l+%-jammer)%-(.+)$")
+    if not tag then tag, operation = full_operation:match("^(native%-lenny)%-(.+)$") end
     local profile = profiles.by_tag[tag]
     if not profile then return end
-    if operation == "aim" then
+    if operation == "aim" and profile.objective_map then
         if #fields ~= 4 or state.map ~= profile.objective_map then refuse(profile, "aim_arguments_unqualified") end
         return aim_fixture.aim(state, phase, fields[3], fields[4], profile)
     end
@@ -178,6 +187,10 @@ function quest.command(fields, state, phase)
     recipe(profile, template)
     if template[keys.step] ~= 1 then refuse(profile, "quest_template_step_unqualified") end
     local before = progress(context)
+    if profile.completion_flag then
+        local wanted = (before.step == 2 or before.step == -10) and 1 or 0
+        if before.completion ~= wanted then refuse(profile, "stock_completion_flag_changed") end
+    end
     if before.step == "-" and operation ~= "turn-in" then
         context.board:Configure_Stock()
         local offered = wire_check(profile, wire.stock_row, context.board.Contracts, context.key)
@@ -241,6 +254,7 @@ function quest.rows(state, phase, status_row)
         last = nil
         return {objective, shot_line}
     end
+    if shot_line then return {shot_line} end
     local proof = last
     if not proof then return {} end
     local profile = proof.context.jammer_profile

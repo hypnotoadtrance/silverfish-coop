@@ -37,6 +37,7 @@
 #include "broker_input.hpp"
 #include "campaign_npc.hpp"
 #include "flood_jammer.hpp"
+#include "lenny_quest.hpp"
 #include "guest_clock.hpp"
 #include "guest_primary_input.hpp"
 #include "guest_consumable.hpp"
@@ -1235,6 +1236,7 @@ namespace
             silverfish::native_broker_input::uninstall_hooks();
             silverfish::campaign_npc::uninstall_hooks();
             silverfish::native_flood_jammer::uninstall_hooks();
+            silverfish::native_lenny_quest::uninstall_hooks();
             silverfish::native_guest_clock::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
             silverfish::native_guest_sickness::uninstall_hooks();
@@ -1272,6 +1274,7 @@ namespace
             silverfish::native_broker_input::install_hooks();
             silverfish::campaign_npc::install_hooks();
             silverfish::native_flood_jammer::install_hooks();
+            silverfish::native_lenny_quest::install_hooks();
             silverfish::native_guest_clock::install_hooks();
             silverfish::native_guest_primary_input::install_hooks();
             silverfish::native_guest_sickness::install_hooks();
@@ -1351,6 +1354,7 @@ namespace
             silverfish::native_broker_input::register_lua(lua);
             silverfish::campaign_npc::register_lua(lua);
             silverfish::native_flood_jammer::register_lua(lua);
+            silverfish::native_lenny_quest::register_lua(lua);
             silverfish::native_guest_clock::register_lua(lua);
             silverfish::native_guest_primary_input::register_lua(lua);
             silverfish::native_guest_consumable::register_lua(lua);
