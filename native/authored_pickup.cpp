@@ -61,6 +61,12 @@ namespace
             STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
             63519.2477725694, 36406.1978875462, 849.5514682383, 9,
         },
+        Profile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1"),
+            STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
+            3297.7888314760, -24282.0923970261, 990.5693125502, 9,
+        },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");

@@ -56,16 +56,21 @@ namespace
         const Unreal::TCHAR* world;
         const Unreal::TCHAR* actor;
         std::uint8_t turn_in_id;
+        bool displays_global_contracts;
     };
 
     constexpr std::array board_profiles{
         BoardProfile{
             STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.BountyBoard_BP_C_3"), 5,
+            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.BountyBoard_BP_C_3"), 5, false,
         },
         BoardProfile{
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2"), 4,
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2"), 4, false,
+        },
+        BoardProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.BountyBoard_BP_C_2"), 10, true,
         },
     };
 
@@ -347,7 +352,7 @@ namespace
         };
         return id && id->GetPropertyValueInContainer(actor) == profile.turn_in_id &&
             equals(STR("BountyBoard_RedeemableHere"), true) && equals(STR("AcceptAllGlobalContracts"), true) &&
-            equals(STR("Display_GlobalContracts"), false) && equals(STR("ShowAllContracts"), false)
+            equals(STR("Display_GlobalContracts"), profile.displays_global_contracts) && equals(STR("ShowAllContracts"), false)
                 ? std::string_view{} : "native_wire_board_configuration";
     }
 

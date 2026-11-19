@@ -31,6 +31,7 @@ namespace
     constexpr auto borough_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough");
     constexpr auto scientist_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01");
     constexpr auto black_market_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01");
+    constexpr auto scav_bar_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -42,6 +43,7 @@ namespace
     constexpr auto wire_path = STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C");
     constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
+    constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto quest_path = STR("/Game/Classes/Libraries/Structs/Quest_Struct.Quest_Struct");
@@ -184,7 +186,7 @@ namespace
         return find<U::UWorld>(path.c_str()) == world ? world : nullptr;
     }
 
-    enum class PartyWorld { borough, scientist, black_market, current_campaign };
+    enum class PartyWorld { borough, scientist, black_market, scav_bar, current_campaign };
 
     struct Party
     {
@@ -202,10 +204,14 @@ namespace
                   PartyWorld location = PartyWorld::borough)
         {
             auto* pawn_class = find<U::UClass>(pawn_path);
-            const auto* world_path = location == PartyWorld::scientist ? scientist_world_path :
-                location == PartyWorld::black_market ? black_market_world_path : borough_world_path;
-            world = location == PartyWorld::current_campaign ? current_campaign_world(pawn_address, pawn_class) :
-                find<U::UWorld>(world_path);
+            switch (location)
+            {
+            case PartyWorld::borough: world = find<U::UWorld>(borough_world_path); break;
+            case PartyWorld::scientist: world = find<U::UWorld>(scientist_world_path); break;
+            case PartyWorld::black_market: world = find<U::UWorld>(black_market_world_path); break;
+            case PartyWorld::scav_bar: world = find<U::UWorld>(scav_bar_world_path); break;
+            case PartyWorld::current_campaign: world = current_campaign_world(pawn_address, pawn_class); break;
+            }
             if (!live(world)) return false;
             auto* save_class = find<U::UClass>(save_path);
             auto* controller_class = find<U::UClass>(controller_path);
@@ -643,24 +649,34 @@ namespace
         return enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == count;
     }
 
-    enum class ObjectiveQuest { copper_stop, computer_board, coup_report };
+    struct ObjectiveQuest
+    {
+        std::string_view fault;
+        PartyWorld world;
+        const U::TCHAR* id;
+        const U::TCHAR* item;
+        int cash;
+    };
 
-    template <ObjectiveQuest Quest>
+    constexpr ObjectiveQuest copper_stop_objective{"wire", PartyWorld::borough, STR("Clt_Wire"), wire_path, 0};
+    constexpr ObjectiveQuest computer_board_objective{"computer_board", PartyWorld::scientist, STR("Clt_ComputerBoard"), board_item_path, 800};
+    constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
+    constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
+
+    template <const ObjectiveQuest& Quest>
     int stage_objective(const Lua& lua)
     {
-        constexpr bool computer_board = Quest == ObjectiveQuest::computer_board;
-        constexpr bool coup_report = Quest == ObjectiveQuest::coup_report;
+        constexpr bool copper_stop = &Quest == &copper_stop_objective;
         const auto fail = [&](std::string_view reason) {
-            if constexpr (computer_board || coup_report)
+            if constexpr (!copper_stop)
             {
                 const auto wire = reason.find("wire_objective");
                 if (wire != std::string_view::npos)
-                    return reply(lua, false, std::format("{}{}_{}", reason.substr(0, wire),
-                        computer_board ? "computer_board" : "coup_report", reason.substr(wire + 5)));
+                    return reply(lua, false, std::format("{}{}_{}", reason.substr(0, wire), Quest.fault, reason.substr(wire + 5)));
             }
             return reply(lua, false, reason);
         };
-        constexpr auto location = computer_board ? PartyWorld::scientist : PartyWorld::borough;
+        constexpr auto location = Quest.world;
         std::array<Address, 3> args{};
         if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args)) return fail("wire_objective_stage_unavailable");
         const auto objective_id = read_guid(lua.get_string());
@@ -668,15 +684,13 @@ namespace
         Party party;
         Inventory inventory;
         if (!party.read(args[0], args[1], args[2], true, location)) return fail("wire_objective_exact_detached_guest_required");
-        auto* wanted = find<U::UClass>(computer_board ? board_item_path : coup_report ? coup_report_item_path : wire_path);
+        auto* wanted = find<U::UClass>(Quest.item);
         const auto matches_recipe = [&] {
-            if constexpr (computer_board)
-                return objective_recipe(party.stock, STR("Clt_ComputerBoard"), wanted, 800, nullptr, nullptr, WirePhase::active);
-            if constexpr (coup_report)
-                return objective_recipe(party.stock, STR("Clt_CoupReport_01"), wanted, 1200, nullptr, nullptr, WirePhase::active);
-            return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
+            if constexpr (copper_stop)
+                return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
+            return objective_recipe(party.stock, Quest.id, wanted, Quest.cash, nullptr, nullptr, WirePhase::active);
         };
-        if (!inventory.bind(Quest == ObjectiveQuest::copper_stop) || !matches_recipe())
+        if (!inventory.bind(copper_stop) || !matches_recipe())
             return fail("wire_objective_active_recipe_required");
         auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
         if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
@@ -953,9 +967,10 @@ namespace
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStageWireQuestObjective", stage_objective<ObjectiveQuest::copper_stop>);
-    lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<ObjectiveQuest::computer_board>);
-    lua.register_function("SilverfishStageCoupReportObjective", stage_objective<ObjectiveQuest::coup_report>);
+    lua.register_function("SilverfishStageWireQuestObjective", stage_objective<copper_stop_objective>);
+    lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<computer_board_objective>);
+    lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
+    lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishCaptureWireRewards", capture<false>);
     lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
     lua.register_function("SilverfishGrantWireRewards", grant<false>);
