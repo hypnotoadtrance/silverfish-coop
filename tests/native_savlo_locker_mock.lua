@@ -84,17 +84,17 @@ assert(locker.command(command, state, "hosting") and read("hosting")[2] == "unlo
 assert(not pcall(locker.command, command, state, "hosting") and presses == 1)
 command[4] = "unlocked"
 assert(locker.command(command, state, "hosting") and read("hosting")[2] == "opening")
-door.RelativeRotation.Roll = 95
+door.RelativeRotation.Yaw = 95
 assert(read("hosting")[2] == "opened" and clears == 0)
 
-hosting, state.server, retired, actor.Locked, door.RelativeRotation.Roll = false, true, false, true, 0
+hosting, state.server, retired, actor.Locked, door.RelativeRotation.Yaw = false, true, false, true, 0
 local projection = {"nonce", "native-savlo-locker-project", epoch, actor_name, pawn:GetFullName()}
 local original = projection[4]
 projection[4] = actor_name:gsub("_16$", "_17")
 assert(not pcall(locker.command, projection, state, "connected") and clears == 0)
 projection[4] = original
 assert(locker.command(projection, state, "connected") and read("connected")[2] == "projecting")
-door.RelativeRotation.Roll = 95
+door.RelativeRotation.Yaw = 95
 local receipt = read("connected")
 assert(receipt[2] == "projected" and receipt[6] == epoch and receipt[7] == 1 and actor.Locked)
 assert(locker.command(projection, state, "connected") and clears == 1)

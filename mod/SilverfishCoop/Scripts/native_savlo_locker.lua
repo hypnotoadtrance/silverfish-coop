@@ -37,9 +37,9 @@ local function angle_close(actual, expected)
     return type(actual) == "number" and math.abs((actual - expected + 180) % 360 - 180) <= .2
 end
 
-local function door_angle(door, roll)
+local function door_angle(door, yaw)
     local angle = door.RelativeRotation
-    return angle and angle_close(angle.Pitch, 0) and angle_close(angle.Yaw, 0) and angle_close(angle.Roll, roll)
+    return angle and angle_close(angle.Pitch, 0) and angle_close(angle.Yaw, yaw) and angle_close(angle.Roll, 0)
 end
 
 local function epoch_valid(epoch)
