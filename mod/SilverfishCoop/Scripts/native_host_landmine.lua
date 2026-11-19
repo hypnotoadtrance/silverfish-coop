@@ -148,6 +148,14 @@ local function launched(ctx)
     return count, found
 end
 
+local function flights(ctx, projectile)
+    if type(SilverfishObserveNativeHostLandmineProjectile) ~= "function" then return -1, "observer_unavailable" end
+    if projectile then
+        return SilverfishObserveNativeHostLandmineProjectile(ctx.world:GetAddress(), ctx.pawn:GetAddress(), projectile:GetAddress())
+    end
+    return SilverfishObserveNativeHostLandmineProjectile(ctx.world:GetAddress(), ctx.pawn:GetAddress())
+end
+
 local function retention(ctx, actor)
     local here = valid(actor) and point(actor:K2_GetActorLocation())
     if not here then return end
@@ -302,7 +310,9 @@ local function at_stock_aim(ctx, tool, invoke)
 end
 
 local function press(ctx)
-    require_value(owns_run(ctx) and run.state == "equipped" and tagged(ctx) == 0 and launched(ctx) == 0
+    local active, flight_state = flights(ctx)
+    require_value(active == 0 and flight_state == "unwatched", "projectile_preflight_" .. flight_state)
+    require_value(owns_run(ctx) and run.state == "equipped" and tagged(ctx) == 0
         and finite(age(ctx)) and finite(ctx.save.PlayerHealth) and ctx.save.PlayerHealth > 1, "press_scope_unavailable")
     local tool = require_value(held(ctx, run.class, run.guid), "exact_hand_item_required")
     require_value(tool.Cooking == false and tool.Held_Primary == false and tool.Held_Secondary == false
@@ -325,6 +335,8 @@ local function release(ctx)
         local count, projectile = launched(ctx)
         require_value(count == 1 and valid(projectile), "stock_projectile_readback", true)
         run.projectile_name = projectile:GetFullName()
+        local active, flight_state = flights(ctx, projectile)
+        require_value(active == 1 and flight_state == "active", "projectile_bind_" .. flight_state, true)
         local movement = projectile.ProjectileMovement
         local velocity = valid(movement) and point(movement.Velocity)
         local speed = velocity and math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2)
@@ -333,9 +345,16 @@ local function release(ctx)
     end)
 end
 
-local function inspect(ctx, state)
+local function inspect(ctx, state, flight, flight_state)
     local count, actor = tagged(ctx)
-    local flight, projectile = launched(ctx)
+    if flight == nil then flight, flight_state = flights(ctx) end
+    local flight_position
+    if flight_state == "active" and run and run.projectile_name then
+        local _, projectile = launched(ctx)
+        if valid(projectile) and projectile:GetFullName() == run.projectile_name then
+            flight_position = point(projectile:K2_GetActorLocation())
+        end
+    end
     local saved, location = stored(ctx)
     local position = actor and point(actor:K2_GetActorLocation())
     local class = StaticFindObject(mine_class)
@@ -344,8 +363,8 @@ local function inspect(ctx, state)
         actor = actor and actor:GetFullName() or "-", position = position, saved = saved, remaining = owned,
         guest_remaining = guest_owned, same_transform = position and location and square(position, location) <= 4,
         presses = run and run.presses or 0, releases = run and run.releases or 0,
-        projectile = run and run.projectile_name or "-", flights = flight,
-        flight_position = projectile and point(projectile:K2_GetActorLocation()),
+        projectile = run and run.projectile_name or "-", flights = flight, flight_state = flight_state,
+        flight_position = flight_position,
         aim_dot = run and run.aim_dot }
     return result, actor
 end
@@ -355,7 +374,8 @@ local function persist(ctx)
     local guest_position = point(ctx.guest:K2_GetActorLocation())
     local retained = owns_run(ctx) and retention(ctx, actor)
     require_value(retained and retained >= .30 and run.state == "released" and snapshot.count == 1
-        and snapshot.remaining == 0 and snapshot.guest_remaining == 0 and launched(ctx) == 0
+        and snapshot.remaining == 0 and snapshot.guest_remaining == 0 and snapshot.flights == 0
+        and snapshot.flight_state == "retired"
         and snapshot.position and square(snapshot.position, run.origin) < 1800^2
         and guest_position and square(snapshot.position, guest_position) > 225^2
         and ctx.detached.PlayerHealth == run.guest_health and ctx.save.PlayerHealth == run.host_health,
@@ -396,19 +416,24 @@ function mine.rows(state, phase, status_row)
     local found = observation
     if not found and owns_run(ctx) then
         local step = run.state
+        local flight, flight_state = flights(ctx)
         if step == "pressed" then
             local tool = held(ctx, run.class, run.guid)
             if valid(tool) and tool.Cooking == true and tool.Held_Primary == true then step = "primed" end
-        elseif step == "released" and launched(ctx) == 0 then
-            local count, actor = tagged(ctx)
-            local retained = count == 1 and retention(ctx, actor)
-            if retained and retained >= .30 then
-                step = "placed"
-            elseif (run.retained_actor and not retained) or count > 1 then
+        elseif step == "released" then
+            if flight == 0 and flight_state == "retired" then
+                local count, actor = tagged(ctx)
+                local retained = count == 1 and retention(ctx, actor)
+                if retained and retained >= .30 then
+                    step = "placed"
+                elseif (run.retained_actor and not retained) or count > 1 then
+                    step = "retention_failed"
+                end
+            elseif flight_state ~= "active" and flight_state ~= "retirement_pending" then
                 step = "retention_failed"
             end
         end
-        found = inspect(ctx, step)
+        found = inspect(ctx, step, flight, flight_state)
     end
     if not found or found.pawn ~= ctx.name then return {} end
     local at = found.position or {}
@@ -416,7 +441,7 @@ function mine.rows(state, phase, status_row)
     return { status_row("native-host-landmine", map, found.pawn, found.state, found.guid, found.actor, found.projectile,
         found.presses, found.releases, found.count, found.saved or "-", found.remaining or "-", found.guest_remaining or "-",
         found.same_transform and 1 or 0, at.X or "-", at.Y or "-", at.Z or "-", found.flights,
-        flight.X or "-", flight.Y or "-", flight.Z or "-", found.aim_dot or "-") }
+        flight.X or "-", flight.Y or "-", flight.Z or "-", found.aim_dot or "-", found.flight_state) }
 end
 
 return mine

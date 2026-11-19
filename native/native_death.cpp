@@ -27,6 +27,7 @@
 #include "guest_item.hpp"
 #include "guest_armor.hpp"
 #include "guest_melee.hpp"
+#include "host_landmine.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "inventory_view.hpp"
@@ -1344,6 +1345,7 @@ namespace
             silverfish::native_guest_item::register_lua(lua);
             silverfish::native_guest_armor::register_lua(lua);
             silverfish::native_guest_melee::register_lua(lua);
+            silverfish::native_host_landmine::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);

@@ -17,7 +17,7 @@ ACTIONS = (PREPARE, DEPLOY, INSPECT)
 
 
 def parse(fields: list[str]) -> dict | None:
-    if len(fields) not in (17, 22) or fields[0] != "native-host-landmine" or fields[13] not in ("0", "1"):
+    if len(fields) not in (17, 22, 23) or fields[0] != "native-host-landmine" or fields[13] not in ("0", "1"):
         return None
 
     def position(values):
@@ -32,12 +32,17 @@ def parse(fields: list[str]) -> dict | None:
                   **{key: None if value == "-" else int(value) for key, value in zip(
                       ("presses", "releases", "actors", "saved", "remaining", "guest_remaining"), fields[7:13])},
                   same_transform=fields[13] == "1", position=position(fields[14:17]))
-    if len(fields) == 22:
+    if len(fields) >= 22:
         aim = None if fields[21] == "-" else float(fields[21])
         if aim is not None and (not math.isfinite(aim) or abs(aim) > 1.001):
             return None
         result.update(active_projectiles=int(fields[17]), projectile_position=position(fields[18:21]),
                       aim_dot=aim)
+    if len(fields) == 23:
+        if fields[22] not in ("unwatched", "active", "retirement_pending", "retired", "unexpected_active",
+                              "bind_unqualified", "watch_expired", "scope_unqualified", "observer_unavailable"):
+            return None
+        result["projectile_state"] = fields[22]
     return result
 
 
@@ -84,6 +89,7 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             raise phase_error(phase, "timeout", last) from error
         if last.get("state") != wanted:
             raise phase_error(phase, "unverified", last)
+        return last
 
     async def request_phase(verb, phase, timeout, last=None):
         try:
@@ -136,14 +142,18 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             snapshot = await request_phase("native-host-landmine-release-fixture", "release", 3, proof)
             release = frame(snapshot)
             if release.get("state") not in ("released", "placed") or release.get("releases") != 1 or release.get("projectile") == "-":
-                raise RuntimeError("The stock LandMine primary release and exact projectile did not verify")
+                raise phase_error("release", "unverified", release)
             if release["state"] != "placed":
-                await wait_phase("placement", "placed", release, 6)
+                release = await wait_phase("placement", "placed", release, 6)
+            if (release.get("active_projectiles"), release.get("projectile_state")) != (0, "retired"):
+                raise phase_error("placement", "retirement_unverified", release)
             snapshot = await request_phase("native-host-landmine-persist-fixture", "persist", 5, release)
             report = frame(snapshot, "persisted")
             if not report or (report["presses"], report["releases"], report["actors"], report["saved"],
                               report["remaining"], report["guest_remaining"], report["same_transform"]) != (1, 1, 1, 1, 0, 0, True):
                 raise RuntimeError("The canonical LandMine deployment and typed world frame did not verify")
+            if (report.get("active_projectiles"), report.get("projectile_state")) != (0, "retired"):
+                raise phase_error("persist", "retirement_unverified", report)
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {KEY: report}
         candidate = party.load_party(host.party)

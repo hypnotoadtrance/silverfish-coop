@@ -87,6 +87,7 @@ async def verify(work: Path, vanilla: Path) -> None:
         receipt = (await action(campaign, mine.INSPECT))[mine.KEY]
         assert (receipt["state"], receipt["saved"], receipt["actors"], receipt["remaining"], receipt["guest_remaining"],
                 receipt["same_transform"]) == ("inspected", 1, 1, 0, 0, True), receipt
+        assert receipt["active_projectiles"] == 0, receipt
         assert math.dist(receipt["position"], previous["position"]) <= 10, (receipt, previous)
         assert receipt["actor"].startswith("Eqp_LandMine_C " + OBSERVATORY + ".Observitory_P:PersistentLevel."), receipt
         return receipt
@@ -108,6 +109,7 @@ async def verify(work: Path, vanilla: Path) -> None:
                 deployed["remaining"], deployed["guest_remaining"], deployed["same_transform"]) == (
                 "persisted", 1, 1, 1, 1, 0, 0, True), deployed
         assert deployed["projectile"].startswith("LandMine_Projectile_BP_C " + OBSERVATORY), deployed
+        assert (deployed["active_projectiles"], deployed["projectile_state"]) == (0, "retired"), deployed
         assert (await action(campaign, mine.DEPLOY, *requested))[mine.KEY] == deployed
         assert any(receipt["id"] == operation and receipt["result"][mine.KEY] == deployed
                    for receipt in verified_save()["world"]["party"]["receipts"]["host"])
