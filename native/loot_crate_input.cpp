@@ -180,26 +180,34 @@ namespace
         return {"retired"};
     }
 
-    bool ready_profile(U::UObject* crate, U::UWorld* world)
+    bool ready_profile(U::UObject* crate, U::UWorld* world, std::string_view* reason = nullptr)
     {
+        const auto refuse = [&](std::string_view detail) {
+            if (reason) *reason = detail;
+            return false;
+        };
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
-        if (!profile || !silverfish::shared_loot::qualified_crate_settings(crate)) return false;
+        if (!profile) return refuse("crate_ready_profile");
+        if (!silverfish::shared_loot::qualified_crate_settings(crate, reason)) return false;
         auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
-        if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate) return false;
+        if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate)
+            return refuse("crate_first_door");
         if (profile->stock_class == &silverfish::authored_loot::small_cabinet)
         {
             auto* second = object(crate, STR("SM_Prop_Cabinet_Small_Door_02"));
             if (!exact(second, STR("/Script/Engine.StaticMeshComponent")) ||
-                second == door || second->GetOuterPrivate() != crate) return false;
+                second == door || second->GetOuterPrivate() != crate) return refuse("cabinet_second_door");
         }
         if (boolean(crate, STR("Looted"), true)) return true;
         auto* value = field<U::FIntProperty>(crate, STR("SpawnedValue"));
         auto* instance = object(world, STR("OwningGameInstance"));
-        if (!boolean(crate, STR("Looted"), false) || !value || value->GetPropertyValueInContainer(crate) != 0 ||
-            !instance || object(crate, STR("As Game Instance FP")) != instance || !presentation_box(crate).box)
-            return false;
+        if (!boolean(crate, STR("Looted"), false)) return refuse("crate_looted_field");
+        if (!value || value->GetPropertyValueInContainer(crate) != 0) return refuse("crate_spawned_value");
+        if (!instance || object(crate, STR("As Game Instance FP")) != instance) return refuse("crate_instance");
+        const auto box = presentation_box(crate);
+        if (!box.box) return refuse(box.state);
         silverfish::shared_loot::ContainerActors children;
-        return silverfish::shared_loot::read_spawners(crate, instance, children);
+        return silverfish::shared_loot::read_spawners(crate, instance, children, reason);
     }
 
 
@@ -333,7 +341,7 @@ namespace
                     if (local.pawn && pawn == reinterpret_cast<std::intptr_t>(local.pawn) && host == local.host)
                     {
                         status = "crate_profile_shape";
-                        if (index == 0 || ready_profile(crate, world))
+                        if (index == 0 || ready_profile(crate, world, &status))
                         {
                             if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, host};
                             scope.expires = Clock::now() + lease;

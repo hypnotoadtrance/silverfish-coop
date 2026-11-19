@@ -1034,44 +1034,60 @@ namespace silverfish::shared_loot
         return world;
     }
 
-    bool qualified_crate_settings(Unreal::UObject* crate)
+    bool qualified_crate_settings(Unreal::UObject* crate, std::string_view* reason)
     {
+        const auto refuse = [&](std::string_view detail) {
+            if (reason) *reason = detail;
+            return false;
+        };
         const auto* profile = authored_profile(crate);
-        if (!profile || !read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn) ||
-            !read_bool(crate, STR("IgnoreKarma"), false)) return false;
+        if (!profile) return refuse("crate_settings_profile");
+        if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
+        if (!read_bool(crate, STR("IgnoreKarma"), false)) return refuse("crate_settings_ignore_karma");
         // Keep the previously live-qualified stock route on its existing guards.
         if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
-        if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate() ||
-            !read_bool(crate, STR("Ping_IfOpened"), false)) return false;
+        if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
+        if (!read_bool(crate, STR("Ping_IfOpened"), false)) return refuse("crate_settings_ping");
         if (profile->stock_class == &authored_loot::small_cabinet)
         {
             auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
             auto* items = field<Unreal::FMapProperty>(crate, STR("Loot Table_Items"));
             auto* rate = field<Unreal::FDoubleProperty>(crate, STR("SpawnChance_Item"));
-            if (!opened || opened->GetSize() != sizeof(Unreal::FMulticastScriptDelegate) ||
-                opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound() ||
-                !items || !items->Identical(items->ContainerPtrToValuePtr<void>(crate),
-                                           items->ContainerPtrToValuePtr<void>(defaults)) ||
-                !rate || rate->GetPropertyValueInContainer(crate) != rate->GetPropertyValueInContainer(defaults) ||
-                !read_bool(crate, STR("bReplicates"), false)) return false;
+            if (!opened) return refuse("cabinet_opened_delegate_type");
+            if (opened->GetSize() != sizeof(Unreal::FMulticastScriptDelegate)) return refuse("cabinet_opened_delegate_layout");
+            if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
+                return refuse("cabinet_opened_delegate_bound");
+            if (!items) return refuse("cabinet_default_items_schema");
+            if (!items->Identical(items->ContainerPtrToValuePtr<void>(crate), items->ContainerPtrToValuePtr<void>(defaults)))
+                return refuse("cabinet_default_items_changed");
+            if (!rate) return refuse("cabinet_default_chance_schema");
+            if (rate->GetPropertyValueInContainer(crate) != rate->GetPropertyValueInContainer(defaults))
+                return refuse("cabinet_default_chance_changed");
+            if (!read_bool(crate, STR("bReplicates"), false)) return refuse("cabinet_replication");
         }
 
         auto* replenish = crate->GetPropertyByNameInChain(STR("Replenish_Mode"));
         auto* handle = field<Unreal::FStructProperty>(crate, STR("Loot_Override"));
-        if (!replenish || replenish->GetArrayDim() != 1 || !handle) return false;
+        if (!replenish || replenish->GetArrayDim() != 1 || !handle) return refuse("crate_settings_replenish_handle");
         if (profile->replenish_override)
         {
             auto* mode = Unreal::CastField<Unreal::FByteProperty>(replenish);
             auto* stock_enum = find<Unreal::UEnum>(replenish_enum);
-            if (!mode || mode->GetSize() != 1 || !stock_enum || mode->GetEnum().Get() != stock_enum ||
-                mode->GetPropertyValueInContainer(crate) != profile->replenish_override) return false;
+            if (!mode || mode->GetSize() != 1 || !stock_enum || mode->GetEnum().Get() != stock_enum)
+                return refuse("crate_settings_replenish_schema");
+            if (mode->GetPropertyValueInContainer(crate) != profile->replenish_override)
+                return refuse("crate_settings_replenish_override");
         }
         else if (!replenish->Identical(replenish->ContainerPtrToValuePtr<void>(crate),
-                                       replenish->ContainerPtrToValuePtr<void>(defaults))) return false;
+                                       replenish->ContainerPtrToValuePtr<void>(defaults))) return refuse("crate_settings_replenish_default");
         auto* live_handle = handle->ContainerPtrToValuePtr<void>(crate);
         if (!profile->loot_override)
-            return handle->Identical(live_handle, handle->ContainerPtrToValuePtr<void>(defaults));
+        {
+            if (!handle->Identical(live_handle, handle->ContainerPtrToValuePtr<void>(defaults)))
+                return refuse("crate_settings_loot_override_default");
+            return true;
+        }
 
         auto* type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
         auto* table_class = find<Unreal::UClass>(STR("/Script/Engine.DataTable"));
@@ -1081,44 +1097,54 @@ namespace silverfish::shared_loot
         auto* row = field<Unreal::FNameProperty>(type, STR("RowName"));
         if (!type || handle->GetStruct().Get() != type || !table_class || !live(stock_table) ||
             stock_table->GetClassPrivate() != table_class || !table || table->GetPropertyClass().Get() != table_class ||
-            table->GetOffset_Internal() != 0 || !row || row->GetOffset_Internal() != sizeof(void*)) return false;
+            table->GetOffset_Internal() != 0 || !row || row->GetOffset_Internal() != sizeof(void*))
+            return refuse("crate_settings_loot_override_schema");
 
         // Cooked rows may omit the table pointer and let the stock container
         // use LootTables_DT. Any explicitly assigned table must be that asset.
         auto* assigned = table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(live_handle));
-        return (!assigned || assigned == stock_table) &&
-               row->GetPropertyValueInContainer(live_handle).ToString() == profile->loot_override;
+        if ((assigned && assigned != stock_table) ||
+            row->GetPropertyValueInContainer(live_handle).ToString() != profile->loot_override)
+            return refuse("crate_settings_loot_override_row");
+        return true;
     }
 
-    bool read_spawners(Unreal::UObject* crate, Unreal::UObject* instance, ContainerActors& spawners)
+    bool read_spawners(Unreal::UObject* crate, Unreal::UObject* instance, ContainerActors& spawners, std::string_view* reason)
     {
+        const auto refuse = [&](std::string_view detail) {
+            if (reason) *reason = detail;
+            return false;
+        };
         const auto* profile = authored_profile(crate);
         auto* type = find<Unreal::UClass>(child_class);
-        if (!profile || !type || !instance) return false;
+        if (!profile || !type || !instance) return refuse("crate_children_context");
         constexpr std::array fields{STR("Loot_Spawner"), STR("Loot_Spawner1"), STR("Loot_Spawner2"), STR("Loot_Spawner3")};
+        constexpr std::array salt_reasons{"cabinet_child0_salt", "cabinet_child1_salt", "cabinet_child2_salt", "cabinet_child3_salt"};
         const bool cabinet = profile->stock_class == &authored_loot::small_cabinet;
         spawners = {};
         for (std::size_t index = 0; index < profile->stock_class->slots; ++index)
         {
             auto* child = object_field(crate, fields[index]);
-            if (!live(child) || child->GetClassPrivate() != type || child->GetOuterPrivate() != crate ||
-                object_field(child, STR("Container")) != crate ||
-                object_field(child, STR("As Game Instance FP")) != instance ||
-                std::find(spawners.begin(), spawners.begin() + index, child) != spawners.begin() + index)
-                return false;
+            if (!live(child) || child->GetClassPrivate() != type) return refuse("crate_child_class");
+            if (child->GetOuterPrivate() != crate || object_field(child, STR("Container")) != crate)
+                return refuse("crate_child_owner");
+            if (object_field(child, STR("As Game Instance FP")) != instance) return refuse("crate_child_instance");
+            if (std::find(spawners.begin(), spawners.begin() + index, child) != spawners.begin() + index)
+                return refuse("crate_child_duplicate");
             if (cabinet)
             {
                 auto* salt = field<Unreal::FIntProperty>(child, STR("SpawnerSalt"));
-                if (!salt || salt->GetPropertyValueInContainer(child) != profile->child_salts[index]) return false;
+                if (!salt || salt->GetPropertyValueInContainer(child) != profile->child_salts[index])
+                    return refuse(salt_reasons[index]);
             }
             spawners[index] = child;
         }
         if (cabinet)
         {
             const auto children = static_cast<Unreal::AActor*>(crate)->K2_GetComponentsByClass(type);
-            if (children.Num() != profile->stock_class->slots) return false;
+            if (children.Num() != profile->stock_class->slots) return refuse("cabinet_children_count");
             for (int index = 0; index < children.Num(); ++index)
-                if (std::ranges::find(spawners, children[index]) == spawners.end()) return false;
+                if (std::ranges::find(spawners, children[index]) == spawners.end()) return refuse("cabinet_children_membership");
         }
         return true;
     }
