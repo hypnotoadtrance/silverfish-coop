@@ -117,6 +117,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             process = await asyncio.create_subprocess_exec(*base, *arguments, cwd=REPO, env=environment,
                 stdout=stream, stderr=stream, creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((process, controller))
+        return process
 
     host = ("--campaign", profile)
     client = ("--profile", profile)
@@ -129,7 +130,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    and state.get("game", {}).get("map") == area
                    and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
         invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
-        await start("client.txt", client, "join", *client, "--invite", invitation["invite_file"], "--headless", "--native-zones")
+        client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
+        client_process = await start("client.txt", client, "join", *client, *client_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected"
                    and state.get("game", {}).get("map") == area
                    and (dead_bridge_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
@@ -138,8 +140,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                                  if dead_bridge_cqc else bandit(state).get("watched_pawn")))
         if dead_bridge_cqc:
             exact_pawn = paired["game"]["native_guest_save"]["pawn"]
-            await wait(guest_run, lambda state: cqc_counterpart(guest_run) is not None)
+            visible = await wait(guest_run, lambda state: cqc_counterpart(guest_run) is not None
+                                 and state.get("game", {}).get("native_enemy_loot_death_view", {}).get("state") == "present")
             evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run)
+            before = visible["game"]["native_enemy_loot_death_view"]
+            assert (before["actor"], before["hidden"], before["collision"]) == (CQC, False, True), before
             wrong = await combat_action(run, "native-enemy-loot-watch", CQC.removesuffix("_0") + "_1")
             assert wrong.get("ok") is False and wrong.get("error") == "Choose the exact staged stock enemy", wrong
             evidence["neighboring_stock_cqc_refused"] = True
@@ -333,6 +338,20 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     verify_record(campaign / "game-user", durable["escrow"])
                     assert {key: value for key, value in durable.items() if key != "escrow"} == roll, durable
                     evidence["verified_stock_shell_escrow"] = durable
+
+                    def projected(state):
+                        view = state.get("game", {}).get("native_enemy_loot_death_view", {})
+                        return state.get("gameplay_fresh") and state.get("zone_epoch") == roll["epoch"] and (
+                            view.get("actor"), view.get("state"), view.get("epoch"), view.get("guid"),
+                            view.get("hidden"), view.get("collision"),
+                        ) == (CQC, "projected", roll["epoch"], guid, True, False)
+
+                    defeat = await wait(guest_run, projected, timeout=12)
+                    counterpart = cqc_counterpart(guest_run)
+                    assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
+                    assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
+                    evidence["client_cqc_after_combat"] = counterpart
+                    evidence["client_cqc_death_view"] = defeat["game"]["native_enemy_loot_death_view"]
                 published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                     "native_enemy_loot_rolls", {}).get(guid) == roll)
                 assert published["gameplay_fresh"], published
@@ -365,8 +384,16 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
                     assert durable == claimed, durable
                     assert saved["world"]["map"] == DEAD_BRIDGE, saved["world"]
-                    evidence["client_cqc_after_combat"] = cqc_counterpart(guest_run)
-                    assert evidence["client_cqc_after_combat"] is not None
+                    await command("action", *client, "stop")
+                    await asyncio.wait_for(client_process.wait(), 15)
+                    await wait(run, lambda state: not state.get("link_connected")
+                               and state.get("game", {}).get("remote_clients") == 0, timeout=15)
+                    await start("client-reconnect.txt", client, "join", *client, *client_flags)
+                    rejoined = await wait(guest_run, lambda state: state.get("generation") != settled["generation"]
+                                          and projected(state), timeout=45)
+                    same_visit = status(run)
+                    assert same_visit["generation"] == paired["generation"] and same_visit["zone_epoch"] == roll["epoch"], same_visit
+                    evidence["client_cqc_death_view_after_reconnect"] = rejoined["game"]["native_enemy_loot_death_view"]
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:

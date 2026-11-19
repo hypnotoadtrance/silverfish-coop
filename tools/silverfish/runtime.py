@@ -1032,6 +1032,17 @@ class Bridge:
                         "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
                         "cache_unchanged": fields[10] == "1",
                     }
+                elif fields[0] == "native-enemy-loot-death-view" and len(fields) == 8:
+                    area, actor, mode, epoch, guid, hidden, collision = fields[1:]
+                    if (hidden in ("0", "1") and collision in ("0", "1")
+                            and (mode == "projected" and len(epoch) == 32
+                                 and all(char in "0123456789abcdef" for char in epoch) and valid_guid(guid)
+                                 and (hidden, collision) == ("1", "0")
+                                 or mode in ("present", "stock") and (epoch, guid) == ("-", "-"))):
+                        data["native_enemy_loot_death_view"] = {
+                            "map": area, "actor": actor, "state": mode, "epoch": None if epoch == "-" else epoch,
+                            "guid": None if guid == "-" else guid, "hidden": hidden == "1", "collision": collision == "1",
+                        }
                 elif fields[0] == "native-enemy-loot-escrow" and len(fields) == 11:
                     data["native_enemy_loot_escrow"] = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
                                                             units=None if fields[7] == "-" else int(fields[7]),

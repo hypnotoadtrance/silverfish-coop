@@ -16,6 +16,8 @@ CLAIM = "native-enemy-loot-claim"
 APPROACH = "native-enemy-loot-approach"
 STATE_KEY = "native_enemy_loot_rolls"
 SHELLS = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
+DEATH_VIEW = "native_enemy_loot_death_view"
+SHELL_ACTOR = f"Ammo_ShotgunShells_BP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
 
 
 def watch_target(game: dict, target: str | None) -> str | None:
@@ -29,6 +31,51 @@ def watch_target(game: dict, target: str | None) -> str | None:
 
 def published(records: dict) -> dict:
     return {key: native_loot.public_roll(roll) for key, roll in records.items()}
+
+
+def defeated_cqc(records: dict, epoch: str) -> str | None:
+    if (type(records) is not dict or not isinstance(epoch, str) or len(epoch) != 32
+            or any(char not in "0123456789abcdef" for char in epoch)):
+        return None
+    selected = None
+    for guid, roll in records.items():
+        if not isinstance(roll, dict) or (roll.get("map"), roll.get("bandit"), roll.get("epoch")) != (DEAD_BRIDGE, CQC, epoch):
+            continue
+        actor = roll.get("actor")
+        if (selected is not None or not valid_guid(guid) or roll.get("guid") != guid
+                or roll.get("class_path") != SHELLS or type(roll.get("quantity")) is not int or not 3 <= roll["quantity"] <= 9
+                or not isinstance(actor, str) or not actor.startswith(SHELL_ACTOR)
+                or not actor.removeprefix(SHELL_ACTOR).isdecimal()):
+            return None
+        selected = guid
+    return selected
+
+
+async def project_client(client) -> None:
+    game, epoch = client.last_game, client.zone_epoch
+    proof = game.get(DEATH_VIEW, {})
+    if (not client.transport.connected or client.stopping or client.needs_travel or client.server_transitioning
+            or client.expected_zone != DEAD_BRIDGE or time.monotonic() - client.gameplay_seen >= 3
+            or (game.get("state"), game.get("map"), proof.get("map"), proof.get("actor")) != (
+                "connected", DEAD_BRIDGE, DEAD_BRIDGE, CQC
+            ) or proof.get("state") not in ("present", "projected")):
+        return
+    guid = defeated_cqc(client.gameplay.get(STATE_KEY), epoch)
+    if not guid or (proof.get("state"), proof.get("epoch"), proof.get("guid"), proof.get("hidden"), proof.get("collision")) == (
+        "projected", epoch, guid, True, False
+    ):
+        return
+    snapshot = await client.bridge.command("native-enemy-loot-project-death", CQC, epoch, guid, timeout=3)
+    proof = snapshot.get(DEATH_VIEW, {})
+    if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("actor")) != (
+        "connected", DEAD_BRIDGE, DEAD_BRIDGE, CQC
+    ) or (proof.get("state") != "stock" and (
+            proof.get("state"), proof.get("epoch"), proof.get("guid"), proof.get("hidden"), proof.get("collision")
+    ) != ("projected", epoch, guid, True, False)):
+        raise RuntimeError("The guest did not verify the stock CQC death presentation")
+    client.last_game = snapshot
+    if proof["state"] == "projected":
+        client.control.event("native_enemy_loot_death_projected", **proof)
 
 
 def _available(host):

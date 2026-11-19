@@ -3590,6 +3590,7 @@ class Client:
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
                     await native_flood_jammer.project_client(self)
+                    await native_enemy_loot.project_client(self)
                     if self.invite.get("native_loot_input"):
                         self.last_game = await native_loot.project_opened(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
