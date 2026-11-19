@@ -1,8 +1,9 @@
-"""Optional Windows integration test. Launches two headless staged games on loopback."""
+"""Exercise Direct IP with two staged headless games on one Windows PC."""
 
 import argparse
 import asyncio
 import hashlib
+from ipaddress import IPv4Address
 import json
 import math
 import os
@@ -21,6 +22,8 @@ from tools.silverfish.authored_loot import PLACEMENTS as AUTHORED_CRATES, full_n
 options = argparse.ArgumentParser(description=__doc__)
 options.add_argument("--work", type=Path, required=True, help="root of a prepared stage workspace")
 options.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash before and after")
+options.add_argument("--bind", type=IPv4Address, default="127.0.0.1", help="local address for the Direct IP host and loss relay")
+options.add_argument("--port", type=int, default=0, help="Direct IP host port, or 0 for an available port")
 options.add_argument("--gameplay", action="store_true", help="test replicated movement, pickup, revive and economy")
 options.add_argument("--zones", action="store_true", help="test host-led travel and guest reconnection between test maps")
 options.add_argument("--native-probe", action="store_true", help="exercise transient native stock Save ownership")
@@ -90,6 +93,8 @@ options.add_argument("--native-backend", choices=("cpp", "cpp-scoped", "overlay"
                      help="require the specified death probe backend")
 options.add_argument("--wipe", action="store_true", help="exercise wipe, item retention and backpack ownership")
 args = options.parse_args()
+if args.bind.is_unspecified or args.bind.is_multicast or not 0 <= args.port <= 65535:
+    options.error("Choose a concrete local IPv4 address and a port between 0 and 65535")
 if args.native_broker_drill:
     if not args.native_guest:
         options.error("--native-broker-drill requires --native-guest")
@@ -1246,16 +1251,19 @@ async def smoke():
                               args.native_blue, random_cube, args.native_stardust, args.observatory_zone,
                               args.native_matrix, args.native_weapon_use))
         initial_zone = ["--start-zone", black_market if broker_map else crossroads] if authored_route or broker_map else []
-        host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
+        bind = str(args.bind)
+        host = await start("host", "--campaign", campaign, "--bind", bind, "--port", str(args.port),
+                           "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
+        assert host_status["endpoint"]["address"] == bind and (not args.port or port == args.port), host_status["endpoint"]
         note("host_listening", {"udp_port": port, "map": host_status["game"]["map"],
-                                "campaign_id": host_status["campaign"]["campaign_id"]})
+                                "campaign_id": host_status["campaign"]["campaign_id"], "loopback": args.bind.is_loopback})
         issued = await command("invite", "--campaign", campaign, "--name", "Validation guest",
                                "--character", "Validation character")
         loop = asyncio.get_running_loop()
         relay, interruption = await loop.create_datagram_endpoint(
-            lambda: InterruptibleRelay(("127.0.0.1", port)), local_addr=("127.0.0.1", 0),
+            lambda: InterruptibleRelay((bind, port)), local_addr=(bind, 0),
         )
         invitation = Path(issued["invite_file"])
         invitation_data = json.loads(invitation.read_text(encoding="utf-8"))
@@ -2202,7 +2210,7 @@ async def smoke():
             contents = path.read_bytes()
             assert contents.startswith(b"GVAS") and len(contents) == detached_frame["size"], detached_frame
             assert hashlib.sha256(contents).hexdigest() == detached_frame["sha256"], detached_frame
-        host_restart = await start("host", "--campaign", campaign, "--port", str(port), "--headless", *fixtures)
+        host_restart = await start("host", "--campaign", campaign, "--bind", bind, "--port", str(port), "--headless", *fixtures)
         restored = await wait(run, lambda state: state.get("state") == "hosting" and
                               state.get("generation") != host_status["generation"])
         assert restored["campaign"]["campaign_id"] == host_status["campaign"]["campaign_id"]
