@@ -76,7 +76,7 @@ The guest inventory key opened a passive stock overlay. Its selection and confir
 
 The staged stock interaction input dispatches a scoped revive through the cooked Enhanced Input binding. One guest revived the other in place at 25 HP. Both guests were refused at the stock Observatory bed on the authority and in their local game. The host confirmed one hour of sleep through the stock sleep screen. The three characters later wiped and respawned at the verified bed Arrow.
 
-Two-player runs repeated the stock one-hour sleep, guest refusal, and wipe recovery at the authored beds in Borough, Scav Bar, Dead End, and Black Lake. The party left each area through an authored exit before wiping. Both characters returned to the host's exact rest site with full native health, and the original save hashes matched in each run.
+Two-player runs repeated the stock one-hour sleep, guest refusal, and wipe recovery at the authored beds in Borough, Scav Bar, Dead End, Black Lake, and Artifact Forge. The party left each area through an authored exit before wiping. Both characters returned to the host's exact rest site with full native health, and the original save hashes matched in each run.
 
 A separate run downed the guest with stock lethal damage, then moved the party through a host-authorized Playtest zone transition. The same character stayed downed in its replacement pawn and through a same-port restart. The campaign ledger kept 0 HP and the detached stock save kept the 1 HP minimum used to prevent stock death. The host revived the restored guest to 25 HP, and the guest's view returned to standing. Guest-initiated travel was refused and the original save hashes matched.
 

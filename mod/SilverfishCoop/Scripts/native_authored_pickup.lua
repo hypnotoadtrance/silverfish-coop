@@ -269,9 +269,8 @@ function pickup.command(fields, state, phase)
             or not same(actor:GetWorld(), state.world) then
             error("The stock loose pickup fixture did not match its placed actor", 0)
         end
-        if profile.source == "railyard-dust-filter" then
-            return stock_input_fixture.approach_dust_filter(state, phase, profile, pawn, actor)
-        end
+        local precision = stock_input_fixture.precise_approach(state, phase, profile, pawn, actor)
+        if precision then return precision end
         local point = actor:K2_GetActorLocation()
         for _, offset in ipairs(profile.approach) do
             local candidate = { X = point.X + offset[1], Y = point.Y + offset[2], Z = point.Z + 75 }

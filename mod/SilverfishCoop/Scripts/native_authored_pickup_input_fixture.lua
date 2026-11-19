@@ -16,6 +16,11 @@ local sources = {
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local dust_filter = "railyard-dust-filter"
+local savlo_keycard = "trench-savlo-keycard"
+local precise_distances = {
+    [dust_filter] = {125, 160, 195},
+    [savlo_keycard] = {55, 80, 105, 125, 160, 195},
+}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 local function valid(object)
@@ -124,7 +129,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_railyard(state, pawn, actor, box, label)
+local function approach_clear_sight(state, pawn, actor, box, label, distances)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -154,8 +159,7 @@ local function approach_railyard(state, pawn, actor, box, label)
         return false
     end
     local checked, placed = pcall(function()
-        for _, distance in ipairs({125, 160, 195}) do
-            -- The cabinet's cooked forward interaction face is world +X.
+        for _, distance in ipairs(distances) do
             for _, angle in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
                 local heading = math.rad(angle)
                 local x, y = center.X + distance * math.cos(heading), center.Y + distance * math.sin(heading)
@@ -194,19 +198,22 @@ local function approach_railyard(state, pawn, actor, box, label)
         table.concat(names, "|", 1, math.min(#names, 4))), 0)
 end
 
-local function railyard_fixture(state, phase, pawn, actor)
+local function approach_scope(state, phase, pawn, actor, map)
     return headless and host_fixtures and phase == "hosting" and state.listening and state.server == false
-        and sources[dust_filter] == state.map and same(pawn:GetWorld(), state.world) and same(actor:GetWorld(), state.world)
+        and map == state.map and same(pawn:GetWorld(), state.world) and same(actor:GetWorld(), state.world)
         and pawn.Dead == false and pawn:HasAuthority()
 end
 
-function input.approach_dust_filter(state, phase, profile, pawn, actor)
-    if profile.source ~= dust_filter or not railyard_fixture(state, phase, pawn, actor)
+function input.precise_approach(state, phase, profile, pawn, actor)
+    local distances = precise_distances[profile.source]
+    if not distances then return end
+    local label = "authored_pickup_fixture_" .. profile.source
+    if not approach_scope(state, phase, pawn, actor, sources[profile.source])
         or not same(actor.Box, actor.RootComponent) then
-        error("authored_pickup_dust_filter_fixture_scope_unavailable", 0)
+        error(label .. "_scope_unavailable", 0)
     end
-    approach_railyard(state, pawn, actor, actor.Box, "authored_pickup_dust_filter_fixture")
-    return "exact stock Dust Filter floor and interaction sight verified"
+    approach_clear_sight(state, pawn, actor, actor.Box, label, distances)
+    return "stock pickup floor and interaction sight verified"
 end
 
 local function restored(camera, original)
@@ -261,11 +268,12 @@ end
 
 function input.open_dust_cabinet(state, phase, pawn, actor, box)
     local press = SilverfishProbeNativeInteractInput
-    if not railyard_fixture(state, phase, pawn, actor) or not same(pawn, state.local_pawn.pawn)
+    if not approach_scope(state, phase, pawn, actor, sources[dust_filter]) or not same(pawn, state.local_pawn.pawn)
         or not owned(pawn.Camera, pawn, "CameraComponent") or type(press) ~= "function" then
         error("authored_dust_cabinet_fixture_scope_unavailable", 0)
     end
-    local origin, facing = approach_railyard(state, pawn, actor, box, "authored_dust_cabinet_fixture")
+    local origin, facing = approach_clear_sight(state, pawn, actor, box, "authored_dust_cabinet_fixture",
+        precise_distances[dust_filter])
     local ok, receipt = pcall(press_stock, state, pawn, box, true, "authored_dust_cabinet_stock_input", function()
         local delivered, why, sequence = press(pawn:GetAddress(), false)
         if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
@@ -306,7 +314,7 @@ function input.press(state, phase, profile)
         or not owned(pawn.Camera, pawn, "CameraComponent") then
         error("authored_pickup_stock_input_exact_box_or_camera_unavailable", 0)
     end
-    press_stock(state, pawn, box, profile.source == dust_filter, "authored_pickup_stock_input", function()
+    press_stock(state, pawn, box, precise_distances[profile.source] ~= nil, "authored_pickup_stock_input", function()
         local consumed, why = press(pawn:GetAddress(), true)
         local still_active, still_claimed, sequence, fixture = inspect(profile.source)
         if consumed ~= true or why ~= "stock_started_consumed" or still_active ~= true
