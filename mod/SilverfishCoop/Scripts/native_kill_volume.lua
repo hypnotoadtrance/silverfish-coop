@@ -186,10 +186,10 @@ local function service(state, phase, geometry, lead)
         if person then
             local target, method = safe_spot(state, person, geometry, everyone)
             if target and relocate(person, geometry, target) then
-                if not death.publish_kill_volume_down(state, phase, person.pawn, person.save)
-                    or SilverfishFinishNativeKillVolumeCrossing(sequence, address) ~= true then error("unverified_downed_event", 0) end
+                local confirmed, at_emission = death.publish_kill_volume_down(state, phase, person.pawn, person.save, person.downed)
+                if not confirmed or SilverfishFinishNativeKillVolumeCrossing(sequence, address) ~= true then error("unverified_downed_event", 0) end
                 current.recovered[person.name] = {sequence = sequence, method = method, target = target, pawn = person.pawn,
-                    projected = person.downed, at = os.time()}
+                    projected = person.downed, at = os.time(), health = at_emission}
                 if current.fixture and same(current.fixture.pawn, person.pawn) then current.fixture = nil end
                 person.here, person.standing = person.pawn:K2_GetActorLocation(), false
                 moved = true
@@ -302,7 +302,8 @@ function volume_guard.rows(state, phase, row)
     if phase == "hosting" then
         for name, recovery in pairs(current.recovered) do
             local target = recovery.target
-            rows[#rows+1] = row("native-kill-volume-recovered", name, recovery.sequence, recovery.method, target.X, target.Y, target.Z)
+            rows[#rows+1] = row("native-kill-volume-recovered", name, recovery.sequence, recovery.method,
+                target.X, target.Y, target.Z, recovery.health or "-")
         end
     end
     return rows

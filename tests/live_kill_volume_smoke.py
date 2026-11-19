@@ -72,6 +72,7 @@ async def verify(work, vanilla, both):
 
     async def fall_and_revive(role, first, opposing_control, character):
         victim_slot, helper_slot = ("local", "guest") if role == "host" else ("guest", "local")
+        victim_character = "host" if role == "host" else character
         victim = first["game"]["pawns"][victim_slot]
         helper = first["game"]["pawns"][helper_slot]
         driver = first["game"]["native_roster"]
@@ -87,18 +88,34 @@ async def verify(work, vanilla, both):
             CROSSROADS, first["zone_epoch"], first["generation"], driver), down["game"]
         assert report["overlaps_vetoed"] > baseline["overlaps_vetoed"] and report["fault"] is None and down["link_connected"], report
         assert recovery["placement"] == "teammate" and math.dist(recovery["location"], helper["location"]) <= 250, recovery
-        assert down["game"]["pawns"][victim_slot]["health"] == 0 and down["game"]["native_dead_flags"][victim_slot] is False
+        durable = down["campaign"]["world"]["party"]["players"][victim_character]
+        assert recovery["native_health_at_down"] == 0 and durable["downed"] and durable["health"] == 0, (recovery, durable)
+        assert down["game"]["native_dead_flags"][victim_slot] is False, down["game"]["native_dead_flags"]
+        effects = down["game"]["player_effects"][victim_slot]
+        assert effects["crouched"] and effects["jump_velocity"] == 0, effects
         await wait(guest, lambda value: value.get("state") == "connected" and value.get("link_connected") and value.get("character_id") == character
             and value.get("zone_epoch") == first["zone_epoch"]
             and value.get("game", {}).get("player_effects", {}).get("local" if role == "guest" else "guest", {}).get("state") == "downed")
         press = await action(opposing_control, "native-interaction-fixture")
         assert press["native_interaction_fixture"], press
+        expected = max(1, victim["max_health"] * .10)
+
+        def native_revive(game):
+            if role == "host":
+                return game.get("native_host_revived_health")
+            proof = game.get("native_guest_revivals", {}).get(victim["name"], {})
+            if (proof.get("map"), proof.get("pawn"), proof.get("owner")) == (CROSSROADS, victim["name"], character):
+                return proof["health"]
+
         revived = await wait(run, lambda value: value.get("game", {}).get("player_effects", {}).get(victim_slot, {}).get("state") == "standing"
-            and value["game"]["pawns"][victim_slot]["health"] > 0 and value.get("zone_epoch") == first["zone_epoch"])
+            and native_revive(value["game"]) == expected and value.get("zone_epoch") == first["zone_epoch"])
         actual = revived["game"]["pawns"][victim_slot]
-        assert actual["name"] == victim["name"] and abs(actual["health"] - victim["max_health"] * .10) < 1, actual
+        assert actual["name"] == victim["name"] and actual["health"] > 0, actual
+        durable = revived["campaign"]["world"]["party"]["players"][victim_character]
+        assert not durable["downed"] and durable["health"] == expected, durable
         assert revived["game"]["pawns"][helper_slot]["health"] == helper["health"]
-        evidence[role] = {"recovery": recovery, "guard": report, "revived_health": actual["health"], "stock_interact": True}
+        evidence[role] = {"recovery": recovery, "guard": report, "revived_health": expected,
+                          "native_health_after_revive": actual["health"], "stock_interact": True}
         return revived
 
     try:
@@ -125,7 +142,7 @@ async def verify(work, vanilla, both):
         assert after["game"][volume.KEY]["overlaps_vetoed"] == 0 and not after["game"]["native_dead_flags"]["guest"]
         evidence.update(restart=True, verified=True)
     except BaseException as error:
-        evidence.update(verified=False, failure=str(error))
+        evidence.update(verified=False, failure=str(error) or type(error).__name__)
         raise
     finally:
         for owner, process in reversed(jobs):

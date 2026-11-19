@@ -22,15 +22,16 @@ def status(state="armed", fault="-"):
 class KillVolumeTests(unittest.IsolatedAsyncioTestCase):
     def test_closed_world_gate_and_exact_recovery_snapshot(self):
         report = volume.parse_state(status(), "hosting", CROSSROADS)
-        recovered = ["native-kill-volume-recovered", PAWN, "2", "teammate", "10", "120", "500"]
+        recovered = ["native-kill-volume-recovered", PAWN, "2", "teammate", "10", "120", "500", "0.0"]
         self.assertEqual(volume.parse_recovered(recovered, "hosting", report),
-                         {"pawn": PAWN, "sequence": 2, "placement": "teammate", "location": [10, 120, 500]})
+                         {"pawn": PAWN, "sequence": 2, "placement": "teammate", "location": [10, 120, 500], "native_health_at_down": 0})
+        self.assertIsNone(volume.parse_recovered([*recovered[:-1], "-"], "hosting", report)["native_health_at_down"])
         self.assertEqual(volume.parse_state(status(), "connected", CROSSROADS)["overlaps_vetoed"], 2)
         with self.assertRaises(ValueError):
             volume.parse_state(status(), "hosting", NOTHING)
         with self.assertRaises(ValueError):
             volume.parse_state(status("pending"), "connected", CROSSROADS)
-        for index, invalid in ((1, PAWN + "extra"), (2, "0"), (4, "nan"), (6, "-22575")):
+        for index, invalid in ((1, PAWN + "extra"), (2, "0"), (4, "nan"), (6, "-22575"), (7, "3.452")):
             with self.subTest(index=index), self.assertRaises(ValueError):
                 volume.parse_recovered([*recovered[:index], invalid, *recovered[index+1:]], "hosting", report)
 

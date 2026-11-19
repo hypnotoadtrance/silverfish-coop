@@ -36,14 +36,15 @@ def parse_state(fields, phase, area):
 
 
 def parse_recovered(fields, phase, report):
-    if (len(fields) != 7 or phase != "hosting" or not report or report["state"] == "arming" or not _pawn_name(fields[1])
+    if (len(fields) not in (7, 8) or phase != "hosting" or not report or report["state"] == "arming" or not _pawn_name(fields[1])
             or not fields[2].isascii() or not fields[2].isdigit() or not 0 < len(fields[2]) < 13
-            or fields[3] not in ("teammate", "last-ground", "player-start")):
+            or fields[3] not in ("teammate", "last-ground", "player-start") or (len(fields) == 8 and fields[7] not in ("0", "0.0", "-"))):
         raise ValueError("Invalid CrossRoads KillVolume recovery scope")
     location = [float(component) for component in fields[4:7]]
     if int(fields[2]) <= 0 or not all(math.isfinite(value) and abs(value) < 1e8 for value in location) or location[2] <= -22074:
         raise ValueError("Invalid CrossRoads KillVolume recovery position")
-    return {"pawn": fields[1], "sequence": int(fields[2]), "placement": fields[3], "location": location}
+    return {"pawn": fields[1], "sequence": int(fields[2]), "placement": fields[3], "location": location,
+            "native_health_at_down": 0 if len(fields) == 8 and fields[7] != "-" else None}
 
 
 def pending(game):

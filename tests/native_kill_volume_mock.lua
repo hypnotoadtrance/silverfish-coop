@@ -82,10 +82,11 @@ local modules = {
     end},
     players = {is_downed = function() return false end,
         is_standing_guest = function() return not guest.HoldingCrouch end},
-    native_death = {publish_kill_volume_down = function(_, _, pawn, save)
+    native_death = {publish_kill_volume_down = function(_, _, pawn, save, projected_downed)
         assert(pawn == guest and save == guest.Save and not box:IsOverlappingActor(pawn))
+        if projected_downed then return true end
         dispatches, save.PlayerHealth = dispatches + 1, 0
-        return true
+        return true, save.PlayerHealth
     end},
 }
 local env = setmetatable({require = function(name) return assert(modules[name]) end, os = {getenv = function() return "1" end, time = os.time},
@@ -112,13 +113,17 @@ authorized, exposed, hits = false, true, 1
 assert(not update() and dispatches == 0 and guest.teleports == 1 and guard.capture_blocked(state, "hosting"))
 authorized = true
 assert(update() and dispatches == 1 and guest.teleports == 2 and guest.Save.PlayerHealth == 0)
-assert(guard.capture_blocked(state, "hosting") and rows()[2][2] == guest_detail.name and rows()[2][4] == "teammate")
+assert(guard.capture_blocked(state, "hosting") and rows()[2][2] == guest_detail.name and rows()[2][4] == "teammate" and rows()[2][8] == 0)
 guest.HoldingCrouch, guest.JumpMaxCount = true, 0
 assert(not update() and dispatches == 1 and not guard.capture_blocked(state, "hosting"))
 
+guest.position, guest.Save.PlayerHealth = box:K2_GetComponentLocation(), 3.452
+exposed, hits = true, 2
+assert(update() and dispatches == 1 and guest.teleports == 3 and guest.Save.PlayerHealth == 3.452 and rows()[2][8] == "-")
+
 guest.position = box:K2_GetComponentLocation()
-authorized, exposed, expired, hits = false, true, true, 2
-assert(not update() and dispatches == 1 and guest.teleports == 2)
+authorized, exposed, expired, hits = false, true, true, 3
+assert(not update() and dispatches == 1 and guest.teleports == 3)
 assert(rows()[1][4] == "fault" and rows()[1][7] == "crossing_owner_unavailable")
 state.map, world_is_nothing = "/Game/Classes/Maps/Dreams/Nothing_P", true
 assert(not update() and #rows() == 0)
