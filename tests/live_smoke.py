@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -27,6 +28,7 @@ options.add_argument("--native-walls", action="store_true", help="verify swept p
 options.add_argument("--authored-zone", action="store_true", help="start from CrossRoads and take the stock DeadBridge exit")
 options.add_argument("--native-door", action="store_true", help="exercise the stock CrossRoads to Cistern transition door")
 options.add_argument("--native-transport", action="store_true", help="verify pre-consumption guards for Stardust and four cubes")
+options.add_argument("--native-gold", action="store_true", help="exercise a Golden Cube round trip and its durable charge")
 options.add_argument("--native-pickup", action="store_true", help="claim and restore a stock Bandage")
 options.add_argument("--native-weapon", action="store_true", help="round-trip a stock weapon and its native typed payload")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
@@ -62,6 +64,8 @@ if args.native_door and (not args.native_zones or args.authored_zone):
     options.error("--native-door requires --native-zones and its own run")
 if args.native_transport and not args.native_zones:
     options.error("--native-transport requires --native-zones")
+if args.native_gold and (not args.native_zones or args.authored_zone or args.native_door):
+    options.error("--native-gold requires --native-zones and its own authored route")
 work = args.work.resolve()
 profile = "validation-" + uuid.uuid4().hex[:8]
 campaign = profile
@@ -71,6 +75,8 @@ base = [sys.executable, "-u", "-m", "tools.silverfish", "--work", str(work)]
 records = []
 processes = []
 deadline = 40
+crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 
 def note(label, summary):
     message = {"check": label, **summary}
@@ -146,6 +152,132 @@ async def stop(process, flag, value):
         await command("action", flag, value, "stop", check=False)
         await asyncio.wait_for(process.wait(), timeout=12)
     assert process.returncode == 0
+
+
+def party_in_zone(status, map_name):
+    game = status.get("game", {})
+    return (game.get("map") == map_name and game.get("remote_clients") == 1
+            and set(game.get("pawns", {})) == {"local", "guest"}
+            and not status.get("awaiting_zone_guest"))
+
+
+def gold_ledger(status):
+    return status.get("campaign", {}).get("world", {}).get("party", {}).get("gold_transport") or {}
+
+
+async def gold_action(operation, guid):
+    reply = await command("action", "--campaign", campaign, f"native-gold-{operation}", "--target", guid)
+    report = reply["native_gold"]
+    assert report["operation"] == operation and report["guid"] == guid, report
+    return report
+
+
+async def wait_gold_event(guid, *, after=0):
+    until = time.monotonic() + deadline
+    while time.monotonic() < until:
+        try:
+            lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, PermissionError):
+            lines = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (event.get("event") == "native_gold_request" and event.get("guid") == guid
+                    and event.get("sequence", 0) > after):
+                return event
+        await asyncio.sleep(0.2)
+    raise TimeoutError(f"No Golden Cube request outcome for {guid} after sequence {after}")
+
+
+async def position_for_native_exit(target, where):
+    return await command("action", "--campaign", campaign, "native-exit-position",
+                         "--target", target, "--exit-position", where)
+
+
+async def golden_cube_departure(character_id, host_session):
+    initial = await wait(run, lambda status: party_in_zone(status, crossroads)
+                         and status["game"].get("native_zone", {}).get("state") == "ready"
+                         and status["game"].get("native_transport", {}).get("state") == "ready")
+    host_pawn = initial["game"]["pawns"]["local"]["name"]
+    guid = uuid.uuid4().hex.upper()
+    seeded = await gold_action("seed", guid)
+    assert seeded["state"] == "seeded" and seeded["map"] == crossroads and seeded["pawn"] == host_pawn, seeded
+
+    await position_for_native_exit("host", "near")
+    await position_for_native_exit("guest", "far")
+    distant = await wait(run, lambda status: party_in_zone(status, crossroads)
+                         and math.dist(status["game"]["pawns"]["local"]["location"],
+                                       status["game"]["pawns"]["guest"]["location"]) > 1500)
+    request = await gold_action("use-probe", guid)
+    assert request["state"] == "requested" and request["pawn"] == host_pawn, request
+    denied = await wait_gold_event(guid)
+    rejection = denied["result"]
+    assert denied["source"] == crossroads and denied["entry"] == "use_held_item", denied
+    assert (not rejection["ok"] and rejection["error"] == "travel_blocked"
+            and {"id": character_id, "reason": "too_far"} in rejection["blockers"]), denied
+    present = await gold_action("inspect", guid)
+    assert present["state"] == "present" and present["map"] == crossroads and present["pawn"] == host_pawn, present
+    untouched = await wait(run, lambda status: party_in_zone(status, crossroads)
+                           and status.get("zone_epoch") == distant["zone_epoch"])
+    assert guid not in gold_ledger(untouched).get("spent", {}), untouched
+    note("golden_cube_rejection_preserves_stock_item", {"guid": guid, "blockers": rejection["blockers"]})
+
+    await position_for_native_exit("guest", "near")
+    await wait(run, lambda status: party_in_zone(status, crossroads)
+               and math.dist(status["game"]["pawns"]["local"]["location"],
+                             status["game"]["pawns"]["guest"]["location"]) <= 1500)
+    request = await gold_action("use-probe", guid)
+    assert request["state"] == "requested" and request["pawn"] == host_pawn, request
+    approved = await wait_gold_event(guid, after=denied["sequence"])
+    outcome = approved["result"]
+    assert approved["source"] == crossroads and approved["entry"] == "use_held_item", approved
+    assert outcome["ok"] and outcome["map"] == gold_nexus and outcome["entrance"] == "PlayerStart_1", outcome
+    arrived = await wait(run, lambda status: party_in_zone(status, gold_nexus)
+                         and gold_ledger(status) == {"pending": None, "spent": {guid: "arrived"}})
+    location = arrived["game"]["pawns"]["local"]["location"]
+    assert math.dist(location, (0, 1050, 150)) <= 350, location
+    peer = await wait(client_run, lambda status: status.get("state") == "connected"
+                      and status.get("game", {}).get("map") == gold_nexus)
+    assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
+    absent = await gold_action("inspect", guid)
+    assert absent["state"] == "absent" and absent["map"] == gold_nexus, absent
+    note("golden_cube_moves_party_to_stock_player_start", {
+        "guid": guid, "map": gold_nexus, "entrance": outcome["entrance"], "host": location,
+        "same_character": character_id, "item": absent["state"],
+    })
+    return guid
+
+
+async def golden_cube_return(guid, character_id, host_session):
+    resumed = await wait(run, lambda status: party_in_zone(status, gold_nexus)
+                         and status["game"].get("native_zone", {}).get("state") == "ready")
+    assert gold_ledger(resumed) == {"pending": None, "spent": {guid: "arrived"}}, resumed
+    absent = await gold_action("inspect", guid)
+    assert absent["state"] == "absent" and absent["map"] == gold_nexus, absent
+    note("golden_cube_destination_and_charge_survive_restart", {"guid": guid, "map": gold_nexus})
+
+    await position_for_native_exit("host", "near")
+    await position_for_native_exit("guest", "near")
+    if args.native_walls:
+        await wait(run, lambda status: status["game"].get("native_zone_wall", {}).get("host_open"))
+        sweep = await command("action", "--campaign", campaign, "native-exit-wall-probe", "--target", "host")
+        assert sweep["native_zone_wall"]["outcome"] == "clear", sweep
+    else:
+        await position_for_native_exit("host", "inside")
+    arrived = await wait(run, lambda status: party_in_zone(status, crossroads))
+    assert gold_ledger(arrived) == {"pending": None, "spent": {guid: "arrived"}}, arrived
+    peer = await wait(client_run, lambda status: status.get("state") == "connected"
+                      and status.get("game", {}).get("map") == crossroads)
+    assert peer["character_id"] == character_id and peer["host_session"] == host_session, peer
+    events = await command("events", "--campaign", campaign)
+    assert any(event["event"] == "zone_travel_ready" and event.get("source") == gold_nexus
+               and event.get("destination") == crossroads and event.get("entrance") == "Nexus_CrossRoads"
+               for event in events["events"]), events
+    assert (await gold_action("inspect", guid))["state"] == "absent"
+    note("golden_cube_stock_exit_returns_party", {"map": crossroads, "entrance": "Nexus_CrossRoads", "guid": guid})
+
 
 async def gameplay_slice(host_status, character_id):
     marker = await wait(client_run, lambda state: len(state.get("game", {}).get("loot_actors", [])) == 1)
@@ -223,8 +355,7 @@ async def smoke():
             fixtures += ["--native-zone-walls"]
         if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
-        initial_zone = (["--start-zone", "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"]
-                        if args.authored_zone or args.native_door else [])
+        initial_zone = ["--start-zone", crossroads] if args.authored_zone or args.native_door or args.native_gold else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
@@ -551,7 +682,10 @@ async def smoke():
         assert automatic["game"]["pawns"]["guest"]["name"] == original_guest
         note("packet_loss_recovers_automatically", {"pawn": original_guest})
         expected_map = host_status["game"]["map"]
-        if args.native_door:
+        if args.native_gold:
+            gold_guid = await golden_cube_departure(chosen, guest["host_session"])
+            expected_map = gold_nexus
+        elif args.native_door:
             destination = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
             expected_map = destination
             authority = ("action", "--campaign", campaign)
@@ -676,6 +810,9 @@ async def smoke():
         saved_character = snapshot["characters"][chosen]
         assert len(saved_character["state"]["location"]) == 3
         assert saved_character["state"]["map"] == expected_map
+        if args.native_gold:
+            assert snapshot["world"]["map"] == gold_nexus
+            assert snapshot["world"]["party"]["gold_transport"] == {"pending": None, "spent": {gold_guid: "arrived"}}
         if args.native_guest:
             assert saved_character["state"]["health"] == native_health
         note("isolated_checkpoint", {"revision": saved["revision"],
@@ -728,6 +865,8 @@ async def smoke():
             assert restored_party["gameplay"]["players"]["guest"]["health"] == expected_health
             assert not restored_party["game"].get("loot_actors", [])
             note("gameplay_survives_host_restart", {"winner": winner, "guest_health": expected_health})
+        if args.native_gold:
+            await golden_cube_return(gold_guid, chosen, restored["generation"])
         await stop(client, "--profile", profile)
         await stop(host_restart, "--campaign", campaign)
         if original:

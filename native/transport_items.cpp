@@ -1,8 +1,12 @@
 #include "transport_items.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
@@ -33,10 +37,21 @@ namespace
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto manager_path = STR("/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C");
     constexpr auto card_path = STR("/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C");
+    constexpr auto panel_path = STR("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C");
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
+    constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
+    constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
+    constexpr auto guid_path = STR("/Script/CoreUObject.Guid");
+    constexpr auto item_class_name = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
+    constexpr auto item_guid_name = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
+    constexpr auto item_ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
+    constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr auto scope_lease = std::chrono::seconds(2);
+    constexpr auto request_lease = std::chrono::seconds(2);
+    constexpr int inventory_limit = 4096;
+    using Guid = std::array<std::uint32_t, guid_names.size()>;
 
     struct Artifact
     {
@@ -51,6 +66,7 @@ namespace
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Red.Art_Tesseract_Red_C"), "red"},
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Gold.Art_Tesseract_Gold_C"), "gold"},
     };
+    constexpr const auto& gold = artifacts.back();
 
     struct Entries
     {
@@ -94,18 +110,37 @@ namespace
         std::string_view reason;
     };
 
+    struct GoldRequest
+    {
+        Guid guid;
+        std::uint64_t generation;
+        Clock::time_point expires;
+        Unreal::FWeakObjectPtr pawn;
+        Unreal::FWeakObjectPtr save;
+        std::string_view entry;
+    };
+
     std::optional<Entries> entries;
     std::array<Hook::GlobalCallbackId, 3> hooks{};
     std::atomic<bool> hooks_ready{};
     std::atomic<std::uint64_t> generation{1};
     thread_local Scope scope;
     thread_local Receipt receipt;
+    thread_local std::optional<GoldRequest> gold_request;
 
     [[nodiscard]] bool enabled()
     {
         std::array<char, 2> flag{};
         std::size_t size{};
         return getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_NATIVE_TRANSPORT") == 0 &&
+               size == flag.size() && flag[0] == '1';
+    }
+
+    [[nodiscard]] bool fixtures_enabled()
+    {
+        std::array<char, 2> flag{};
+        std::size_t size{};
+        return getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_NATIVE_FIXTURES") == 0 &&
                size == flag.size() && flag[0] == '1';
     }
 
@@ -269,38 +304,126 @@ namespace
         return nullptr;
     }
 
-    [[nodiscard]] const Artifact* inventory_item(Unreal::UObject* owner, const Unreal::TCHAR* name)
+    struct ItemView
+    {
+        const Artifact* artifact{};
+        Unreal::UScriptStruct* structure{};
+        const void* value{};
+        Unreal::UObject* panel{};
+    };
+
+    [[nodiscard]] ItemView inventory_item(Unreal::UObject* owner, const Unreal::TCHAR* name)
     {
         auto* item = field<Unreal::FStructProperty>(owner, name);
         auto* type = item ? item->GetStruct().Get() : nullptr;
         if (!type || type->GetPathName() != item_path)
         {
-            return nullptr;
+            return {};
         }
-        auto* item_class = field<Unreal::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
-        return identify(object_value(item_class, item->ContainerPtrToValuePtr<void>(owner)));
+        const auto* value = item->ContainerPtrToValuePtr<void>(owner);
+        return {identify(object_value(field<Unreal::FClassProperty>(type, item_class_name), value)), type, value};
     }
 
-    [[nodiscard]] const Artifact* manager_item(Unreal::UObject* manager, const Unreal::FName& name)
+    [[nodiscard]] ItemView card_item(Unreal::UObject* card)
+    {
+        if (!exact_class(card, card_path))
+        {
+            return {};
+        }
+        auto item = inventory_item(card, STR("Item"));
+        item.panel = object_field(card, STR("InventoryWidget"));
+        return item;
+    }
+
+    [[nodiscard]] ItemView manager_item(Unreal::UObject* manager, const Unreal::FName& name)
     {
         if (name == entries->action_use)
         {
             auto* menu = object_field(manager, STR("ItemContextMenu"));
-            auto* card = exact_class(menu, context_menu_path) ? object_field(menu, STR("Item Card")) : nullptr;
-            return exact_class(card, card_path) ? inventory_item(card, STR("Item")) : nullptr;
+            return exact_class(menu, context_menu_path) ? card_item(object_field(menu, STR("Item Card"))) : ItemView{};
         }
         if (name == entries->quick_move)
         {
-            auto* card = object_field(manager, STR("HoveredCard"));
-            if (!exact_class(card, card_path))
-            {
-                return nullptr;
-            }
-            auto* widget = object_field(card, STR("InventoryWidget"));
-            auto* quick_use = field<Unreal::FBoolProperty>(widget, STR("Can Quick Use Items"));
-            return quick_use && !quick_use->GetPropertyValueInContainer(widget) ? nullptr : inventory_item(card, STR("Item"));
+            auto item = card_item(object_field(manager, STR("HoveredCard")));
+            auto* quick_use = field<Unreal::FBoolProperty>(item.panel, STR("Can Quick Use Items"));
+            return quick_use && !quick_use->GetPropertyValueInContainer(item.panel) ? ItemView{} : item;
         }
         return inventory_item(manager, STR("HeldItem"));
+    }
+
+    struct GuidFields
+    {
+        Unreal::FStructProperty* property{};
+        std::array<Unreal::FIntProperty*, guid_names.size()> words{};
+
+        explicit GuidFields(Unreal::UScriptStruct* item)
+        {
+            property = field<Unreal::FStructProperty>(item, item_guid_name);
+            auto* structure = property ? property->GetStruct().Get() : nullptr;
+            if (structure && structure->GetPathName() == guid_path)
+            {
+                for (std::size_t i = 0; i < words.size(); ++i)
+                {
+                    words[i] = field<Unreal::FIntProperty>(structure, guid_names[i]);
+                }
+            }
+        }
+
+        [[nodiscard]] bool valid() const { return std::ranges::all_of(words, [](const auto* word) { return word; }); }
+
+        [[nodiscard]] Guid read(const void* item) const
+        {
+            const auto* value = property->ContainerPtrToValuePtr<void>(item);
+            Guid result{};
+            for (std::size_t i = 0; i < words.size(); ++i)
+            {
+                result[i] = static_cast<std::uint32_t>(words[i]->GetPropertyValueInContainer(value));
+            }
+            return result;
+        }
+
+        void write(void* item, const Guid& guid) const
+        {
+            auto* value = property->ContainerPtrToValuePtr<void>(item);
+            for (std::size_t i = 0; i < words.size(); ++i)
+            {
+                words[i]->SetPropertyValueInContainer(value, static_cast<std::int32_t>(guid[i]));
+            }
+        }
+    };
+
+    [[nodiscard]] bool parse_guid(std::string_view input, Guid& guid)
+    {
+        if (input.size() != 32 || !std::ranges::all_of(input, [](char value) {
+                return (value >= '0' && value <= '9') || (value >= 'A' && value <= 'F');
+            }))
+        {
+            return false;
+        }
+        for (std::size_t i = 0; i < guid.size(); ++i)
+        {
+            const auto* start = input.data() + i * 8;
+            const auto parsed = std::from_chars(start, start + 8, guid[i], 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != start + 8)
+            {
+                return false;
+            }
+        }
+        return guid != Guid{};
+    }
+
+    [[nodiscard]] auto format_guid(const Guid& guid)
+    {
+        constexpr std::string_view digits = "0123456789ABCDEF";
+        std::array<char, 32> text{};
+        for (std::size_t i = 0; i < guid.size(); ++i)
+        {
+            for (std::size_t digit = 0; digit < 8; ++digit)
+            {
+                text[i * 8 + digit] = digits[(guid[i] >> ((7 - digit) * 4)) & 0xF];
+            }
+        }
+        return text;
     }
 
     [[nodiscard]] bool same_widget_player(Unreal::UObject* manager)
@@ -334,14 +457,167 @@ namespace
                (object_field(actor, STR("Instigator")) == pawn || object_field(actor, STR("Owner")) == pawn);
     }
 
-    void record(const Artifact& item, std::string_view entry, Unreal::UObject* context, bool widget)
+    [[nodiscard]] bool active_scope()
     {
-        const bool qualified = scope.generation == generation.load(std::memory_order_acquire) &&
-                               Clock::now() < scope.expires && current_player(scope) &&
+        return scope.generation == generation.load(std::memory_order_acquire) && Clock::now() < scope.expires &&
+               current_player(scope);
+    }
+
+    [[nodiscard]] Unreal::UObject* canonical_host_save()
+    {
+        auto* pawn = scope.pawn.Get();
+        auto* instance = scope.instance.Get();
+        auto* slot = exact_class(instance, instance_path) ? object_field(instance, STR("SaveSlot_Ref")) : nullptr;
+        return live(slot) && exact_class(slot, save_path) && object_field(pawn, STR("Save")) == slot ? slot : nullptr;
+    }
+
+    [[nodiscard]] bool current_host_argument(std::int64_t address)
+    {
+        return address > 0 && scope.address == static_cast<std::uintptr_t>(address) && scope.host &&
+               hooks_ready.load(std::memory_order_acquire) && active_scope();
+    }
+
+    struct GoldInventory
+    {
+        Unreal::UObject* save{};
+        Unreal::FArrayProperty* backpack{};
+        Unreal::UScriptStruct* item{};
+        Unreal::FClassProperty* item_class{};
+        Unreal::FIntProperty* ammo{};
+        Unreal::UClass* gold_class{};
+        void* record{};
+        int index{-1};
+    };
+
+    [[nodiscard]] bool item_struct(Unreal::FProperty* property, const Unreal::UScriptStruct* item)
+    {
+        const auto* structure = Unreal::CastField<Unreal::FStructProperty>(property);
+        return structure && structure->GetArrayDim() == 1 && structure->GetStruct().Get() == item;
+    }
+
+    [[nodiscard]] std::string_view locate_gold(Unreal::UObject* save, const Guid& guid, GoldInventory& match)
+    {
+        if (!save)
+        {
+            return "canonical_host_save_required";
+        }
+        match.save = save;
+        match.backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
+        auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
+        auto* helmet = field<Unreal::FStructProperty>(save, STR("PlayerHelmet"));
+        auto* armor = field<Unreal::FStructProperty>(save, STR("PlayerArmor"));
+        const auto* backpack_row = match.backpack ? Unreal::CastField<Unreal::FStructProperty>(match.backpack->GetInner()) : nullptr;
+        match.item = backpack_row ? backpack_row->GetStruct().Get() : nullptr;
+        if (!match.item || match.item->GetPathName() != item_path || backpack_row->GetArrayDim() != 1 ||
+            !equipment || !item_struct(equipment->GetInner(), match.item) ||
+            !item_struct(helmet, match.item) || !item_struct(armor, match.item))
+        {
+            return "stock_backpack_schema_unavailable";
+        }
+        const GuidFields fields(match.item);
+        match.item_class = field<Unreal::FClassProperty>(match.item, item_class_name);
+        match.ammo = field<Unreal::FIntProperty>(match.item, item_ammo_name);
+        match.gold_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, gold.class_path);
+        auto* defaults = match.gold_class ? match.gold_class->GetClassDefaultObject().Get() : nullptr;
+        auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
+        auto* expected_ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        auto* item_base = match.item_class ? match.item_class->GetMetaClass().Get() : nullptr;
+        if (!fields.valid() || !item_base || !match.ammo || !stacks || !expected_ammo || !match.gold_class->IsChildOf(item_base) ||
+            stacks->GetPropertyValueInContainer(defaults) || expected_ammo->GetPropertyValueInContainer(defaults) != -1)
+        {
+            return "stock_single_cube_schema_unavailable";
+        }
+        Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(save));
+        Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
+        if (backpack.Num() > inventory_limit || loadout.Num() > inventory_limit)
+        {
+            return "stock_inventory_size_out_of_range";
+        }
+        for (int index = 0; index < backpack.Num(); ++index)
+        {
+            auto* row = backpack.GetRawPtr(index);
+            if (fields.read(row) != guid)
+            {
+                continue;
+            }
+            if (match.record || object_value(match.item_class, row) != match.gold_class ||
+                match.ammo->GetPropertyValueInContainer(row) != -1)
+            {
+                return "host_backpack_guid_conflict";
+            }
+            match.index = index;
+            match.record = row;
+        }
+        for (int index = 0; index < loadout.Num(); ++index)
+        {
+            if (fields.read(loadout.GetRawPtr(index)) == guid)
+            {
+                return "host_equipment_guid_conflict";
+            }
+        }
+        return fields.read(helmet->ContainerPtrToValuePtr<void>(save)) == guid ||
+               fields.read(armor->ContainerPtrToValuePtr<void>(save)) == guid ? "host_equipment_guid_conflict" : "";
+    }
+
+    [[nodiscard]] bool exact_backpack_panel(Unreal::UObject* panel, Unreal::UObject* manager)
+    {
+        auto* index = exact_class(panel, panel_path) ? field<Unreal::FIntProperty>(panel, STR("InventoryIndex")) : nullptr;
+        return index && index->GetPropertyValueInContainer(panel) == 0 &&
+               object_field(panel, STR("Target")) == scope.instance.Get() && object_field(panel, STR("ItemManager")) == manager;
+    }
+
+    [[nodiscard]] bool gold_request_current(const GoldRequest& request, Unreal::UObject* save)
+    {
+        return save && request.save.Get() == save && request.pawn.Get() == scope.pawn.Get() &&
+               request.generation == scope.generation && Clock::now() < request.expires;
+    }
+
+    [[nodiscard]] std::string_view queue_gold(const ItemView& candidate, std::string_view entry, Unreal::UObject* manager)
+    {
+        if (entry != "use_held_item" &&
+            ((entry != "action_use" && entry != "quick_move") || !exact_backpack_panel(candidate.panel, manager)))
+        {
+            return "canonical_backpack_source_required";
+        }
+        auto* pawn = scope.pawn.Get();
+        auto* submerged = field<Unreal::FBoolProperty>(pawn, STR("HeadUnderWater"));
+        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
+        if (!submerged || !dead || submerged->GetPropertyValueInContainer(pawn) || dead->GetPropertyValueInContainer(pawn))
+        {
+            return "stock_transport_use_ineligible";
+        }
+        const GuidFields fields(candidate.structure);
+        const auto guid = fields.valid() ? fields.read(candidate.value) : Guid{};
+        if (guid == Guid{})
+        {
+            return "coordinated_route_required";
+        }
+        auto* save = canonical_host_save();
+        GoldInventory match;
+        if (const auto error = locate_gold(save, guid, match); !error.empty())
+        {
+            return error;
+        }
+        if (!match.record || match.item != candidate.structure)
+        {
+            return "owned_backpack_cube_required";
+        }
+        if (gold_request && gold_request_current(*gold_request, save))
+        {
+            return gold_request->guid == guid ? "gold_request_pending" : "another_gold_request_pending";
+        }
+        gold_request = GoldRequest{guid, scope.generation, Clock::now() + request_lease, pawn, save, entry};
+        return "gold_request_queued";
+    }
+
+    void record(const Artifact& item, const ItemView& candidate, std::string_view entry, Unreal::UObject* context, bool widget)
+    {
+        const bool qualified = active_scope() &&
                                (widget ? same_widget_player(context) : same_actor_player(context));
         const std::string_view role = !qualified ? "unverified" : scope.host ? "host" : "guest";
         const std::string_view reason = !qualified ? "current_local_owner_unverified" :
-            scope.host ? "coordinated_route_required" : "host_activation_required";
+            !scope.host ? "host_activation_required" :
+            widget && &item == &gold ? queue_gold(candidate, entry, context) : "coordinated_route_required";
         if (receipt.role != role || receipt.item != item.name || receipt.entry != entry || receipt.reason != reason)
         {
             RC::Output::send<RC::LogLevel::Verbose>(STR("[SilverfishCoopNative] Transport item denied for {}: {} via {} ({})\n"),
@@ -369,6 +645,7 @@ namespace
         }
 
         const Artifact* artifact;
+        ItemView candidate;
         std::string_view entry;
         if (manager)
         {
@@ -376,7 +653,8 @@ namespace
             {
                 return;
             }
-            artifact = manager_item(context, name);
+            candidate = manager_item(context, name);
+            artifact = candidate.artifact;
             entry = name == entries->action_use ? "action_use" : name == entries->quick_move ? "quick_move" :
                 name == entries->use_held ? "use_held_item" : "confirm_use_item";
         }
@@ -402,7 +680,7 @@ namespace
         iteration.PreventOriginalFunctionCall();
         if (iteration.OriginalFunctionCallPrevented())
         {
-            record(*artifact, entry, context, manager);
+            record(*artifact, candidate, entry, context, manager);
         }
     }
 
@@ -428,6 +706,7 @@ namespace
             if (!accepted)
             {
                 scope = {};
+                gold_request.reset();
             }
         }
         lua.set_bool(accepted);
@@ -458,6 +737,258 @@ namespace
         lua.set_bool(ok);
         lua.set_string(detail);
         return 2;
+    }
+
+    int report_gold_request(const Lua& lua, bool ok, std::string_view detail, std::string_view entry = {})
+    {
+        lua.set_bool(ok);
+        lua.set_string(detail);
+        lua.set_string(entry);
+        return 3;
+    }
+
+    int lua_take_gold_request(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            !current_host_argument(lua.get_integer(1)))
+        {
+            return report_gold_request(lua, false, "current_transport_host_required");
+        }
+        if (!gold_request)
+        {
+            return report_gold_request(lua, false, "no_gold_request");
+        }
+        const auto request = *gold_request;
+        gold_request.reset();
+        auto* save = canonical_host_save();
+        if (!gold_request_current(request, save))
+        {
+            return report_gold_request(lua, false, "stale_gold_request");
+        }
+        GoldInventory match;
+        if (const auto error = locate_gold(save, request.guid, match); !error.empty())
+        {
+            return report_gold_request(lua, false, error);
+        }
+        if (!match.record)
+        {
+            return report_gold_request(lua, false, "owned_backpack_cube_required");
+        }
+        const auto guid = format_guid(request.guid);
+        return report_gold_request(lua, true, {guid.data(), guid.size()}, request.entry);
+    }
+
+    [[nodiscard]] std::string_view gold_inventory_argument(const Lua& lua, Guid& guid, GoldInventory& match)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
+        {
+            return "host_and_gold_guid_required_on_game_thread";
+        }
+        if (!parse_guid(lua.get_string(2), guid))
+        {
+            return "invalid_gold_guid";
+        }
+        if (!current_host_argument(lua.get_integer(1)))
+        {
+            return "current_transport_host_required";
+        }
+        return locate_gold(canonical_host_save(), guid, match);
+    }
+
+    [[nodiscard]] Unreal::UFunction* stock_no_args(Unreal::UObject* object, const Unreal::FName& name)
+    {
+        auto* function = object->GetFunctionByNameInChain(name);
+        return function && function->GetOuterPrivate() == object->GetClassPrivate() && function->GetNumParms() == 0 &&
+               !function->GetReturnProperty() && !function->HasAnyFunctionFlags(Unreal::FUNC_Native) &&
+               !function->HasAnyFunctionFlags(Unreal::FUNC_Net) ? function : nullptr;
+    }
+
+    int lua_inspect_gold(const Lua& lua)
+    {
+        Guid guid{};
+        GoldInventory match;
+        if (const auto error = gold_inventory_argument(lua, guid, match); !error.empty())
+        {
+            return probe_result(lua, false, error);
+        }
+        return probe_result(lua, true, match.record ? "present" : "absent");
+    }
+
+    int lua_commit_gold(const Lua& lua)
+    {
+        Guid guid{};
+        GoldInventory match;
+        if (const auto error = gold_inventory_argument(lua, guid, match); !error.empty())
+        {
+            return probe_result(lua, false, error);
+        }
+        if (!match.record)
+        {
+            return probe_result(lua, true, "absent");
+        }
+        auto* instance = scope.instance.Get();
+        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
+        auto* recalculate = stock_no_args(instance, carry_name);
+        if (!recalculate)
+        {
+            return probe_result(lua, false, "stock_carry_weight_function_unavailable");
+        }
+        Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(match.save));
+        backpack.RemoveValues(match.index, 1);
+        instance->ProcessEvent(recalculate, nullptr);
+        return probe_result(lua, true, "removed");
+    }
+
+    int lua_seed_gold(const Lua& lua)
+    {
+        if (!fixtures_enabled())
+        {
+            return probe_result(lua, false, "native_gold_fixtures_disabled");
+        }
+        Guid guid{};
+        GoldInventory match;
+        if (const auto error = gold_inventory_argument(lua, guid, match); !error.empty())
+        {
+            return probe_result(lua, false, error);
+        }
+        if (match.record)
+        {
+            return probe_result(lua, true, "present");
+        }
+
+        auto* defaults = match.gold_class->GetClassDefaultObject().Get();
+        auto* stock_weight = field<Unreal::FDoubleProperty>(defaults, STR("Weight"));
+        auto* stock_value = field<Unreal::FIntProperty>(defaults, STR("Value"));
+        auto* stock_tag = field<Unreal::FNameProperty>(defaults, STR("DataTag"));
+        auto* stock_data = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
+        auto* stock_never_drop = field<Unreal::FBoolProperty>(defaults, STR("NeverDrop"));
+        auto* item_weight = field<Unreal::FDoubleProperty>(match.item, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"));
+        auto* item_value = field<Unreal::FIntProperty>(match.item, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
+        auto* item_tag = field<Unreal::FNameProperty>(match.item, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"));
+        auto* item_data = field<Unreal::FStructProperty>(match.item, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
+        auto* item_never_drop = field<Unreal::FBoolProperty>(match.item, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
+        auto* data_type = item_data ? item_data->GetStruct().Get() : nullptr;
+        if (!stock_weight || !stock_value || !stock_tag || !stock_data || !stock_never_drop ||
+            !item_weight || !item_value || !item_tag || !data_type || !item_never_drop ||
+            stock_data->GetStruct().Get() != data_type || data_type->GetPathName() != STR("/Script/StructUtils.InstancedStruct"))
+        {
+            return probe_result(lua, false, "stock_gold_defaults_unavailable");
+        }
+        const auto weight = stock_weight->GetPropertyValueInContainer(defaults);
+        const auto value = stock_value->GetPropertyValueInContainer(defaults);
+        if (!std::isfinite(weight) || weight < 0 || value < 0)
+        {
+            return probe_result(lua, false, "invalid_stock_gold_defaults");
+        }
+        auto* instance = scope.instance.Get();
+        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
+        auto* recalculate = stock_no_args(instance, carry_name);
+        if (!recalculate)
+        {
+            return probe_result(lua, false, "stock_carry_weight_function_unavailable");
+        }
+        const GuidFields fields(match.item);
+        Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(match.save));
+        if (backpack.Num() >= inventory_limit)
+        {
+            return probe_result(lua, false, "stock_inventory_size_out_of_range");
+        }
+        auto* item = backpack.GetRawPtr(backpack.AddValue());
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(item), match.gold_class);
+        match.ammo->SetPropertyValueInContainer(item, -1);
+        item_weight->SetPropertyValueInContainer(item, weight);
+        item_value->SetPropertyValueInContainer(item, value);
+        item_never_drop->SetPropertyValueInContainer(item, stock_never_drop->GetPropertyValueInContainer(defaults));
+        item_tag->CopyCompleteValue(item_tag->ContainerPtrToValuePtr<void>(item), stock_tag->ContainerPtrToValuePtr<void>(defaults));
+        item_data->CopyCompleteValue(item_data->ContainerPtrToValuePtr<void>(item), stock_data->ContainerPtrToValuePtr<void>(defaults));
+        fields.write(item, guid);
+        instance->ProcessEvent(recalculate, nullptr);
+        return probe_result(lua, true, "seeded");
+    }
+
+    int lua_probe_gold(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !fixtures_enabled() || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
+        {
+            return probe_result(lua, false, "gold_probe_fixture_required_on_game_thread");
+        }
+        Guid guid{};
+        if (!parse_guid(lua.get_string(3), guid))
+        {
+            return probe_result(lua, false, "invalid_gold_guid");
+        }
+        const auto manager_address = lua.get_integer(2);
+        if (manager_address <= 0 || !current_host_argument(lua.get_integer(1)))
+        {
+            return probe_result(lua, false, "current_transport_host_and_manager_required");
+        }
+        auto* manager = find_object(static_cast<std::uintptr_t>(manager_address), manager_path);
+        if (!manager || !same_widget_player(manager))
+        {
+            return probe_result(lua, false, "current_local_item_manager_required");
+        }
+        auto* save = canonical_host_save();
+        GoldInventory match;
+        if (const auto error = locate_gold(save, guid, match); !error.empty())
+        {
+            return probe_result(lua, false, error);
+        }
+        if (!match.record)
+        {
+            return probe_result(lua, false, "owned_backpack_cube_required");
+        }
+        if (gold_request && gold_request_current(*gold_request, save))
+        {
+            return probe_result(lua, false, "another_gold_request_pending");
+        }
+        auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
+        const GuidFields fields(match.item);
+        auto* function = stock_no_args(manager, entries->use_held);
+        constexpr std::size_t capacity = 256;
+        if (!item_struct(held, match.item) || !function || held->GetSize() <= 0 || held->GetSize() > capacity ||
+            held->GetMinAlignment() > alignof(std::max_align_t))
+        {
+            return probe_result(lua, false, "stock_held_item_schema_unavailable");
+        }
+        auto* value = held->ContainerPtrToValuePtr<void>(manager);
+        if (object_value(match.item_class, value) || fields.read(value) != Guid{})
+        {
+            return probe_result(lua, false, "local_item_manager_is_holding_an_item");
+        }
+        struct RestoreItem
+        {
+            Unreal::FStructProperty* property;
+            void* value;
+            alignas(std::max_align_t) std::array<std::byte, capacity> original{};
+
+            RestoreItem(Unreal::FStructProperty* property, void* value) : property(property), value(value)
+            {
+                property->InitializeValue(original.data());
+                property->CopyCompleteValue(original.data(), value);
+            }
+
+            ~RestoreItem()
+            {
+                property->CopyCompleteValue(value, original.data());
+                property->DestroyValue(original.data());
+            }
+        } restore(held, value);
+
+        // First prove this instance's stock entry is intercepted while the GUID is unusable.
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.gold_class);
+        const auto before = receipt.count;
+        manager->ProcessEvent(function, nullptr);
+        if (receipt.count != before + 1 || receipt.role != "host" || receipt.item != gold.name ||
+            receipt.entry != "use_held_item" || receipt.reason != "coordinated_route_required")
+        {
+            return probe_result(lua, false, "stock_scratch_held_use_did_not_report_expected_denial");
+        }
+        held->CopyCompleteValue(value, match.record);
+        manager->ProcessEvent(function, nullptr);
+        const bool queued = receipt.count == before + 2 && receipt.reason == "gold_request_queued" && gold_request &&
+                            gold_request->guid == guid && gold_request_current(*gold_request, save);
+        return probe_result(lua, queued, queued ? "stock_gold_use_queued" : "stock_gold_use_did_not_queue");
     }
 
     int lua_probe_held_item(const Lua& lua)
@@ -493,13 +1024,12 @@ namespace
         auto* item_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, item->class_path);
         auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
         auto* type = held ? held->GetStruct().Get() : nullptr;
-        auto* class_property = field<Unreal::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
-        auto* guid = field<Unreal::FStructProperty>(type, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
-        auto* guid_type = guid ? guid->GetStruct().Get() : nullptr;
+        auto* class_property = field<Unreal::FClassProperty>(type, item_class_name);
+        const GuidFields fields(type);
         auto* function = manager->GetFunctionByNameInChain(entries->use_held);
         auto* item_base = class_property ? class_property->GetMetaClass().Get() : nullptr;
         if (!item_class || !type || type->GetPathName() != item_path || !item_base || !item_class->IsChildOf(item_base) ||
-            !guid_type || guid_type->GetPathName() != STR("/Script/CoreUObject.Guid") || !function ||
+            !fields.valid() || !function ||
             function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 0 ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Net))
@@ -507,20 +1037,14 @@ namespace
             return probe_result(lua, false, "stock_held_item_schema_unavailable");
         }
         auto* record = held->ContainerPtrToValuePtr<void>(manager);
-        auto* guid_record = guid->ContainerPtrToValuePtr<void>(record);
         auto* class_record = class_property->ContainerPtrToValuePtr<void>(record);
         if (class_property->GetObjectPropertyValue(class_record))
         {
             return probe_result(lua, false, "local_item_manager_is_holding_an_item");
         }
-        constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
-        for (const auto field_name : guid_names)
+        if (fields.read(record) != Guid{})
         {
-            auto* word = field<Unreal::FIntProperty>(guid_type, field_name);
-            if (!word || word->GetPropertyValueInContainer(guid_record) != 0)
-            {
-                return probe_result(lua, false, "local_held_item_guid_is_not_empty");
-            }
+            return probe_result(lua, false, "local_held_item_guid_is_not_empty");
         }
 
         // Stock ItemIsValid rejects the zero GUID even with a valid class.
@@ -572,6 +1096,7 @@ void silverfish::native_transport::clear_scope()
     if (Unreal::IsInGameThreadRaw())
     {
         scope = {};
+        gold_request.reset();
     }
 }
 
@@ -596,5 +1121,13 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);
+        lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_gold_request);
+        lua.register_function("SilverfishInspectNativeGoldTransport", lua_inspect_gold);
+        lua.register_function("SilverfishCommitNativeGoldTransport", lua_commit_gold);
+        if (fixtures_enabled())
+        {
+            lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_gold);
+            lua.register_function("SilverfishProbeNativeGoldTransport", lua_probe_gold);
+        }
     }
 }

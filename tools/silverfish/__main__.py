@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .control import select_run, status, submit
 from .runtime import REPO, prepare_game
-from .travel import AUTHORED_MAPS, PLAYTEST_MAPS
+from .travel import AUTHORED_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
 
 def _workspace(value: str) -> Path:
     return Path(value).expanduser().resolve()
@@ -60,7 +60,7 @@ def parser() -> argparse.ArgumentParser:
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
-    host.add_argument("--start-zone", choices=sorted(AUTHORED_MAPS | PLAYTEST_MAPS),
+    host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | PLAYTEST_MAPS) - {GOLD_NEXUS}),
                       help="start a new campaign in a qualified zone")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--fixture-keep-slots", type=int, help="test how many inventory stacks survive a wipe")
@@ -100,6 +100,7 @@ def parser() -> argparse.ArgumentParser:
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
         "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
         "native-exit-position", "native-exit-wall-probe", "native-host-damage", "native-friendly-fire",
+        "native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
         "native-weapon-roundtrip",
         "native-shop-approach", "native-shop-buy",

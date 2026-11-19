@@ -51,6 +51,7 @@ namespace
         RC::StringViewType destination;
         RC::StringViewType entrance;
         RC::StringViewType door_destination{};
+        std::array<RC::StringViewType, 2> alternate_exits{};
     };
 
     constexpr std::array routes{
@@ -63,6 +64,9 @@ namespace
               STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("DB_CR")},
         Route{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"), {}, {}, {},
               STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")},
+        Route{STR("/Game/Classes/Maps/Dreams/GoldNexus_P.GoldNexus_P"), STR("Level_Exit_BP_C_178"),
+              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Nexus_CrossRoads"), {},
+              {STR("Level_Exit_BP_C_181"), STR("Level_Exit_BP_C_182")}},
     };
 
     std::atomic<std::uint64_t> generation{};
@@ -228,6 +232,21 @@ namespace
         return level && static_cast<Unreal::AActor*>(actor)->GetLevel() == level;
     }
 
+    bool is_route_exit(const Scope& current, Unreal::UObject* actor, Unreal::UWorld* world)
+    {
+        if (!current.route || actor->GetClassPrivate() != current.exit_class || !in_persistent_level(actor, world))
+        {
+            return false;
+        }
+        const auto name = actor->GetName();
+        if (name == current.route->exit) return true;
+        for (const auto alternate : current.route->alternate_exits)
+        {
+            if (!alternate.empty() && name == alternate) return true;
+        }
+        return false;
+    }
+
     bool configure(Address local_address, Address remote_address, Address exit_address, bool host, bool accepting)
     {
         const auto current_generation = generation.load(std::memory_order_acquire);
@@ -267,7 +286,7 @@ namespace
                 break;
             }
         }
-        if (!next.route || (fixture && (fixture->GetName() != next.route->exit || !in_persistent_level(fixture, world)))) return false;
+        if (!next.route || (fixture && !is_route_exit(next, fixture, world))) return false;
 
         next.world = world;
         next.instance = read_object(field<Unreal::FObjectProperty>(world, STR("OwningGameInstance")), world);
@@ -432,8 +451,9 @@ namespace
             scope.event = "guest_denied";
             return;
         }
-        auto* fixture = scope.fixture.Get();
-        if (fixture != context || read_object(scope.overlap_component, locals) != read_object(scope.fixture_box, fixture))
+        auto* component = read_object(scope.overlap_component, locals);
+        if (!scope.fixture.Get() || !is_route_exit(scope, context, static_cast<Unreal::UWorld*>(world)) ||
+            !component || component != read_object(scope.fixture_box, context))
         {
             scope.event = "unsupported_exit";
             return;
@@ -448,7 +468,7 @@ namespace
             scope.event = "too_far";
             return;
         }
-        if (!matches_authored_route(scope, fixture))
+        if (!matches_authored_route(scope, context))
         {
             scope.event = "destination_mismatch";
             return;

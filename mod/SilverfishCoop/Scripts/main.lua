@@ -18,6 +18,7 @@ local weapon_inventory = require("weapon_inventory")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
+local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local stock_save_probes = {
     ["native-death-probe"] = true,
@@ -295,11 +296,15 @@ local function run_command(fields, state, current_phase)
         expected_map = argument
         return "listen travel requested"
     elseif command == "travel" then
-        if #fields ~= 3 or not supported_map(argument) or argument == state.map then
+        if not supported_map(argument) or argument == state.map
+            or #fields ~= (argument == gold_nexus and 4 or 3) then
             error("Expected a different qualified co-op map", 0)
         end
         if role ~= "host" or current_phase ~= "hosting" then
             error("Zone travel requires the active listen host", 0)
+        end
+        if argument == gold_nexus and not native_transport.authorize_gold_travel(fields[4], state, current_phase) then
+            error("Gold Nexus travel requires the exact host inventory debit", 0)
         end
         guest_save.clear()
         vitals.reset()

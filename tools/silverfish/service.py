@@ -11,11 +11,11 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, native_quest, party, wipe
+from . import link, native_gold, native_quest, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .native_pickup import NativePickup, STAGED_SHOPS
-from .travel import AUTHORED_EXITS, AUTHORED_MAPS, PLAYTEST_MAPS, travel_decision
+from .travel import AUTHORED_EXITS, AUTHORED_MAPS, CROSSROADS, GOLD_NEXUS, PLAYTEST_MAPS, travel_decision
 from .runtime import (Bridge, MAP, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       stop_game, verify_loopback_socket, write_json, write_text)
 
@@ -24,6 +24,8 @@ PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin")
 TRANSPORT_FIXTURES = ("stardust", "green", "blue", "red", "gold")
+GOLD_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
+                "seed": ("seeded", "present"), "use-probe": ("requested",)}
 
 
 def _identity(directory: Path):
@@ -94,6 +96,7 @@ class Host:
         self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         self.party = party.load_party(store.status()["world"].get("party"))
+        native_gold.ledger(self.party)
         if death_rules is not None:
             if self.party["wipe"]:
                 raise ValueError("Finish the existing party wipe before changing its settings")
@@ -158,11 +161,12 @@ class Host:
             return
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
-        try:
-            self.checkpoint()
-        except (OSError, RuntimeError) as error:
-            with contextlib.suppress(OSError):
-                self.control.event("disconnect_checkpoint_error", error_type=type(error).__name__)
+        if not self.transitioning:
+            try:
+                self.checkpoint()
+            except (OSError, RuntimeError) as error:
+                with contextlib.suppress(OSError):
+                    self.control.event("disconnect_checkpoint_error", error_type=type(error).__name__)
         with contextlib.suppress(OSError):
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
 
@@ -204,6 +208,8 @@ class Host:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
         view["native_quests"] = self.party.get("native_quests", {})
+        if pending := self.party.get("gold_transport", {}).get("pending"):
+            view["pending_item_travel"] = {"source": pending["source"], "destination": pending["destination"]}
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
         return view
@@ -245,11 +251,9 @@ class Host:
                 pawns[character_id] = details
         return pawns
 
-    async def travel(self, bridge: Bridge, transport, destination: str, *, respawning: bool = False,
-                     entrance: str | None = None) -> dict:
+    def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False) -> dict | None:
         if self.party["wipe"] and not respawning:
             return {"ok": False, "error": "wipe_in_progress"}
-        roles = self.roles()
         if not respawning and any(actor in self.party["pending_spawns"] for actor in roles.values()):
             return {"ok": False, "error": "respawn_in_progress"}
         current = self.last_game.get("map", "")
@@ -257,29 +261,44 @@ class Host:
                                self.authoritative_pawns(roles), allowed_maps=self.allowed_maps)
         if not gate["allowed"]:
             return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
+        return None
+
+    async def travel(self, bridge: Bridge, transport, destination: str, *, respawning: bool = False,
+                     entrance: str | None = None) -> dict:
+        roles = self.roles()
+        if refusal := self.travel_refusal(destination, roles, respawning=respawning):
+            return refusal
+        current = self.last_game["map"]
         if not respawning and (current in AUTHORED_MAPS or entrance is not None):
             expected = AUTHORED_EXITS.get((current, destination))
             if not expected or entrance != expected:
                 return {"ok": False, "error": "authored_exit_required"}
         self.transitioning = True
-        self.control.event("zone_travel_requested", source=current, destination=destination)
         try:
-            guest = _pawn(self.last_game, "guest")
-            if self.native_guest and guest.get("health") is not None:
-                self.checkpoint()
-            await bridge.command("travel", destination)
-            try:
-                observed = await bridge.wait_for(
-                    lambda game: game.get("state") == "hosting" and game.get("map") == destination,
-                    timeout=22,
-                )
-                await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
-                if entrance:
-                    observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
+            return await self.switch_zone(bridge, transport, destination, entrance, roles)
+        finally:
+            self.transitioning = False
+
+    async def switch_zone(self, bridge: Bridge, transport, destination: str, entrance: str | None,
+                          roles: dict[str, str], *, gold_guid: str | None = None) -> dict:
+        current = self.last_game["map"]
+        guest = _pawn(self.last_game, "guest")
+        self.control.event("zone_travel_requested", source=current, destination=destination)
+        if self.native_guest and guest.get("health") is not None and not gold_guid:
+            self.checkpoint()
+        try:
+            await bridge.command("travel", destination, *((gold_guid,) if gold_guid else ()))
+            observed = await bridge.wait_for(
+                lambda game: game.get("state") == "hosting" and game.get("map") == destination,
+                timeout=22,
+            )
+            await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
+            if entrance:
+                observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
+                if observed.get("map") != destination or observed.get("state") != "hosting":
+                    raise RuntimeError("The authored arrival was acknowledged in the wrong world")
+            if transport is not None:
                 await transport.refresh_game_routes()
-            except (OSError, RuntimeError):
-                self.stopping = True
-                raise
             self.last_game = observed
             self.last_seen = time.monotonic()
             self.zone_epoch = uuid.uuid4().hex
@@ -288,12 +307,87 @@ class Host:
             self.marker_ready = False
             if self.guest:
                 self.guest["restore"] = {"health": guest.get("health")} if self.native_guest else {}
-            revision = self.checkpoint()
-            self.control.event("zone_travel_ready", source=current, destination=destination,
-                               entrance=entrance, epoch=self.zone_epoch, revision=revision)
-            return {"ok": True, "map": destination, "travel_epoch": self.zone_epoch, "revision": revision}
+            candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
+            revision = self.checkpoint(candidate)
+            if candidate is not None:
+                self.party = candidate
+        except (OSError, RuntimeError, ValueError):
+            self.stopping = True
+            raise
+        self.control.event("zone_travel_ready", source=current, destination=destination,
+                           entrance=entrance, epoch=self.zone_epoch, revision=revision)
+        return {"ok": True, "map": destination, "entrance": entrance,
+                "travel_epoch": self.zone_epoch, "revision": revision}
+
+    async def checked_gold(self, bridge: Bridge, operation: str, guid: str) -> tuple[dict, dict]:
+        game = self.last_game
+        area = game.get("map")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        if (not native_gold.valid_guid(guid) or game.get("state") != "hosting" or not pawn
+                or area not in (CROSSROADS, GOLD_NEXUS) or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
+            raise ValueError("Golden Cube operations require a current host pawn and an exact item GUID")
+        write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+        snapshot = await bridge.command(f"native-gold-{operation}", pawn, guid, timeout=4)
+        row = snapshot.get("native_gold", {})
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
+                or snapshot.get("pawns", {}).get("local", {}).get("name") != pawn
+                or row.get("operation") != operation or row.get("map") != area or row.get("pawn") != pawn
+                or row.get("guid") != guid or row.get("state") not in GOLD_RESULTS[operation]):
+            raise RuntimeError("The game did not acknowledge the exact Golden Cube operation")
+        return snapshot, row
+
+    async def activate_gold(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
+        if (not self.native_zones or GOLD_NEXUS not in self.allowed_maps or self.stopping or self.transitioning
+                or request.source != CROSSROADS or self.last_game.get("map") != request.source
+                or self.last_game.get("state") != "hosting" or request.entry not in native_gold.INVENTORY_ENTRIES
+                or not native_gold.valid_guid(request.guid)
+                or self.last_game.get("pawns", {}).get("local", {}).get("name") != request.pawn):
+            return {"ok": False, "error": "gold_scope_unavailable"}
+        history = native_gold.ledger(self.party)
+        if request.guid in history["spent"]:
+            return {"ok": False, "error": "gold_already_spent"}
+        if history["pending"]:
+            return {"ok": False, "error": "gold_travel_pending"}
+        if self.party["players"]["host"]["downed"]:
+            return {"ok": False, "error": "actor_downed"}
+        if refusal := self.travel_refusal(GOLD_NEXUS, self.roles()):
+            return refusal
+        self.transitioning = True
+        try:
+            snapshot, item = await self.checked_gold(bridge, "inspect", request.guid)
+            if item["state"] != "present":
+                return {"ok": False, "error": "gold_item_unavailable"}
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            if refusal := self.travel_refusal(GOLD_NEXUS, self.roles()):
+                return refusal
+            candidate = native_gold.begin(self.party, request.guid)
+            self.checkpoint(candidate)
+            self.party = candidate
+            return await self.resume_gold(bridge, transport, recovery=False)
         finally:
             self.transitioning = False
+
+    async def resume_gold(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
+        pending = native_gold.ledger(self.party)["pending"]
+        try:
+            if (not pending or self.last_game.get("map") != pending["source"]
+                    or not self.native_zones or pending["destination"] not in self.allowed_maps):
+                raise RuntimeError("Cannot recover Golden Cube travel from the current campaign map")
+            snapshot, item = await self.checked_gold(bridge, "debit", pending["guid"])
+            if item["state"] != "removed" and not recovery:
+                raise RuntimeError("The committed Golden Cube could not be removed from the active inventory")
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            result = await self.switch_zone(bridge, transport, pending["destination"], pending["entrance"],
+                                            self.roles(), gold_guid=pending["guid"])
+        except (OSError, RuntimeError, ValueError):
+            self.stopping = True
+            raise
+        with contextlib.suppress(OSError):
+            self.control.event("gold_travel_recovered" if recovery else "gold_travel_completed", guid=pending["guid"],
+                               debit=item["state"], map=result["map"], revision=result["revision"])
+        return result
 
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
@@ -647,6 +741,11 @@ class Host:
                     result = {"native_zone": snapshot.get("native_zone"), "native_door": snapshot.get("native_door")}
                 elif action == "native-transport-probe" and self.native_zones and self.fixtures:
                     result = await probe_transport(bridge, request.get("target"))
+                elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe")
+                      and self.native_zones and self.fixtures and GOLD_NEXUS in self.allowed_maps):
+                    operation = action.removeprefix("native-gold-")
+                    _, item = await self.checked_gold(bridge, operation, request.get("target"))
+                    result = {"native_gold": item}
                 elif action == "walk":
                     await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
                     result = {"movement_scheduled": True}
@@ -722,6 +821,17 @@ class Host:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
+        for request in bridge.native_gold_requests():
+            try:
+                result = await self.activate_gold(bridge, transport, request)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.control.event("native_gold_request_failed", sequence=request.sequence,
+                                   source=request.source, guid=request.guid, error=str(error))
+                if self.stopping:
+                    raise
+                result = {"ok": False, "error": str(error)}
+            self.control.event("native_gold_request", sequence=request.sequence, source=request.source,
+                               guid=request.guid, entry=request.entry, position=request.location, result=result)
         for sequence, source, destination, entrance in bridge.native_zone_requests():
             if self.last_game.get("state") != "hosting" or self.last_game.get("map") != source:
                 continue
@@ -780,6 +890,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     fixtures: bool = False, death_rules: dict | None = None, *,
                     native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
                     native_zone_walls: bool = False, start_zone: str | None = None) -> None:
+    if start_zone == GOLD_NEXUS:
+        raise ValueError("Use a Golden Cube to enter Gold Nexus")
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
     if native_events and native_backend != "cpp":
@@ -796,6 +908,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
+        pending = native_gold.ledger(party.load_party(old_world.get("party")))["pending"]
+        if pending and (not authored or entry_map != pending["source"]):
+            raise ValueError("The campaign's Golden Cube travel does not match its saved zone")
         process = transport = None
         controller = None
         result = "stopped"
@@ -806,7 +921,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
             process = launch(work, directory / "game-user", bridge_directory, headless, internal_port,
                              native_events=native_events, native_guest=native_guest, native_zones=native_zones,
-                             native_zone_walls=native_zone_walls)
+                             native_zone_walls=native_zone_walls, native_fixtures=fixtures)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await bridge.command("host", entry_map)
@@ -826,6 +941,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             controller.internal_port = internal_port
             controller.last_game = bridge.snapshot() or initial_game
             controller.last_seen = time.monotonic()
+            if pending:
+                await controller.resume_gold(bridge, None, recovery=True)
             transport = await link.start_host(bind, port, "127.0.0.1", internal_port, identity,
                                               controller.admit, on_disconnect=controller.disconnected,
                                               on_request=controller.guest_request)

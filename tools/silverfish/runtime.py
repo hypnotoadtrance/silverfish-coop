@@ -15,6 +15,8 @@ import tempfile
 import time
 import uuid
 
+from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+
 REPO = Path(__file__).resolve().parents[2]
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
@@ -238,7 +240,7 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
-           native_zones: bool = False, native_zone_walls: bool = False):
+           native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -252,6 +254,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
     env.pop("SILVERFISH_COOP_NATIVE_TRANSPORT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_FIXTURES", None)
     backend = native_death_backend(work)
     if native_events and (backend != "cpp" or port is None):
         raise ValueError("Native event scope requires a staged C++ listen host")
@@ -270,6 +273,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     if native_zones:
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
+        if port is not None and native_fixtures:
+            env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
     if native_zone_walls:
         env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
@@ -311,6 +316,7 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
+        self.gold_offset = 0
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -367,6 +373,28 @@ class Bridge:
                              fields[4].decode("utf-8", errors="replace") if len(fields) == 5 else None))
         return requests
 
+    def native_gold_requests(self) -> list[GoldRequest]:
+        try:
+            with (self.directory / "native-transport-events").open("rb") as stream:
+                stream.seek(self.gold_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.gold_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        requests = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if len(fields) != 9 or fields[0] != "gold-request" or not fields[1].isascii() \
+                    or not fields[1].isdigit() or len(fields[1]) > 12:
+                continue
+            source, pawn, guid, entry = fields[2:6]
+            location = tuple(_finite(value) for value in fields[6:])
+            if (valid_guid(guid) and entry in INVENTORY_ENTRIES and 0 < len(pawn) <= 512
+                    and all(value is not None and abs(value) <= 1e8 for value in location)):
+                requests.append(GoldRequest(int(fields[1]), source, pawn, guid, entry, location))
+        return requests
+
     def snapshot(self) -> dict | None:
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
@@ -420,6 +448,11 @@ class Bridge:
                     data["native_transport"] = {
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],
                         "item": fields[4], "entry": fields[5], "reason": fields[6],
+                    }
+                elif fields[0] == "native-gold" and len(fields) == 6:
+                    data["native_gold"] = {
+                        "operation": fields[1], "state": fields[2], "map": fields[3],
+                        "pawn": fields[4], "guid": fields[5],
                     }
                 elif fields[0] == "native-pickup" and len(fields) == 9:
                     data["native_pickup"] = {

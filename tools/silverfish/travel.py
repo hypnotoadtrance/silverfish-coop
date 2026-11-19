@@ -13,13 +13,15 @@ PLAYTEST_MAPS = frozenset({
 CROSSROADS = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 CISTERN = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
+GOLD_NEXUS = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 AUTHORED_EXITS = {
     (CROSSROADS, DEAD_BRIDGE): "DB_CR",
     (DEAD_BRIDGE, CROSSROADS): "DB_CR",
     (CROSSROADS, CISTERN): "CR_Cstrn",
     (CISTERN, CROSSROADS): "CR_Cstrn",
+    (GOLD_NEXUS, CROSSROADS): "Nexus_CrossRoads",
 }
-AUTHORED_MAPS = frozenset({CROSSROADS, DEAD_BRIDGE, CISTERN})
+AUTHORED_MAPS = frozenset({CROSSROADS, DEAD_BRIDGE, CISTERN, GOLD_NEXUS})
 TRAVEL_RADIUS_UU = 1500
 
 
