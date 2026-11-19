@@ -104,6 +104,8 @@ The guest's stock interact input at the Broker station submitted the Drill Head.
 
 The clean Bandage test ran the stock `GainHealth` operation while the guest was at 25 HP and already had a full regeneration ceiling. The operation removed one owned Bandage, and replay and restart left the consumed row absent. A separate `--native-guest-regen` run verified that the same detached guest stayed at fixed health while downed, revived at 25 HP, then gained health through stock `RegenHealth` and continued to heal through a relay interruption.
 
+The headless inventory-input run opened the guest overlay through the stock menu, selected the exact Bandage GUID, and confirmed it twice. The host verified the guest's stack went from one to zero. The guest recovered the same pawn after packet loss, and the Bandage stayed consumed across host restart and replay. Nine original single-player file hashes matched.
+
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
 ## Pending live verification
@@ -113,8 +115,6 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 - Wallet debits, loot claims, guest equipment changes, and quest settlements require the updated guest save in the same commit. Offline tests covered missing inventory frames and reconnecting to receive queued quest XP exactly once.
 
 - An extraction wipe can finish for a guest whose reservation expired before inventory selection. The host uses a verified detached save from the wipe map. Offline tests covered lease expiry during capture, settlement after a restart, and a stock health reset request at the returning guest's current spawn after later travel.
-
-- The guest inventory overlay can now send a confirmed clean Bandage use through the existing stock healing transaction. Offline tests covered the stock inventory overlay state, a stale selection, and the exact Bandage GUID. The new keyboard path still needs a loopback game run.
 
 - The Black Market board adapter can request the stock `MeetBroker` contract for either authenticated player. Its recipe awards a distinct automatic pistol, nine rounds, and one XP per eligible character with a zero cash payout. Offline tests covered duplicate turn-in and a reserved guest receiving their reward after reconnect. The stock board and the Broker's dialogue entry still need live coverage.
 
