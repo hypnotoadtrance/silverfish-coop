@@ -15,6 +15,7 @@ from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+STOCK_START_MODES = ("Mercy", "Respawn_WtPenalty", "Decimation")
 CQC_DROP_SOURCE = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 CQC_DROP_SOURCES = (CQC_DROP_SOURCE, CQC_DROP_SOURCE.removesuffix("_0") + "_1")
 

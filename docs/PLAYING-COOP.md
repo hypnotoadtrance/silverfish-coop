@@ -86,6 +86,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
 | `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Loopback testing covered four guests at once. |
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
+| `--native-guest-mre` | Enables stock MRE use for guests. Select an owned MRE in the inventory overlay and press Home twice, or use `native-guest-mre --target GUID` from the guest profile. |
 | `--native-guest-held-fire` | Enables experimental hold and release for the standard SMG on a current matched native stage. The invitation enables the matching guest control. |
 | `--native-dead-bridge-enemy-loot` | Automatically shares the qualified Dead Bridge State Infantry CQC's stock shotgun-shell roll. Near the drop, use `native-enemy-loot-claim --target GUID` with the GUID shown in `gameplay.native_enemy_loot`. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |

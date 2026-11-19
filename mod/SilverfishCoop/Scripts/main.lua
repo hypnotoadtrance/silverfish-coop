@@ -436,10 +436,10 @@ local function run_command(fields, state, current_phase)
         native_wipe_view.clear()
     end
     if command == "native-fresh-campaign-prepare" then
-        if not authored_routes or role ~= "idle" or #fields ~= 5 then
+        if not authored_routes or role ~= "idle" or (#fields ~= 5 and #fields ~= 6) then
             error("The stock start preset requires a fresh authored co-op campaign", 0)
         end
-        return native_fresh_campaign.prepare(state, current_phase, fields[3], fields[4], fields[5])
+        return native_fresh_campaign.prepare(state, current_phase, fields[3], fields[4], fields[5], fields[6])
     elseif command == "native-extraction-prepare" then
         if not authored_routes or role ~= "idle" or #fields ~= 5 then
             error("Stock extraction settings require a new authored co-op campaign", 0)

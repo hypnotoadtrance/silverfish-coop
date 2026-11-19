@@ -3004,14 +3004,17 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     expanded_zones: bool = False, native_shop_view: bool = False,
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
                     guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None, guest_mre: bool = False,
+                    difficulty: str | None = None,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
         raise ValueError("The stock start preset accepts a world seed from 1 to 999999")
+    if difficulty is not None and (start_preset != "wanderer" or difficulty not in native_host_save.STOCK_START_MODES):
+        raise ValueError("Choose stock rules for a new Wanderer campaign")
     if start_preset is not None and (start_preset != "wanderer" or start_zone not in (None, OBSERVATORY)
                                      or extraction is not None or not native_guest or not native_zones or not staged_script(work, "native_fresh_campaign.lua")):
-        raise ValueError("The stock Wanderer preset requires a fresh native Observatory campaign with the Mercy rules")
+        raise ValueError("The stock Wanderer preset requires a fresh native Observatory campaign")
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
     native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
@@ -3116,10 +3119,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             if start_preset:
                 working_slot = "SFCoopLive_" + uuid.uuid4().hex
                 world_seed = world_seed if world_seed is not None else 1 + secrets.randbelow(999_999)
-                snapshot = await bridge.command("native-fresh-campaign-prepare", start_preset, working_slot, str(world_seed), timeout=8)
+                selected_rules = (difficulty,) if difficulty else ()
+                snapshot = await bridge.command("native-fresh-campaign-prepare", start_preset, working_slot, str(world_seed),
+                                                *selected_rules, timeout=8)
                 prepared_preset = snapshot.get("native_fresh_campaign", {})
                 if (prepared_preset.get("state") != "prepared" or prepared_preset.get("preset") != start_preset
                         or prepared_preset.get("map") != entry_map or prepared_preset.get("working_slot") != working_slot
+                        or prepared_preset.get("difficulty") != (difficulty or "Mercy")
                         or prepared_preset.get("instance_seed") != world_seed):
                     raise RuntimeError("The staged title menu did not verify the exact stock preset and seed")
             if extraction is not None:

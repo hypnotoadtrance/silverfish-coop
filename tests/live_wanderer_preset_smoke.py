@@ -61,7 +61,14 @@ def check_inventory(frame: dict, owner: str, expected):
     return sorted(rows, key=lambda row: row["guid"])
 
 
-async def verify(work: Path, vanilla_saved: Path) -> None:
+DIFFICULTY_RULES = {
+    "Mercy": MERCY_RULES,
+    "Respawn_WtPenalty": dict(MERCY_RULES, extraction_mode=1, items_kept_on_death=5, drop_bone_pile=1),
+    "Decimation": dict(MERCY_RULES, extraction_mode=1, replenish_loot=0, drop_bone_pile=1),
+}
+
+
+async def verify(work: Path, vanilla_saved: Path, difficulty: str = "Mercy") -> None:
     if os.name != "nt":
         raise OSError("The live Wanderer start test requires the staged Windows game")
     name = "wanderer-preset-" + uuid.uuid4().hex[:8]
@@ -133,7 +140,7 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
                 or scene.get("instance_seed") != SEED or seed.get("state") != "verified"
                 or seed.get("expected") != SEED or seed.get("observed") != SEED or seed.get("stock_stream") != SEED
                 or game.get("native_wallet") != 23 or server.get("gameplay", {}).get("shared_wallet") != 23
-                or any(game.get("native_rules", {}).get(key) != expected for key, expected in MERCY_RULES.items())):
+                or any(game.get("native_rules", {}).get(key) != expected for key, expected in DIFFICULTY_RULES[difficulty].items())):
             raise AssertionError({"game": game, "shared_wallet": server.get("gameplay", {}).get("shared_wallet")})
         return {"scene": scene, "seed": seed, "rules": game["native_rules"], "shared_wallet": game["native_wallet"]}
 
@@ -159,15 +166,16 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
                 and native_guest(server, character))
 
     try:
+        mode = ("--native-difficulty", difficulty) if difficulty != "Mercy" else ()
         host = await spawn("host", primary, host_run, "host-first.txt", "--port", "0", *host_flags,
-                           "--native-start-preset", "wanderer", "--native-world-seed", str(SEED))
+                           "--native-start-preset", "wanderer", "--native-world-seed", str(SEED), *mode)
         first, _ = await wait("The Wanderer host never exposed its verified startup checkpoint",
             lambda server, _: server.get("state") == "hosting"
             and server.get("game", {}).get("native_seed", {}).get("state") == "verified"
             and server.get("game", {}).get("native_fresh_campaign", {}).get("state") == "verified")
         first_generation, port = first["generation"], first["endpoint"]["port"]
         preset = first["game"]["native_fresh_campaign"]
-        expected = {"state": "verified", "preset": "wanderer", "difficulty": "Mercy", "map": OBSERVATORY,
+        expected = {"state": "verified", "preset": "wanderer", "difficulty": difficulty, "map": OBSERVATORY,
                     "instance_seed": SEED, "cash": 23, "debt": 3015220, "xp": 0, "backpack_count": 2,
                     "armor": ARMOR, "rest_level": LEVEL, "proof": "authoritative_pawn_adopted_stock_save"}
         if (any(preset.get(key) != value for key, value in expected.items())
@@ -291,10 +299,11 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--difficulty", choices=DIFFICULTY_RULES, default="Mercy")
     parser.add_argument("--work", required=True, type=Path, help="directory containing a prepared stage")
     parser.add_argument("--vanilla-saved", type=Path,
                         default=Path(os.environ.get("LOCALAPPDATA", ".")) / "SilverFish" / "Saved")
     options = parser.parse_args()
     if not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing original Saved directory")
-    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve()))
+    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(), options.difficulty))

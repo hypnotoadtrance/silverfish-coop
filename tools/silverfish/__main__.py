@@ -11,6 +11,7 @@ from pathlib import Path
 from .control import select_run, status, submit
 from .authored_routes import MAPS as EXPANDED_MAPS
 from .native_guest_weapon import SEED_KINDS
+from .native_host_save import STOCK_START_MODES
 from .runtime import REPO, prepare_game
 from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
 
@@ -74,6 +75,7 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS) - DREAM_MAPS - {GOLD_NEXUS}),
                       help="start a new campaign in a qualified zone")
     host.add_argument("--native-start-preset", choices=("wanderer",), help="start a new campaign with a qualified stock character preset")
+    host.add_argument("--native-difficulty", choices=STOCK_START_MODES, help="select the stock rules for a new Wanderer campaign")
     host.add_argument("--native-world-seed", type=int, help="choose the initial stock preset seed from 1 to 999999")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--native-shop-view", action="store_true", help="enable the qualified native guest merchant overlay")
@@ -239,7 +241,7 @@ async def execute(opts):
                         guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness, guest_mre=opts.native_guest_mre,
                         guest_held_fire=opts.native_guest_held_fire,
                         native_dead_bridge_enemy_loot=opts.native_dead_bridge_enemy_loot,
-                        start_preset=opts.native_start_preset,
+                        start_preset=opts.native_start_preset, difficulty=opts.native_difficulty,
                         world_seed=opts.native_world_seed,
                         extraction=None if opts.native_extraction_keep is None else (
                             opts.native_extraction_keep, opts.native_extraction_backpacks, opts.native_extraction_lose_slot))

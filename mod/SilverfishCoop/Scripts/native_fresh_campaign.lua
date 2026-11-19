@@ -5,7 +5,12 @@ local enabled = bridge and bridge ~= "" and os.getenv("SILVERFISH_COOP_NATIVE_ZO
 local menu = "/Game/Classes/Maps/MainMenu_P"
 local destination = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local level = "Observitory_P"
-local preset, mode_row = "wanderer", "Mercy"
+local preset = "wanderer"
+local modes = {
+    Mercy = {extraction = false, replenish = true, keep = 0},
+    Respawn_WtPenalty = {extraction = true, replenish = true, keep = 5},
+    Decimation = {extraction = true, replenish = false, keep = 0},
+}
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local maths_path = "/Script/Engine.Default__KismetMathLibrary"
 local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
@@ -42,21 +47,15 @@ local storm_time = "TimeZero_10_E5159B6049F6FE6711AEBFB70381881E"
 local storm_rate = "PlayRate_13_BE5598FD40BAEA467B961581B19E0DF6"
 local storm_active = "Activated_19_0B381CD94413F01EAE590297A57BD87B"
 
-local mercy = {
-    ExtractionMode_45_FC0B60E8470417127E7367B262395F41 = false,
+local common_rules = {
     PermaDeath_47_9B31E81C4D87339B7E5858915E149876 = false,
-    ReplenishLoot_5_0542042A4D8D98E206019BA9B5A3E23F = true,
     SaveOn_LevelTransition_7_B709174E4B3AAF09E16C5DA11B61EA65 = true,
     CanSave_InMenu_11_62445BFB482BAF72F8AEECB71E78E918 = false,
     FailContracts_OnDeath_9_2B5C7A364BAB9B21A5358E8D6A55369F = false,
-    Items_KeptOnDeath_14_9602AB054254974168B43BB0C2924307 = 0,
     Randomize_Loot_17_A163022E40E9CA62A6DCC1B791990083 = false,
     Randomize_NPCs_19_3AF748864F3403D76A5428AA591EFA30 = false,
-    ObservitoryVendor_33_F1F6482F4AA17EFFFBEE508D9D657CAE = false,
     Min_PlayerExp_36_08B8B29F4779435201A379AB42F1DA69 = 0,
-    Lock_SaveSlot_38_7CD8888F49C79B45763265A468989B23 = false,
     LoseSlot_PerDeath_41_60DB8A134132D666D7FD9E9714F51A77 = false,
-    Drop_BonePile_43_877E5A2C4F77E5E91CB0ED82EBC3738D = false,
 }
 -- The serialized NewEnumerator suffixes differ from the runtime values in Factions_Enum.
 local wanderer_rep = { [2] = 0, [3] = -400, [4] = -800, [5] = -300, [6] = -1000, [7] = -1000, [8] = 0 }
@@ -121,9 +120,15 @@ local function data_row(table_name, struct_name, key)
     return require_exact(table_asset:FindRow(key), "table_row_unavailable")
 end
 
-local function matches_rule_row(row)
-    for field, value in pairs(mercy) do if row[field] ~= value then return false end end
-    return array_count(row.CustomRule_Tags_31_F8A608C241E19BEBBE44A9BFCCDA335C) == 0
+local function matches_rule_row(row, mode)
+    for field, value in pairs(common_rules) do if row[field] ~= value then return false end end
+    return row.ExtractionMode_45_FC0B60E8470417127E7367B262395F41 == mode.extraction
+        and row.ReplenishLoot_5_0542042A4D8D98E206019BA9B5A3E23F == mode.replenish
+        and row.Items_KeptOnDeath_14_9602AB054254974168B43BB0C2924307 == mode.keep
+        and row.ObservitoryVendor_33_F1F6482F4AA17EFFFBEE508D9D657CAE == mode.extraction
+        and row.Lock_SaveSlot_38_7CD8888F49C79B45763265A468989B23 == mode.extraction
+        and row.Drop_BonePile_43_877E5A2C4F77E5E91CB0ED82EBC3738D == mode.extraction
+        and array_count(row.CustomRule_Tags_31_F8A608C241E19BEBBE44A9BFCCDA335C) == 0
 end
 
 local function fname(name)
@@ -219,7 +224,7 @@ local function verify(instance, save, planned, strict)
     require_exact(same(instance.SaveSlot_Ref, save) and text(instance.CurrentSaveSlot) == planned.slot
         and instance.SaveAfterTransition == false and instance.Travel_TimeStep == 0 and instance.Respawning == false,
         "canonical_slot_readback_failed")
-    require_exact(matches_rule_row(save.GameRules) and text(save.Level) == level and text(save.RespawnLevel) == level
+    require_exact(matches_rule_row(save.GameRules, modes[planned.difficulty]) and text(save.Level) == level and text(save.RespawnLevel) == level
         and text(save.Bed) == "" and text(save.Entrance) == "MainMenu" and save.InstanceSeed == planned.seed,
         "world_readback_failed")
     require_exact(save.WeatherOffset == planned.weather and save.CombineStashes == false and save.BarterOnly == false
@@ -269,9 +274,11 @@ local function start_clock(controller, save, planned, authored_storm, authored_s
         and math.type(old_storm) == "integer" and next_storm == 2268000000000, "clock_receipt_unqualified")
 end
 
-function fresh.prepare(state, phase, name, slot, seed_text)
+function fresh.prepare(state, phase, name, slot, seed_text, difficulty)
+    difficulty = difficulty or "Mercy"
+    local mode = modes[difficulty]
     local seed = type(seed_text) == "string" and #seed_text <= 6 and seed_text:match("^[1-9][0-9]*$") and tonumber(seed_text)
-    require_exact(not receipt and name == preset and type(slot) == "string" and #slot == 43
+    require_exact(not receipt and name == preset and mode and type(slot) == "string" and #slot == 43
         and slot:match("^SFCoopLive_[0-9a-f]+$") and seed and seed <= 999999, "preset_arguments_invalid")
     local instance = require_exact(qualified_title(state, phase), "title_authority_required")
     local old_save = instance.SaveSlot_Ref
@@ -282,14 +289,15 @@ function fresh.prepare(state, phase, name, slot, seed_text)
         and array_count(instance.PassiveEffects) == 0, "fresh_title_state_unqualified")
 
     local character = character_row()
-    local rules = data_row("GameMode_Presets_DT", "GameMode_Rules_Struct", mode_row)
-    require_exact(matches_rule_row(rules), "mercy_rules_changed")
+    local rules = data_row("GameMode_Presets_DT", "GameMode_Rules_Struct", difficulty)
+    require_exact(matches_rule_row(rules, mode), "difficulty_rules_changed")
     require_exact(matches_map(instance.FactionAdvantage_Defaults, faction_advantage, 5), "faction_defaults_changed")
     local library = asset(character_library_path)
     require_exact(valid(library), "faction_library_unqualified")
     local authored_storm, authored_storm_curve = starting_weather()
     require_exact(type(SilverfishSetNativeFreshClock) == "function", "clock_addon_unavailable")
     local planned = starter(seed, slot)
+    planned.difficulty = difficulty
     local ok, prepared = pcall(function()
         -- NewSave allocates in memory and sets CurrentSaveSlot. No save writer or stock travel is invoked here.
         instance:NewSave(slot)
@@ -368,7 +376,7 @@ function fresh.rows(state, phase, status_row)
     local result, detail = outcome(state, phase)
     if not result then return {} end
     return {
-        status_row("native-fresh-campaign", result, preset, mode_row, destination, receipt.slot, receipt.seed,
+        status_row("native-fresh-campaign", result, preset, receipt.difficulty, destination, receipt.slot, receipt.seed,
             receipt.world_seed, receipt.artifact_seed, receipt.storm_seed, 23, 3015220, 0, 2, armor_path, level, detail),
     }
 end
