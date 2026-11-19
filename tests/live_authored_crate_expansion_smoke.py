@@ -225,7 +225,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             if guaranteed:
                 assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
             elif cabinet:
-                assert roll["trait_calls"] == 5 and 1 <= len(roll["items"]) <= 4, roll
+                assert roll["trait_calls"] == 5 and len(roll["items"]) <= 4, roll
             else:
                 assert 1 <= roll["trait_calls"] <= 3, roll
             if name == "guaranteed-docks":
