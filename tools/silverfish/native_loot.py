@@ -12,6 +12,11 @@ from .native_gold import valid_guid
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
+CASH_RANGES = {
+    f"/Game/Classes/Items/Item_Money_{name}.Item_Money_{name}_C": limits
+    for name, limits in (("CoupleBills", (6, 10)), ("SmallStack", (30, 50)),
+                         ("LargeStack", (100, 200)), ("MassivePile", (3000, 5000)))
+}
 
 
 def public_roll(roll: dict) -> dict:
@@ -184,6 +189,18 @@ class LootView:
         return game
 
 
+def _verified_cash_credit(proof: dict, item: dict, balance: int | None) -> dict:
+    credit = proof.get("cash", {})
+    amount, before, after = (credit.get(key) for key in ("amount", "before", "after"))
+    minimum, maximum = CASH_RANGES[item["class_path"]]
+    if (proof.get("status") != "cash_credited" or credit.get("guid") != item["guid"]
+            or any(type(value) is not int for value in (amount, before, after, balance))
+            or not minimum <= amount <= maximum or not 0 <= before < after <= 2**31 - 1
+            or after - before != amount or after != balance):
+        raise RuntimeError("The exact stock crate cash credit did not verify")
+    return {"amount": amount, "before": before, "after": after}
+
+
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
                   fixture_nonempty: bool = False) -> dict:
     area = host.last_game.get("map")
@@ -291,12 +308,20 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 result["native_loot_fixture"] = proof
             return result
         if action == "claim":
-            if (proof["status"] not in ("claimed", "already_claimed") or not proof["invoked"]
-                    or proof["escrow_slot"] != arguments[1]):
+            if not proof["invoked"] or proof["escrow_slot"] != arguments[1]:
                 raise RuntimeError("The exact stock crate item transfer did not verify")
+            credit = None
+            if item["class_path"] in CASH_RANGES:
+                credit = _verified_cash_credit(proof, item, snapshot.get("native_wallet"))
+            elif proof["status"] not in ("claimed", "already_claimed") or proof.get("cash"):
+                raise RuntimeError("The exact stock crate item transfer did not verify")
+
             candidate = party.load_party(host.party)
             claimed = next(row for row in candidate[STATE_KEY][crate]["items"] if row["guid"] == guid)
             claimed["claimed_by"] = character
+            if credit:
+                candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
+                claimed["wallet_credit"] = credit
             result = {"native_loot_claim": claimed, "native_loot_crate": crate}
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})

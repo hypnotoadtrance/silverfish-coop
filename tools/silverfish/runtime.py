@@ -1575,6 +1575,12 @@ class Bridge:
                     if len(fields) == 4:
                         item["guid"] = fields[3]
                     data["native_loot"]["items"].append(item)
+                elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
+                    loot = data["native_loot"]
+                    if loot.get("action") != "claim" or "cash" in loot:
+                        raise ValueError("Stock crate cash proof is out of scope")
+                    loot["cash"] = dict(zip(("guid", "amount", "before", "after"),
+                                            (fields[1], *map(int, fields[2:]))))
                 elif fields[0] == "native-wipe-inventory" and len(fields) == 8:
                     data["native_wipe_inventory"] = {
                         "map": fields[1], "source": fields[2], "replacement": fields[3],

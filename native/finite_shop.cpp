@@ -1,4 +1,5 @@
 #include "finite_shop.hpp"
+#include "stock_wallet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -94,8 +95,6 @@ namespace
     constexpr auto calc_markup = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C:Calc_ShopMarkup");
     constexpr auto calc_item = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C:CalcItemMarkup");
     constexpr auto save_inventory = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C:SaveInventory");
-    constexpr auto check_cash = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Check_SaveFlag");
-    constexpr auto debit_cash = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Give_PlayerCash");
     constexpr auto instance_class = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_class = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -592,46 +591,7 @@ namespace
         }
     };
 
-    struct Wallet
-    {
-        Unreal::UFunction* read = find<Unreal::UFunction>(check_cash);
-        Unreal::UFunction* debit = find<Unreal::UFunction>(debit_cash);
-        Unreal::FIntProperty* value = field<Unreal::FIntProperty>(read, STR("Value"));
-        Unreal::FBoolProperty* found = field<Unreal::FBoolProperty>(read, STR("Found"));
-
-        bool bind(const Context& context) const
-        {
-            auto* name = field<Unreal::FNameProperty>(read, STR("Key"));
-            auto* amount = field<Unreal::FIntProperty>(debit, STR("Amount"));
-            auto* subtract = field<Unreal::FBoolProperty>(debit, STR("Deduct"));
-            auto* type = context.instance->GetClassPrivate();
-            return read && debit && read->GetOuterPrivate() == type && debit->GetOuterPrivate() == type &&
-                name && name->GetOffset_Internal() == 0 && name->GetSize() == sizeof(Unreal::FName) &&
-                value && value->GetOffset_Internal() == 12 && found && found->GetOffset_Internal() == 8 &&
-                read->GetNumParms() == 3 && read->GetParmsSize() == 16 &&
-                amount && amount->GetOffset_Internal() == 0 && subtract && subtract->GetOffset_Internal() == 4 &&
-                debit->GetNumParms() == 2 && debit->GetParmsSize() >= 5 && debit->GetParmsSize() <= 8;
-        }
-
-        std::pair<int, bool> flag_value(const Context& context, const Unreal::TCHAR* key) const
-        {
-            struct Parameters { Unreal::FName name; bool found{}; std::int32_t amount{}; };
-            static_assert(sizeof(Parameters) == 16 && offsetof(Parameters, amount) == 12);
-            Parameters params{Unreal::FName{key}};
-            context.instance->ProcessEvent(read, &params);
-            const auto exists = found->GetPropertyValueInContainer(&params);
-            return {exists ? value->GetPropertyValueInContainer(&params) : 0, exists};
-        }
-
-        int amount(const Context& context) const { return flag_value(context, STR("Player_Cash")).first; }
-
-        void change(const Context& context, int price, bool deduct) const
-        {
-            struct Parameters { std::int32_t amount; bool deduct; } params{price, deduct};
-            static_assert(sizeof(Parameters) == 8 && offsetof(Parameters, deduct) == 4);
-            context.instance->ProcessEvent(debit, &params);
-        }
-    };
+    using silverfish::stock_wallet::Wallet;
 
     struct Offer
     {
@@ -713,7 +673,7 @@ namespace
             PassiveEffect trait{Unreal::FName{STR("IntensePersonality")}};
             if (!read_purchase_effect(context, trait)) return false;
             reward = price / 100;
-            const auto [before, found] = wallet.flag_value(context, STR("Rep_Commune"));
+            const auto [before, found] = wallet.flag_value(context.instance, STR("Rep_Commune"));
             const auto change = static_cast<std::int64_t>(reward) * (found ? 1LL + trait.instances : 1LL);
             const auto after = before + change;
             if (change > max_money || after > max_money) return false;
@@ -731,7 +691,7 @@ namespace
 
         bool verified(const Context& context, const Wallet& wallet) const
         {
-            return !apply || wallet.flag_value(context, STR("Rep_Commune")).first == expected;
+            return !apply || wallet.flag_value(context.instance, STR("Rep_Commune")).first == expected;
         }
     };
 
@@ -843,8 +803,8 @@ namespace
         if (!layout.bind(context)) return response(lua, false, "shop_reflected_layout_unavailable");
         if (!layout.verify_saved(context, false)) return response(lua, false, "shop_exact_stock_save_record_unavailable");
         Wallet wallet;
-        if (!wallet.bind(context)) return response(lua, false, "shop_stock_wallet_schema_unavailable");
-        const int money = wallet.amount(context);
+        if (!wallet.bind(context.instance)) return response(lua, false, "shop_stock_wallet_schema_unavailable");
+        const int money = wallet.amount(context.instance);
         const int cash = layout.merchant_cash->GetPropertyValueInContainer(context.shop);
         if (money < 0 || cash < 0) return response(lua, false, "shop_wallet_unavailable");
         std::uint8_t changed{};
@@ -978,13 +938,13 @@ namespace
         {
             layout.row->CopyCompleteValue(backpack.GetRawPtr(add), transferred.get());
             if (!reusable) stock_rows.RemoveValues(index);
-            wallet.change(context, selected.price, true);
+            wallet.change(context.instance, selected.price, true);
             layout.merchant_cash->SetPropertyValueInContainer(context.shop, cash + selected.price);
             reputation.commit(context);
             context.shop->ProcessEvent(layout.save, nullptr);
             bool verified = stock_rows.Num() == old_stock - (reusable ? 0 : 1) && backpack.Num() == old_size + 1 &&
                 layout.ident(backpack.GetRawPtr(add), transferred.get()) &&
-                wallet.amount(context) == money - selected.price && reputation.verified(context, wallet) && qualified_connection(context) &&
+                wallet.amount(context.instance) == money - selected.price && reputation.verified(context, wallet) && qualified_connection(context) &&
                 read_object(context.pawn, STR("Save")) == context.guest &&
                 read_object(context.instance, STR("SaveSlot_Ref")) == context.stock &&
                 layout.verify_saved(context, true);
@@ -1005,7 +965,7 @@ namespace
         if (!layout.equal(source_property, source, source_property, source_before.get(), max_offers) ||
             !layout.equal(layout.backpack, target, layout.backpack, target_before.get(), max_items) ||
             !layout.flags->Identical(flags, flags_before.get()) || !layout.saved_shops->Identical(saved, saved_before.get()) ||
-            wallet.amount(context) != money || layout.merchant_cash->GetPropertyValueInContainer(context.shop) != cash)
+            wallet.amount(context.instance) != money || layout.merchant_cash->GetPropertyValueInContainer(context.shop) != cash)
             return response(lua, false, "mutation_unverified_shop_restore");
         return response(lua, false, "shop_commit_readback_failed_rolled_back");
     }
@@ -1163,12 +1123,12 @@ namespace
         Layout layout;
         Sale sale;
         Wallet wallet;
-        if (!layout.bind(context) || !layout.verify_saved(context, false) || !sale.bind(context, layout) || !wallet.bind(context))
+        if (!layout.bind(context) || !layout.verify_saved(context, false) || !sale.bind(context, layout) || !wallet.bind(context.instance))
             return response(lua, false, "shop_sale_stock_schema_unavailable");
         if (!read_bool(context.shop, STR("CanSellTo"), true) || !read_bool(context.shop, STR("LimitedCash"), true))
             return response(lua, false, "shop_stock_sales_unavailable");
         if (!sale.preserves_reputation(context)) return response(lua, false, "shop_sale_stock_reputation_path_unavailable");
-        const int money = wallet.amount(context), cash = layout.merchant_cash->GetPropertyValueInContainer(context.shop);
+        const int money = wallet.amount(context.instance), cash = layout.merchant_cash->GetPropertyValueInContainer(context.shop);
         if (money < 0 || cash < 0) return response(lua, false, "shop_sale_wallet_unavailable");
 
         auto* source = layout.backpack->ContainerPtrToValuePtr<void>(context.guest);
@@ -1251,12 +1211,12 @@ namespace
         if (verified)
         {
             backpack.RemoveValues(removed);
-            wallet.change(context, selected.price, false);
+            wallet.change(context.instance, selected.price, false);
             layout.merchant_cash->SetPropertyValueInContainer(context.shop, cash - selected.price);
             context.shop->ProcessEvent(layout.save, nullptr);
             Unreal::FScriptArrayHelper previous_bag(layout.backpack, source_before.get());
             if (exact_removal(layout, backpack, previous_bag, removed) && !layout.owner_has(context.guest, chosen) &&
-                wallet.amount(context) == money + selected.price && qualified_connection(context) &&
+                wallet.amount(context.instance) == money + selected.price && qualified_connection(context) &&
                 read_object(context.pawn, STR("Save")) == context.guest &&
                 read_object(context.instance, STR("SaveSlot_Ref")) == context.stock && layout.verify_saved(context, true))
                 return response(lua, true, "sold", encode(selected), money, money + selected.price, cash, cash - selected.price);
@@ -1272,7 +1232,7 @@ namespace
             !layout.equal(layout.buyback, target, layout.buyback, target_before.get(), max_offers) ||
             !layout.equal(layout.finite, finite, layout.finite, finite_before.get(), max_offers) ||
             !layout.flags->Identical(flags, flags_before.get()) || !layout.saved_shops->Identical(saved, saved_before.get()) ||
-            wallet.amount(context) != money || layout.merchant_cash->GetPropertyValueInContainer(context.shop) != cash)
+            wallet.amount(context.instance) != money || layout.merchant_cash->GetPropertyValueInContainer(context.shop) != cash)
             return response(lua, false, "mutation_unverified_shop_sale_restore");
         return response(lua, false, "shop_sale_readback_failed_rolled_back");
     }

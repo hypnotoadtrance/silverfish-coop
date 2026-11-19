@@ -85,8 +85,12 @@ function actions.command(fields, state, phase)
             return "stock loot escrow missing"
         end
         result.distance, result.escrow_slot = scope.distance, slot
-        result.ok, result.status = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(), scope.save:GetAddress(),
-            scope.stock:GetAddress(), pool:GetAddress(), guid)
+        local ok, status, amount, before, after = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
+            scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid)
+        result.ok, result.status = ok, status
+        if ok and status == "cash_credited" then
+            result.cash = { guid = guid, amount = amount, before = before, after = after }
+        end
         result.invoked = result.ok or tostring(result.status):match("^mutation_unverified_") ~= nil
         return "stock loot claim reported"
     end
@@ -156,6 +160,10 @@ function actions.rows(state, phase, status_row)
     local records = { status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
         row.status or "", row.looted and 1 or 0, row.lucky and 1 or 0, row.trait or "", row.calls,
         row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-") }
+    if row.cash then
+        local cash = row.cash
+        records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)
+    end
     for _, item in ipairs(row.items) do
         records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid)
     end

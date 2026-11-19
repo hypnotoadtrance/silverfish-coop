@@ -162,6 +162,70 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await native_loot.perform(host, bridge, "host", "claim", guid, "e" * 32), legacy_result)
         bridge.command.assert_awaited_once()
 
+    async def test_stock_cash_credits_wallet_once_and_persists_the_exact_receipt(self):
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["class_path"] = next(iter(native_loot.CASH_RANGES))
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
+                 "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True, "status": "cash_credited",
+                 "cash": {"guid": item["guid"], "amount": 8, "before": 23, "after": 31}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof, native_wallet=31)))
+        arguments = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
+        result = await native_loot.perform(*arguments, OPERATION)
+        self.assertEqual(result["native_loot_claim"]["wallet_credit"], {"amount": 8, "before": 23, "after": 31})
+        self.assertEqual(host.party["economy"]["wallet"], 31)
+        self.assertEqual(host.party["players"]["host"]["inventory"], {})
+        self.assertEqual(host.party[native_loot.STATE_KEY][OTHER_CRATE]["items"][0], result["native_loot_claim"])
+        self.assertEqual(await native_loot.perform(*arguments, OPERATION), result)
+        with self.assertRaisesRegex(party.RuleError, "native_loot_already_claimed"):
+            await native_loot.perform(*arguments, "2" * 32)
+        bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_awaited_once()
+        self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_unverified_stock_cash_fences_checkpoint_and_never_falls_back_to_inventory(self):
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["class_path"] = next(iter(native_loot.CASH_RANGES))
+        native = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
+                  "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True}
+        good = {"guid": item["guid"], "amount": 8, "before": 23, "after": 31}
+        cases = [
+            (dict(status="claimed"), 31),
+            (dict(status="cash_credited", cash=good | {"guid": "B" * 32}), 31),
+            (dict(status="cash_credited", cash=good | {"amount": 30, "after": 53}), 53),
+            (dict(status="cash_credited", cash=good | {"before": 24}), 31),
+            (dict(status="cash_credited", cash=good), 32),
+        ]
+        for proof, balance in cases:
+            with self.subTest(proof=proof, balance=balance):
+                host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+                snapshot = self.game(CROSSROADS, native_loot=native | proof, native_wallet=balance)
+                bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+                with self.assertRaisesRegex(RuntimeError, "cash credit did not verify"):
+                    await native_loot.perform(host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}", OPERATION)
+                self.assertTrue(host.stopping)
+                self.assertTrue(host.native_checkpoint_unsafe)
+                host.checkpoint_native.assert_not_awaited()
+                self.assertNotIn("claimed_by", item)
+
+    def test_cash_snapshot_requires_a_single_claim_row(self):
+        lines = [
+            ("schema", "1"), ("session", "host", "hosting", CROSSROADS, "0", "1"),
+            ("native-loot", "claim", CROSSROADS, OTHER_CRATE, PAWN, "1", "cash_credited",
+             "0", "0", "", "0", "90", "0", "1", "SFCoop_" + "a" * 32),
+            ("native-loot-cash", ITEM["guid"], "8", "23", "31"), ("wallet", "31"),
+        ]
+        status = self.root / "status.tsv"
+        def snapshot(rows):
+            status.write_text("".join("\t".join(fields) + "\n" for fields in rows), encoding="utf-8")
+            return runtime.Bridge(self.root, None).snapshot()
+        sample = snapshot(lines)
+        self.assertEqual(sample["native_wallet"], 31)
+        self.assertEqual(sample["native_loot"]["cash"], {"guid": ITEM["guid"], "amount": 8, "before": 23, "after": 31})
+        self.assertIsNone(snapshot([*lines, lines[3]]))
+
     async def test_restart_projects_all_committed_local_crates_and_no_other_map(self):
         states = {crate: {"map": area, "crate": crate, "state": "ready"}
                   for crate, area in native_loot.CRATES.items()}

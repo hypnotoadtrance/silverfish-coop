@@ -1,6 +1,7 @@
 #include "loot_escrow.hpp"
 #include "enemy_loot.hpp"
 #include "shared_loot.hpp"
+#include "stock_wallet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -467,6 +469,45 @@ namespace
         return qualified;
     }
 
+    bool is_stock_cash(Unreal::UClass* type)
+    {
+        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C"));
+        return type && base && type->IsChildOf(base);
+    }
+
+    int stock_cash_value(const Inventory& inventory, const void* item, Unreal::UClass* type)
+    {
+        struct CashProfile { const Unreal::TCHAR* path; int minimum; int maximum; };
+        constexpr std::array profiles{
+            CashProfile{STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"), 6, 10},
+            CashProfile{STR("/Game/Classes/Items/Item_Money_SmallStack.Item_Money_SmallStack_C"), 30, 50},
+            CashProfile{STR("/Game/Classes/Items/Item_Money_LargeStack.Item_Money_LargeStack_C"), 100, 200},
+            CashProfile{STR("/Game/Classes/Items/Item_Money_MassivePile.Item_Money_MassivePile_C"), 3000, 5000},
+        };
+        const auto path = type->GetPathName();
+        const auto profile = std::ranges::find_if(profiles, [&](const auto& entry) { return path == entry.path; });
+        if (profile == profiles.end()) return 0;
+        auto* defaults = type->GetClassDefaultObject().Get();
+        auto* minimum = field<Unreal::FIntProperty>(defaults, STR("Value_Min"));
+        auto* maximum = field<Unreal::FIntProperty>(defaults, STR("Value_Max"));
+        if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            defaults->GetClassPrivate() != type || !minimum || !maximum ||
+            minimum->GetPropertyValueInContainer(defaults) != profile->minimum ||
+            maximum->GetPropertyValueInContainer(defaults) != profile->maximum) return 0;
+        const auto amount = inventory.value->GetPropertyValueInContainer(item);
+        return amount >= profile->minimum && amount <= profile->maximum ? amount : 0;
+    }
+
+    Unreal::UObject* canonical_game_instance(const Owner& owner)
+    {
+        auto* instance_link = field<Unreal::FObjectProperty>(owner.world, STR("OwningGameInstance"));
+        auto* instance = instance_link ? instance_link->GetObjectPropertyValue(instance_link->ContainerPtrToValuePtr<void>(owner.world)) : nullptr;
+        auto* save_link = field<Unreal::FObjectProperty>(instance, STR("SaveSlot_Ref"));
+        if (!live(instance) || instance->GetClassPrivate() != find<Unreal::UClass>(instance_path) ||
+            !save_link || save_link->GetObjectPropertyValue(save_link->ContainerPtrToValuePtr<void>(instance)) != owner.stock) return nullptr;
+        return instance;
+    }
+
     template <bool enemy>
     int claim(const Lua& lua)
     {
@@ -505,6 +546,11 @@ namespace
                 return result(lua, false, "native_enemy_escrow_ammunition_unqualified");
         }
 
+        auto* item_type = Unreal::Cast<Unreal::UClass>(inventory.klass(item));
+        const bool cash = !enemy && is_stock_cash(item_type);
+        const int amount = cash ? stock_cash_value(inventory, item, item_type) : 0;
+        if (cash && !amount) return result(lua, false, "native_loot_cash_payload_unqualified");
+
         Match recipient;
         if (!inspect_owner(inventory, owner.save, guid, recipient) || recipient.count > 1 ||
             (recipient.row && !inventory.identical(item, recipient.row)))
@@ -530,11 +576,51 @@ namespace
         }
         if (destination.Num() && source.GetRawPtr(0) == destination.GetRawPtr(0))
             return result(lua, false, "native_loot_escrow_backpack_alias");
-        if (recipient.row) return result(lua, true, "already_claimed");
-        if (destination.Num() >= max_inventory) return result(lua, false, "native_loot_claimant_backpack_full");
+        if (recipient.row)
+            return cash ? result(lua, false, "native_loot_cash_inventory_conflict") : result(lua, true, "already_claimed");
+        if (!cash && destination.Num() >= max_inventory) return result(lua, false, "native_loot_claimant_backpack_full");
         auto before = copy_value(backpack, target);
         auto escrow_before = copy_value(backpack, backpack->ContainerPtrToValuePtr<void>(escrow));
         if (!before || !escrow_before) return result(lua, false, "native_loot_save_snapshot_unavailable");
+
+        const auto same_owner_and_escrow = [&] {
+            Owner current;
+            return backpack->Identical(escrow_before.get(), backpack->ContainerPtrToValuePtr<void>(escrow)) &&
+                qualify(current) && current.world == owner.world && current.pawn == owner.pawn &&
+                current.save == owner.save && current.stock == owner.stock;
+        };
+        const auto protected_inventories_unchanged = [&] {
+            for (std::size_t index = 0; index < protected_saves.size() && protected_saves[index]; ++index)
+            {
+                if (!backpack->Identical(protected_backpacks[index].get(),
+                        backpack->ContainerPtrToValuePtr<void>(protected_saves[index]))) return false;
+            }
+            return true;
+        };
+        if (cash)
+        {
+            auto* instance = canonical_game_instance(owner);
+            silverfish::stock_wallet::Wallet wallet;
+            if (!instance || !wallet.bind(instance)) return result(lua, false, "native_loot_cash_schema_unavailable");
+            const auto balance = wallet.amount(instance);
+            if (balance < 0 || balance > (std::numeric_limits<int>::max)() - amount)
+                return result(lua, false, "native_loot_cash_wallet_out_of_range");
+
+            // Give_PlayerCash is the same stock call used by Money_Master's Interact.
+            wallet.change(instance, amount, false);
+            const auto [updated, found] = wallet.flag_value(instance, STR("Player_Cash"));
+            if (!found || updated != balance + amount || !same_owner_and_escrow() ||
+                canonical_game_instance(owner) != instance || !backpack->Identical(before.get(), target) ||
+                !protected_inventories_unchanged())
+                return result(lua, false, "mutation_unverified_native_loot_cash_readback");
+
+            lua.set_bool(true);
+            lua.set_string("cash_credited");
+            lua.set_integer(amount);
+            lua.set_integer(balance);
+            lua.set_integer(updated);
+            return 5;
+        }
 
         AddedRows append{destination};
         const auto index = destination.AddValue();
@@ -542,11 +628,7 @@ namespace
             return result(lua, false, "native_loot_claim_append_unverified");
         auto* new_row = destination.GetRawPtr(index);
         inventory.row->CopyCompleteValue(new_row, item);
-        Owner current;
-        if (!inventory.identical(new_row, item) ||
-            !backpack->Identical(escrow_before.get(), backpack->ContainerPtrToValuePtr<void>(escrow)) ||
-            !qualify(current) ||
-            current.world != owner.world || current.pawn != owner.pawn)
+        if (!inventory.identical(new_row, item) || !same_owner_and_escrow())
             return result(lua, false, "native_loot_claim_payload_or_owner_unverified");
         Unreal::FScriptArrayHelper old(backpack, before.get());
         for (int i = 0; i < append.before; ++i)
@@ -554,11 +636,8 @@ namespace
             if (!inventory.identical(old.GetRawPtr(i), destination.GetRawPtr(i)))
                 return result(lua, false, "native_loot_claim_backpack_changed");
         }
-        for (std::size_t i = 0; i < protected_saves.size() && protected_saves[i]; ++i)
-        {
-            if (!backpack->Identical(protected_backpacks[i].get(), backpack->ContainerPtrToValuePtr<void>(protected_saves[i])))
-                return result(lua, false, "native_loot_other_owner_backpack_changed");
-        }
+        if (!protected_inventories_unchanged())
+            return result(lua, false, "native_loot_other_owner_backpack_changed");
         append.committed = true;
         return result(lua, true, "claimed");
     }
