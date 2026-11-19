@@ -110,6 +110,8 @@ The cooked-map registry now includes 287 default small crates in 32 supported ma
 
 The same registry also qualifies 55 small crates with exact authored loot-table overrides. Three CrossRoads crates exercised the stock Cargo, Rural, and Industrial rows via Interact, each using the guest's Lucky Looter checks. Rural produced a typed Couple Bills escrow. Cargo and Industrial returned empty rolls. The rolls stayed distinct, replay was stable, and the original saves kept their hashes.
 
+The cooked registry also qualifies 36 exact guaranteed small crates, for 378 small crates across 37 maps. The Observatory's stock guaranteed crate produced a Bandage and ammunition with zero Lucky Looter queries, as expected from the stock branch. The guest claimed one exact item. The native permanent flag, opened crate, and claimed item survived a same-port restart. The nine original save hashes matched.
+
 A second headless campaign used a hash-verified copy of that stock cash escrow. The guest claimed the exact rolled $6, which the game credited once to the shared stock wallet. Both peers saw the new balance. The guest's backpack remained free of that cash row, the host's competing claim was refused, and same-port restart preserved the balance and receipt.
 
 Two runs used stock LookTrace and the Enhanced Input Interact action on the exact Rail Yard Dust Filter and NorthEast Rail Molasses cabinets. Each guest press left the local cabinet closed. The host opened the original cabinet and both peers observed the open doors. The guest collected the exact placed item. Get Molasses then settled $30 shared cash and 1 XP per character through the original board. The reward survived restarting on the same port and the original saves kept their file hashes.
