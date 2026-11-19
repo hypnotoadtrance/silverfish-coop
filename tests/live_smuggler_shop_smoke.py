@@ -7,9 +7,10 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
-from live_ai_smoke import wait
+from live_ai_smoke import status, wait
 from live_computer_board_smoke import stock_flags
 from live_guest_held_fire_smoke import wait_event
 from live_multi_smoke import saved_hashes
@@ -91,18 +92,24 @@ async def verify(work: Path, original: Path):
     async def approach():
         arranged = await action(host_run, "native-finite-shop-approach", target="guest")
         assert arranged["actor"] == MERCHANTS[SMUGGLER], arranged
-
-        def near_counter(s):
-            position = s.get("game", {}).get("pawns", {}).get("guest", {}).get("location")
-            return position and math.dist(position, COUNTER) < 250
-
-        authority = await wait(host_run, near_counter)
-        exact = authority["game"]["pawns"]["guest"]
+        completed = time.time()
 
         def reproduced(s):
+            # The authority pawn can still settle after the first in-range sample.
+            authority = status(host_run)
+            host_game = authority.get("game", {})
+            exact = host_game.get("pawns", {}).get("guest", {})
             game = s.get("game", {})
             position = game.get("pawns", {}).get("local", {}).get("location")
-            return game.get("map") == SMUGGLER and position and math.dist(position, exact["location"]) <= 25
+            if (authority.get("updated_unix", 0) <= completed or s.get("updated_unix", 0) <= completed
+                    or (authority.get("state"), s.get("state")) != ("hosting", "connected")
+                    or (host_game.get("map"), game.get("map")) != (SMUGGLER, SMUGGLER)
+                    or (s.get("host_session"), s.get("zone_epoch")) != (
+                        authority.get("generation"), authority.get("zone_epoch"))
+                    or exact.get("name") != arranged["pawn"]):
+                return False
+            stock = exact.get("location")
+            return stock and position and math.dist(stock, COUNTER) < 250 and math.dist(position, stock) <= 25
 
         return await wait(guest_run, reproduced)
 
