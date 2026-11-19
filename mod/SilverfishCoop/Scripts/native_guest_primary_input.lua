@@ -6,7 +6,7 @@ local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
-local kinds = { smg = true, ["light-pistol"] = true }
+local kinds = { smg = true, ["light-pistol"] = true, ["nagant-scoped"] = true }
 local event_path, is_downed, binding, fixture_proof
 
 local function valid(object)

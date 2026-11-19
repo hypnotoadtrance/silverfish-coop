@@ -1,4 +1,5 @@
 #include "enemy_loot.hpp"
+#include "shared_loot.hpp"
 
 #include <array>
 #include <atomic>
@@ -42,6 +43,7 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
+    constexpr auto shell_path = STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C");
     constexpr auto projectile_path =
         STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto lease = std::chrono::milliseconds(1500);
@@ -338,6 +340,8 @@ namespace
         int original_bounty_instances{}, bounty_overrides{};
         std::string_view bounty_source{"pending"};
         U::FWeakObjectPtr killer{};
+        U::FWeakObjectPtr ammo_drop{};
+        bool captured{};
         std::string_view role{"-"};
         std::string killer_name, projectile, ammo_actor, ammo_class;
         double damage{}, before{}, after{};
@@ -733,6 +737,7 @@ namespace
         scope.proof.ammo_actor = RC::to_utf8_string(ammo->GetFullName());
         scope.proof.ammo_class = RC::to_utf8_string(ammo->GetClassPrivate()->GetPathName());
         scope.proof.ammo_count = units;
+        scope.proof.ammo_drop = ammo;
     }
 
     void post(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
@@ -858,6 +863,37 @@ namespace
 
 namespace silverfish::native_enemy_loot
 {
+    bool qualify_escrow_claimant(Address pawn, Address save, Address stock, shared_loot::EscrowOwner& claimant)
+    {
+        if (!available()) return false;
+        auto* world = find<U::UWorld>(world_path);
+        return shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, claimant);
+    }
+
+    bool verified_ammo_roll(Address bandit, Address ammo, shared_loot::EscrowOwner& claimant, U::UObject*& actor,
+                            bool consume)
+    {
+        if (!available() || !bandit || !ammo || address(scope.npc.Get()) != bandit ||
+            Clock::now() >= scope.until || !current(scope)) return false;
+        auto& proof = scope.proof;
+        auto* dropped = proof.ammo_drop.Get();
+        auto* world = scope.world.Get();
+        auto* shell = find<U::UClass>(shell_path);
+        auto* count = field<U::FIntProperty>(dropped, STR("Ammo"));
+        if (proof.captured || proof.status != "stock_loot_observed" || proof.loot_calls != 1 || !proof.cache_unchanged ||
+            (proof.bounty_source != "stock_host" && proof.bounty_source != "guest_detached") ||
+            !authority(dropped, world) || address(dropped) != ammo || !shell || dropped->GetClassPrivate() != shell ||
+            static_cast<U::AActor*>(dropped)->GetLevel() != object(world, STR("PersistentLevel")) ||
+            !count || count->GetPropertyValueInContainer(dropped) != proof.ammo_count) return false;
+        const auto& participant = proof.role == "guest" ? scope.guest : scope.host;
+        auto* killer = participant.pawn.Get();
+        if (proof.killer.Get() != killer || !qualify_escrow_claimant(address(killer), address(participant.save.Get()),
+                                                                  address(scope.host.save.Get()), claimant)) return false;
+        actor = dropped;
+        if (consume) proof.captured = true;
+        return true;
+    }
+
     void install_hooks()
     {
         if (!enabled() || installed.load(std::memory_order_acquire)) return;

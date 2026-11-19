@@ -32,6 +32,19 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto smg_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
     constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
+    constexpr auto nagant_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C");
+    constexpr auto nagant_primary_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C:Use_Item_Primary");
+    constexpr auto rifle_fmj_path = STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C");
+    constexpr auto rifle_incendiary_path = STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C");
+    constexpr auto rifle_fmj_projectile = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C");
+    constexpr auto rifle_incendiary_projectile =
+        STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C");
+    constexpr auto ammo_table_path = STR("/Game/Classes/Libraries/DataTables/AmmoTypes_DT.AmmoTypes_DT");
+    constexpr auto change_ammo_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ChangeAmmoType");
+    constexpr int nagant_magazine = 5;
+    constexpr int rifle_caliber = 3;
+    constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
+    constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto ammo_fixture_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
@@ -48,6 +61,9 @@ namespace
     constexpr auto class_name = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
     constexpr auto ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
     constexpr auto weight_name = STR("Weight_12_11AB9ED547504E78A849A692A36DC938");
+    constexpr auto payload_name = STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59");
+    constexpr auto ammo_item_name = STR("Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582");
+    constexpr auto ammo_caliber_name = STR("Caliber_3_3C88B25D42998F32221AA0AA7E1B4537");
     constexpr auto value_name = STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9");
     constexpr auto guid_name = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
@@ -348,12 +364,44 @@ namespace
             ? "" : "guest_weapon_guid_conflict";
     }
 
+    bool nagant_shape(Unreal::UObject* weapon)
+    {
+        auto* magazine = field<Unreal::FIntProperty>(weapon, STR("MagSize"));
+        auto* caliber = field<Unreal::FByteProperty>(weapon, STR("Caliber"));
+        auto* cost = field<Unreal::FIntProperty>(weapon, STR("AmmoCost_PerShot"));
+        auto* cycle = field<Unreal::FDoubleProperty>(weapon, STR("FireRate"));
+        return magazine && magazine->GetPropertyValueInContainer(weapon) == nagant_magazine &&
+            caliber && caliber->GetPropertyValueInContainer(weapon) == rifle_caliber &&
+            cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
+            cycle && cycle->GetPropertyValueInContainer(weapon) == 1.0 &&
+            boolean(weapon, STR("Action_OnRelease"), true) && boolean(weapon, STR("SingleReload"), true) &&
+            boolean(weapon, STR("UseEatherAsAmmo"), false);
+    }
+
     Unreal::UClass* qualified_weapon(Unreal::UObject* item_class)
     {
         auto* weapon = Unreal::Cast<Unreal::UClass>(item_class);
         auto* base = find<Unreal::UClass>(weapon_base_path);
         if (!live(weapon) || !base || !weapon->IsChildOf(base)) return nullptr;
-        return weapon == find<Unreal::UClass>(smg_path) || weapon == find<Unreal::UClass>(pistol_path) ? weapon : nullptr;
+        if (weapon == find<Unreal::UClass>(smg_path) || weapon == find<Unreal::UClass>(pistol_path)) return weapon;
+        if (weapon != find<Unreal::UClass>(nagant_path)) return nullptr;
+        auto* defaults = weapon->GetClassDefaultObject().Get();
+        return defaults && defaults->GetClassPrivate() == weapon && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+            nagant_shape(defaults) ? weapon : nullptr;
+    }
+
+    Unreal::UClass* qualified_camera(Unreal::UObject* item_class)
+    {
+        auto* camera = find<Unreal::UClass>(camera_path);
+        auto* equipment = find<Unreal::UClass>(equipment_base_path);
+        if (!camera || item_class != camera || !equipment || !camera->IsChildOf(equipment)) return nullptr;
+        auto* defaults = camera->GetClassDefaultObject().Get();
+        auto* item_type = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+        auto* ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        return defaults && defaults->GetClassPrivate() == camera && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+            item_type && item_type->GetPropertyValueInContainer(defaults) == 5 &&
+            ammo && ammo->GetPropertyValueInContainer(defaults) == -1 && boolean(defaults, STR("Stacks"), false)
+            ? camera : nullptr;
     }
 
     bool ready_pawn(const Context& context)
@@ -376,6 +424,25 @@ namespace
             object(actor, STR("Player_Ref")) == context.pawn && object(actor, STR("User")) == context.pawn &&
             object(actor, STR("As Game Instance FP")) == context.instance &&
             boolean(actor, STR("HeldByPlayer"), true) ? actor : nullptr;
+    }
+
+    bool camera_capture_ready(Unreal::UObject* camera)
+    {
+        auto* capture = object(camera, STR("SceneCaptureComponent2D"));
+        if (!live(capture) || capture->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.SceneCaptureComponent2D")) ||
+            capture->GetOuterPrivate() != camera) return false;
+        auto* target = object(capture, STR("TextureTarget"));
+        auto* fov = field<Unreal::FFloatProperty>(capture, STR("FOVAngle"));
+        if (!live(target) || target != find<Unreal::UObject>(STR("/Game/Assets/Textures/VirtualTextures/VT_Camera.VT_Camera")) ||
+            target->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.TextureRenderTarget2D")) || !fov) return false;
+        const auto angle = fov->GetPropertyValueInContainer(capture);
+        return std::isfinite(angle) && angle > 0.0f && angle < 179.0f;
+    }
+
+    bool camera_stock_ammo(std::int32_t value)
+    {
+        // The loose stock actor has -1; stock Shop.GenerateItem writes zero for non-ammo items.
+        return value == -1 || value == 0;
     }
 
     enum class Operation { Seed, SeedAmmo, Equip, Inspect, Fire, Disarm, Reload };
@@ -492,7 +559,16 @@ namespace
 
     int equip(const Lua& lua, const Context& context, const Inventory& inventory)
     {
-        if (equipped(context, inventory)) return result(lua, true, "equipped");
+        const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
+        if (auto* actor = equipped(context, inventory))
+        {
+            if (!camera) return result(lua, true, "equipped");
+            const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+            auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+            const bool verified = camera_stock_ammo(stored) && ammo && ammo->GetPropertyValueInContainer(actor) == stored &&
+                camera_capture_ready(actor);
+            return result(lua, verified, verified ? "camera_equipped" : "stock_guest_camera_capture_unavailable");
+        }
         if (!ready_pawn(context)) return result(lua, false, "guest_weapon_pawn_ineligible");
 
         struct Parameters { std::int32_t index{}; bool prev{}; } parameters;
@@ -504,10 +580,18 @@ namespace
             action->GetParmsSize() > sizeof(Parameters))
             return result(lua, false, "stock_guest_weapon_equip_schema_unavailable");
         const auto loaded = inventory.ammo->GetPropertyValueInContainer(inventory.item);
-        auto* defaults = context.weapon->GetClassDefaultObject().Get();
-        auto* magazine = field<Unreal::FIntProperty>(defaults, STR("MagSize"));
-        if (!magazine || loaded < 1 || loaded > magazine->GetPropertyValueInContainer(defaults))
-            return result(lua, false, "guest_weapon_magazine_unqualified");
+        if (camera)
+        {
+            if (!camera_stock_ammo(loaded)) return result(lua, false, "guest_camera_row_unqualified");
+        }
+        else
+        {
+            auto* defaults = context.weapon->GetClassDefaultObject().Get();
+            auto* magazine = field<Unreal::FIntProperty>(defaults, STR("MagSize"));
+            const auto minimum = context.weapon == find<Unreal::UClass>(nagant_path) ? 0 : 1;
+            if (!magazine || loaded < minimum || loaded > magazine->GetPropertyValueInContainer(defaults))
+                return result(lua, false, "guest_weapon_magazine_unqualified");
+        }
 
         const auto previous = inventory.selected->GetPropertyValueInContainer(context.save);
         auto* old = object(context.pawn, STR("EquipedItem"));
@@ -546,18 +630,28 @@ namespace
         auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         const bool proven = ammo && after.equipment_index == target &&
             ammo->GetPropertyValueInContainer(actor) == loaded && after.ammo->GetPropertyValueInContainer(after.item) == loaded;
+        if (camera)
+        {
+            const bool verified = proven && camera_capture_ready(actor);
+            return result(lua, verified, verified ? "camera_equipped" : "mutation_unverified_guest_camera_equip");
+        }
         return result(lua, proven, proven ? "equipped" : "mutation_unverified_guest_weapon_equip");
     }
 
     int inspect(const Lua& lua, const Context& context, const Inventory& inventory)
     {
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
-        if (inventory.backpack_index >= 0) return proof(lua, true, "backpack", -1, stored);
+        const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
+        if (camera && !camera_stock_ammo(stored)) return proof(lua, false, "guest_camera_row_unqualified");
+        if (inventory.backpack_index >= 0) return proof(lua, true, camera ? "camera_backpack" : "backpack", -1, stored);
         auto* actor = equipped(context, inventory);
-        if (!actor) return proof(lua, true, "stored_equipment", -1, stored);
+        if (!actor) return proof(lua, true, camera ? "camera_stored_equipment" : "stored_equipment", -1, stored);
         auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         if (!ammo) return proof(lua, false, "stock_guest_weapon_ammo_unavailable");
-        return proof(lua, true, "equipped", ammo->GetPropertyValueInContainer(actor), stored);
+        const auto observed = ammo->GetPropertyValueInContainer(actor);
+        if (camera && (observed != stored || !camera_capture_ready(actor)))
+            return proof(lua, false, "stock_guest_camera_capture_unavailable");
+        return proof(lua, true, camera ? "camera_equipped" : "equipped", observed, stored);
     }
 
     Unreal::UClass* single_stock_projectile(Unreal::UObject* actor)
@@ -572,6 +666,26 @@ namespace
         auto* projectile = static_cast<Unreal::UClass*>(klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(data)));
         return count->GetPropertyValueInContainer(data) == 1 && projectile && projectile->IsChildOf(projectile_base)
             ? projectile : nullptr;
+    }
+
+    Unreal::UClass* mounted_ammo(Unreal::UObject* actor)
+    {
+        auto* ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
+        auto* type = ammo ? ammo->GetStruct().Get() : nullptr;
+        auto* item = field<Unreal::FClassProperty>(type, ammo_item_name);
+        if (!type || type != find<Unreal::UScriptStruct>(ammo_type_path) || !item) return nullptr;
+        const auto* data = ammo->ContainerPtrToValuePtr<void>(actor);
+        return Unreal::Cast<Unreal::UClass>(item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(data)));
+    }
+
+    bool nagant_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
+    {
+        if (!ammo || !projectile) return false;
+        auto* data = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
+        auto* caliber = data ? field<Unreal::FByteProperty>(data->GetStruct().Get(), ammo_caliber_name) : nullptr;
+        if (!caliber || caliber->GetPropertyValueInContainer(data->ContainerPtrToValuePtr<void>(actor)) != rifle_caliber) return false;
+        return (ammo == find<Unreal::UClass>(rifle_fmj_path) && projectile == find<Unreal::UClass>(rifle_fmj_projectile)) ||
+            (ammo == find<Unreal::UClass>(rifle_incendiary_path) && projectile == find<Unreal::UClass>(rifle_incendiary_projectile));
     }
 
     struct ProjectileSnapshot
@@ -632,18 +746,25 @@ namespace
         if (!actor) return report(false, "guest_weapon_actor_not_equipped");
 
         const Unreal::FName use_name{STR("Use_Item_Primary")};
-        auto* action = find<Unreal::UFunction>(primary_path);
+        const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
+        auto* action = find<Unreal::UFunction>(nagant ? nagant_primary_path : primary_path);
         struct Parameters { bool held{}; double variance{}; } parameters;
         auto* held = input<Unreal::FBoolProperty>(action, STR("Held"), offsetof(Parameters, held));
         auto* variance = input<Unreal::FDoubleProperty>(action, STR("VarianceScaler"), offsetof(Parameters, variance));
         auto* proxy = field<Unreal::FObjectProperty>(actor, STR("InputIntercept"));
         if (!held || !variance || !proxy || object(actor, STR("InputIntercept")) ||
             actor->GetFunctionByNameInChain(use_name) != action || action->GetNumParms() != 2 ||
-            action->GetReturnProperty() || action->GetParmsSize() != sizeof(Parameters))
+            action->GetReturnProperty() || action->GetParmsSize() != sizeof(Parameters) ||
+            (nagant && (action->GetOuterPrivate() != context.weapon ||
+                action->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))))
             return report(false, "stock_guest_weapon_primary_schema_unavailable");
 
-        if (!boolean(actor, STR("Action_OnRelease"), false))
+        if (!boolean(actor, STR("Action_OnRelease"), nagant) || (nagant && (disarm || !nagant_shape(actor))))
             return report(false, "guest_weapon_release_mode_unqualified");
+        if (nagant && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
+            live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
+            !boolean(actor, STR("IsSeerOpen"), false)))
+            return report(false, "guest_weapon_primary_ineligible");
         if (!disarm &&
             (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
              !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
@@ -657,8 +778,10 @@ namespace
         const auto before = live_ammo->GetPropertyValueInContainer(actor);
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         auto* projectile = disarm ? nullptr : single_stock_projectile(actor);
-        if (!disarm && (before != stored || before < 2 || before > magazine->GetPropertyValueInContainer(actor) ||
-                        shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile))
+        const auto minimum = nagant ? 1 : 2;
+        if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
+                        shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
+                        (nagant && !nagant_round(actor, mounted_ammo(actor), projectile))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
         Unreal::FWeakObjectPtr held_actor;
@@ -678,7 +801,8 @@ namespace
 
         Inventory after;
         if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != actor ||
-            !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false))
+            !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
+            (nagant && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
             return report(false, "mutation_unverified_guest_weapon_release", before);
         const auto remaining = live_ammo->GetPropertyValueInContainer(actor);
         if (disarm) return report(true, "disarmed", before, remaining);
@@ -732,33 +856,74 @@ namespace
         });
     }
 
-    int reload(const Lua& lua, const Context& context, const Inventory& inventory)
+    bool mounted_payload_matches(Unreal::UObject* actor, const Inventory& inventory)
+    {
+        auto* actor_field = field<Unreal::FStructProperty>(actor, STR("DataStruct"));
+        auto* row_field = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        auto* type = find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+        return type && actor_field && row_field && actor_field->GetStruct().Get() == type &&
+            row_field->GetStruct().Get() == type && actor_field->Identical(actor_field->ContainerPtrToValuePtr<void>(actor),
+                row_field->ContainerPtrToValuePtr<void>(inventory.item));
+    }
+
+    bool select_incendiary(Unreal::UObject* actor, const Inventory& inventory, Unreal::UClass* ammo)
+    {
+        auto* fn = find<Unreal::UFunction>(change_ammo_path);
+        auto* handle = input<Unreal::FStructProperty>(fn, STR("InputPin"), 0);
+        auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* defaults = ammo->GetClassDefaultObject().Get();
+        auto* ammo_handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
+        auto* caliber = field<Unreal::FByteProperty>(defaults, STR("Caliber"));
+        auto* table = field<Unreal::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* name = field<Unreal::FNameProperty>(handle_type, STR("RowName"));
+        auto* expected_table = find<Unreal::UObject>(ammo_table_path);
+        const Unreal::FName change_name{STR("ChangeAmmoType")};
+        const Unreal::FName incendiary{STR("30-06_Incendiary"), Unreal::FNAME_Find};
+        if (!fn || fn->GetOuterPrivate() != find<Unreal::UClass>(weapon_base_path) ||
+            actor->GetFunctionByNameInChain(change_name) != fn || fn->GetNumParms() != 1 || fn->GetReturnProperty() ||
+            fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !handle || !handle_type || handle->GetStruct().Get() != handle_type || fn->GetParmsSize() != handle->GetSize() ||
+            !defaults || defaults->GetClassPrivate() != ammo || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            !ammo_handle || ammo_handle->GetStruct().Get() != handle_type || !caliber ||
+            caliber->GetPropertyValueInContainer(defaults) != rifle_caliber || !table || !name || !live(expected_table) ||
+            incendiary.IsNone() || incendiary.ToString() != STR("30-06_Incendiary") ||
+            !mounted_payload_matches(actor, inventory)) return false;
+        const auto* row = ammo_handle->ContainerPtrToValuePtr<void>(defaults);
+        if (table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row)) != expected_table ||
+            name->GetPropertyValueInContainer(row) != incendiary) return false;
+        // Stock ChangeAmmoType writes only the held weapon and its owning pawn's selected equipment row.
+        auto* params = handle->AllocateAndInitializeValue();
+        if (!params) return false;
+        handle->CopyCompleteValue(params, row);
+        actor->ProcessEvent(fn, params);
+        handle->DestroyAndFreeValue(params);
+        return true;
+    }
+
+    int reload(const Lua& lua, const Context& context, Inventory inventory)
     {
         auto* actor = equipped(context, inventory);
         if (!actor) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
+        const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
         if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !boolean(actor, STR("SingleReload"), false) || !boolean(actor, STR("UseEatherAsAmmo"), false))
+            !boolean(actor, STR("SingleReload"), nagant) || !boolean(actor, STR("UseEatherAsAmmo"), false) ||
+            (nagant && (!nagant_shape(actor) || !boolean(actor, STR("ReloadInput"), false) ||
+                !mounted_payload_matches(actor, inventory))))
             return reload_proof(lua, false, "guest_weapon_reload_ineligible");
 
         auto* rounds = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         auto* capacity = field<Unreal::FIntProperty>(actor, STR("MagSize"));
-        auto* current_ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
-        auto* ammo_type = current_ammo ? current_ammo->GetStruct().Get() : nullptr;
-        auto* reserve_type = field<Unreal::FClassProperty>(ammo_type, STR("Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"));
         auto* update = find<Unreal::UFunction>(update_mag_path);
         const Unreal::FName update_name{STR("Update_Mag")};
-        if (!rounds || !capacity || !ammo_type || ammo_type != find<Unreal::UScriptStruct>(ammo_type_path) ||
-            !reserve_type || !update || actor->GetFunctionByNameInChain(update_name) != update ||
+        if (!rounds || !capacity || !update || actor->GetFunctionByNameInChain(update_name) != update ||
             update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty())
             return reload_proof(lua, false, "stock_guest_weapon_reload_schema_unavailable");
 
-        auto* ammo_data = current_ammo->ContainerPtrToValuePtr<void>(actor);
-        auto* ammo_class = static_cast<Unreal::UClass*>(
-            reserve_type->GetObjectPropertyValue(reserve_type->ContainerPtrToValuePtr<void>(ammo_data)));
+        auto* ammo_class = mounted_ammo(actor);
         AmmoStackSchema stack_schema;
-        if (!stack_schema.read(ammo_class, inventory))
+        if (!stack_schema.read(ammo_class, inventory) || (nagant && !nagant_round(actor, ammo_class, single_stock_projectile(actor))))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
 
         const auto before = rounds->GetPropertyValueInContainer(actor);
@@ -772,10 +937,29 @@ namespace
             return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
         if (before == cap)
             return reload_proof(lua, false, "magazine_full", before, before, reserve_before, reserve_before);
+        bool change_to_incendiary = false;
+        if (nagant && before == 0 && reserve_before == 0 && ammo_class == find<Unreal::UClass>(rifle_fmj_path))
+        {
+            auto* incendiary_class = find<Unreal::UClass>(rifle_incendiary_path);
+            if (incendiary_class && find<Unreal::UClass>(rifle_incendiary_projectile))
+            {
+                if (!snapshot_reserve(context, inventory, incendiary_class, stacks, reserve_before))
+                    return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
+                if (reserve_before > 0)
+                {
+                    if (!stack_schema.read(incendiary_class, inventory) || stack_schema.unit_value != 12 ||
+                        stack_schema.unit_weight != 0.014)
+                        return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable", before, before);
+                    ammo_class = incendiary_class;
+                    change_to_incendiary = true;
+                }
+            }
+        }
         if (reserve_before == 0)
             return reload_proof(lua, false, "no_matching_guest_ammo", before, before, 0, 0);
 
-        const auto transferred = std::min(cap - before, reserve_before);
+        // The scoped Nagant loads one chambered round per stock single-round step.
+        const auto transferred = nagant ? 1 : std::min(cap - before, reserve_before);
         auto needed = transferred;
         for (auto& stack : stacks)
         {
@@ -787,7 +971,28 @@ namespace
         if (needed != 0 || !ownership_current(context))
             return reload_proof(lua, false, "guest_weapon_reload_precondition_changed", before, before, reserve_before, reserve_before);
 
-        // Publish the detached reserve and magazine in one game-thread turn before any stock callback.
+        if (change_to_incendiary)
+        {
+            const Unreal::FWeakObjectPtr held_actor{actor};
+            if (!select_incendiary(actor, inventory, ammo_class))
+                return reload_proof(lua, false, "stock_guest_weapon_ammo_switch_unqualified", before, before, reserve_before);
+            Inventory selected;
+            std::vector<ReserveStack> selected_stacks;
+            std::int32_t selected_total{};
+            if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, selected).empty() ||
+                equipped(context, selected) != actor || rounds->GetPropertyValueInContainer(actor) != before ||
+                selected.ammo->GetPropertyValueInContainer(selected.item) != before ||
+                mounted_ammo(actor) != ammo_class || !nagant_round(actor, ammo_class, single_stock_projectile(actor)) ||
+                !mounted_payload_matches(actor, selected) ||
+                !snapshot_reserve(context, selected, ammo_class, selected_stacks, selected_total) || selected_total != reserve_before ||
+                !std::ranges::equal(stacks, selected_stacks, [](const ReserveStack& first, const ReserveStack& second) {
+                    return first.guid == second.guid && first.index == second.index && first.units == second.units;
+                }))
+                return reload_proof(lua, false, "mutation_unverified_guest_weapon_ammo_switch", before, -1, reserve_before);
+            inventory = selected;
+        }
+
+        // Publish the verified detached reserve and magazine in one game-thread turn.
         const auto refilled = before + transferred;
         Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
         for (auto it = stacks.rbegin(); it != stacks.rend(); ++it)
@@ -817,6 +1022,7 @@ namespace
         std::int32_t reserve_after{};
         std::vector<ReserveStack> remaining_stacks;
         if (observed != refilled || after.ammo->GetPropertyValueInContainer(after.item) != observed ||
+            (nagant && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
             !snapshot_reserve(context, after, ammo_class, remaining_stacks, reserve_after) ||
             reserve_after != reserve_before - transferred)
             return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_commit", before, observed, reserve_before);
@@ -862,7 +1068,10 @@ namespace
         }
         if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
         if (!inventory.item) return fail("owned_guest_weapon_guid_required");
-        context.weapon = qualified_weapon(inventory.row_class(inventory.item));
+        auto* row_class = inventory.row_class(inventory.item);
+        context.weapon = qualified_weapon(row_class);
+        if constexpr (operation == Operation::Equip || operation == Operation::Inspect)
+            if (!context.weapon) context.weapon = qualified_camera(row_class);
         if (!context.weapon) return fail("guest_weapon_class_unqualified");
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
         if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);

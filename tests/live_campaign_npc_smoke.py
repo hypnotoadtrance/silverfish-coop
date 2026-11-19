@@ -1,4 +1,4 @@
-"""Observe natural CrossRoads Husk squads on a fresh headless loopback party."""
+"""Observe stock CrossRoads encounter squads on a fresh headless loopback party."""
 
 import argparse
 import asyncio
@@ -22,9 +22,11 @@ SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(LEVEL) + r"AI_Spawner
 MARKERS = frozenset((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24,
                      26, 27, 28, 30, 31, 32, 34, 35, 37, 38, 40, 41))
 DATA = {
-    f"SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/{name}.{name}": size
-    for name, size in (("Husks_Scattered", 4), ("Husks_SwarmSmall", 3), ("Husks_SwarmLarge", 5))
+    "husk": ({"stock_initial", "stock_refresh"}, "NPC_Zomb_01_C",
+             {"Husks_Scattered": 4, "Husks_SwarmSmall": 3, "Husks_SwarmLarge": 5}),
+    "flayer": ({"stock_antfarm"}, "NPC_Flayer_C", {"Flayers": 2}),
 }
+SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
 
 
 def status(run: Path) -> dict:
@@ -103,16 +105,18 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         return None
 
 
-def stock_cohort(report: dict | None, replicate: bool) -> bool:
-    if not report or report["stage"] not in {"stock_initial", "stock_refresh"}:
+def stock_cohort(report: dict | None, replicate: bool, family: str = "husk") -> bool:
+    stages, actor, squads = DATA[family]
+    if not report or report["stage"] not in stages:
         return False
     source = SPAWNER.fullmatch(report["spawner"])
     members = report["members"]
-    return bool(source and int(source.group(1)) in MARKERS and report["data"] in DATA
-                and 0 < report["cohort"] <= DATA[report["data"]]
+    maximum = next((size for name, size in squads.items() if report["data"] == f"{SQUAD_PREFIX}{name}.{name}"), 0)
+    return bool(source and int(source.group(1)) in MARKERS
+                and 0 < report["cohort"] <= maximum
                 and report["natural_calls"] >= report["receipts"] > 0
                 and len(set(members)) == len(members) == report["cohort"]
-                and all(name.startswith("NPC_Zomb_01_C " + LEVEL) for name in members)
+                and all(name.startswith(f"{actor} {LEVEL}{actor}_") for name in members)
                 and report["authority"] >= report["cohort"]
                 and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0
                 and report["replicated"] == (report["cohort"] if replicate else 0)
@@ -130,7 +134,8 @@ def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bo
 
 
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
-                   require_client_denial: bool, approach: bool = False) -> None:
+                   require_client_denial: bool, approach: bool = False, family: str = "husk",
+                   flayer_veto: bool = False, join_only: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
@@ -143,13 +148,23 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     cli = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     environment = dict(os.environ, SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1")
     for flag in ("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE", "SILVERFISH_COOP_NATIVE_NPC_TEST",
-                 "SILVERFISH_COOP_NATIVE_NPC_HOSTILE", "SILVERFISH_COOP_NATIVE_FIXTURES"):
+                 "SILVERFISH_COOP_NATIVE_NPC_HOSTILE", "SILVERFISH_COOP_NATIVE_FIXTURES",
+                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH",
+                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"):
         environment.pop(flag, None)
     if replicate:
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE"] = "1"
+    if family == "flayer":
+        environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
+        if replicate:
+            environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH"] = "1"
+        if flayer_veto:
+            environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
-    evidence = {"map": MAP, "mode": "replicated" if replicate else "observed", "approach_requested": approach}
+    evidence = {"map": MAP, "family": family, "mode": "replicated" if replicate else "observed",
+                "verification_scope": "join" if join_only else "encounter", "approach_requested": approach,
+                "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto}
     last_frames = {"host": None, "guest": None}
     client_history = {"frames": 0, "network_frames": 0, "max_local_authority": 0,
                       "max_local_begins": 0, "max_local_initializations": 0,
@@ -162,7 +177,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             if frame is None or (last_frames[viewer] and frame["sequence"] <= last_frames[viewer]["sequence"]):
                 continue
             last_frames[viewer] = frame
-            if viewer != "guest":
+            if viewer == "host":
+                if stock_cohort(frame, replicate, family):
+                    evidence.setdefault("first_host_cohort", frame)
                 continue
             client_history["frames"] += 1
             client_history["max_local_authority"] = max(client_history["max_local_authority"], frame["authority"])
@@ -229,7 +246,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
 
     def proved(server, client, snapshot):
         host_npcs, guest_npcs = snapshot["host"], snapshot["guest"]
-        if not paired(server, client) or not stock_cohort(host_npcs, replicate) or not guest_npcs:
+        if not paired(server, client) or not stock_cohort(host_npcs, replicate, family) or not guest_npcs:
             return False
         if replicate:
             return (client_replica(guest_npcs, host_npcs["cohort"], require_client_denial)
@@ -257,13 +274,22 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
                     "--native-events", "--native-guest", "--start-zone", MAP, *(("--fixtures",) if approach else ()))
         await wait("The CrossRoads host did not start", lambda server, _, __: server.get("state") == "hosting", 45)
-        invitation = await command("invite", *primary, "--name", "Husk canary guest", "--character", "Husk observer")
+        invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
+        if join_only:
+            def initial_join(server, client, snapshot):
+                return (paired(server, client) and snapshot["guest"] is not None
+                        and stock_cohort(snapshot["host"], replicate, family)
+                        and client.get("character_id") == invitation["character_id"])
+
+            _, _, joined = await wait(f"The guest did not finish joining the stock {family} world", initial_join)
+            evidence.update({"verified": True, "host": joined["host"], "guest": joined["guest"]})
+            return
         if approach:
             def ready(server, client, snapshot):
-                return paired(server, client) and stock_cohort(snapshot["host"], True) and approach_pair(server)
+                return paired(server, client) and stock_cohort(snapshot["host"], True, family) and approach_pair(server)
 
-            before, _, natural = await wait("No natural Husk cohort and enrolled pair appeared", ready)
+            before, _, natural = await wait(f"No stock {family} cohort and enrolled pair appeared", ready)
             evidence["before_approach"] = {"host": natural["host"], "guest": natural["guest"]}
             host_pawn, guest_pawn = approach_pair(before)
             target = natural["host"]["members"][0]
@@ -279,7 +305,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             server, client, snapshot = await wait("The approached cohort did not yield stock client replicas", approached, 45)
             evidence["approach"] = snapshot["host"]["approach"]
         else:
-            server, client, snapshot = await wait("No fixture-free stock Husk proof appeared", proved)
+            server, client, snapshot = await wait(f"No fixture-free stock {family} proof appeared", proved)
         if client.get("character_id") != invitation["character_id"]:
             raise AssertionError("The authenticated guest did not activate its invited character")
         evidence.update({"host": snapshot["host"], "guest": snapshot["guest"], "zone_epoch": server["zone_epoch"]})
@@ -306,6 +332,14 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         evidence["failure"] = str(failure)
         frames()
         evidence["failure_frames"] = last_frames
+        connection = {}
+        for viewer, run in (("host", host), ("guest", guest)):
+            current = status(run)
+            game = current.get("game", {})
+            connection[viewer] = {"service_state": current.get("state"), "link_connected": current.get("link_connected"),
+                                  **{field: game.get(field) for field in ("state", "sequence", "map",
+                                                                          "remote_clients", "server_connection")}}
+        evidence["failure_connections"] = connection
         raise
     finally:
         for process, target in reversed(launched):
@@ -338,18 +372,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True, help="root of an already prepared stage")
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
-    parser.add_argument("--replicate", action="store_true", help="enable the exact native Husk cohort replication canary")
+    parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
+    parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
+    parser.add_argument("--join-only", action="store_true", help="verify stock cohort start and guest map admission only")
+    parser.add_argument("--replicate", action="store_true", help="enable the exact native encounter cohort replication canary")
     parser.add_argument("--approach", action="store_true",
                         help="bring the paired pawns near a naturally spawned stock cohort after verification")
-    parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client Husk spawn veto")
+    parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
     if (options.require_client_denial or options.approach) and not options.replicate:
         parser.error("--require-client-denial and --approach require --replicate")
+    if options.flayer_veto and options.cohort != "flayer":
+        parser.error("--flayer-veto requires --cohort flayer")
+    if options.require_client_denial and options.cohort == "flayer" and not options.flayer_veto:
+        parser.error("--require-client-denial for Flayers requires --flayer-veto")
+    if options.join_only and (options.approach or options.require_client_denial):
+        parser.error("--join-only excludes encounter approach and spawn denial proof")
     if not 15 <= options.timeout <= 360:
         parser.error("--timeout must be between 15 and 360 seconds")
     if options.vanilla_saved and not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing directory")
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
-                         approach=options.approach))
+                         approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
+                         join_only=options.join_only))

@@ -1,6 +1,6 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
-from . import native_broker, native_wire_quest, native_rewards, party
+from . import native_broker, native_wire_quest, native_rewards, native_turret_photo, party
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -45,6 +45,9 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         return await native_wire_quest.start(host, bridge, actor)
     if target == native_wire_quest.QUEST_ID and verb == "native-quest-turnin":
         return await native_wire_quest.turn_in(host, bridge, actor)
+    if target == native_turret_photo.QUEST_ID and verb in ("native-quest-start", "native-quest-turnin"):
+        action = "native-turret-photo-start" if verb == "native-quest-start" else "native-turret-photo-turn-in"
+        return await native_turret_photo.advance(host, bridge, actor, action)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
     roles = host.roles()

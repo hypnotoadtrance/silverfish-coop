@@ -85,7 +85,7 @@ Use the same invitation workflow and the campaign name `crossings`. The invitati
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
 | `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
 | Guest `--native-guest-inventory-view` | The stock inventory key opens the guest's first native inventory page. Page Up and Page Down move the selection, Home twice confirms a supported equip, and End closes it. |
-| Guest `--native-guest-primary-input --native-guest-reload-input` | Routes the qualified SMG and Light Pistol inputs to the host. The stock primary path handles one shot per press. |
+| Guest `--native-guest-primary-input --native-guest-reload-input` | Routes the qualified SMG, Light Pistol, and scoped Nagant inputs to the host. The stock primary path handles one shot per press. |
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
 

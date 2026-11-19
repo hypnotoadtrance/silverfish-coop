@@ -44,7 +44,7 @@ async def wait(directory: Path, predicate, *, timeout=42) -> dict:
 
 async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: bool, require_movement: bool,
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
-                   enemy_bounty: bool = False) -> dict:
+                   enemy_bounty: bool = False, shared_enemy_loot: bool = False) -> dict:
     profile = f"bandit-{subject}-{uuid.uuid4().hex[:8]}"
     run = work / "campaigns" / profile / "run"
     guest_run = work / "clients" / profile / "run"
@@ -77,8 +77,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise RuntimeError(f"{arguments}: {reply}")
         return reply
 
-    async def combat_action(directory: Path, action: str, target: str | None = None) -> dict:
-        return await submit(directory, action, target=target)
+    async def combat_action(directory: Path, action: str, target: str | None = None, **options) -> dict:
+        return await submit(directory, action, target=target, **options)
 
     def accepted(action, reply):
         if reply.get("ok") is not True:
@@ -271,6 +271,37 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         bounty["permanent_count"], bounty["timed_count"], bounty["gear_count"], bounty["cache_unchanged"]) == (
                     observed["bounty_calls"], False, 0, 1, 0, 0, True
                 ), bounty
+            if shared_enemy_loot:
+                roll = accepted("bank the stock Bandit roll", await combat_action(
+                    run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
+                guid = roll["guid"]
+                assert (roll["killer"], roll["actor"], roll["quantity"], roll["claimed_by"]) == (
+                    invitation["character_id"], observed["ammo_actor"], observed["ammo_quantity"], None
+                ), roll
+                published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
+                    "native_enemy_loot_rolls", {}).get(guid) == roll)
+                assert published["gameplay_fresh"], published
+                repeated = accepted("repeat the bank request", await combat_action(
+                    run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
+                assert repeated == roll, repeated
+                accepted("place the host within stock pickup range", await combat_action(
+                    run, "native-enemy-loot-approach", f"host|{guid}"))
+                operation = uuid.uuid4().hex
+                claimed = accepted("claim the stock shells for the host", await combat_action(
+                    run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
+                assert claimed == dict(roll, claimed_by="host"), claimed
+                retry = accepted("replay the stock host claim", await combat_action(
+                    run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
+                assert retry == claimed, retry
+                refused = await combat_action(guest_run, "native-enemy-loot-claim", guid)
+                assert refused.get("ok") is False and refused.get("error") == "native_enemy_loot_already_claimed", refused
+                home = accepted("inspect the exact host inventory", await combat_action(run, "native-inventory-list"))["native_inventory"]
+                away = accepted("inspect the killer's separate inventory", await combat_action(guest_run, "native-inventory-list"))["native_inventory"]
+                row, = [item for item in home["items"] if item["guid"] == guid]
+                assert (row["class_path"], row["quantity"]) == (roll["class_path"], roll["quantity"]), row
+                assert all(item["guid"] != guid for item in away["items"]), away
+                evidence["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
+                                                       "duplicate_guest_claim": refused["error"]}
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:
@@ -295,7 +326,8 @@ async def main(args) -> None:
     for subject in subjects:
         await exercise(args.work.resolve(), subject, hostile=args.hostile, require_combat=args.require_combat,
                        require_movement=args.require_movement, require_damage=args.require_damage,
-                       enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty)
+                       enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty,
+                       shared_enemy_loot=args.shared_enemy_loot)
 
 
 if __name__ == "__main__":
@@ -308,9 +340,10 @@ if __name__ == "__main__":
     parser.add_argument("--require-damage", action="store_true")
     parser.add_argument("--enemy-loot", action="store_true", help="verify stock enemy loot attribution to the guest")
     parser.add_argument("--enemy-bounty", action="store_true", help="verify a detached Bounty perk against an empty host cache")
+    parser.add_argument("--shared-enemy-loot", action="store_true", help="check the shared typed roll and alternate member's single claim")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
-    args.enemy_loot = args.enemy_loot or args.enemy_bounty
+    args.enemy_loot = args.enemy_loot or args.enemy_bounty or args.shared_enemy_loot
     if args.enemy_loot and (args.subject != "guest" or args.hostile):
         parser.error("The stock shot and loot fixture uses a nonaggressive Bandit and --subject guest")
     if args.require_damage and not args.hostile:

@@ -928,9 +928,14 @@ namespace silverfish::shared_loot
 {
     bool qualify_escrow_owner(Address pawn, Address save, Address stock, EscrowOwner& owner)
     {
+        return qualify_escrow_owner_in_world(find<Unreal::UWorld>(world_path), pawn, save, stock, owner);
+    }
+
+    bool qualify_escrow_owner_in_world(Unreal::UWorld* world, Address pawn, Address save, Address stock, EscrowOwner& owner)
+    {
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening) return false;
         Context context;
-        context.world = find<Unreal::UWorld>(world_path);
+        context.world = world;
         if (!qualify_opener(pawn, save, stock, context).empty()) return false;
         owner = {context.world, context.pawn, context.save, context.stock};
         return true;

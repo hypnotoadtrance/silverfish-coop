@@ -466,7 +466,7 @@ class Bridge:
             if (len(fields) != 6 or fields[0] != "native-guest-primary-intent"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
                     or not 0 < (sequence := int(fields[1])) < 2**53
-                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol")
+                    or not valid_guid(fields[4]) or fields[5] not in ("smg", "light-pistol", "nagant-scoped")
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
                 continue
             events.append((sequence, *fields[2:]))
@@ -805,6 +805,13 @@ class Bridge:
                 elif fields[0] == "native-wire-board" and len(fields) == 8:
                     data["native_wire_board"] = dict(zip(("map", "pawn", "board", "quest", "state"), fields[1:6]),
                                                      sequence=int(fields[6]), open=int(fields[7]))
+                elif fields[0] == "native-turret-photo" and len(fields) == 16:
+                    photo = dict(zip(("action", "map", "pawn", "quest", "target", "camera"), fields[1:7]))
+                    photo["visibility"] = _finite(fields[7])
+                    photo["step_before"], photo["step_after"] = (None if part == "-" else int(part) for part in fields[8:10])
+                    balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
+                    photo.update(zip(balances, map(int, fields[10:])))
+                    data["native_turret_photo"] = photo
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
                 elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
@@ -827,6 +834,10 @@ class Bridge:
                         "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
                         "cache_unchanged": fields[10] == "1",
                     }
+                elif fields[0] == "native-enemy-loot-escrow" and len(fields) == 11:
+                    data["native_enemy_loot_escrow"] = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
+                                                            units=None if fields[7] == "-" else int(fields[7]),
+                                                            position=[_finite(axis) for axis in fields[8:11]])
                 elif fields[0] == "native-campaign-npc" and len(fields) == 10:
                     data["native_campaign_npc"] = {
                         "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
@@ -860,7 +871,7 @@ class Bridge:
                                                            "guest_distance": _finite(fields[6])}
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol"):
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol", "nagant-scoped"):
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],

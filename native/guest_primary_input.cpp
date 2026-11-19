@@ -61,6 +61,7 @@ namespace
     constexpr std::array weapons{
         Weapon{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C")},
         Weapon{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")},
+        Weapon{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C")},
     };
 
     template <typename T>

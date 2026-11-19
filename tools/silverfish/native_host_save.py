@@ -1,6 +1,7 @@
 """Pair an immutable, isolated Unreal save generation with a co-op checkpoint."""
 
 from hashlib import file_digest
+import math
 import os
 from pathlib import Path
 import re
@@ -107,6 +108,22 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     rolls = party.get("native_loot_rolls", {})
     if type(rolls) is not dict or any(type(roll) is not dict for roll in rolls.values()):
         raise CampaignFormatError("The campaign's native loot records are invalid")
+    enemy_rolls = party.get("native_enemy_loot_rolls", {})
+    if type(enemy_rolls) is not dict:
+        raise CampaignFormatError("The campaign's stock enemy drops are invalid")
+    members = {"host", *checkpoint["characters"]}
+    for guid, roll in enemy_rolls.items():
+        if (not valid_guid(guid) or type(roll) is not dict or roll.get("guid") != guid
+                or roll.get("map") != "/Game/Classes/Maps/PlaytestMap_01"
+                or roll.get("class_path") != "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
+                or type(roll.get("quantity")) is not int or not 3 <= roll["quantity"] <= 9
+                or not isinstance(roll.get("position"), list) or len(roll["position"]) != 3
+                or any(type(axis) not in (int, float) or not math.isfinite(axis) or abs(axis) > 10000000 for axis in roll["position"])
+                or roll.get("killer") not in members
+                or roll.get("claimed_by") is not None and (roll["claimed_by"] not in members or "escrow" in roll)
+                or roll.get("claimed_by") is None and (type(roll.get("escrow")) is not dict
+                                                       or roll["escrow"].get("map") != roll["map"])):
+            raise CampaignFormatError("A stock enemy drop has an invalid escrow or owner")
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
@@ -125,6 +142,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("The campaign's pending Copper Wire recipient or reward identity is invalid")
             used.update(items)
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
+            + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]
             + ([wire_quest["escrow"]] if wire_quest else []))
 

@@ -13,10 +13,10 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_dream, native_finite_shop,
+from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_dream, native_enemy_loot, native_finite_shop,
                native_gold, native_green, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
-               native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards,
+               native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_turret_photo,
                native_wipe_view, native_wire_board, party, wipe)
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
@@ -35,11 +35,11 @@ PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
-                        native_broker.INTERACT, native_wire_quest.PREFLIGHT,
+                        native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT, native_turret_photo.CAPTURE,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
-                        native_authored_pickup.ACTION,
+                        native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_consumable.ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -456,6 +456,8 @@ class Host:
         view["native_quests"] = self.party.get("native_quests", {})
         if rolls := self.party.get(native_loot.STATE_KEY):
             view[native_loot.STATE_KEY] = {key: native_loot.public_roll(roll) for key, roll in rolls.items()}
+        if rolls := self.party.get(native_enemy_loot.STATE_KEY):
+            view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
         if pending := pending_cube(self.party):
             cube, itinerary = pending
             view["pending_item_travel"] = {"item": cube, "source": itinerary["source"],
@@ -1211,7 +1213,7 @@ class Host:
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
-            if native_gold.valid_guid(equipped.get("guid")) and equipped.get("kind") in ("smg", "light-pistol"):
+            if native_gold.valid_guid(equipped.get("guid")) and equipped.get("kind") in ("smg", "light-pistol", "nagant-scoped"):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
         return {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
                 "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
@@ -1293,6 +1295,12 @@ class Host:
                 if target is not None:
                     raise party.RuleError("native_wire_quest_has_fixed_board")
                 result = await native_wire_quest.preflight(self, bridge, character)
+            elif action == native_turret_photo.PREFLIGHT:
+                if target is not None:
+                    raise party.RuleError("native_turret_photo_has_fixed_board")
+                result = await native_turret_photo.preflight(self, bridge, character)
+            elif action == native_turret_photo.CAPTURE:
+                result = await native_turret_photo.advance(self, bridge, character, action, target)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1301,6 +1309,8 @@ class Host:
                 result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
+            elif action == native_enemy_loot.CLAIM:
+                result = await native_enemy_loot.claim(self, bridge, character, target, request["operation_id"])
             else:
                 result = await native_quest.action(self, bridge, character, action, target)
         except (OSError, RuntimeError, ValueError) as error:
@@ -1792,6 +1802,13 @@ class Host:
                     self.party = candidate
                 elif action in native_guest_npc.HOST_ACTIONS:
                     result = await native_guest_npc.host_fixture(self, bridge, action, request.get("target"))
+                elif action == native_enemy_loot.BANK:
+                    result = await native_enemy_loot.bank(self, bridge, request.get("target"))
+                elif action == native_enemy_loot.APPROACH:
+                    result = await native_enemy_loot.approach(self, bridge, request.get("target"))
+                elif action == native_enemy_loot.CLAIM:
+                    result = await native_enemy_loot.claim(self, bridge, "host", request.get("target"),
+                                                          request.get("operation_id") or path.stem)
                 elif action == "native-campaign-npc-approach" and self.native_guest and self.fixtures:
                     target = request.get("target")
                     authority = self.last_game.get("native_campaign_npc", {})
@@ -1902,6 +1919,14 @@ class Host:
                     if request.get("target") is not None:
                         raise party.RuleError("native_wire_quest_has_fixed_board")
                     result = await native_wire_quest.preflight(self, bridge, "host")
+                elif action == native_turret_photo.PREFLIGHT:
+                    if request.get("target") is not None:
+                        raise party.RuleError("native_turret_photo_has_fixed_board")
+                    result = await native_turret_photo.preflight(self, bridge, "host")
+                elif action == native_turret_photo.CAPTURE:
+                    result = await native_turret_photo.advance(self, bridge, "host", action, request.get("target"))
+                elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:
+                    result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action == native_wire_quest.APPROACH:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_wire_quest.approach(self, bridge, actor)
@@ -2874,6 +2899,8 @@ class Client:
             timeout = 15
         if action == "native-quest-turnin" and target == native_wire_quest.QUEST_ID:
             timeout = 22
+        if action == native_turret_photo.CAPTURE or target == native_turret_photo.QUEST_ID:
+            timeout = 20
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
@@ -2907,7 +2934,7 @@ class Client:
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and kind in ("smg", "light-pistol"))
+                    and native_gold.valid_guid(guid) and kind in ("smg", "light-pistol", "nagant-scoped"))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
             try:

@@ -4,11 +4,12 @@ local transport = require("native_transport")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local bandit_class = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C"
+local shells = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ENEMY_LOOT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_NPC_TEST") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local watch
+local watch, escrow
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -35,7 +36,7 @@ function enemy_loot.clear()
     if watch and type(SilverfishClearNativeEnemyLootScope) == "function" then
         SilverfishClearNativeEnemyLootScope()
     end
-    watch = nil
+    watch, escrow = nil, nil
 end
 
 local function read(host)
@@ -46,6 +47,113 @@ local function read(host)
         if type(result[index]) == "boolean" then result[index] = result[index] and 1 or 0 end
     end
     return result
+end
+
+local function is_slot(slot)
+    return type(slot) == "string" and #slot == 39 and slot:match("^SFCoop_[0-9a-f]+$")
+end
+
+local function is_guid(guid)
+    return type(guid) == "string" and #guid == 32 and guid:match("^[0-9A-F]+$") and guid:find("[^0]")
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) <= 10000000
+end
+
+local function stash(state, phase, fields)
+    local host = participants(state, phase)
+    local bandit, slot, expected = fields[3], fields[4], fields[5]
+    local report = watch and watch.proof
+    if not valid(host) or #fields ~= 5 or not is_slot(slot) or not report or not same(state.world, watch.world)
+        or bandit ~= watch.name or not valid(watch.bandit) or report[1] ~= "stock_loot_observed" or report[9] ~= 1
+        or report[13] ~= expected or report[14] ~= shells then error("native_enemy_loot_roll_unavailable", 0) end
+    local ammo = StaticFindObject(expected:match("^%S+ (.+)$") or "")
+    if not valid(ammo) or not same(ammo:GetClass(), StaticFindObject(shells)) or not same(ammo:GetWorld(), state.world)
+        or not ammo:HasAuthority() or ammo:IsActorBeingDestroyed() or ammo:GetFullName() ~= expected
+        or type(ammo.Ammo) ~= "number" or ammo.Ammo ~= report[15] or ammo.Ammo < 3 or ammo.Ammo > 9 then
+        error("native_enemy_loot_exact_drop_unavailable", 0)
+    end
+    local at, units = ammo:K2_GetActorLocation(), ammo.Ammo
+    if not at or not finite(at.X) or not finite(at.Y) or not finite(at.Z) then error("native_enemy_loot_position_unavailable", 0) end
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
+    if not valid(api) or not valid(class) or api:DoesSaveGameExist(slot, 0)
+        or type(SilverfishCaptureNativeEnemyLootEscrow) ~= "function" or type(SilverfishVerifyNativeLootEscrow) ~= "function" then
+        error("native_enemy_loot_escrow_unavailable", 0)
+    end
+    local pool = api:CreateSaveGameObject(class)
+    if not valid(pool) then error("native_enemy_loot_escrow_unavailable", 0) end
+    local ok, reason, count, guid = SilverfishCaptureNativeEnemyLootEscrow(watch.bandit:GetAddress(), pool:GetAddress(), ammo:GetAddress(), 0)
+    if not ok then error(tostring(reason), 0) end
+    if count ~= 1 or not is_guid(guid) or not api:SaveGameToSlot(pool, slot, 0) then
+        error("mutation_unverified_enemy_loot_escrow_save", 0)
+    end
+    local restored = api:LoadGameFromSlot(slot, 0)
+    if not valid(restored) or not SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress()) then
+        error("mutation_unverified_enemy_loot_escrow_readback", 0)
+    end
+    ammo:SetActorEnableCollision(false)
+    ammo:SetActorHiddenInGame(true)
+    if ammo:GetActorEnableCollision() ~= false or ammo.bHidden ~= true then error("mutation_unverified_enemy_loot_retirement", 0) end
+    ammo:K2_DestroyActor()
+    escrow = {status = "captured", pawn = report[4], actor = expected, slot = slot, guid = guid, units = units,
+        at = {X = at.X, Y = at.Y, Z = at.Z}}
+    return "typed stock enemy ammunition escrowed"
+end
+
+local function claim(state, phase, fields)
+    local host, guest = participants(state, phase)
+    local name, slot, guid = fields[3], fields[4], fields[5]
+    local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
+    if #fields ~= 8 or not is_slot(slot) or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z)
+        or not valid(host) or type(SilverfishClaimNativeEnemyLootEscrow) ~= "function" then
+        error("native_enemy_loot_claim_unavailable", 0)
+    end
+    local pawn = host:GetFullName() == name and host or guest:GetFullName() == name and guest or nil
+    if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
+    local at, reach = pawn:K2_GetActorLocation(), pawn.InteractionRange
+    if not at or not finite(reach) or reach <= 0 or reach > 1000 or
+        (at.X - x)^2 + (at.Y - y)^2 + (at.Z - z)^2 > math.min(reach, 250)^2 then
+        error("native_enemy_loot_out_of_reach", 0)
+    end
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local pool = valid(api) and api:LoadGameFromSlot(slot, 0)
+    if not valid(pool) or not valid(pawn.Save) or not valid(host.Save) then error("native_enemy_loot_claim_unavailable", 0) end
+    local ok, status = SilverfishClaimNativeEnemyLootEscrow(pawn:GetAddress(), pawn.Save:GetAddress(),
+        host.Save:GetAddress(), pool:GetAddress(), guid)
+    if not ok then error(tostring(status), 0) end
+    escrow = {status = status, pawn = name, actor = "-", slot = slot, guid = guid}
+    return "typed stock enemy ammunition claim verified"
+end
+
+local function approach(state, phase, fields)
+    local host, guest = participants(state, phase)
+    local name, guid = fields[3], fields[4]
+    local x, y, z = tonumber(fields[5]), tonumber(fields[6]), tonumber(fields[7])
+    if #fields ~= 7 or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z) or not valid(host) then
+        error("native_enemy_loot_fixture_unavailable", 0)
+    end
+    local pawn = host:GetFullName() == name and host or guest:GetFullName() == name and guest or nil
+    if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
+    local before, facing = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
+    local reach = pawn.InteractionRange
+    if not finite(reach) or reach <= 0 or reach > 1000 or not before or not finite(before.Z) then
+        error("native_enemy_loot_fixture_unavailable", 0)
+    end
+    for _, offset in ipairs({{123, 0}, {-123, 0}, {0, 123}, {0, -123}}) do
+        local candidate = {X = x + offset[1], Y = y + offset[2], Z = math.max(z + 94, before.Z)}
+        if pawn:K2_TeleportTo(candidate, facing) then
+            local actual = pawn:K2_GetActorLocation()
+            if finite(actual.X) and finite(actual.Y) and finite(actual.Z)
+                and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - z)^2 <= math.min(reach, 250)^2 then
+                escrow = {status = "approached", pawn = name, guid = guid, actor = "-", slot = "-"}
+                return "stock enemy loot approach verified"
+            end
+            if not pawn:K2_TeleportTo(before, facing) then error("mutation_unverified_enemy_loot_fixture_rollback", 0) end
+        end
+    end
+    error("native_enemy_loot_fixture_no_clear_location", 0)
 end
 
 function enemy_loot.sync(state, phase)
@@ -62,6 +170,14 @@ end
 
 function enemy_loot.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-enemy-loot-bank" or action == "native-enemy-loot-claim" then
+        escrow = nil
+        return (action == "native-enemy-loot-bank" and stash or claim)(state, phase, fields)
+    end
+    if action == "native-enemy-loot-approach" then
+        escrow = nil
+        return approach(state, phase, fields)
+    end
     if action == "native-enemy-loot-clear" and #fields == 2 then
         enemy_loot.clear()
         return "stock enemy loot observer cleared"
@@ -100,14 +216,20 @@ function enemy_loot.command(fields, state, phase)
 end
 
 function enemy_loot.rows(state, phase, status_row)
-    if watch and watch.proof and phase == "hosting" and state.map == map and same(state.world, watch.world) then
-        local rows = {status_row("native-enemy-loot", map, watch.name, table.unpack(watch.proof, 1, 15))}
+    if phase ~= "hosting" or state.map ~= map then return {} end
+    local rows = {}
+    if watch and watch.proof and same(state.world, watch.world) then
+        rows[1] = status_row("native-enemy-loot", map, watch.name, table.unpack(watch.proof, 1, 15))
         if watch.proof.n == 23 then
             rows[#rows + 1] = status_row("native-enemy-bounty", map, watch.name, table.unpack(watch.proof, 16, 23))
         end
-        return rows
     end
-    return {}
+    if escrow then
+        local at = escrow.at
+        rows[#rows + 1] = status_row("native-enemy-loot-escrow", map, escrow.status, escrow.pawn, escrow.actor,
+            escrow.slot, escrow.guid, escrow.units or "-", at and at.X or "-", at and at.Y or "-", at and at.Z or "-")
+    end
+    return rows
 end
 
 return enemy_loot

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -43,8 +44,8 @@ def guest_pawn(state, character):
 
 
 async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, deferred: bool = False,
-                   board_input: bool = False) -> None:
-    turn_in = turn_in or deferred or board_input
+                   board_input: bool = False, nagant: bool = False) -> None:
+    turn_in = turn_in or deferred or board_input or nagant
     name = "wire-quest-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -55,6 +56,9 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
     host_run.mkdir(parents=True, exist_ok=True)
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
+    environment = dict(os.environ)
+    if nagant:
+        environment["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES"] = "1"
     processes = []
     clients = {}
     proof = {}
@@ -73,7 +77,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
     async def launch(kind, owner, label, *arguments):
         with (host_run / (label + ".txt")).open("wb") as output:
             process = await asyncio.create_subprocess_exec(*cli, kind, *owner, *arguments, stdout=output, stderr=output,
-                                                            creationflags=subprocess.CREATE_NO_WINDOW)
+                                                            creationflags=subprocess.CREATE_NO_WINDOW, env=environment)
         processes.append((process, owner))
         return process
 
@@ -146,6 +150,49 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
         assert (rifle["quantity"], ammo["quantity"]) == (1, 14), inventory
         return {"rifle": rifle, "ammo": ammo}
 
+    async def stock_weapon_input(which, guid):
+        fixture = (await action(profile, f"native-guest-{which}-input-fixture"))[f"native_guest_{which}_fixture"]
+        assert fixture["stock_wrappers"] == 2, fixture
+        if which == "primary":
+            assert fixture["guid"] == guid, fixture
+        for _ in range(22):
+            events = (await command("events", *profile, "--tail", "30"))["events"]
+            kind = f"native_guest_{which}_input"
+            entered = next((event for event in events if event.get("sequence") == fixture["sequence"]
+                            and event["event"] in (kind, kind + "_rejected")), None)
+            if entered:
+                assert entered["event"] == kind and entered["native_guest_weapon"]["guid"] == guid, entered
+                return entered["native_guest_weapon"]
+            await asyncio.sleep(.2)
+        raise RuntimeError(f"The Nagant's {which} input did not produce an authenticated receipt")
+
+    async def use_nagant(rewards, home_rewards):
+        await cross_exit(CITY, ("guest",))
+        guid = rewards["rifle"]["guid"]
+        ammo = rewards["ammo"]["guid"]
+        equipped = (await action(profile, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
+        assert equipped["status"] == "equipped" and equipped["actor_ammo"] == equipped["stored_ammo"] == 5, equipped
+        await wait(guest_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
+                   and (scope.get("kind"), scope.get("guid")) == ("nagant-scoped", guid))
+        stock = {"equipped": equipped, "fmj_shots": []}
+        proof["guest_nagant"] = stock
+        for remaining in range(5, 0, -1):
+            fired = await stock_weapon_input("primary", guid)
+            assert (fired["before"], fired["after"], fired["projectiles"]) == (remaining, remaining - 1, 1), fired
+            stock["fmj_shots"].append(fired)
+            await asyncio.sleep(1.3)
+        reload = await stock_weapon_input("reload", guid)
+        assert (reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (0, 1, 14, 13), reload
+        stock["incendiary_reload"] = reload
+        fired = await stock_weapon_input("primary", guid)
+        assert (fired["before"], fired["after"], fired["projectiles"]) == (1, 0, 1), fired
+        stock["incendiary_shot"] = fired
+        assert await rewards_for(campaign) == home_rewards
+        gear = (await action(profile, "native-inventory-list"))["native_inventory"]
+        round_stack, = [row for row in gear["items"] if row["guid"] == ammo]
+        assert round_stack["class_path"] == AMMO and round_stack["quantity"] == 13, round_stack
+        stock["detached_reserve"] = round_stack
+
     try:
         area = CITY if turn_in else BOROUGH
         zone_flags = (*flags, "--native-expanded-zones") if turn_in else flags
@@ -157,7 +204,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
         invite = await command("invite", *campaign, "--name", "Borough visitor", "--character", "Borough guest")
         main_character = invite["character_id"]
         clients[main_character] = guest_run
-        await launch("join", profile, "guest", "--headless", "--native-zones", "--invite", invite["invite_file"])
+        input_flags = ("--native-guest-primary-input", "--native-guest-reload-input") if nagant else ()
+        await launch("join", profile, "guest", "--headless", "--native-zones", "--invite", invite["invite_file"], *input_flags)
         await roster(area)
         if turn_in:
             await action(campaign, "native-authored-pickup-approach", "--target", "guest")
@@ -305,6 +353,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
             assert len(settlements) == 1 and settlements[0]["recipients"] == [late_character], settlements
             proof["deferred"]["single_settlement"] = settlements[0]
         proof["stock_restart"] = restored
+        if nagant:
+            await use_nagant(guest_rewards, host_rewards)
         proof["verified"] = True
     except BaseException as error:
         proof.update(verified=False, failure=str(error))
@@ -334,6 +384,9 @@ if __name__ == "__main__":
     options.add_argument("--turn-in", action="store_true")
     options.add_argument("--deferred", action="store_true", help="turn in while a second guest is offline, then verify delivery in City")
     options.add_argument("--board-input", action="store_true", help="accept and turn in through the authentic stock Interact binding")
+    options.add_argument("--nagant", action="store_true", help="equip the rewarded rifle and exercise its stock primary and reload inputs")
     args = options.parse_args()
+    if args.nagant and args.deferred:
+        options.error("The two-player Nagant exercise and deferred party exercise run separately")
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, args.turn_in, deferred=args.deferred,
-                         board_input=args.board_input))
+                         board_input=args.board_input, nagant=args.nagant))

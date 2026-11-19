@@ -43,6 +43,10 @@ namespace
     constexpr auto spawn_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnSquadFromData");
     constexpr auto data_class = STR("/Game/Classes/Libraries/DataAssets/Squads/SquadData.SquadData_C");
     constexpr auto npc_class = STR("/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C");
+    constexpr auto flayer_class = STR("/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C");
+    constexpr auto flayer_squad = STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Flayers.Flayers");
+    constexpr auto npc_controller = STR("/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C");
+    constexpr int max_flayers = 2;
     constexpr auto npc_base = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto initialize_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:InitializeAI");
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
@@ -67,7 +71,7 @@ namespace
         STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmLarge.Husks_SwarmLarge"),
     };
     constexpr std::array maximum_squad_sizes{4, 3, 5};
-    constexpr std::size_t max_scene_husks = 128;
+    constexpr std::size_t max_scene_npcs = 128;
 
     template<class T>
     T* find(const U::TCHAR* path)
@@ -294,16 +298,16 @@ namespace
     using Actors = std::vector<U::UObject*>;
     using Handles = std::vector<U::FWeakObjectPtr>;
 
-    bool scene_husks(U::UWorld* world, Actors& found)
+    bool scene_npcs(U::UWorld* world, const U::TCHAR* npc, Actors& found)
     {
-        auto* type = find<U::UClass>(npc_class);
+        auto* type = find<U::UClass>(npc);
         // The first stock call may still need to load the soft NPC class.
         if (!type) return true;
         U::UObjectGlobals::ForEachUObject([&](U::UObject* actor, int, int) {
             if (actor->GetClassPrivate() == type && in_level(actor, world)) found.push_back(actor);
-            return found.size() > max_scene_husks ? RC::LoopAction::Break : RC::LoopAction::Continue;
+            return found.size() > max_scene_npcs ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
-        return found.size() <= max_scene_husks;
+        return found.size() <= max_scene_npcs;
     }
 
     U::FObjectProperty* leader_property(U::UObject* spawner)
@@ -391,6 +395,14 @@ namespace
         U::FWeakObjectPtr last_actor, last_caller, last_script;
     };
 
+    struct Flayers
+    {
+        std::int64_t calls{}, receipts{}, spawn_denials{}, ai_denials{};
+        Observation latest;
+        ClientBirths client_births;
+        Counts counts;
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr world, driver;
@@ -399,6 +411,7 @@ namespace
         Observation latest;
         SavedSquad saved_squad;
         ClientBirths client_births;
+        Flayers flayers;
         Clock::time_point next_census{};
         Counts counts;
     } scope;
@@ -414,16 +427,26 @@ namespace
         std::string_view birth_failure{};
     } attempt;
 
+    struct FlayerLoad
+    {
+        U::FFrame* frame{};
+        U::FWeakObjectPtr world, antfarm, marker, squad, data;
+        Handles before, units;
+    } flayer_load;
+
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
         Hook::ERROR_ID};
     bool operate{};
+    bool publish_flayers{};
+    bool veto_flayer_spawns{};
 
     void update_scope(const Network& active)
     {
         if (scope.world.Get() == active.world && scope.driver.Get() == active.driver && scope.seat == active.seat) return;
         scope = {};
         attempt = {};
+        flayer_load = {};
         scope.world = active.world;
         scope.driver = active.driver;
         scope.seat = active.seat;
@@ -512,12 +535,17 @@ namespace
         auto* data = get_object(data_property, squad);
         receipt.data = data;
         receipt.stage = "stock_saved_squad_other_data";
-        if (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true)) return;
+        const bool flayers = exact(data, data_class) && data->GetPathName() == flayer_squad;
+        if (!bool_field(data, STR("ForceWander"), true) || (flayers
+            ? caller->Node() == find<U::UFunction>(saved_squad_sources.back()) : data_index(data) < 0)) return;
+        if (flayers) ++scope.flayers.calls;
 
         receipt.stage = "stock_saved_squad_members_unverified";
         U::FScriptArrayHelper units(units_property, units_property->ContainerPtrToValuePtr<void>(squad));
         const auto unit_count = units.Num();
-        if (unit_count <= 0 || static_cast<std::size_t>(unit_count) > max_scene_husks) return;
+        const auto maximum = flayers ? static_cast<std::size_t>(max_flayers) : max_scene_npcs;
+        if (unit_count <= 0 || static_cast<std::size_t>(unit_count) > maximum) return;
+        Handles qualified_units;
         for (int i = 0; i < unit_count; ++i)
         {
             auto* unit = get_object(unit_element, units.GetRawPtr(i));
@@ -525,33 +553,112 @@ namespace
             const auto* soft = unit_class->ContainerPtrToValuePtr<U::FSoftObjectPtr>(unit);
             const auto& path = soft->ToSoftObjectPath();
             const auto asset = path.GetAssetPathString();
-            if (!path.GetSubPathString().IsEmpty() || std::wstring_view{*asset} != npc_class) return;
+            if (!path.GetSubPathString().IsEmpty() || std::wstring_view{*asset} != (flayers ? flayer_class : npc_class)) return;
+            if (flayers)
+            {
+                auto* npc = field<U::FObjectProperty>(unit, STR("Npc"));
+                if (!npc || npc->GetPropertyClass().Get() != base || live(get_object(npc, unit)) || contains(qualified_units, unit)) return;
+                qualified_units.emplace_back(unit);
+            }
         }
 
         receipt.stage = "stock_saved_squad_observed";
-        if (!operate || active.seat != Seat::Client) return;
+        if (flayers && active.seat == Seat::Host && !flayer_load.frame && exact(object(active.instance, STR("SaveSlot_Ref")), save_class))
+        {
+            Actors before;
+            if (!scene_npcs(active.world, flayer_class, before)) return;
+            Handles original;
+            for (auto* actor : before) original.emplace_back(actor);
+            flayer_load = {&frame, active.world, antfarm, receiver, squad, data, std::move(original), std::move(qualified_units)};
+        }
+        if (active.seat != Seat::Client || !(flayers ? veto_flayer_spawns : operate)) return;
         call.PreventOriginalFunctionCall();
         if (call.OriginalFunctionCallPrevented())
         {
             ++receipt.denials;
             receipt.stage = "stock_saved_squad_denied";
+            if (flayers)
+            {
+                auto& result = scope.flayers;
+                ++result.spawn_denials;
+                if (network(active.world).seat != Seat::Client) ++result.client_births.early_spawn_denials;
+                result.latest = {receiver, data, {}, "stock_client_flayer_load_denied", 0};
+            }
         }
+    }
+
+    bool stock_npc_authority(U::UObject* actor, const U::TCHAR* type, U::UWorld* world)
+    {
+        return exact(actor, type) && in_level(actor, world) && byte_field(actor, STR("Faction")) == 6 &&
+            byte_field(actor, STR("Role")) == 3;
+    }
+
+    bool stock_npc_controller(U::UObject* actor, U::UWorld* world)
+    {
+        auto* controller = object(actor, STR("Controller"));
+        return exact(controller, npc_controller) && static_cast<U::AActor*>(controller)->GetWorld() == world &&
+            object(controller, STR("Pawn")) == actor && byte_field(controller, STR("Role")) == 3;
+    }
+
+    void observe_flayer_load(Iteration& call, U::UObject* receiver, U::FFrame& frame)
+    {
+        const auto observed = std::move(flayer_load);
+        flayer_load = {};
+        if (call.OriginalFunctionCallPrevented() || frame.Node() != find<U::UFunction>(load_squad_path)) return;
+        const auto active = network(U::Cast<U::UWorld>(observed.world.Get()));
+        auto* stock = observed.antfarm.Get();
+        auto* squad = observed.squad.Get();
+        auto* data = observed.data.Get();
+        if (active.seat != Seat::Host || !placed_spawner(receiver, active.world) || !in_level(stock, active.world) ||
+            object(stock, STR("GameInstance")) != active.instance || !exact(object(active.instance, STR("SaveSlot_Ref")), save_class) ||
+            !exact(squad, antfarm_squad_class) || object(squad, STR("Controller")) != stock || object(squad, STR("Data")) != data ||
+            !exact(data, data_class) || data->GetPathName() != flayer_squad) return;
+
+        Observation next{receiver, data, {}, "stock_flayer_links_unverified", 0};
+        Actors cohort;
+        const auto proof = [&] {
+            for (const auto& handle : observed.units)
+            {
+                auto* unit = handle.Get();
+                if (!exact(unit, antfarm_unit_class) || object(unit, STR("Controller")) != stock) return false;
+                auto* actor = object(unit, STR("Npc"));
+                if (!live(actor)) continue;
+                if (!stock_npc_authority(actor, flayer_class, active.world) || !bool_field(actor, STR("Wander"), true) ||
+                    !stock_npc_controller(actor, active.world) || contains(observed.before, actor) ||
+                    std::ranges::find(cohort, actor) != cohort.end()) return false;
+                cohort.push_back(actor);
+            }
+            Actors newborn;
+            if (cohort.empty() || !scene_npcs(active.world, flayer_class, newborn)) return false;
+            std::erase_if(newborn, [&](auto* actor) { return contains(observed.before, actor); });
+            return newborn.size() == cohort.size() && std::ranges::is_permutation(cohort, newborn);
+        };
+        if (proof())
+        {
+            ++scope.flayers.receipts;
+            for (auto* actor : cohort) next.cohort.emplace_back(actor);
+            next.stage = "stock_antfarm";
+            if (publish_flayers && Replication{}.apply(cohort)) next.replicated = static_cast<int>(cohort.size());
+        }
+        if (!next.cohort.empty() || scope.flayers.latest.cohort.empty()) scope.flayers.latest = std::move(next);
     }
 
     void prevent_replica_brain(Iteration& call, U::UObject* receiver, U::UFunction* function)
     {
-        if (!operate || !function || !receiver || call.OriginalFunctionCallPrevented()) return;
+        if ((!operate && !publish_flayers) || !function || !receiver || call.OriginalFunctionCallPrevented()) return;
         static const U::FName init_name{STR("InitializeAI")};
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         const auto name = function->GetFName();
         if ((name != init_name && name != perceive_name) ||
             function != find<U::UFunction>(name == init_name ? initialize_path : perceive_path) ||
-            function->GetReturnProperty() || !exact(receiver, npc_class) || byte_field(receiver, STR("Role")) != 1) return;
+            function->GetReturnProperty() || byte_field(receiver, STR("Role")) != 1) return;
+        const bool flayers = exact(receiver, flayer_class);
+        if (flayers ? !publish_flayers : (!operate || !exact(receiver, npc_class))) return;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
         if (active.seat != Seat::Client || !in_level(receiver, active.world)) return;
         update_scope(active);
         call.PreventOriginalFunctionCall();
-        if (call.OriginalFunctionCallPrevented()) ++scope.ai_denials;
+        if (call.OriginalFunctionCallPrevented()) ++(flayers ? scope.flayers.ai_denials : scope.ai_denials);
     }
 
     void prevent_client_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, const Network& active)
@@ -606,18 +713,22 @@ namespace
             inspect_saved_squad(call, receiver, frame);
             return;
         }
-        if (name == init_name && frame.Node() == find<U::UFunction>(initialize_path) && exact(receiver, npc_class) &&
-            byte_field(receiver, STR("Role")) == 3)
+        if (name == init_name && frame.Node() == find<U::UFunction>(initialize_path) && byte_field(receiver, STR("Role")) == 3)
         {
-            const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-            if (active.seat == Seat::Client && in_level(receiver, active.world))
+            const bool flayers = exact(receiver, flayer_class);
+            if (flayers || exact(receiver, npc_class))
             {
-                update_scope(active);
-                ++scope.client_births.local_initializations;
-                scope.client_births.last_actor = receiver;
-                auto* parent = frame.PreviousFrame();
-                scope.client_births.last_caller = parent ? parent->Object() : nullptr;
-                scope.client_births.last_script = parent ? parent->Node() : nullptr;
+                const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
+                if (active.seat == Seat::Client && in_level(receiver, active.world))
+                {
+                    update_scope(active);
+                    auto& births = flayers ? scope.flayers.client_births : scope.client_births;
+                    ++births.local_initializations;
+                    births.last_actor = receiver;
+                    auto* parent = frame.PreviousFrame();
+                    births.last_caller = parent ? parent->Object() : nullptr;
+                    births.last_script = parent ? parent->Node() : nullptr;
+                }
             }
         }
         prevent_replica_brain(call, receiver, frame.Node());
@@ -658,7 +769,7 @@ namespace
         }
         if (!local_pawn(director, active)) return;
         Actors before;
-        if (!scene_husks(active.world, before)) return;
+        if (!scene_npcs(active.world, npc_class, before)) return;
         Handles baseline;
         baseline.reserve(before.size());
         for (auto* existing : before) baseline.emplace_back(existing);
@@ -668,7 +779,13 @@ namespace
 
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
-        if (!hook_ready() || attempt.frame != &frame || attempt.spawner.Get() != receiver) return;
+        if (!hook_ready()) return;
+        if (flayer_load.frame == &frame && flayer_load.marker.Get() == receiver)
+        {
+            observe_flayer_load(call, receiver, frame);
+            return;
+        }
+        if (attempt.frame != &frame || attempt.spawner.Get() != receiver) return;
         const auto observed = std::move(attempt);
         attempt = {};
         if (call.OriginalFunctionCallPrevented()) return;
@@ -688,7 +805,7 @@ namespace
         {
             if (output) next.stage = "stock_count_unexpected";
         }
-        else if (!scene_husks(active.world, after))
+        else if (!scene_npcs(active.world, npc_class, after))
         {
             next.stage = "stock_husk_census_unavailable";
             after.clear();
@@ -711,17 +828,13 @@ namespace
             return;
         }
         if (!std::ranges::all_of(after, [&](U::UObject* actor) {
-            return exact(actor, npc_class) && in_level(actor, active.world) && byte_field(actor, STR("Faction")) == 6 &&
-                byte_field(actor, STR("Role")) == 3;
+            return stock_npc_authority(actor, npc_class, active.world);
         }))
         {
             next.stage = "stock_husk_authority_unverified";
         }
         else if (!std::ranges::all_of(after, [&](U::UObject* actor) {
-            auto* controller = object(actor, STR("Controller"));
-            return exact(controller, STR("/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C")) &&
-                static_cast<U::AActor*>(controller)->GetWorld() == active.world && object(controller, STR("Pawn")) == actor &&
-                byte_field(controller, STR("Role")) == 3;
+            return stock_npc_controller(actor, active.world);
         }))
         {
             next.stage = "stock_husk_controller_unverified";
@@ -743,32 +856,36 @@ namespace
         if (now < scope.next_census) return;
         scope.next_census = now + std::chrono::milliseconds(750);
         scope.counts = {};
+        scope.flayers.counts = {};
         auto* husk = find<U::UClass>(npc_class);
+        auto* flayer = find<U::UClass>(flayer_class);
         auto* antfarm = find<U::UClass>(antfarm_class);
         U::UObjectGlobals::ForEachUObject([&](U::UObject* object_ptr, int, int) {
             if (!live(object_ptr)) return RC::LoopAction::Continue;
             auto* type = object_ptr->GetClassPrivate();
-            if (type == husk && in_level(object_ptr, active.world))
+            if ((type == husk || type == flayer) && in_level(object_ptr, active.world))
             {
+                auto& counts = type == flayer ? scope.flayers.counts : scope.counts;
                 const auto role = byte_field(object_ptr, STR("Role"));
                 if (role == 3)
                 {
-                    ++scope.counts.authority;
+                    ++counts.authority;
                     if (bool_field(object_ptr, STR("bReplicates"), true) &&
                         bool_field(object_ptr, STR("bReplicateMovement"), true) && byte_field(object_ptr, STR("RemoteRole")) == 1)
-                        ++scope.counts.authority_network_ready;
+                        ++counts.authority_network_ready;
                 }
                 else if (role == 1)
                 {
-                    ++scope.counts.simulated;
-                    if (live(object(object_ptr, STR("Controller")))) ++scope.counts.simulated_controllers;
+                    ++counts.simulated;
+                    if (live(object(object_ptr, STR("Controller")))) ++counts.simulated_controllers;
                 }
-                else ++scope.counts.other;
+                else ++counts.other;
             }
             else if (type == antfarm && static_cast<U::AActor*>(object_ptr)->GetWorld() == active.world &&
                      object(object_ptr, STR("GameInstance")) == active.instance && live(object(object_ptr, STR("LoadedCell"))))
             {
                 ++scope.counts.antfarm_initialized;
+                ++scope.flayers.counts.antfarm_initialized;
             }
             return RC::LoopAction::Continue;
         });
@@ -782,31 +899,38 @@ namespace
 
     int report(const Lua& lua)
     {
-        if (!hook_ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        const auto arguments = lua.get_stack_size();
+        if (!hook_ready() || (arguments != 2 && arguments != 3) || !lua.is_integer(1) || !lua.is_bool(2) ||
+            (arguments == 3 && !lua.is_string(3))) return 0;
         const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
         const auto host = lua.get_bool();
+        const bool flayers = arguments == 3 && lua.get_string() == "flayer";
+        if (arguments == 3 && !flayers) return 0;
         const auto active = network(find<U::UWorld>(world_path));
         auto* director = find<U::UObject>(director_path);
         if (active.seat != (host ? Seat::Host : Seat::Client) || !exact_director(director, active) ||
             !expected || reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected) return 0;
         update_scope(active);
         census(active);
-        lua.set_integer(scope.receipts);
-        lua.set_string(scope.latest.stage);
-        push_name(lua, scope.latest.spawner.Get());
-        push_name(lua, scope.latest.data.Get());
-        lua.set_integer(static_cast<std::int64_t>(scope.latest.cohort.size()));
-        lua.set_integer(scope.latest.replicated);
-        lua.set_integer(scope.spawn_denials);
-        lua.set_integer(scope.ai_denials);
-        lua.set_integer(scope.natural_calls);
-        lua.set_integer(scope.counts.authority);
-        lua.set_integer(scope.counts.simulated);
-        lua.set_integer(scope.counts.other);
-        lua.set_integer(scope.counts.simulated_controllers);
-        lua.set_integer(scope.counts.antfarm_initialized);
+        const auto& latest = flayers ? scope.flayers.latest : scope.latest;
+        const auto& counts = flayers ? scope.flayers.counts : scope.counts;
+        const auto& births = flayers ? scope.flayers.client_births : scope.client_births;
+        lua.set_integer(flayers ? scope.flayers.receipts : scope.receipts);
+        lua.set_string(latest.stage);
+        push_name(lua, latest.spawner.Get());
+        push_name(lua, latest.data.Get());
+        lua.set_integer(static_cast<std::int64_t>(latest.cohort.size()));
+        lua.set_integer(latest.replicated);
+        lua.set_integer(flayers ? scope.flayers.spawn_denials : scope.spawn_denials);
+        lua.set_integer(flayers ? scope.flayers.ai_denials : scope.ai_denials);
+        lua.set_integer(flayers ? scope.flayers.calls : scope.natural_calls);
+        lua.set_integer(counts.authority);
+        lua.set_integer(counts.simulated);
+        lua.set_integer(counts.other);
+        lua.set_integer(counts.simulated_controllers);
+        lua.set_integer(counts.antfarm_initialized);
         std::string roster;
-        for (const auto& pointer : scope.latest.cohort)
+        for (const auto& pointer : latest.cohort)
         {
             if (auto* actor = pointer.Get(); live(actor) && in_level(actor, active.world))
             {
@@ -820,13 +944,13 @@ namespace
         lua.set_string(scope.saved_squad.stage);
         push_name(lua, scope.saved_squad.spawner.Get());
         push_name(lua, scope.saved_squad.data.Get());
-        lua.set_integer(scope.counts.authority_network_ready);
-        lua.set_integer(scope.client_births.local_begins);
-        lua.set_integer(scope.client_births.local_initializations);
-        lua.set_integer(scope.client_births.early_spawn_denials);
-        push_name(lua, scope.client_births.last_actor.Get());
-        push_name(lua, scope.client_births.last_caller.Get());
-        push_name(lua, scope.client_births.last_script.Get());
+        lua.set_integer(counts.authority_network_ready);
+        lua.set_integer(births.local_begins);
+        lua.set_integer(births.local_initializations);
+        lua.set_integer(births.early_spawn_denials);
+        push_name(lua, births.last_actor.Get());
+        push_name(lua, births.last_caller.Get());
+        push_name(lua, births.last_script.Get());
         return 27;
     }
 
@@ -844,6 +968,8 @@ namespace silverfish::campaign_npc
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || !env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") ||
             installed.load(std::memory_order_acquire)) return;
         operate = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE");
+        publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
+        veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             on_pre, {false, false, STR("SilverfishCoopNative"), STR("Qualify natural CrossRoads Husk squads")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
@@ -854,11 +980,12 @@ namespace silverfish::campaign_npc
             }, {false, false, STR("SilverfishCoopNative"), STR("Guard stock CrossRoads Husk replica brains")});
         callbacks[3] = Hook::RegisterProcessInternalPreCallback(
             [](Iteration& call, U::UObject* receiver, U::FFrame& frame, void*) {
-                if (!hook_ready() || !operate || !receiver || !frame.Node() || call.OriginalFunctionCallPrevented()) return;
+                if (!hook_ready() || (!operate && !veto_flayer_spawns) || !receiver || !frame.Node() ||
+                    call.OriginalFunctionCallPrevented()) return;
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
-                if ((name != spawn_name && name != load_name) || !exact(receiver, spawner_class)) return;
+                if ((name != load_name && (name != spawn_name || !operate)) || !exact(receiver, spawner_class)) return;
                 const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
                 if (active.seat != Seat::Client) return;
                 if (name == spawn_name) prevent_client_spawn(call, receiver, frame, active);
@@ -886,14 +1013,17 @@ namespace silverfish::campaign_npc
             }, {false, true, STR("SilverfishCoopNative"), STR("Release early CrossRoads load binding")});
         callbacks[6] = Hook::RegisterBeginPlayPreCallback(
             [](Iteration&, U::AActor* candidate) {
-                if (!hook_ready() || !exact(candidate, npc_class) || byte_field(candidate, STR("Role")) != 3) return;
+                if (!hook_ready()) return;
+                const bool flayers = exact(candidate, flayer_class);
+                if ((!flayers && !exact(candidate, npc_class)) || byte_field(candidate, STR("Role")) != 3) return;
                 const auto active = network(candidate->GetWorld(), true);
                 if (active.seat != Seat::Client || !in_level(candidate, active.world)) return;
                 update_scope(active);
-                ++scope.client_births.local_begins;
-                scope.client_births.last_actor = candidate;
-                scope.client_births.last_caller.Reset();
-                scope.client_births.last_script.Reset();
+                auto& births = flayers ? scope.flayers.client_births : scope.client_births;
+                ++births.local_begins;
+                births.last_actor = candidate;
+                births.last_caller.Reset();
+                births.last_script.Reset();
             }, {false, false, STR("SilverfishCoopNative"), STR("Observe local CrossRoads Husk births")});
         if (callbacks[4] == Hook::ERROR_ID || callbacks[5] == Hook::ERROR_ID)
         {
@@ -933,6 +1063,7 @@ namespace silverfish::campaign_npc
         {
             scope = {};
             attempt = {};
+            flayer_load = {};
         }
     }
 }

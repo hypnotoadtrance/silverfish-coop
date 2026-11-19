@@ -9,8 +9,12 @@ GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "na
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
+CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
+CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 CLASS_PATHS = {"/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C",
-               "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"}
+               "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C",
+               "/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C",
+               CAMERA_PATH}
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, pistol_fixture=False,
@@ -83,7 +87,14 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError(reason)
 
         actor, stored = proof.get("actor_ammo"), proof.get("stored_ammo")
-        if operation == "seed-ammo":
+        camera = proof.get("status") in CAMERA_READBACK_STATES
+        if camera:
+            status = proof["status"]
+            if ((operation != "inspect" and (operation != "equip" or status != "camera_equipped"))
+                    or type(stored) is not int or stored not in (-1, 0)
+                    or type(actor) is not int or actor != (stored if status == "camera_equipped" else -1)):
+                raise RuntimeError("Native guest stock camera equipment did not verify")
+        elif operation == "seed-ammo":
             if proof.get("status") not in ("seeded", "present"):
                 raise RuntimeError("The stock guest reserve fixture did not verify the exact ammo GUID")
         elif (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
@@ -102,7 +113,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
                 raise RuntimeError("Stock reserve ammunition did not move exactly into the guest magazine")
 
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        result = {"native_guest_weapon": proof}
+        result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
         if bandit_fixture is not None:
             aim = snapshot.get("native_bandit_aim", {})
             if (aim.get("map"), aim.get("bandit"), aim.get("pawn")) != (source, bandit_fixture, pawn):

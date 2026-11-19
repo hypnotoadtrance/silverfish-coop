@@ -6,6 +6,11 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local smg_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
 local pistol_path = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
+local weapon_kinds = {
+    [smg_path] = "smg",
+    [pistol_path] = "light-pistol",
+    ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = "nagant-scoped",
+}
 local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -32,8 +37,7 @@ local function equipped_guid(pawn, save)
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
-    local kind = class_name == smg_path and "smg" or class_name == pistol_path and "light-pistol" or nil
-    return guid:find("[^0]") and guid or nil, kind
+    return guid:find("[^0]") and guid or nil, weapon_kinds[class_name]
 end
 
 function guest_weapon.command(fields, state, phase)

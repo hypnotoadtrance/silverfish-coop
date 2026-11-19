@@ -1,4 +1,5 @@
 #include "loot_escrow.hpp"
+#include "enemy_loot.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -326,6 +327,7 @@ namespace
         }
     };
 
+    template <bool enemy>
     int capture(const Lua& lua)
     {
         std::array<Address, 4> arguments{};
@@ -334,7 +336,13 @@ namespace
         const std::array addresses{arguments[2], arguments[3]};
         Owner owner;
         std::array<Unreal::UObject*, 2> actors{};
-        if (!silverfish::shared_loot::verified_escrow_roll(arguments[0], addresses, owner, actors, false))
+        const auto ticket = [&](bool consume) {
+            if constexpr (enemy)
+                return !addresses[1] && silverfish::native_enemy_loot::verified_ammo_roll(
+                    arguments[0], addresses[0], owner, actors[0], consume);
+            return silverfish::shared_loot::verified_escrow_roll(arguments[0], addresses, owner, actors, consume);
+        };
+        if (!ticket(false))
             return result(lua, false, "native_loot_verified_roll_unavailable");
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
@@ -374,7 +382,7 @@ namespace
         // Revalidate the live ticket after conversion. Consuming it is the
         // final non-Lua step so the same crate cannot produce a second escrow.
         if (rows.Num() != count || !qualified_escrow(inventory, scratch, rows) ||
-            !silverfish::shared_loot::verified_escrow_roll(arguments[0], addresses, owner, actors, true))
+            !ticket(true))
             return result(lua, false, "native_loot_escrow_roll_changed");
         append.committed = true;
         result(lua, true, "captured");
@@ -459,6 +467,7 @@ namespace
         return qualified;
     }
 
+    template <bool enemy>
     int claim(const Lua& lua)
     {
         std::array<Address, 4> arguments{};
@@ -466,8 +475,13 @@ namespace
             !read_addresses(lua, arguments, 4)) return result(lua, false, "native_loot_escrow_claim_unavailable");
         const auto guid = parse_guid(lua.get_string());
         if (guid == Guid{}) return result(lua, false, "native_loot_exact_escrow_guid_required");
+        const auto qualify = [&](Owner& context) {
+            if constexpr (enemy)
+                return silverfish::native_enemy_loot::qualify_escrow_claimant(arguments[0], arguments[1], arguments[2], context);
+            return silverfish::shared_loot::qualify_escrow_owner(arguments[0], arguments[1], arguments[2], context);
+        };
         Owner owner;
-        if (!silverfish::shared_loot::qualify_escrow_owner(arguments[0], arguments[1], arguments[2], owner))
+        if (!qualify(owner))
             return result(lua, false, "native_loot_exact_claimant_unavailable");
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
@@ -483,6 +497,13 @@ namespace
             if (inventory.identity(row) == guid) item = row;
         }
         if (!item) return result(lua, false, "native_loot_escrow_item_unavailable");
+        if constexpr (enemy)
+        {
+            auto* shell = find<Unreal::UClass>(STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"));
+            const auto count = inventory.ammo->GetPropertyValueInContainer(item);
+            if (!shell || source.Num() != 1 || inventory.klass(item) != shell || count < 3 || count > 9)
+                return result(lua, false, "native_enemy_escrow_ammunition_unqualified");
+        }
 
         Match recipient;
         if (!inspect_owner(inventory, owner.save, guid, recipient) || recipient.count > 1 ||
@@ -524,7 +545,7 @@ namespace
         Owner current;
         if (!inventory.identical(new_row, item) ||
             !backpack->Identical(escrow_before.get(), backpack->ContainerPtrToValuePtr<void>(escrow)) ||
-            !silverfish::shared_loot::qualify_escrow_owner(arguments[0], arguments[1], arguments[2], current) ||
+            !qualify(current) ||
             current.world != owner.world || current.pawn != owner.pawn)
             return result(lua, false, "native_loot_claim_payload_or_owner_unverified");
         Unreal::FScriptArrayHelper old(backpack, before.get());
@@ -548,8 +569,10 @@ namespace silverfish::loot_escrow
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         if (!enabled()) return;
-        lua.register_function("SilverfishCaptureNativeLootEscrow", capture);
+        lua.register_function("SilverfishCaptureNativeLootEscrow", capture<false>);
         lua.register_function("SilverfishVerifyNativeLootEscrow", verify_escrow);
-        lua.register_function("SilverfishClaimNativeLootEscrow", claim);
+        lua.register_function("SilverfishClaimNativeLootEscrow", claim<false>);
+        lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
+        lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);
     }
 }

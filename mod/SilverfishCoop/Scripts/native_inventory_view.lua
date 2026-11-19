@@ -10,9 +10,11 @@ local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTe
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
-local weapon_paths = {
+local equippable_paths = {
     ["/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
     ["/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = true,
+    ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = true,
+    ["/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"] = true,
 }
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
 local input_keys, held = {}, {}
@@ -154,7 +156,7 @@ local function page(fields)
         if slots[position] then error("The authenticated inventory view repeats a stock inventory position", 0) end
         slots[position] = true
         seen[guid] = true
-        local equippable = (source == "backpack" or source == "equipment") and weapon_paths[class] == true
+        local equippable = (source == "backpack" or source == "equipment") and equippable_paths[class] == true
         local name = item:gsub("_", " ")
         records[#records + 1] = {guid = guid, class = class, equippable = equippable,
             name = name, label = string.format("%s   %d x %s", sources[source], quantity, name)}

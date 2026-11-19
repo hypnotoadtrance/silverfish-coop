@@ -9,8 +9,19 @@ local fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLI
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local level = map .. ".CrossRoads_P:PersistentLevel."
-local member_prefix = "NPC_Zomb_01_C " .. level
-local husk_path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C"
+local types = {
+    husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
+        stages = { stock_initial = true, stock_refresh = true } },
+    flayer = { name = "NPC_Flayer_C", path = "/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C", limit = 2,
+        stages = { stock_antfarm = true } },
+}
+local view = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer" and "flayer" or "husk"
+
+local function read_family(pawn, host, family)
+    if family == "flayer" then return SilverfishReadCampaignNpc(pawn:GetAddress(), host, family) end
+    return SilverfishReadCampaignNpc(pawn:GetAddress(), host)
+end
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local trace_color = { R = 0, G = 0, B = 0, A = 0 }
@@ -67,15 +78,16 @@ local function paired(state, phase)
 end
 
 local function stock_member(world, local_pawn, name)
+    local profile = types[view]
+    local prefix = profile.name .. " " .. level
     if type(SilverfishReadCampaignNpc) ~= "function" or type(name) ~= "string" or #name > 512
-        or name:sub(1, #member_prefix) ~= member_prefix
-        or not name:sub(#member_prefix + 1):match("^NPC_Zomb_01_C_%d+$") then return end
-    -- Read the natural receipt fields. The bridge can append independent telemetry after the roster.
+        or name:sub(1, #prefix) ~= prefix
+        or not name:sub(#prefix + 1):match("^" .. profile.name .. "_%d+$") then return end
     local receipts, stage, spawner, data, size, replicated, _, _, natural_calls, _, _, _, _, _, roster =
-        SilverfishReadCampaignNpc(local_pawn:GetAddress(), true)
-    if type(receipts) ~= "number" or receipts < 1 or (stage ~= "stock_initial" and stage ~= "stock_refresh")
+        read_family(local_pawn, true, view)
+    if type(receipts) ~= "number" or receipts < 1 or not profile.stages[stage]
         or type(spawner) ~= "string" or spawner == "" or type(data) ~= "string" or data == ""
-        or type(size) ~= "number" or size < 1 or size > 5 or replicated ~= size
+        or type(size) ~= "number" or size < 1 or size > profile.limit or replicated ~= size
         or type(natural_calls) ~= "number" or natural_calls < receipts or type(roster) ~= "string" then return end
     local names, count = {}, 0
     for fullname in roster:gmatch("[^\n]+") do
@@ -85,8 +97,8 @@ local function stock_member(world, local_pawn, name)
     end
     if not names[name] or count ~= size then return end
     local cohort, target = {}, nil
-    for _, actor in ipairs(FindAllOf("NPC_Zomb_01_C") or {}) do
-        if exact(actor, husk_path) and same(actor:GetWorld(), world) and actor:HasAuthority()
+    for _, actor in ipairs(FindAllOf(profile.name) or {}) do
+        if exact(actor, profile.path) and same(actor:GetWorld(), world) and actor:HasAuthority()
             and not actor:IsActorBeingDestroyed() and names[actor:GetFullName()] then
             names[actor:GetFullName()] = nil
             cohort[#cohort + 1] = actor
@@ -203,7 +215,39 @@ function campaign_npc.command(fields, state, phase)
     local host_distance, guest_distance = place_pair(state.world, first, second, target, cohort)
     approach = { world = state.world:GetAddress(), member = fields[3], host = host.name, guest = guest.name,
         host_distance = host_distance, guest_distance = guest_distance }
-    return "verified headless pair placement near exact naturally spawned Husk"
+    return "verified headless pair placement near an exact stock " .. view
+end
+
+local function family_rows(state, pawn, host, status_row, family, topic)
+    local receipts, stage, spawner, stock_data, cohort, replicated, spawn_denials, ai_denials, natural_calls,
+        authority, simulated, other, simulated_controllers, antfarm, roster, saved_calls, saved_denials,
+        saved_stage, saved_spawner, saved_data, authority_network_ready, local_begins, local_initializations,
+        early_denials, last_actor, last_caller, last_script = read_family(pawn, host, family)
+    if type(receipts) ~= "number" then return {} end
+    local viewer = host and "host" or "client"
+    local rows = {
+        status_row(topic, state.map, viewer, receipts, stage, spawner ~= "" and spawner or "-",
+            stock_data ~= "" and stock_data or "-", cohort, replicated, spawn_denials),
+        status_row(topic .. "-census", state.map, viewer, natural_calls, authority, simulated, other,
+            simulated_controllers, ai_denials, antfarm),
+    }
+    if topic == "native-campaign-npc" and type(saved_calls) == "number" and type(saved_denials) == "number"
+        and type(saved_stage) == "string"
+        and type(saved_spawner) == "string" and type(saved_data) == "string" then
+        rows[#rows + 1] = status_row("native-campaign-npc-saved-squads", state.map, viewer, saved_calls, saved_denials,
+            saved_stage, saved_spawner ~= "" and saved_spawner or "-", saved_data ~= "" and saved_data or "-")
+    end
+    if type(authority_network_ready) == "number" and type(local_begins) == "number"
+        and type(local_initializations) == "number" and type(early_denials) == "number"
+        and type(last_actor) == "string" and type(last_caller) == "string" and type(last_script) == "string" then
+        rows[#rows + 1] = status_row(topic .. "-network", state.map, viewer, authority_network_ready,
+            local_begins, local_initializations, early_denials, last_actor ~= "" and last_actor or "-",
+            last_caller ~= "" and last_caller or "-", last_script ~= "" and last_script or "-")
+    end
+    for actor in roster:gmatch("[^\n]+") do
+        rows[#rows + 1] = status_row(topic .. "-member", state.map, viewer, actor)
+    end
+    return rows
 end
 
 function campaign_npc.rows(state, phase, status_row)
@@ -218,33 +262,12 @@ function campaign_npc.rows(state, phase, status_row)
         return {}
     end
     if type(SilverfishReadCampaignNpc) ~= "function" then return {} end
-    local receipts, stage, spawner, stock_data, cohort, replicated, spawn_denials, ai_denials, natural_calls,
-        authority, simulated, other, simulated_controllers, antfarm, roster, saved_calls, saved_denials,
-        saved_stage, saved_spawner, saved_data, authority_network_ready, local_begins, local_initializations,
-        early_denials, last_actor, last_caller, last_script = SilverfishReadCampaignNpc(pawn:GetAddress(), host)
-    if type(receipts) ~= "number" then return {} end
+    local rows = family_rows(state, pawn, host, status_row, view, "native-campaign-npc")
+    if #rows == 0 then return rows end
     active = state.world:GetAddress()
-    local viewer = host and "host" or "client"
-    local rows = {
-        status_row("native-campaign-npc", state.map, viewer, receipts, stage, spawner ~= "" and spawner or "-",
-            stock_data ~= "" and stock_data or "-", cohort, replicated, spawn_denials),
-        status_row("native-campaign-npc-census", state.map, viewer, natural_calls, authority, simulated, other,
-            simulated_controllers, ai_denials, antfarm),
-    }
-    if type(saved_calls) == "number" and type(saved_denials) == "number" and type(saved_stage) == "string"
-        and type(saved_spawner) == "string" and type(saved_data) == "string" then
-        rows[#rows + 1] = status_row("native-campaign-npc-saved-squads", state.map, viewer, saved_calls, saved_denials,
-            saved_stage, saved_spawner ~= "" and saved_spawner or "-", saved_data ~= "" and saved_data or "-")
-    end
-    if type(authority_network_ready) == "number" and type(local_begins) == "number"
-        and type(local_initializations) == "number" and type(early_denials) == "number"
-        and type(last_actor) == "string" and type(last_caller) == "string" and type(last_script) == "string" then
-        rows[#rows + 1] = status_row("native-campaign-npc-network", state.map, viewer, authority_network_ready,
-            local_begins, local_initializations, early_denials, last_actor ~= "" and last_actor or "-",
-            last_caller ~= "" and last_caller or "-", last_script ~= "" and last_script or "-")
-    end
-    for actor in roster:gmatch("[^\n]+") do
-        rows[#rows + 1] = status_row("native-campaign-npc-member", state.map, viewer, actor)
+    local secondary = view == "flayer" and "husk" or "flayer"
+    for _, row in ipairs(family_rows(state, pawn, host, status_row, secondary, "native-campaign-npc-" .. secondary)) do
+        rows[#rows + 1] = row
     end
     if host and approach and approach.world == active and state.local_pawn.name == approach.host
         and state.guests and #state.guests == 1 and state.guests[1].name == approach.guest then
