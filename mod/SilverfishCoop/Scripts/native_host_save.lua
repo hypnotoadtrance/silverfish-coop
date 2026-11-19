@@ -145,6 +145,8 @@ function host_save.prepare(state, phase, slot, carry_text)
     local instance, statics = owner(state)
     if not instance then error("The staged title menu does not have a canonical stock save", 0) end
     local previous = instance.SaveSlot_Ref
+    local old_autosave = instance.SaveAfterTransition
+    if type(old_autosave) ~= "boolean" then error("The stock transition autosave flag is unavailable", 0) end
     local old_carry, carry = eather_remainder(instance), tonumber(carry_text)
     if carry_text and (not carry or carry ~= carry or carry < 0 or carry >= 1 or old_carry == nil) then
         error("The stock Eather carry from the co-op save is invalid", 0)
@@ -164,6 +166,13 @@ function host_save.prepare(state, phase, slot, carry_text)
             instance.SaveSlot_Ref = previous
             error("The stock Eather carry did not survive restore", 0)
         end
+    end
+    instance.SaveAfterTransition = false
+    if instance.SaveAfterTransition ~= false then
+        instance.SaveAfterTransition = old_autosave
+        if carry ~= nil then instance.EatherRemainder = old_carry end
+        instance.SaveSlot_Ref = previous
+        error("The isolated co-op restore could not disable stock transition autosave", 0)
     end
     receipt = { kind = "prepared", slot = slot, instance = instance:GetAddress(), save = loaded:GetAddress(),
         summary = observed, carry = carry }

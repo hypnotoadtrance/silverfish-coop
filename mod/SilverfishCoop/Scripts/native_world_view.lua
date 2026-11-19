@@ -27,24 +27,7 @@ local weather_fields = {
     { "cloud_height_km", 3, 20 }, { "cloud_density_offset", 0, 1 },
 }
 
-local profiles = {}
-local function register_profile(level, index)
-    local map = "/Game/Classes/Maps/Maps_OverWorld/" .. level
-    local world = map .. "." .. level
-    local placed = world .. ":PersistentLevel."
-    profiles[map] = { map = map, world = "World " .. world,
-        day = "DayCycle_SunControler_BP_C " .. placed .. "DayCycle_SunControler_BP_C_" .. index,
-        sky = "BP_Sky_Sphere_Custom_C " .. placed .. "BP_Sky_Sphere_Custom_C_" .. index,
-        fog = "ExponentialHeightFog " .. placed .. "ExponentialHeightFog_0",
-        cloud = "VolumetricCloud " .. placed .. "VolumetricCloud_" .. index }
-end
-
--- These persistent levels have one stock day actor, its authored sky and fog,
--- and one volumetric cloud. Cistern only tracks time and has no stock sun view.
-register_profile("CrossRoads_P", 1)
-register_profile("Observitory_P", 0)
-register_profile("DeadBridge_P", 0)
-register_profile("City_01_P", 0)
+local profiles = require("authored_world_view")
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()

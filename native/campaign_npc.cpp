@@ -200,30 +200,52 @@ namespace
         U::FObjectProperty* finished_member{};
         U::FObjectProperty* finished_leader{};
 
-        bool bind(U::UFunction* function)
+        std::string_view bind_base(U::UFunction* function)
         {
             if (!function || function != find<U::UFunction>(spawn_path) ||
                 function->GetOuterPrivate() != find<U::UClass>(spawner_class) || function->GetNumParms() != 3 ||
-                function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
+                function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
+                return "stock_spawn_function_schema_unverified";
             data = field<U::FObjectProperty>(function, STR("Data"));
             count = field<U::FIntProperty>(function, STR("NpcsCount"));
+            if (!data || data->GetOffset_Internal() != 0 || !data->HasAnyPropertyFlags(U::CPF_Parm) ||
+                data->HasAnyPropertyFlags(U::CPF_OutParm) || data->GetPropertyClass().Get() != find<U::UClass>(data_class))
+                return "stock_spawn_data_schema_unverified";
+            if (!count || !count->HasAllPropertyFlags(U::CPF_Parm | U::CPF_OutParm) ||
+                count->HasAnyPropertyFlags(U::CPF_ReturnParm) || count->GetOffset_Internal() != 0x18 ||
+                count->GetOffset_Internal() + count->GetSize() > function->GetParmsSize())
+                return "stock_spawn_count_schema_unverified";
+            return {};
+        }
+
+        std::string_view bind_birth(U::UFunction* function)
+        {
             auto* base = find<U::UClass>(npc_base);
+            if (!base) return "stock_husk_birth_class_unavailable";
             member = actor_local(function, STR("Member"), 0x20, base);
             finished_member = actor_local(function, STR("CallFunc_FinishSpawningActor_ReturnValue"), 0x148, base);
             finished_leader = actor_local(function, STR("CallFunc_FinishSpawningActor_ReturnValue_1"), 0x170, base);
-            return data && data->GetOffset_Internal() == 0 &&
-                data->HasAnyPropertyFlags(U::CPF_Parm) && !data->HasAnyPropertyFlags(U::CPF_OutParm) &&
-                data->GetPropertyClass().Get() == find<U::UClass>(data_class) && count &&
-                count->HasAllPropertyFlags(U::CPF_Parm | U::CPF_OutParm) && !count->HasAnyPropertyFlags(U::CPF_ReturnParm) &&
-                count->GetOffset_Internal() == 0x18 && count->GetOffset_Internal() + count->GetSize() <= function->GetParmsSize() &&
-                member && finished_member && finished_leader;
+            if (!member) return "stock_husk_member_local_unverified";
+            if (!finished_member) return "stock_husk_follower_local_unverified";
+            if (!finished_leader) return "stock_husk_leader_local_unverified";
+            return {};
         }
 
         static U::FObjectProperty* actor_local(U::UFunction* function, const U::TCHAR* name, int offset, U::UClass* base)
         {
-            auto* local = field<U::FObjectProperty>(function, name);
-            return base && local && local->GetPropertyClass().Get() == base && local->GetOffset_Internal() == offset &&
-                !local->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm) ? local : nullptr;
+            // UE4SS's name-chain lookup ignores the FName number and aliases
+            // the two FinishSpawningActor locals. Match the actual field name.
+            U::FObjectProperty* match{};
+            for (auto* property : U::TFieldRange<U::FProperty>(function, U::EFieldIterationFlags::None))
+            {
+                if (property->GetOffset_Internal() != offset || property->GetFName().ToString() != name) continue;
+                auto* local = U::CastField<U::FObjectProperty>(property);
+                if (match || !local || local->GetPropertyClass().Get() != base || local->GetArrayDim() != 1 ||
+                    local->GetSize() != sizeof(void*) ||
+                    local->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm)) return nullptr;
+                match = local;
+            }
+            return match;
         }
 
         std::uint8_t* output_address(U::FFrame& frame) const
@@ -340,8 +362,10 @@ namespace
         U::FFrame* frame{};
         U::FWeakObjectPtr world, director, spawner, data;
         Handles before, births;
+        SpawnSchema schema{};
         int max_count{};
-        bool initial{}, birth_mismatch{};
+        bool initial{};
+        std::string_view birth_failure{};
     } attempt;
 
     std::atomic<bool> installed{};
@@ -367,20 +391,26 @@ namespace
     {
         auto* spawner = attempt.spawner.Get();
         auto* world = U::Cast<U::UWorld>(attempt.world.Get());
-        SpawnSchema schema;
-        if (!world || parent.Object() != spawner || !schema.bind(parent.Node()) || !exact(actor, npc_class) ||
+        if (!attempt.birth_failure.empty()) return;
+        if (!world || parent.Object() != spawner || !exact(actor, npc_class) ||
             !in_level(actor, world) || contains(attempt.before, actor) || !bool_field(actor, STR("Wander"), true))
         {
-            attempt.birth_mismatch = true;
+            attempt.birth_failure = "stock_husk_birth_context_unverified";
             return;
         }
+        const auto& schema = attempt.schema;
         auto* locals = parent.Locals();
         const bool leader = get_object(leader_property(spawner), spawner) == actor &&
             get_object(schema.finished_leader, locals) == actor;
         const bool follower = get_object(schema.member, locals) == actor && get_object(schema.finished_member, locals) == actor;
-        if (leader == follower || contains(attempt.births, actor) || attempt.births.size() >= static_cast<std::size_t>(attempt.max_count))
+        if (leader == follower)
         {
-            attempt.birth_mismatch = true;
+            attempt.birth_failure = "stock_husk_birth_locals_unmatched";
+            return;
+        }
+        if (contains(attempt.births, actor) || attempt.births.size() >= static_cast<std::size_t>(attempt.max_count))
+        {
+            attempt.birth_failure = "stock_husk_birth_count_unverified";
             return;
         }
         attempt.births.emplace_back(actor);
@@ -426,13 +456,22 @@ namespace
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
         if (!active.world || !exact_director(director, active) || !placed_spawner(receiver, active.world) ||
             byte_field(receiver, STR("Usage")) != (initial ? 0 : 3)) return;
-        SpawnSchema schema;
-        if (!schema.bind(frame.Node())) return;
         update_scope(active);
+        SpawnSchema schema;
+        if (const auto error = schema.bind_base(frame.Node()); !error.empty())
+        {
+            if (scope.latest.cohort.empty()) scope.latest = {receiver, {}, {}, error, 0};
+            return;
+        }
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
         const auto source = data_index(data);
         if (source < 0 || !bool_field(data, STR("ForceWander"), true)) return;
+        if (const auto error = schema.bind_birth(frame.Node()); !error.empty())
+        {
+            if (scope.latest.cohort.empty()) scope.latest = {receiver, data, {}, error, 0};
+            return;
+        }
 
         if (active.seat == Seat::Client)
         {
@@ -453,8 +492,8 @@ namespace
         Handles baseline;
         baseline.reserve(before.size());
         for (auto* existing : before) baseline.emplace_back(existing);
-        attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {},
-            maximum_squad_sizes[static_cast<std::size_t>(source)], initial, false};
+        attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {}, schema,
+            maximum_squad_sizes[static_cast<std::size_t>(source)], initial, {}};
     }
 
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
@@ -466,9 +505,9 @@ namespace
         const auto active = network(U::Cast<U::UWorld>(observed.world.Get()));
         auto* director = observed.director.Get();
         auto* data = observed.data.Get();
-        SpawnSchema schema;
+        const auto& schema = observed.schema;
         if (active.seat != Seat::Host || !exact_director(director, active) || !local_pawn(director, active) ||
-            !placed_spawner(receiver, active.world) || !schema.bind(frame.Node()) ||
+            !placed_spawner(receiver, active.world) || frame.Node() != find<U::UFunction>(spawn_path) ||
             data != get_object(schema.data, frame.Locals()) || data_index(data) < 0) return;
 
         Observation next{receiver, data, {}, "stock_count_unavailable", 0};
@@ -487,12 +526,12 @@ namespace
         else
         {
             std::erase_if(after, [&](auto* actor) { return contains(observed.before, actor); });
-            if (after.empty() || observed.birth_mismatch || after.size() != observed.births.size() ||
+            if (after.empty() || !observed.birth_failure.empty() || after.size() != observed.births.size() ||
                 static_cast<int>(after.size()) > count || !std::ranges::all_of(after, [&](auto* actor) {
                     return contains(observed.births, actor);
                 }))
             {
-                next.stage = "stock_husk_births_unverified";
+                next.stage = observed.birth_failure.empty() ? "stock_husk_births_unverified" : observed.birth_failure;
                 after.clear();
             }
         }

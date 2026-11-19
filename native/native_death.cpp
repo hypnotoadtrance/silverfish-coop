@@ -33,9 +33,13 @@
 #include "interaction_input.hpp"
 #include "authored_pickup.hpp"
 #include "broker_menu.hpp"
+#include "broker_input.hpp"
 #include "campaign_npc.hpp"
 #include "guest_primary_input.hpp"
 #include "guest_consumable.hpp"
+#include "guest_regen.hpp"
+#include "loot_crate_input.hpp"
+#include "enemy_loot.hpp"
 #include "shop_view.hpp"
 #include "nothing_return.hpp"
 #include "guest_npc.hpp"
@@ -1220,8 +1224,11 @@ namespace
             silverfish::native_interaction_input::uninstall_hooks();
             silverfish::native_authored_pickup::uninstall_hooks();
             silverfish::native_broker_menu::uninstall_hooks();
+            silverfish::native_broker_input::uninstall_hooks();
             silverfish::campaign_npc::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
+            silverfish::native_loot_crate_input::uninstall_hooks();
+            silverfish::native_enemy_loot::uninstall_hooks();
             silverfish::native_shop_view::uninstall_hooks();
             silverfish::native_nothing_return::uninstall_hooks();
             silverfish::shared_loot::uninstall_hooks();
@@ -1250,8 +1257,11 @@ namespace
             silverfish::native_interaction_input::install_hooks();
             silverfish::native_authored_pickup::install_hooks();
             silverfish::native_broker_menu::install_hooks();
+            silverfish::native_broker_input::install_hooks();
             silverfish::campaign_npc::install_hooks();
             silverfish::native_guest_primary_input::install_hooks();
+            silverfish::native_loot_crate_input::install_hooks();
+            silverfish::native_enemy_loot::install_hooks();
             silverfish::native_shop_view::install_hooks();
             silverfish::native_nothing_return::install_hooks();
             silverfish::shared_loot::install_hooks();
@@ -1321,9 +1331,13 @@ namespace
             silverfish::native_interaction_input::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_broker_menu::register_lua(lua);
+            silverfish::native_broker_input::register_lua(lua);
             silverfish::campaign_npc::register_lua(lua);
             silverfish::native_guest_primary_input::register_lua(lua);
             silverfish::native_guest_consumable::register_lua(lua);
+            silverfish::native_guest_regen::register_lua(lua);
+            silverfish::native_loot_crate_input::register_lua(lua);
+            silverfish::native_enemy_loot::register_lua(lua);
             silverfish::native_shop_view::register_lua(lua);
             silverfish::native_nothing_return::register_lua(lua);
             silverfish::native_black_stone::register_lua(lua);
@@ -1365,8 +1379,11 @@ namespace
                 silverfish::native_interaction_input::clear_scope();
                 silverfish::native_authored_pickup::clear_scope();
                 silverfish::native_broker_menu::clear_scope();
+                silverfish::native_broker_input::clear_scope();
                 silverfish::campaign_npc::clear_scope();
                 silverfish::native_guest_primary_input::clear_scope();
+                silverfish::native_loot_crate_input::clear_scope();
+                silverfish::native_enemy_loot::clear_scope();
                 silverfish::native_shop_view::clear_scope();
                 silverfish::native_nothing_return::clear_scope();
                 silverfish::native_black_stone::clear_scope();

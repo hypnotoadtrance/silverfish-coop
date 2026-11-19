@@ -28,10 +28,31 @@ namespace
     using Address = std::uintptr_t;
 
     constexpr auto owner = STR("SilverfishCoopNative");
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
-    constexpr auto shop_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_2");
+    struct Merchant
+    {
+        const Unreal::TCHAR* world;
+        const Unreal::TCHAR* actor;
+        const Unreal::TCHAR* data;
+    };
+
+    constexpr std::array merchants{
+        Merchant{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_2"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData"),
+        },
+        Merchant{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.Shop_BP_C_2"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/ScavBar_ShopData.ScavBar_ShopData"),
+        },
+        Merchant{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/BlacMarket_ShopData.BlacMarket_ShopData"),
+        },
+    };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
-    constexpr auto shop_data = STR("/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData");
     constexpr auto action_path = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C:SendInteractionToActor");
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
@@ -189,20 +210,35 @@ namespace
         auto* local_player_type = find<Unreal::UClass>(STR("/Script/Engine.LocalPlayer"));
         auto* scene_type = find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"));
         auto* shop_type = find<Unreal::UClass>(shop_class);
-        auto* world = find<Unreal::UWorld>(world_path);
-        auto* shop = find<Unreal::UObject>(shop_path);
-        auto* box = object_field(shop, STR("Box"));
-        auto* data = find<Unreal::UObject>(shop_data);
         if (!next.pawn_type || !next.controller_type || !next.connection_type || !local_player_type ||
-            !scene_type || !live(world) || !exact(shop, shop_type) || !live(data) ||
-            !exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")))) return false;
-
+            !scene_type || !shop_type) return false;
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
             if (address(object) != pawn_address) return RC::LoopAction::Continue;
             if (exact(object, next.pawn_type)) next.pawn = object;
             return RC::LoopAction::Break;
         });
-        auto* controller = object_field(next.pawn.Get(), STR("Controller"));
+        auto* pawn = next.pawn.Get();
+        if (!live(pawn)) return false;
+        auto* world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+        if (!live(world)) return false;
+
+        const Merchant* profile = nullptr;
+        const auto world_name = world->GetPathName();
+        for (const auto& merchant : merchants)
+        {
+            if (world_name == merchant.world)
+            {
+                profile = &merchant;
+                break;
+            }
+        }
+        if (!profile || find<Unreal::UWorld>(profile->world) != world) return false;
+        auto* shop = find<Unreal::UObject>(profile->actor);
+        auto* data = find<Unreal::UObject>(profile->data);
+        auto* box = object_field(shop, STR("Box"));
+        if (!exact(shop, shop_type) || !live(data) ||
+            !exact(box, find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")))) return false;
+        auto* controller = object_field(pawn, STR("Controller"));
         auto* player = object_field(controller, STR("Player"));
         auto* instance = object_field(world, STR("OwningGameInstance"));
         auto* driver = object_field(world, STR("NetDriver"));
@@ -329,9 +365,9 @@ namespace silverfish::native_shop_view
     {
         if (!enabled() || installed.load(std::memory_order_acquire)) return;
         callbacks[0] = Hook::RegisterProcessEventPreCallback(
-            event_pre, {false, false, owner, STR("Guard exact stock Observatory guest shop")});
+            event_pre, {false, false, owner, STR("Guard exact stock guest merchant")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
-            script_pre, {false, false, owner, STR("Capture exact stock Observatory guest interaction")});
+            script_pre, {false, false, owner, STR("Capture exact stock guest merchant interaction")});
         if (callbacks[0] == Hook::ERROR_ID || callbacks[1] == Hook::ERROR_ID)
         {
             uninstall_hooks();

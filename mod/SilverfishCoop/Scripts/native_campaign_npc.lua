@@ -1,17 +1,205 @@
 local campaign_npc = {}
+local guest_save = require("guest_save")
+local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") == "1"
+local fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+    and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
-local active
+local level = map .. ".CrossRoads_P:PersistentLevel."
+local member_prefix = "NPC_Zomb_01_C " .. level
+local husk_path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C"
+local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+local trace_color = { R = 0, G = 0, B = 0, A = 0 }
+local approach_radius, readback_tolerance = 4000, 60
+local active, approach
 
 local function valid(value)
-    return value and value:IsValid()
+    return value ~= nil and value ~= false and value:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function exact(object, path)
+    return valid(object) and same(object:GetClass(), StaticFindObject(path))
 end
 
 function campaign_npc.clear()
-    active = nil
+    active, approach = nil, nil
     if enabled and type(SilverfishClearCampaignNpc) == "function" then SilverfishClearCampaignNpc() end
+end
+
+local function controlled(detail, world, local_player)
+    local pawn, controller = detail and detail.pawn, detail and detail.controller_object
+    return exact(pawn, pawn_path) and exact(controller, controller_path)
+        and pawn:GetFullName() == detail.name and not pawn:IsActorBeingDestroyed()
+        and not controller:IsActorBeingDestroyed() and pawn:HasAuthority() and controller:HasAuthority()
+        and pawn:IsLocallyControlled() == local_player and controller:IsLocalController() == local_player
+        and same(pawn.Controller, controller) and same(controller.Pawn, pawn)
+        and same(pawn:GetWorld(), world) and same(controller:GetWorld(), world)
+end
+
+local function paired(state, phase)
+    local host = state.local_pawn
+    local guest = state.guests and #state.guests == 1 and state.guests[1]
+    if phase ~= "hosting" or state.map ~= map or not state.listening or state.server ~= false or state.clients ~= 1
+        or not valid(state.world) or not controlled(host, state.world, true)
+        or not same(host.controller_object, state.controller) or not controlled(guest, state.world, false)
+        or same(host.pawn, guest.pawn) or players.is_downed(host.pawn) ~= false
+        or not players.is_standing_guest(guest.pawn, guest.name) then return end
+    local driver, remote = state.world.NetDriver, guest.controller_object
+    local connection = remote.Player
+    local connection_class = StaticFindObject("/Script/Engine.NetConnection")
+    if not valid(driver) or not same(driver.World, state.world) or valid(driver.ServerConnection)
+        or not valid(connection) or not valid(connection_class) or not connection:IsA(connection_class)
+        or not same(connection.Driver, driver) or not same(connection.PlayerController, remote)
+        or not same(connection.OwningActor, remote) or (valid(remote.NetConnection) and not same(remote.NetConnection, connection))
+        or driver.ClientConnections:GetArrayNum() ~= 1 or not same(driver.ClientConnections[1], connection) then return end
+    local enrolled, saved = guest_save.exact_item_context(state, phase, guest.name)
+    if same(enrolled, guest.pawn) and same(saved, guest.pawn.Save) and not same(saved, host.pawn.Save) then
+        return host, guest
+    end
+end
+
+local function stock_member(world, local_pawn, name)
+    if type(SilverfishReadCampaignNpc) ~= "function" or type(name) ~= "string" or #name > 512
+        or name:sub(1, #member_prefix) ~= member_prefix
+        or not name:sub(#member_prefix + 1):match("^NPC_Zomb_01_C_%d+$") then return end
+    local receipt = table.pack(SilverfishReadCampaignNpc(local_pawn:GetAddress(), true))
+    if receipt.n ~= 15 or receipt[1] < 1 or (receipt[2] ~= "stock_initial" and receipt[2] ~= "stock_refresh")
+        or receipt[5] < 1 or receipt[5] > 5 or receipt[6] ~= receipt[5] or receipt[9] < receipt[1] then return end
+    local names, count = {}, 0
+    for fullname in receipt[15]:gmatch("[^\n]+") do
+        if names[fullname] then return end
+        names[fullname] = true
+        count = count + 1
+    end
+    if not names[name] or count ~= receipt[5] then return end
+    local cohort, target = {}, nil
+    for _, actor in ipairs(FindAllOf("NPC_Zomb_01_C") or {}) do
+        if exact(actor, husk_path) and same(actor:GetWorld(), world) and actor:HasAuthority()
+            and not actor:IsActorBeingDestroyed() and names[actor:GetFullName()] then
+            names[actor:GetFullName()] = nil
+            cohort[#cohort + 1] = actor
+            if actor:GetFullName() == name then target = actor end
+        end
+    end
+    if target and #cohort == count then return target, cohort end
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function point(value)
+    if value and finite(value.X) and finite(value.Y) and finite(value.Z) then
+        return { X = value.X, Y = value.Y, Z = value.Z }
+    end
+end
+
+local function rotation(value)
+    if value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) then
+        return { Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll }
+    end
+end
+
+local function distance(first, second)
+    return math.sqrt((first.X - second.X) ^ 2 + (first.Y - second.Y) ^ 2 + (first.Z - second.Z) ^ 2)
+end
+
+local function placement(pawn)
+    local capsule = pawn.CapsuleComponent
+    local half_height = valid(capsule) and same(capsule:GetOwner(), pawn) and capsule:GetScaledCapsuleHalfHeight()
+    local origin, facing = point(pawn:K2_GetActorLocation()), rotation(pawn:K2_GetActorRotation())
+    if origin and facing and finite(half_height) and half_height >= 20 and half_height <= 120 then
+        return { pawn = pawn, origin = origin, facing = facing, half_height = half_height }
+    end
+end
+
+local function floor_at(trace, player, anchor, x, y, ignored)
+    local top, bottom = anchor.Z + 420, anchor.Z - 450
+    local hit = {}
+    local found = trace:LineTraceSingle(player.pawn, { X = x, Y = y, Z = top }, { X = x, Y = y, Z = bottom },
+        0, false, ignored, 0, hit, true, trace_color, trace_color, 0)
+    hit = hit.OutHit or hit
+    if found ~= true then return end
+    local impact, normal = point(hit.ImpactPoint), point(hit.ImpactNormal)
+    local component = hit.Component and hit.Component:Get()
+    if impact and normal and normal.Z >= 0.75 and impact.Z < top - 1 and impact.Z >= bottom
+        and valid(component) and component:GetCollisionObjectType() == 0 then
+        return { X = x, Y = y, Z = impact.Z + player.half_height + 3 }
+    end
+end
+
+local function at(pawn, target, tolerance)
+    local current = point(pawn:K2_GetActorLocation())
+    return current and distance(current, target) <= tolerance and current
+end
+
+local function place_pair(world, host, guest, target, cohort)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local anchor = point(target:K2_GetActorLocation())
+    if not valid(trace) or not anchor then error("stock_husk_approach_geometry_unavailable", 0) end
+    local ignored = { host.pawn, guest.pawn }
+    for _, actor in ipairs(cohort) do ignored[#ignored + 1] = actor end
+    for _, radius in ipairs({ 2800, 2200, 3400, 1800 }) do
+        for step = 0, 11 do
+            local angle = step * math.pi / 6
+            local x, y = anchor.X + math.cos(angle) * radius, anchor.Y + math.sin(angle) * radius
+            local dx, dy = -math.sin(angle) * 150, math.cos(angle) * 150
+            local first = floor_at(trace, host, anchor, x + dx, y + dy, ignored)
+            local second = floor_at(trace, guest, anchor, x - dx, y - dy, ignored)
+            if first and second and math.abs(first.Z - second.Z) <= 120 then
+                local ok, first_read, second_read = pcall(function()
+                    if host.pawn:K2_TeleportTo(first, host.facing) ~= true
+                        or not at(host.pawn, first, readback_tolerance)
+                        or guest.pawn:K2_TeleportTo(second, guest.facing) ~= true then return end
+                    if not same(host.pawn:GetWorld(), world) or not same(guest.pawn:GetWorld(), world) then return end
+                    local host_at, guest_at = at(host.pawn, first, readback_tolerance),
+                        at(guest.pawn, second, readback_tolerance)
+                    if host_at and guest_at and distance(host_at, anchor) <= approach_radius
+                        and distance(guest_at, anchor) <= approach_radius then return host_at, guest_at end
+                end)
+                if ok and first_read and second_read then
+                    host.pawn:ForceNetUpdate()
+                    guest.pawn:ForceNetUpdate()
+                    return distance(first_read, anchor), distance(second_read, anchor)
+                end
+                local restored = true
+                for _, player in ipairs({ host, guest }) do
+                    local checked, result = pcall(function()
+                        return at(player.pawn, player.origin, 1) or
+                            (player.pawn:K2_TeleportTo(player.origin, player.facing) == true
+                                and at(player.pawn, player.origin, readback_tolerance))
+                    end)
+                    restored = restored and checked and result ~= nil and result ~= false
+                end
+                if not restored then error("mutation_unverified_stock_husk_approach_restore", 0) end
+            end
+        end
+    end
+    error("stock_husk_approach_no_safe_floor_pair", 0)
+end
+
+function campaign_npc.command(fields, state, phase)
+    if fields[2] ~= "native-campaign-npc-approach" then return end
+    if not fixture or #fields ~= 3 then error("stock_husk_approach_fixture_disabled", 0) end
+    approach = nil
+    local host, guest = paired(state, phase)
+    if not host then error("stock_husk_approach_exact_pair_unavailable", 0) end
+    local target, cohort = stock_member(state.world, host.pawn, fields[3])
+    if not target then error("stock_husk_approach_cohort_member_unavailable", 0) end
+    local first, second = placement(host.pawn), placement(guest.pawn)
+    if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
+    local host_distance, guest_distance = place_pair(state.world, first, second, target, cohort)
+    approach = { world = state.world:GetAddress(), member = fields[3], host = host.name, guest = guest.name,
+        host_distance = host_distance, guest_distance = guest_distance }
+    return "verified headless pair placement near exact naturally spawned Husk"
 end
 
 function campaign_npc.rows(state, phase, status_row)
@@ -40,6 +228,11 @@ function campaign_npc.rows(state, phase, status_row)
     }
     for actor in roster:gmatch("[^\n]+") do
         rows[#rows + 1] = status_row("native-campaign-npc-member", state.map, viewer, actor)
+    end
+    if host and approach and approach.world == active and state.local_pawn.name == approach.host
+        and state.guests and #state.guests == 1 and state.guests[1].name == approach.guest then
+        rows[#rows + 1] = status_row("native-campaign-npc-approach", state.map, approach.member,
+            approach.host, approach.guest, approach.host_distance, approach.guest_distance)
     end
     return rows
 end

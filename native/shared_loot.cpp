@@ -958,6 +958,18 @@ namespace silverfish::shared_loot
         return true;
     }
 
+    bool permits_stock_interaction(Unreal::UObject* crate, Unreal::UObject* pawn,
+                                   Unreal::UObject* hit, Unreal::UFunction* function)
+    {
+        return opening && crate == opening->context.crate && pawn == opening->context.pawn &&
+            hit == opening->context.box && function == opening->schema.open;
+    }
+
+    bool permits_stock_script(Unreal::UObject* crate, Unreal::UFunction* function)
+    {
+        return opening && crate == opening->context.crate && function == opening->schema.script;
+    }
+
     void install_hooks()
     {
         if (!enabled() || callback != Hook::ERROR_ID) return;

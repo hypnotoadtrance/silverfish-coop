@@ -1,7 +1,8 @@
 local actions = {}
 local loot = require("native_loot")
 
-local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
+local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local observation
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
@@ -56,7 +57,11 @@ function actions.command(fields, state, phase)
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local count = action == "open" and (fixture_nonempty and 6 or 5) or action == "claim" and 6 or 4
     if not enabled or phase ~= "hosting" or #fields ~= count or crate ~= loot.crate or state.map ~= loot.map then
-        error("The exact stock crate fixture is unavailable", 0)
+        error("The exact stock crate operation is unavailable", 0)
+    end
+    if (action == "seed" or action == "approach" or fixture_nonempty)
+        and (not fixtures or fixture_nonempty and os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1") then
+        error("The exact stock crate operation is unavailable", 0)
     end
     observation = { action = action, map = state.map, crate = crate, pawn = pawn,
         ok = false, invoked = false, looted = false, calls = 0, items = {} }
@@ -118,10 +123,6 @@ function actions.command(fields, state, phase)
         or not valid_slot(slot) then
         result.status = "native_loot_crate_hook_unavailable"
         return "stock loot hook unavailable"
-    end
-    if fixture_nonempty and os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then
-        result.status = "stock_loot_fixture_seed_unavailable"
-        return "stock loot fixture seed unavailable"
     end
     local fixture_args = fixture_nonempty and { true } or {}
     local ok, status, looted, first, second, calls, invoked = SilverfishOpenNativeLootCrate(

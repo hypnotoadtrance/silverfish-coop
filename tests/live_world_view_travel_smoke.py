@@ -16,17 +16,20 @@ from live_multi_smoke import saved_hashes
 OVERWORLD = "/Game/Classes/Maps/Maps_OverWorld/"
 CROSSROADS = OVERWORLD + "CrossRoads_P"
 DEAD_BRIDGE = OVERWORLD + "DeadBridge_P"
+FOREST = OVERWORLD + "Forest_01_P"
 CISTERN = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 DAY_ACTORS = {
     CROSSROADS: "DayCycle_SunControler_BP_C " + CROSSROADS
     + ".CrossRoads_P:PersistentLevel.DayCycle_SunControler_BP_C_1",
     DEAD_BRIDGE: "DayCycle_SunControler_BP_C " + DEAD_BRIDGE
     + ".DeadBridge_P:PersistentLevel.DayCycle_SunControler_BP_C_0",
+    FOREST: "DayCycle_SunControler_BP_C " + FOREST
+    + ".Forest_01_P:PersistentLevel.DayCycle_SunControler_BP_C_0",
 }
 WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
 
 
-async def validate(work: Path, vanilla_saved: Path | None) -> None:
+async def validate(work: Path, vanilla_saved: Path | None, forest: bool) -> None:
     name = "world-view-" + uuid.uuid4().hex[:8]
     host_run = work / "campaigns" / name / "run"
     client_run = work / "clients" / name / "run"
@@ -108,18 +111,25 @@ async def validate(work: Path, vanilla_saved: Path | None) -> None:
         assert all(abs(local[key] - sample[key]) <= 0.0001 for key in WEATHER_FIELDS), local
         return client, local
 
-    async def cross_stock_exit(source):
+    async def cross_stock_exit(source, entrance=None):
         await wait(host_run, lambda state: host_ready(state, source))
+        route = ("--entrance", entrance) if entrance else ()
         for role, position in (("host", "near"), ("guest", "near"), ("host", "inside")):
-            await command(*authority, "native-exit-position", "--target", role, "--exit-position", position)
+            await command(*authority, "native-exit-position", "--target", role, "--exit-position", position, *route)
 
     try:
+        first_map = FOREST if forest else CROSSROADS
         await start("host", ("--campaign", name), "--port", "0", "--headless", "--fixtures",
-                    "--native-zones", "--start-zone", CROSSROADS)
+                    "--native-zones", "--start-zone", first_map, *(("--native-expanded-zones",) if forest else ()))
         await wait(host_run, lambda state: state.get("state") == "hosting")
         invite = await command("invite", "--campaign", name, "--name", "World view guest", "--character", "Sky observer")
         await start("join", ("--profile", name), "--invite", invite["invite_file"], "--headless", "--native-zones")
-        initial, evidence["crossroads"] = await projection(CROSSROADS)
+        if forest:
+            first, evidence["forest"] = await projection(FOREST)
+            await cross_stock_exit(FOREST, "CR_Forest")
+            initial, evidence["crossroads"] = await projection(CROSSROADS, first["zone_epoch"])
+        else:
+            initial, evidence["crossroads"] = await projection(CROSSROADS)
 
         await cross_stock_exit(CROSSROADS)
         bridge, evidence["dead_bridge"] = await projection(DEAD_BRIDGE, initial["zone_epoch"])
@@ -176,5 +186,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path)
+    parser.add_argument("--forest", action="store_true", help="begin in the authored Forest scene and take its stock exit")
     arguments = parser.parse_args()
-    asyncio.run(validate(arguments.work.resolve(), arguments.vanilla_saved))
+    asyncio.run(validate(arguments.work.resolve(), arguments.vanilla_saved, arguments.forest))

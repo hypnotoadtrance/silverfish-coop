@@ -72,11 +72,13 @@ options.add_argument("--native-inventory-equip", action="store_true", help="equi
 options.add_argument("--native-weapon-reload", action="store_true", help="reload from an exact stock guest reserve")
 options.add_argument("--native-reload-input", action="store_true", help="dispatch the guest's genuine stock reload wrappers")
 options.add_argument("--native-loot", action="store_true", help="roll the qualified stock crate using an exact guest trait")
+options.add_argument("--native-loot-input", action="store_true", help="open the stock crate using its actual interaction binding")
 options.add_argument("--native-loot-nonempty", action="store_true", help="use a deterministic stock crate test draw")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
 options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
 options.add_argument("--native-broker-drill", action="store_true", help="exercise the stock Drill Head quest and debt voucher")
+options.add_argument("--native-broker-input", action="store_true", help="hand in a Broker objective through stock guest Interact")
 options.add_argument("--native-shop", action="store_true", help="buy a stock merchant item with the party wallet")
 options.add_argument("--native-wipe", action="store_true", help="wipe both native pawns and recover a native item")
 options.add_argument("--native-backend", choices=("cpp", "cpp-scoped", "overlay"),
@@ -87,6 +89,10 @@ if args.native_broker_drill:
     if not args.native_guest:
         options.error("--native-broker-drill requires --native-guest")
     args.native_broker = True
+if args.native_broker_input:
+    if not args.native_guest:
+        options.error("--native-broker-input requires --native-guest")
+    args.native_broker = True
 if args.native_light_pistol or args.native_primary_input or args.native_inventory_equip:
     args.native_weapon_use = True
 if args.native_inventory_equip:
@@ -96,6 +102,10 @@ if args.native_bandage:
     args.native_pickup = True
     if not args.native_guest or args.native_wipe or args.native_guest_save:
         options.error("--native-bandage requires an independent native guest and its own inventory scenario")
+if args.native_loot_input:
+    args.native_loot = True
+    if args.native_loot_nonempty:
+        options.error("The actual stock input uses the ordinary weighted roll")
 if args.native_backend and not (args.native_death or args.native_damage):
     options.error("--native-backend requires a native death or damage probe")
 if args.native_guest and any((args.native_death, args.native_damage, args.native_inventory, args.native_probe)):
@@ -1309,7 +1319,27 @@ async def smoke():
                 await command("action", "--campaign", campaign, "checkpoint")
                 broker_before = broker_stock_balances(chosen)
             redeem = ("action", "--profile", profile, "native-quest-turnin", "--target", quest_id)
-            turned = await command(*redeem)
+            if args.native_broker_input:
+                guest_actions = ("action", "--profile", profile)
+                listing = (await command(*guest_actions, "native-quest-list"))["native_quest_page"]
+                assert any(entry["id"] == quest_id and entry["state"] in ("active", "ready") for entry in listing["quests"]), listing
+                templates = (await command(*guest_actions, "native-quest-list", "--target", "stock"))["native_quest_page"]
+                assert templates["reported"] == 82 and templates["next_offset"] == len(templates["quests"]) == 8, templates
+                await wait(client_run, lambda state: state.get("game", {}).get("native_broker_input", {}).get("state") == "armed")
+                intent = (await command(*guest_actions, "native-broker-input-fixture"))["native_broker_input"]
+                assert intent["state"] == "fixture_queued" and intent["sequence"] > 0, intent
+                turned = None
+                for _ in range(50):
+                    broker_events = (await command("events", "--profile", profile, "--tail", "30"))["events"]
+                    turned = next((entry for entry in broker_events if entry.get("sequence") == intent["sequence"]
+                                   and entry["event"] in ("native_stock_broker_interaction", "native_stock_broker_interaction_rejected")), None)
+                    if turned:
+                        break
+                    await asyncio.sleep(.2)
+                assert turned and turned["event"] == "native_stock_broker_interaction", turned
+                note("stock_guest_interact_submits_the_qualified_broker_objective", intent)
+            else:
+                turned = await command(*redeem)
             assert (turned["step"] == -10 and turned["consumed_guid"] == guid and turned["cash"] == cash_reward
                     and set(turned["recipients"]) == {"host", chosen} and turned["xp"] == 1), turned
             if args.native_broker_drill:
@@ -1613,8 +1643,19 @@ async def smoke():
                 assert still_neutral["lucky_looter"] is False, still_neutral
                 await command(*stock, "native-loot-approach", "--target", "guest")
                 open_crate = ("action", "--profile", profile, "native-loot-open", "--target", NATIVE_LOOT_CRATE)
-                proof_command = (*stock, "native-loot-open-fixture", "--target", "guest") if args.native_loot_nonempty else open_crate
-                loot_roll = (await command(*proof_command))["native_loot_roll"]
+                if args.native_loot_input:
+                    await wait(client_run, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "ready")
+                    observed = (await command("action", "--profile", profile,
+                                              "native-loot-crate-fixture"))["native_loot_crate_interaction"]
+                    assert observed["crate"] == NATIVE_LOOT_CRATE and observed["entry"] == "fixture", observed
+                    opened = await wait(run, lambda state: state.get("gameplay", {}).get("native_loot_rolls", {}).get(NATIVE_LOOT_CRATE))
+                    loot_roll = opened["gameplay"]["native_loot_rolls"][NATIVE_LOOT_CRATE]
+                    for directory in (run, client_run):
+                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "exhausted")
+                    note("stock_interact_opens_the_authoritative_party_crate", observed)
+                else:
+                    proof_command = (*stock, "native-loot-open-fixture", "--target", "guest") if args.native_loot_nonempty else open_crate
+                    loot_roll = (await command(*proof_command))["native_loot_roll"]
                 if args.native_loot_nonempty:
                     assert loot_roll["items"], loot_roll
                 assert loot_roll["opener"] == chosen and loot_roll["lucky_looter"] and loot_roll["trait_calls"] >= 1
@@ -2079,6 +2120,10 @@ async def smoke():
             if args.native_loot:
                 assert (await command(*open_crate))["native_loot_roll"] == loot_roll
                 note("stock_crate_roll_survives_restart_without_a_reroll", loot_roll)
+                if args.native_loot_input:
+                    for directory in (run, client_run):
+                        await wait(directory, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "exhausted")
+                    note("committed_stock_crate_reopens_visually_without_a_reroll", {"crate": NATIVE_LOOT_CRATE})
                 if claim_crate:
                     assert (await command(*claim_crate))["native_loot_claim"] == claim
                     await command("action", "--campaign", campaign, "checkpoint")

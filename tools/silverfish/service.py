@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import secrets
 import time
 import uuid
 from functools import partial
@@ -15,14 +16,16 @@ from cryptography.hazmat.primitives import serialization
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_dream, native_finite_shop,
                native_gold, native_green, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix,
-               native_purple, native_quest, native_red, native_rest, native_rewards, party, wipe)
+               native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards,
+               native_wipe_view, party, wipe)
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
+from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment
-from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, CISTERN, CITY, CROSSROADS, GOLD_NEXUS,
+from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, CISTERN, CROSSROADS, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
@@ -30,13 +33,9 @@ from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_ba
 
 PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
-WORLD_VIEW_ACTORS = {
-    area: f"DayCycle_SunControler_BP_C {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.DayCycle_SunControler_BP_C_{index}"
-    for area, index in ((CROSSROADS, 1), (OBSERVATORY, 0), (CITY, 0),
-                        ("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P", 0))
-}
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
-GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin",
+GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
+                        native_broker.INTERACT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -124,7 +123,8 @@ class Host:
                  authored_zones: bool = False, native_zone_walls: bool = False, native_profile: Path | None = None,
                  verify_native_roster: bool = False, persist_native_guest: bool = False, matrix_supported: bool = False,
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
-                 native_shop_view: bool = False):
+                 native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
+                 broker_input: bool = False, wipe_view_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -150,6 +150,12 @@ class Host:
         self.allowed_maps = AUTHORED_MAPS if authored_zones else PLAYTEST_MAPS
         self.expanded_zones = expanded_zones
         self.native_shop_view = native_shop_view
+        self.native_loot_input = native_loot_input
+        self.guest_regen = guest_regen
+        self.broker_input = broker_input
+        self.wipe_view_enabled = wipe_view_enabled
+        self.wipe_view = None
+        self.last_crate_intent = 0
         if authored_zones and expanded_zones:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
@@ -268,6 +274,9 @@ class Host:
         native = self.native_world_state()
         if native:
             world["native_observation"] = native
+        fresh = self.last_game.get("native_fresh_campaign", {})
+        if fresh.get("state") == "verified" and "native_start_preset" not in world:
+            world["native_start_preset"] = {key: value for key, value in fresh.items() if key not in ("working_slot", "state")}
         scene = native.get("native_scene", {})
         level = scene.get("rest_level")
         if self.native_zones and scene.get("active_map") == self.last_game["map"] and level is not None:
@@ -455,6 +464,9 @@ class Host:
             view["stardust_visit"]["return_blockers"] = self.dream_blockers
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
+        if view["wipe"] and self.party["wipe"].get("native") and not self.party["wipe"].get("native_committed"):
+            view["wipe"].update(native_inventory_ready=True,
+                                remaining_seconds=max(0, min(30, view["wipe"]["deadline"] - time.time())))
         return view
 
     def act(self, actor: str, operation_id: str, action: str, target: str | None,
@@ -1270,6 +1282,10 @@ class Host:
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
                     raise party.RuleError("invalid_inventory_offset")
                 result = await native_inventory.inspect(self, bridge, character, int(offset))
+            elif action == "native-quest-list":
+                result = {"native_quest_page": native_quest_catalog.page(await self.read_quest_catalog(bridge), target)}
+            elif action == native_broker.INTERACT:
+                result = await native_broker.interact(self, bridge, character, target)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1285,6 +1301,17 @@ class Host:
         if not future.done():
             future.set_result({"ok": True, **result})
 
+    async def read_quest_catalog(self, bridge: Bridge) -> dict:
+        if self.last_game.get("state") != "hosting" or self.transitioning or self.stopping:
+            raise party.RuleError("native_quest_catalog_unavailable")
+        snapshot = await bridge.command("native-quest-catalog", timeout=7)
+        catalog = snapshot.get("native_quest_catalog")
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != self.last_game.get("map")
+                or not catalog or catalog["sequence"] != snapshot.get("sequence")):
+            raise RuntimeError("The stock quest catalog did not return a complete native frame")
+        self.last_game, self.last_seen = snapshot, time.monotonic()
+        return catalog
+
     async def project_gameplay(self, bridge: Bridge) -> None:
         now = time.monotonic()
         if self.last_game.get("state") != "hosting" or now < self.next_projection:
@@ -1293,6 +1320,10 @@ class Host:
             await project_players(bridge, self.last_game, self.public_gameplay(), client=False)
             await native_inventory_death.project_bags(self, bridge, "host", native_inventory_death.visible_bags(self.party, "host"))
             await native_authored_pickup.project(self, bridge, self.party.get(native_authored_pickup.STATE_KEY, {}))
+            if self.native_loot_input:
+                snapshot = await native_loot.project_opened(bridge, self.last_game, self.party.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE))
+                if snapshot is not self.last_game:
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_rewards.settle(self, bridge)
             if not self.fixtures:
                 return
@@ -1489,6 +1520,9 @@ class Host:
             "native_zones": self.native_zones, "native_zone_walls": self.native_zone_walls,
             "expanded_zones": self.expanded_zones,
             "native_shop_view": self.native_shop_view,
+            "native_loot_input": self.native_loot_input,
+            "native_broker_input": self.broker_input,
+            "native_wipe_view": self.wipe_view_enabled,
         })
         self.control.event("invite_created", guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -1687,20 +1721,23 @@ class Host:
                 elif action == "native-interaction-fixture":
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
-                elif action == "native-finite-shop-approach" and self.fixtures and self.last_game.get("map") == OBSERVATORY:
+                elif (action == "native-finite-shop-approach" and self.fixtures
+                      and self.last_game.get("map") in native_finite_shop.MERCHANTS):
                     character = self.roles().get(request.get("target") or "guest")
                     member = self.native_recipients().get(character)
                     if not member or not member["connected"]:
                         raise ValueError("Choose an enrolled finite merchant guest")
                     self.last_game = await bridge.command(action, member["pawn"], timeout=5)
                     self.last_seen = time.monotonic()
-                    result = {"pawn": member["pawn"], "actor": native_finite_shop.ACTOR}
-                elif action == "native-finite-shop-wallet-fixture" and self.fixtures and self.last_game.get("map") == OBSERVATORY:
+                    result = {"pawn": member["pawn"], "actor": native_finite_shop.MERCHANTS[self.last_game["map"]]}
+                elif (action == "native-finite-shop-wallet-fixture" and self.fixtures
+                      and self.last_game.get("map") in native_finite_shop.MERCHANTS):
                     amount = request.get("amount")
+                    area = self.last_game["map"]
                     if type(amount) is not int or not 0 <= amount <= 100_000:
                         raise ValueError("Choose a staged stock wallet balance from zero to 100000")
                     snapshot = await bridge.command("wallet-set", str(amount), timeout=4)
-                    if snapshot.get("native_wallet") != amount or snapshot.get("map") != OBSERVATORY:
+                    if snapshot.get("native_wallet") != amount or snapshot.get("map") != area:
                         raise RuntimeError("The exact staged canonical wallet update did not verify")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     candidate = party.load_party(self.party)
@@ -1709,6 +1746,31 @@ class Host:
                     self.party = candidate
                 elif action in native_guest_npc.HOST_ACTIONS:
                     result = await native_guest_npc.host_fixture(self, bridge, action, request.get("target"))
+                elif action == "native-campaign-npc-approach" and self.native_guest and self.fixtures:
+                    target = request.get("target")
+                    authority = self.last_game.get("native_campaign_npc", {})
+                    if self.last_game.get("map") != CROSSROADS or target not in authority.get("members", []):
+                        raise ValueError("Choose an exact observed stock CrossRoads Husk")
+                    self.last_game = await bridge.command(action, target, timeout=6)
+                    self.last_seen = time.monotonic()
+                    proof = self.last_game.get("native_campaign_npc_approach", {})
+                    if proof.get("member") != target or proof.get("map") != CROSSROADS:
+                        raise RuntimeError("The stock Husk approach did not verify both exact pawns")
+                    result = {"native_campaign_npc_approach": proof}
+                elif action in ("native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture") and self.native_guest and self.fixtures:
+                    target = request.get("target")
+                    if action in ("native-enemy-loot-watch", "native-bandit-aim-fixture"):
+                        bandit = self.last_game.get("native_bandit", {}).get("npc")
+                        if not bandit or target != bandit:
+                            raise ValueError("Choose the exact staged stock Bandit")
+                        arguments = (bandit,)
+                    else:
+                        arguments = ()
+                    self.last_game = await bridge.command(action, *arguments, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {"native_enemy_loot": self.last_game.get("native_enemy_loot", {})}
+                    if action == "native-bandit-aim-fixture":
+                        result["native_bandit_aim"] = self.last_game.get("native_bandit_aim", {})
                 elif action == "native-shop-approach" and self.native_guest and self.fixtures:
                     target = request.get("target")
                     shop = next((entry for entry in self.last_game.get("native_shops", [])
@@ -1741,6 +1803,10 @@ class Host:
                     result = await native_inventory_death.probe(self, bridge, character, request.get("item_guid"))
                 elif action == "native-wipe-items":
                     result = native_inventory_death.items(self, "host", request.get("target"))
+                elif action == "native-wipe-view-key-fixture" and self.wipe_view and self.fixtures:
+                    self.last_game = await self.wipe_view.fixture(action, request.get("target"))
+                    self.last_seen = time.monotonic()
+                    result = {"native_wipe_view": self.last_game.get("native_wipe_view", {})}
                 elif action == "native-wipe-recover":
                     result = await native_inventory_death.recover(self, bridge, "host", request.get("target"),
                                                                   request.get("operation_id") or path.stem)
@@ -1767,12 +1833,14 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_loot.perform(self, bridge, character, "open", native_loot.CRATE,
                                                        request.get("operation_id") or path.stem, fixture_nonempty=True)
-                elif action == "native-quest-catalog":
-                    snapshot = await bridge.command(action, timeout=7)
-                    catalog = snapshot.get("native_quest_catalog")
-                    if not catalog or catalog["sequence"] != snapshot.get("sequence"):
-                        raise RuntimeError("The stock quest catalog did not return a complete native frame")
-                    result = {"native_quest_catalog": catalog}
+                elif action == "native-loot-crate-fixture" and self.native_loot_input and self.fixtures:
+                    self.last_game = await bridge.command(action, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
+                elif action in ("native-quest-catalog", "native-quest-list"):
+                    catalog = await self.read_quest_catalog(bridge)
+                    result = {"native_quest_catalog": catalog} if action == "native-quest-catalog" else {
+                        "native_quest_page": native_quest_catalog.page(catalog, request.get("target"))}
                 elif action in ("native-quest-start", "native-quest-objective", "native-quest-turnin"):
                     result = await native_quest.action(self, bridge, "host", action, request.get("target"))
                 elif action in ("native-broker-issue-fixture", "native-broker-drill-issue-fixture") and self.fixtures:
@@ -2176,6 +2244,8 @@ class Host:
 
     async def run(self, bridge: Bridge, transport) -> None:
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
+        if self.wipe_view_enabled:
+            self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
             await self.run_session(bridge, transport)
         finally:
@@ -2185,10 +2255,20 @@ class Host:
                     await heartbeat
 
     async def run_session(self, bridge: Bridge, transport) -> None:
+        async def frozen_items(offset):
+            return native_inventory_death.items(self, "host", offset)
+
+        async def retain(operation, choices):
+            return self.act("host", operation, "keep", None, retained=choices)
+
         while not self.stopping:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
+                                        for row in self.last_game.get("native_guest_regen", {}).values()):
+                self.native_checkpoint_unsafe = True
+                raise RuntimeError("A stock guest regeneration update failed authority readback")
             now = time.monotonic()
             if self.native_backend:
                 self.deliver_native_deaths(bridge)
@@ -2198,6 +2278,14 @@ class Host:
                     await self.advance_dream(bridge, transport)
             if not self.stopping:
                 await self.service_guest_native_requests(bridge)
+                if self.native_loot_input and (sequence := native_loot.interaction_sequence(self.last_game, self.last_crate_intent)):
+                    self.last_crate_intent = sequence
+                    operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}").hex
+                    try:
+                        await native_loot.perform(self, bridge, "host", "open", native_loot.CRATE, operation)
+                        self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation)
+                    except (OSError, ValueError, RuntimeError) as error:
+                        self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, reason=str(error))
             for operation_id, target in bridge.interactions():
                 try:
                     if target == native_authored_pickup.SOURCE:
@@ -2217,6 +2305,10 @@ class Host:
             await self.service_requests(bridge, transport)
             if not self.stopping:
                 await self.settle_wipe(bridge, transport)
+                if self.wipe_view:
+                    snapshot = await self.wipe_view.sync(self.last_game, self.public_gameplay()["wipe"], frozen_items, retain)
+                    if snapshot is not self.last_game:
+                        self.last_game, self.last_seen = snapshot, time.monotonic()
                 await self.apply_pending_spawns(bridge)
                 await self.project_gameplay(bridge)
             now = time.monotonic()
@@ -2239,11 +2331,22 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
                     native_zone_walls: bool = False, start_zone: str | None = None, max_guests: int = 1,
                     expanded_zones: bool = False, native_shop_view: bool = False,
-                    extraction: tuple[int, bool, bool] | None = None) -> None:
+                    extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
+                    start_preset: str | None = None, world_seed: int | None = None) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
+    if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
+        raise ValueError("The stock start preset accepts a world seed from 1 to 999999")
+    if start_preset is not None and (start_preset != "wanderer" or start_zone not in (None, OBSERVATORY)
+                                     or extraction is not None or not native_guest or not native_zones or not staged_script(work, "native_fresh_campaign.lua")):
+        raise ValueError("The stock Wanderer preset requires a fresh native Observatory campaign with the Mercy rules")
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
+    native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
+    broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
+    wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
+    if guest_regen and not staged_script(work, "native_guest_regen.lua"):
+        raise ValueError("Restage the native host to enable stock guest regeneration")
     if native_events and native_backend != "cpp":
         raise ValueError("--native-events requires the staged C++ lab")
     if native_guest and not native_events:
@@ -2262,7 +2365,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         old_world = store.status()["world"]
         if start_zone and old_world.get("map") not in (None, start_zone):
             raise ValueError("An existing campaign resumes in its saved zone")
-        entry_map = old_world.get("map", start_zone or MAP)
+        if start_preset and old_world.get("map"):
+            raise ValueError("An existing campaign already has a saved start and world seed")
+        entry_map = old_world.get("map", OBSERVATORY if start_preset else start_zone or MAP)
         authored = entry_map in AUTHORED_MAPS or expanded_zones and entry_map in EXPANDED_MAPS
         if authored and not (native_zones and qualified_authored_routes(work)):
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
@@ -2304,16 +2409,27 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             process = launch(work, profile, bridge_directory, headless, internal_port,
                              native_events=native_events, native_guest=native_guest, native_zones=native_zones,
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
-                             native_shop_view=native_shop_view)
+                             native_shop_view=native_shop_view, native_loot_input=native_loot_input,
+                             guest_regen=guest_regen, native_wipe_view=wipe_view_enabled)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             extraction_rules = {}
+            prepared_preset = None
+            if start_preset:
+                working_slot = "SFCoopLive_" + uuid.uuid4().hex
+                world_seed = world_seed if world_seed is not None else 1 + secrets.randbelow(999_999)
+                snapshot = await bridge.command("native-fresh-campaign-prepare", start_preset, working_slot, str(world_seed), timeout=8)
+                prepared_preset = snapshot.get("native_fresh_campaign", {})
+                if (prepared_preset.get("state") != "prepared" or prepared_preset.get("preset") != start_preset
+                        or prepared_preset.get("map") != entry_map or prepared_preset.get("working_slot") != working_slot
+                        or prepared_preset.get("instance_seed") != world_seed):
+                    raise RuntimeError("The staged title menu did not verify the exact stock preset and seed")
             if extraction is not None:
                 keep, drops, shrink = extraction
                 await bridge.command("native-extraction-prepare", str(keep), str(int(drops)), str(int(shrink)))
                 extraction_rules = {"extraction_mode": 1, "items_kept_on_death": keep,
                                     "drop_bone_pile": int(drops), "lose_slot_per_death": int(shrink)}
-            seed = checkpoint_seed(old_world) if staged_script(work, "world_seed.lua") else None
+            seed = world_seed if prepared_preset else checkpoint_seed(old_world) if staged_script(work, "world_seed.lua") else None
             arguments = (str(seed),) if seed is not None else ()
             if native_record:
                 arguments = ("native-save", native_record["slot"])
@@ -2328,6 +2444,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     lambda game: all(game.get("native_rules", {}).get(key) == value
                                      for key, value in extraction_rules.items()), timeout=7,
                 )
+            if prepared_preset:
+                initial_game = await bridge.wait_for(lambda game: game.get("native_fresh_campaign", {}).get("state")
+                                                     in ("verified", "changed"), timeout=8)
+                observed = initial_game["native_fresh_campaign"]
+                if (observed != dict(prepared_preset, state="verified", proof="authoritative_pawn_adopted_stock_save")
+                        or (native_host_save.directory(profile) / f"{working_slot}.sav").exists()):
+                    raise RuntimeError(f"The native start preset failed stock adoption ({observed.get('proof', 'unknown')})")
             await asyncio.to_thread(verify_loopback_socket, process.pid, internal_port)
             if native_record:
                 initial_game = await bridge.wait_for(
@@ -2365,7 +2488,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               persist_native_guest=persist_guest, matrix_supported=matrix_supported,
                               world_flush_supported=bool(authored and native_profile and staged_script(work, "native_world_flush.lua")),
                               expanded_zones=expanded_zones,
-                              native_shop_view=native_shop_view,
+                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
+                              guest_regen=guest_regen, broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -2374,6 +2498,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             if extraction_rules:
                 revision = await controller.checkpoint_native(bridge)
                 control.event("native_extraction_configured", revision=revision, rules=extraction_rules)
+            if prepared_preset:
+                revision = await controller.checkpoint_native(bridge)
+                control.event("native_start_preset_committed", revision=revision,
+                              preset=start_preset, seed=world_seed)
             rest = old_world.get("native_rest")
             if authored and isinstance(rest, dict):
                 qualified_rest = native_blue.saved_rest(rest.get("destination"), rest.get("bed"))
@@ -2446,7 +2574,9 @@ def load_invite(file: Path, build: str) -> dict:
     if not all(isinstance(invite[key], str) for key in ("certificate", "guest_id", "credential", "character_id")):
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
-           ("native_zones", "native_zone_walls", "expanded_zones", "native_shop_view") if key in invite):
+           ("native_zones", "native_zone_walls", "expanded_zones", "native_shop_view", "native_loot_input",
+            "native_broker_input", "native_wipe_view")
+           if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     return invite
 
@@ -2517,6 +2647,9 @@ class Client:
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.last_primary_intent = 0
+        self.last_crate_intent = 0
+        self.last_broker_intent = 0
+        self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
         self.primary_scope = None
         self.next_primary_renewal = 0.0
         self.bag_projection_key = None
@@ -2595,7 +2728,8 @@ class Client:
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained
-        timeout = 15 if action in (*native_finite_shop.ACTIONS, native_guest_consumable.ACTION) else 7 if action in GUEST_NATIVE_ACTIONS else 4
+        timeout = 15 if action in (*native_finite_shop.ACTIONS, native_guest_consumable.ACTION, native_broker.INTERACT,
+                                   "native-quest-list") else 7 if action in GUEST_NATIVE_ACTIONS else 4
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
@@ -2656,6 +2790,43 @@ class Client:
                 self.control.event("native_guest_primary_input", operation_id=operation, sequence=sequence, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_primary_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
+
+    async def service_crate_interaction(self, active: bool) -> None:
+        if not self.invite.get("native_loot_input"):
+            return
+        sequence = native_loot.interaction_sequence(self.last_game, self.last_crate_intent)
+        if sequence is None:
+            return
+        self.last_crate_intent = sequence
+        if not active or self.stopping or not self.host_session or not self.zone_epoch:
+            return
+        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}").hex
+        try:
+            result = await self.gameplay_action("native-loot-open", operation, native_loot.CRATE)
+            self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, **result)
+        except (ValueError, OSError, RuntimeError) as error:
+            self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, reason=str(error))
+
+    async def service_broker_input(self, active: bool) -> None:
+        if not self.invite.get("native_broker_input"):
+            return
+        rows = self.bridge.native_broker_requests()
+        if not rows or not active or self.stopping or not self.host_session or not self.zone_epoch:
+            return
+        sequence, area, pawn, station = rows[-1]
+        proof = self.last_game.get("native_broker_input", {})
+        if (sequence <= self.last_broker_intent or area != native_broker.BLACK_MARKET or self.last_game.get("map") != area
+                or station != native_broker.STATION or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
+                or (proof.get("map"), proof.get("pawn"), proof.get("station"), proof.get("sequence")) != (area, pawn, station, sequence)
+                or proof.get("state") not in ("queued", "fixture_queued")):
+            return
+        self.last_broker_intent = sequence
+        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.host_session}:{self.zone_epoch}:{pawn}:broker:{sequence}").hex
+        try:
+            result = await self.gameplay_action(native_broker.INTERACT, operation, station)
+            self.control.event("native_stock_broker_interaction", operation_id=operation, sequence=sequence, **result)
+        except (ValueError, OSError, RuntimeError) as error:
+            self.control.event("native_stock_broker_interaction_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
     async def service_inventory_view(self, active: bool) -> None:
         requests = self.bridge.native_inventory_view_requests()
@@ -2719,18 +2890,25 @@ class Client:
         with contextlib.suppress(OSError, RuntimeError):
             self.last_game = await self.bridge.command("native-inventory-view-equip-result", str(sequence), area, guid, outcome, timeout=2)
 
-    async def renew_shop_view(self) -> None:
+    async def renew_native_interactions(self) -> None:
+        features = (
+            (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
+            (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
+        )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
             game = self.bridge.snapshot()
             now = time.monotonic()
             if game and game.get("sequence") != sequence:
                 sequence, seen = game["sequence"], now
-            if (game and game.get("state") == "connected" and game.get("map") == OBSERVATORY
+            if (game and game.get("state") == "connected"
                     and self.transport.connected and self.host_session and not self.needs_travel
                     and not self.server_transitioning and now - seen < 1.5):
-                with contextlib.suppress(OSError):
-                    write_text(self.bridge.directory / "native-shop-view-heartbeat", f"{int(time.time())}\n")
+                heartbeat = f"{int(time.time())}\n"
+                for enabled, maps, heartbeat_file in features:
+                    if enabled and game.get("map") in maps:
+                        with contextlib.suppress(OSError):
+                            write_text(self.bridge.directory / heartbeat_file, heartbeat)
             await asyncio.sleep(.4)
 
     async def service_shop_view(self, active: bool) -> None:
@@ -2742,9 +2920,10 @@ class Client:
         event, sequence, kind, area, pawn, actor, guid, raw_price = entries[-1]
         view = self.last_game.get("native_shop_view", {})
         expected_state = "pending" if kind == "open" else "buying"
-        if (kind == "close" or area != OBSERVATORY or area != self.last_game.get("map")
-                or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name") or actor != native_finite_shop.ACTOR
-                or view.get("sequence") != sequence or view.get("state") != expected_state):
+        if (kind == "close" or area != self.last_game.get("map") or actor != native_finite_shop.MERCHANTS.get(area)
+                or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
+                or (view.get("map"), view.get("actor"), view.get("sequence"), view.get("state"))
+                != (area, actor, sequence, expected_state)):
             return
         identifier = f"{self.host_session}:{self.zone_epoch}:{pawn}:shop:{sequence}:{event}"
         operation = uuid.uuid5(uuid.NAMESPACE_OID, identifier).hex
@@ -2761,7 +2940,7 @@ class Client:
             total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
             if (type(total) is not int or not 0 <= total <= 128 or type(wallet) is not int
                     or not 0 <= wallet <= native_finite_shop.MAX_PRICE or type(offers) is not list or len(offers) != total
-                    or listing.get("actor") != actor):
+                    or (listing.get("map"), listing.get("actor")) != (area, actor)):
                 raise ValueError("The host returned an invalid native merchant catalog")
             fields = tuple(f"{row['guid']}|{row['class_path']}|{row['quantity']}|{row['price']}" for row in offers[:8])
             snapshot = await self.bridge.command("native-shop-view-render", str(sequence), area, actor, str(wallet),
@@ -2813,6 +2992,9 @@ class Client:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
+                    if self.invite.get("native_loot_input"):
+                        self.last_game = await native_loot.project_opened(
+                            self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE))
                 await self.project_world_view()
             except (OSError, RuntimeError) as error:
                 self.next_projection = time.monotonic() + 2
@@ -2913,6 +3095,18 @@ class Client:
                 elif action == "native-authored-pickup-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_authored_pickup_interaction": self.last_game.get("native_authored_pickup_interaction", {})}
+                elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
+                    self.last_game = await self.bridge.command(action, timeout=5)
+                    result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
+                elif action == "native-broker-input-fixture" and self.invite.get("native_broker_input"):
+                    pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                    if not pawn or self.last_game.get("state") != "connected":
+                        raise ValueError("Connect the staged Broker station client first")
+                    self.last_game = await self.bridge.command(action, pawn, timeout=5)
+                    result = {"native_broker_input": self.last_game.get("native_broker_input", {})}
+                elif action == "native-wipe-view-key-fixture" and self.wipe_view:
+                    self.last_game = await self.wipe_view.fixture(action, request.get("target"))
+                    result = {"native_wipe_view": self.last_game.get("native_wipe_view", {})}
                 elif action == "native-interaction-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
@@ -2936,6 +3130,12 @@ class Client:
                 self.control.respond(path, False, error=str(error))
 
     async def run(self) -> None:
+        async def frozen_items(offset):
+            return await self.gameplay_action("native-wipe-items", uuid.uuid4().hex, offset)
+
+        async def retain(operation, choices):
+            return await self.gameplay_action("keep", operation, None, retained=choices)
+
         while not self.stopping:
             if self.bridge.process.poll() is not None:
                 raise RuntimeError(f"Client game exited with code {self.bridge.process.returncode}")
@@ -2959,6 +3159,11 @@ class Client:
                       and not self.needs_travel and not self.server_transitioning)
             await self.service_reload_input(active)
             await self.service_primary_input(active)
+            await self.service_crate_interaction(active)
+            await self.service_broker_input(active)
+            if self.wipe_view:
+                draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
+                self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
             await self.service_inventory_equip(active)
             await self.service_shop_view(active)
@@ -2994,6 +3199,15 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
     native_zones = native_zones or invite.get("native_zones", False)
     native_zone_walls = native_zone_walls or invite.get("native_zone_walls", False)
     expanded_zones = invite.get("expanded_zones", False)
+    native_loot_input = invite.get("native_loot_input", False)
+    broker_input = invite.get("native_broker_input", False)
+    wipe_view_enabled = invite.get("native_wipe_view", False)
+    if wipe_view_enabled and not staged_script(work, "native_wipe_view.lua"):
+        raise ValueError("Restage the native client for stock wipe item selection")
+    if broker_input and not staged_script(work, "native_broker_input.lua"):
+        raise ValueError("Restage the native client for stock Broker station interaction")
+    if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
+        raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):
         raise ValueError("Restage the native client to route stock primary attack input")
     if expanded_zones and not (native_zones and staged_script(work, "authored_zone_maps.lua")
@@ -3016,7 +3230,9 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             process = launch(work, directory / "game-user", bridge_directory, headless,
                              native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
                              guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
-                             native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input)
+                             native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
+                             native_loot_input=native_loot_input, broker_input=broker_input,
+                             native_wipe_view=wipe_view_enabled)
             bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:
@@ -3025,8 +3241,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
             await client.open_game_link()
-            if invite.get("native_shop_view"):
-                heartbeat = asyncio.create_task(client.renew_shop_view())
+            if invite.get("native_shop_view") or broker_input:
+                heartbeat = asyncio.create_task(client.renew_native_interactions())
                 try:
                     await client.run()
                 finally:

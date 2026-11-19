@@ -507,6 +507,7 @@ function guest_save.project(state, phase, next_state, name)
     if not guest or not matches(binding, guest.pawn) then return end
     if next_state == "downed" then
         binding.was_downed = true
+        binding.revive = nil
     elseif binding.was_downed then
         local maximum = guest.pawn.MaxHealth
         if not finite(maximum) or maximum <= 0 then error("Guest revive health is unavailable", 0) end
@@ -515,6 +516,7 @@ function guest_save.project(state, phase, next_state, name)
         if binding.detached.PlayerHealth ~= health then error("Guest revive health write failed", 0) end
         binding.was_downed = false
         guest.pawn:ForceNetUpdate()
+        binding.revive = {health = health, maximum = maximum}
     end
 end
 
@@ -556,6 +558,10 @@ function guest_save.rows(status_row)
         rows[#rows + 1] = save_row(status_row, "native-guest-save-member", binding)
         local frame = frame_row(status_row, "native-guest-save-member-frame", binding)
         if frame then rows[#rows + 1] = frame end
+        if binding.revive and not binding.revoked then
+            rows[#rows + 1] = status_row("native-guest-revive", binding.map, binding.name, binding.character or "-",
+                binding.revive.health, binding.revive.maximum)
+        end
     end
     return rows
 end

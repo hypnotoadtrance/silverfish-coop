@@ -23,13 +23,39 @@ def _scope(host, character: str) -> str:
     return record.get("pawn", "") if record.get("connected") else ""
 
 
+def interaction_sequence(game: dict, last_sequence: int) -> int | None:
+    proof = game.get("native_loot_crate_interaction", {})
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    sequence = proof.get("sequence")
+    if (game.get("map") == CROSSROADS and pawn and type(sequence) is int and last_sequence < sequence < 2**53
+            and (proof.get("map"), proof.get("crate"), proof.get("pawn")) == (CROSSROADS, CRATE, pawn)
+            and proof.get("entry") in ("stock", "fixture")):
+        return sequence
+
+
+async def project_opened(bridge, game: dict, roll: dict | None) -> dict:
+    """Project a saved open crate without replaying its stock loot function."""
+    if not roll or game.get("map") != CROSSROADS or roll.get("crate") != CRATE or roll.get("map") != CROSSROADS:
+        return game
+    scope = game.get("native_loot_crate_input", {})
+    if (scope.get("map"), scope.get("crate"), scope.get("state")) != (CROSSROADS, CRATE, "ready"):
+        return game
+    snapshot = await bridge.command("native-loot-crate-project", "exhausted", timeout=4)
+    proof = snapshot.get("native_loot_crate_input", {})
+    if (proof.get("map"), proof.get("crate"), proof.get("state")) != (CROSSROADS, CRATE, "exhausted"):
+        raise RuntimeError("The stock crate did not reflect its committed roll")
+    return snapshot
+
+
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
                   fixture_nonempty: bool = False) -> dict:
-    if (not host.native_zones or not host.fixtures or host.native_profile is None
+    if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
             or host.last_game.get("state") != "hosting" or host.last_game.get("map") != CROSSROADS
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_loot_scope_unavailable")
+    if (action in ("approach", "seed") or fixture_nonempty) and not host.fixtures:
+        raise party.RuleError("native_loot_fixture_unavailable")
     target_valid = valid_guid(target) if action == "claim" else target == CRATE
     if not target_valid or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")

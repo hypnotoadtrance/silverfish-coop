@@ -2,12 +2,24 @@ local view = {}
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local world_name = "World " .. map .. ".Observitory_P"
-local actor_object_path = map .. ".Observitory_P:PersistentLevel.Shop_BP_C_2"
-local actor_name = "Shop_BP_C " .. actor_object_path
+local profiles = {}
+local function register_merchant(map, level, actor, data, title)
+    local world = map .. "." .. level
+    local path = world .. ":PersistentLevel." .. actor
+    profiles[map] = {
+        map = map, world = "World " .. world, actor_object_path = path, actor_name = "Shop_BP_C " .. path,
+        data_path = "/Game/Classes/Libraries/DataAssets/Merchants/" .. data .. "." .. data, title = title,
+    }
+end
+
+register_merchant("/Game/Classes/Maps/Maps_OverWorld/Observitory_P",
+    "Observitory_P", "Shop_BP_C_2", "Observitory_ShopData", "Observatory merchant")
+register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
+    "Shop_ScavBar_P", "Shop_BP_C_2", "ScavBar_ShopData", "Scav Bar merchant")
+register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01",
+    "Shop_BlackMarket_01", "Shop_BP_C_1", "BlacMarket_ShopData", "Black Market merchant")
+
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
-local data_path = "/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local keys = {up = "Up", down = "Down", enter = "Enter", back = "BackSpace"}
 local page_size, max_offers, max_money = 8, 128, 2147483647
@@ -50,9 +62,10 @@ end
 
 local function context(state, phase)
     local host = phase == "hosting"
-    if not enabled or not events_path or (not host and phase ~= "connected") or state.map ~= map
+    local profile = profiles[state.map]
+    if not enabled or not events_path or (not host and phase ~= "connected") or not profile
         or not state.listening or state.server ~= (not host) or not valid(state.world)
-        or state.world:GetFullName() ~= world_name then return nil end
+        or state.world:GetFullName() ~= profile.world then return nil end
     local detail = state.local_pawn
     local pawn, controller = detail and detail.pawn, state.controller
     if not valid(pawn) or not valid(controller) or not pawn:IsLocallyControlled()
@@ -61,19 +74,20 @@ local function context(state, phase)
         or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
         or type(detail.name) ~= "string" or #detail.name > 512 or detail.name:find("%c")
         or detail.name ~= pawn:GetFullName() then return nil end
-    return {host = host, world = state.world, pawn = pawn, controller = controller, name = detail.name}
+    return {host = host, profile = profile, world = state.world, pawn = pawn, controller = controller, name = detail.name}
 end
 
 local function same_context(first, second)
-    return first and second and first.host == second.host and first.name == second.name
+    return first and second and first.host == second.host and first.name == second.name and first.profile == second.profile
         and same(first.world, second.world) and same(first.pawn, second.pawn)
         and same(first.controller, second.controller)
 end
 
 local function qualified_actor(current)
-    local actor = StaticFindObject(actor_object_path)
-    if not exact(actor, actor_path) or actor:GetFullName() ~= actor_name or not same(actor:GetWorld(), current.world)
-        or actor:IsActorBeingDestroyed() or not same(actor.MerchantData, StaticFindObject(data_path))
+    local profile = current.profile
+    local actor = StaticFindObject(profile.actor_object_path)
+    if not exact(actor, actor_path) or actor:GetFullName() ~= profile.actor_name or not same(actor:GetWorld(), current.world)
+        or actor:IsActorBeingDestroyed() or not same(actor.MerchantData, StaticFindObject(profile.data_path))
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then return nil end
     return actor
 end
@@ -107,11 +121,12 @@ function view.clear()
 end
 
 local function emit(kind, offer)
+    local profile = session.context.profile
     local file = io.open(events_path, "ab")
     if not file then return false end
     event_sequence = event_sequence + 1
-    local wrote = file:write(table.concat({"shop-view", event_sequence, session.sequence, kind, map,
-        session.context.name, actor_name, offer and offer.guid or "-", offer and offer.price or "-"}, "\t"), "\n")
+    local wrote = file:write(table.concat({"shop-view", event_sequence, session.sequence, kind, profile.map,
+        session.context.name, profile.actor_name, offer and offer.guid or "-", offer and offer.price or "-"}, "\t"), "\n")
     local closed = file:close()
     return wrote and closed
 end
@@ -184,7 +199,7 @@ local function show()
         widget:SetDesiredSizeInViewport({X = 580, Y = 420})
         widget:SetPositionInViewport({X = 42, Y = 138}, false)
     end
-    local lines = {"Observatory merchant"}
+    local lines = {current.profile.title}
     if session.wallet then lines[#lines + 1] = "Party cash  " .. session.wallet end
     if #session.offers > 0 then
         lines[#lines + 1] = string.format("Showing %d of %d offers", #session.offers, session.total)
@@ -295,7 +310,7 @@ function view.command(fields, state, phase)
     end
     if operation == "native-shop-view-fixture" and #fields == 3 then return fixture(current, fields[3]) end
     local sequence = integer(fields[3], 9007199254740991)
-    if not same_context(current, session and session.context) or sequence ~= session.sequence or fields[4] ~= map
+    if not same_context(current, session and session.context) or sequence ~= session.sequence or fields[4] ~= current.profile.map
         or (session.state ~= "pending" and session.state ~= "buying") then
         error("The authenticated merchant view has expired", 0)
     end
@@ -305,7 +320,7 @@ function view.command(fields, state, phase)
     else
         local balance, total = integer(fields[6], max_money), integer(fields[7], max_offers)
         local catalog = total and offers(fields, total)
-        if operation ~= "native-shop-view-render" or fields[5] ~= actor_name or not balance or not catalog then
+        if operation ~= "native-shop-view-render" or fields[5] ~= current.profile.actor_name or not balance or not catalog then
             error("The authenticated merchant catalog is unavailable", 0)
         end
         session.wallet, session.total, session.offers = balance, total, catalog
@@ -322,9 +337,11 @@ function view.command(fields, state, phase)
 end
 
 function view.rows(state, phase, status_row)
-    if not session or phase ~= "connected" or state.map ~= map or not same(state.world, session.context.world) then return {} end
+    local current = session and session.context
+    if not current or phase ~= "connected" or state.map ~= current.profile.map
+        or not same(state.world, current.world) then return {} end
     local offer = session.offers[session.selection]
-    return {status_row("native-shop-view", session.state, session.sequence, map, session.context.name, actor_name,
+    return {status_row("native-shop-view", session.state, session.sequence, current.profile.map, current.name, current.profile.actor_name,
         session.wallet or "-", session.total, #session.offers, session.selection, offer and offer.guid or "-", offer and offer.price or "-")}
 end
 

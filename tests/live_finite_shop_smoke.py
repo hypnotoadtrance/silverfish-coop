@@ -13,9 +13,12 @@ from live_multi_smoke import saved_hashes
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+MAPS = {"observatory": OBSERVATORY,
+        "scav-bar": "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
+        "black-market": "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"}
 
 
-async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool) -> None:
+async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool, merchant: str) -> None:
     name = "finite-shop-" + uuid.uuid4().hex[:8]
     host_run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -23,6 +26,8 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
     guest_target = ("--profile", name)
     cli = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     launch_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones")
+    if merchant == "scav-bar":
+        launch_flags += ("--native-expanded-zones",)
     if shop_view:
         launch_flags += ("--native-shop-view",)
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
@@ -65,7 +70,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
 
     try:
         host = await spawn(host_run, "host-first.txt", host_target, "host", *host_target, "--port", "0",
-                           *launch_flags, "--start-zone", OBSERVATORY)
+                           *launch_flags, "--start-zone", MAPS[merchant])
         initial = await wait(host_run, lambda state: state.get("state") == "hosting")
         port = str(initial["endpoint"]["port"])
         invite = await command("invite", *host_target, "--name", "Merchant guest", "--character", "Merchant character")
@@ -74,10 +79,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         await wait(guest_run, lambda state: state.get("state") == "connected")
         paired = await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         generation = paired["generation"]
-        await act(host_target, "native-finite-shop-approach")
+        approach = await act(host_target, "native-finite-shop-approach")
         await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "100000")
         listing = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
         assert listing["wallet_before"] == listing["wallet_after"] == 100_000 and listing["offers"], listing
+        assert listing["map"] == MAPS[merchant] and listing["actor"] == approach["actor"], listing
         offer = listing["offers"][0] if shop_view else next(
             row for row in listing["offers"] if row["price"] > 0 and "/Weapons/" not in row["class_path"])
         guid, price = offer["guid"], offer["price"]
@@ -86,10 +92,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         operation_id = uuid.uuid4().hex
         if shop_view:
             opened = (await act(guest_target, "native-shop-view-fixture", "--target", "open"))["native_shop_view"]
-            assert opened["state"] == "pending", opened
+            assert (opened["state"], opened["map"], opened["actor"]) == ("pending", MAPS[merchant], listing["actor"]), opened
             visible = await wait(guest_run, lambda state: state.get("game", {}).get("native_shop_view", {}).get("state") == "ready")
             view = visible["game"]["native_shop_view"]
-            assert view["sequence"] == opened["sequence"] and view["guid"] == guid and view["price"] == price, view
+            assert (view["map"], view["actor"], view["sequence"], view["guid"], view["price"]) == (
+                MAPS[merchant], listing["actor"], opened["sequence"], guid, price), view
             confirm = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
             assert confirm["state"] == "confirming", confirm
             submit = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
@@ -168,5 +175,6 @@ if __name__ == "__main__":
     options.add_argument("--vanilla-saved", type=Path)
     options.add_argument("--shop-view", action="store_true")
     options.add_argument("--sell", action="store_true")
+    options.add_argument("--merchant", choices=MAPS, default="observatory")
     args = options.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view, args.sell))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view, args.sell, args.merchant))

@@ -8,6 +8,7 @@ from typing import TypedDict
 _LIMITS = {"active": 64, "stock": 128}
 _TOTAL_LIMIT = 1024
 _ITEM_LIMIT = 8
+_PAGE_SIZE = 8
 _TAGS = {"native-quest-catalog": 6, "native-quest-entry": 9, "native-quest-reward-item": 5}
 _REASON = re.compile(r"[a-z_]{1,64}\Z")
 _ASSET = re.compile(r"/Game/[A-Za-z0-9_/-]+\.[A-Za-z0-9_-]+\Z")
@@ -172,3 +173,21 @@ def parse(rows: Iterable[Sequence[str]], *, sequence: int | None) -> QuestCatalo
     for source, report in reports.items():
         _verify(source, report)
     return {"sequence": sequence, "active": reports["active"], "stock": reports["stock"]}
+
+
+def page(catalog: QuestCatalog, selection: str | None) -> dict:
+    if selection is None:
+        selection = "active@0"
+    if not isinstance(selection, str):
+        raise ValueError("Choose active or stock and an optional quest catalog offset")
+    source, separator, start = selection.partition("@")
+    if source not in _LIMITS:
+        raise ValueError("Choose active or stock for the quest catalog")
+    offset = _integer(start, maximum=_LIMITS[source]) if separator else 0
+    report = catalog[source]
+    entries = sorted(report["entries"].items(), key=lambda row: row[0].casefold())
+    rows = entries[offset:offset + _PAGE_SIZE]
+    return {"source": source, "state": report["state"], "total": report["total"], "reported": report["emitted"],
+            "reason": report["reason"], "sequence": catalog["sequence"], "offset": offset,
+            "next_offset": offset + len(rows) if offset + len(rows) < len(entries) else None,
+            "quests": [{"id": name, **entry} for name, entry in rows]}

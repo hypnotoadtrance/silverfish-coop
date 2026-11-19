@@ -133,7 +133,9 @@ def items(host, character: str, raw_offset: str | None) -> dict:
     rows = draft["native"]["inventories"][character]["items"]
     page = rows[offset:offset + native_inventory.PAGE_SIZE]
     end = offset + len(page)
-    return {"native_wipe_items": {"wipe_id": draft["id"], "offset": offset, "count": len(rows),
+    forced_count = sum(native_inventory_wipe.selection_policy(row) == "locked" for row in rows)
+    return {"native_wipe_items": {"wipe_id": draft["id"], "owner": character, "offset": offset, "count": len(rows),
+                                   "forced_count": forced_count,
                                    "items": page, "next_offset": end if end < len(rows) else None}}
 
 

@@ -1,5 +1,6 @@
 local npc = {}
 local transport = require("native_transport")
+local guest_save = require("guest_save")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local world_name = "World " .. map .. ".PlaytestMap_01"
@@ -8,6 +9,12 @@ local bandit_class = "BlueprintGeneratedClass /Game/Classes/NPCs/NPC_Bandit.NPC_
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_NPC_TEST") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local hostile = os.getenv("SILVERFISH_COOP_NATIVE_NPC_HOSTILE") == "1"
+local stock_weapons = {
+    ["BlueprintGeneratedClass /Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = true,
+    ["BlueprintGeneratedClass /Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
+}
+local aim_fixture
+local trace_color = { R = 0, G = 0, B = 0, A = 1 }
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -71,8 +78,15 @@ function npc.rows(state, phase, status_row)
         if type(report[index]) == "boolean" then report[index] = report[index] and 1 or 0 end
         if report[index] == "" then report[index] = "-" end
     end
-    return { status_row("native-bandit", map, phase, pawn:GetFullName(), watched and watched:GetFullName() or "-",
+    local rows = { status_row("native-bandit", map, phase, pawn:GetFullName(), watched and watched:GetFullName() or "-",
         table.unpack(report, 1, report.n)) }
+    local aim = aim_fixture
+    if aim and phase == "hosting" and report[5] == aim.name and report[12] == 1
+        and same(state.world, aim.world) and same(watched, aim.guest) then
+        rows[#rows + 1] = status_row("native-bandit-aim", map, aim.name, watched:GetFullName(),
+            aim.distance, aim.yaw, aim.pitch, aim.component)
+    end
+    return rows
 end
 
 local function place(pawn, point, rotation, forward_x, forward_y, offset)
@@ -86,9 +100,186 @@ local function place(pawn, point, rotation, forward_x, forward_y, offset)
     return false
 end
 
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function vector(value)
+    return value and finite(value.X) and finite(value.Y) and finite(value.Z)
+end
+
+local function rotation(value)
+    if value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) then
+        return { Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll }
+    end
+end
+
+local function look_from(origin, target)
+    local x, y, z = target.X - origin.X, target.Y - origin.Y, target.Z - origin.Z
+    local horizontal = math.sqrt(x * x + y * y)
+    return { Pitch = math.deg(math.atan(z, horizontal)), Yaw = math.deg(math.atan(y, x)), Roll = 0 },
+        math.sqrt(horizontal * horizontal + z * z)
+end
+
+local function stock_bandit(state, report, name)
+    if type(name) ~= "string" or #name > 512 or name:find("%c") or report.n ~= 24
+        or report[1] ~= true or report[2] ~= "stock_bandit_authority" or report[3] ~= 1
+        or report[4] ~= 0 or report[5] ~= name or report[11] ~= true or report[12] ~= true then return end
+    local bandit
+    for _, actor in ipairs(FindAllOf("NPC_Bandit_C") or {}) do
+        if valid(actor) and actor:GetFullName() == name and same(actor:GetWorld(), state.world)
+            and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+            and actor:GetClass():GetFullName() == bandit_class then
+            if bandit then return end
+            bandit = actor
+        end
+    end
+    return bandit
+end
+
+local function owned_component(component, owner, class_name)
+    return valid(component) and same(component:GetOwner(), owner)
+        and component:GetClass():GetFullName() == "Class /Script/Engine." .. class_name
+end
+
+local function floor_at(context, point, x, y, half_height)
+    local start = { X = x, Y = y, Z = point.Z + 95 }
+    local finish = { X = x, Y = y, Z = point.Z - 220 }
+    local hit = {}
+    local found = context.trace:LineTraceSingle(context.guest, start, finish, 0, false,
+        { context.host, context.guest, context.bandit, context.weapon }, 0, hit, true, trace_color, trace_color, 0)
+    hit = hit.OutHit or hit
+    if found == true and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= 0.7
+        and hit.ImpactPoint.Z < start.Z - 1 and hit.ImpactPoint.Z >= finish.Z then
+        return { X = x, Y = y, Z = hit.ImpactPoint.Z + half_height + 2 }
+    end
+end
+
+local function stock_hit(context, start, finish)
+    local hit = {}
+    -- Match the projectile's MovementUpdate trace, including complex collision.
+    local found = context.trace:LineTraceSingle(context.guest, start, finish, 2, true,
+        { context.guest, context.weapon }, 0, hit, true, trace_color, trace_color, 0)
+    hit = hit.OutHit or hit
+    if found ~= true or not hit.Component then return end
+    local component = hit.Component:Get()
+    if valid(component) and same(component:GetOwner(), context.bandit) then return component end
+end
+
+local function settle_aim(context, point)
+    local eye = context.camera:K2_GetComponentLocation()
+    if not vector(eye) then return end
+    local view = look_from(eye, point)
+    context.controller:SetControlRotation(view)
+    context.camera:K2_SetWorldRotation(view, false, {}, true)
+
+    local origin = context.muzzle:K2_GetComponentLocation()
+    if not vector(origin) then return end
+    -- SpawnProjectile reads the held Arrow_Muzzle world transform and applies
+    -- stock spread. Keep that spread and all stock damage handling intact.
+    for _, height in ipairs({ 18, 5, 32, -10, 47 }) do
+        local target = { X = point.X, Y = point.Y, Z = point.Z + height }
+        local aim, distance = look_from(origin, target)
+        if distance >= 90 and distance <= 550 and math.abs(aim.Pitch) < 35 then
+            context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
+            local muzzle = context.muzzle:K2_GetComponentLocation()
+            local forward = context.muzzle:GetForwardVector()
+            local actual_aim = rotation(context.muzzle:K2_GetComponentRotation())
+            if vector(muzzle) and vector(forward) and actual_aim
+                and (forward.X * (target.X - origin.X) + forward.Y * (target.Y - origin.Y)
+                    + forward.Z * (target.Z - origin.Z)) / distance > 0.999 then
+                local reach = distance + 60
+                local finish = { X = muzzle.X + forward.X * reach,
+                    Y = muzzle.Y + forward.Y * reach, Z = muzzle.Z + forward.Z * reach }
+                local contact = stock_hit(context, muzzle, finish)
+                if contact then return distance, actual_aim, contact end
+            end
+        end
+    end
+end
+
+local function bandit_aim(state, phase, host, guest, before, name)
+    aim_fixture = nil
+    local bandit = stock_bandit(state, before, name)
+    local detail = state.guests[1]
+    local controller = detail.controller_object
+    local qualified, detached = guest_save.exact_item_context(state, phase, detail.name)
+    local weapon, camera, capsule = guest.EquipedItem, guest.Camera, guest.CapsuleComponent
+    if not bandit or not same(guest, qualified) or not valid(detached) or guest.Dead ~= false
+        or guest.IsWeaponBlocked ~= false or not valid(weapon) or not weapon:HasAuthority()
+        or not same(weapon:GetWorld(), state.world) or not same(weapon:GetOwner(), guest)
+        or not same(weapon:GetInstigator(), guest) or not same(weapon.User, guest) or not same(weapon.Player_Ref, guest)
+        or not stock_weapons[weapon:GetClass():GetFullName()] or weapon.HeldByPlayer ~= true
+        or not owned_component(camera, guest, "CameraComponent") or not owned_component(capsule, guest, "CapsuleComponent")
+        or not owned_component(weapon.Arrow_Muzzle, weapon, "ArrowComponent")
+        or not owned_component(bandit.CapsuleComponent, bandit, "CapsuleComponent") then
+        error("The verified standing guest, stock equipped weapon or living Bandit is unavailable", 0)
+    end
+    local muzzle = weapon.Arrow_Muzzle
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local point = bandit.CapsuleComponent:K2_GetComponentLocation()
+    local height = capsule:GetScaledCapsuleHalfHeight()
+    local original = {
+        position = guest:K2_GetActorLocation(), pawn = rotation(guest:K2_GetActorRotation()),
+        control = rotation(controller:GetControlRotation()), camera = rotation(camera.RelativeRotation),
+        muzzle = rotation(muzzle.RelativeRotation),
+    }
+    if not valid(trace) or not vector(point) or not finite(height) or height <= 0 or height > 150
+        or not vector(original.position) or not original.pawn or not original.control or not original.camera
+        or not original.muzzle then error("The stock Bandit aim geometry is unavailable", 0) end
+    local context = { trace = trace, host = host, guest = guest, bandit = bandit, weapon = weapon,
+        controller = controller, camera = camera, muzzle = muzzle }
+    local moved = false
+    local applied, distance, aim, contact = pcall(function()
+        local _, now = look_from(original.position, point)
+        if now >= 215 and now <= 430 then
+            local length, current_aim, hit = settle_aim(context, point)
+            if hit then return length, current_aim, hit end
+        end
+        local bearing = math.atan(original.position.Y - point.Y, original.position.X - point.X)
+        for _, offset in ipairs({ 0, 55, -55, 115, -115, 180 }) do
+            local direction = bearing + math.rad(offset)
+            for _, range in ipairs({ 295, 360 }) do
+                local x, y = point.X + math.cos(direction) * range, point.Y + math.sin(direction) * range
+                local at = floor_at(context, point, x, y, height)
+                if at and math.abs(at.Z - point.Z) <= 95 then
+                    local facing = look_from(at, point)
+                    if guest:K2_TeleportTo(at, { Pitch = 0, Yaw = facing.Yaw, Roll = 0 }) then
+                        moved = true
+                        local actual = guest:K2_GetActorLocation()
+                        local _, error_distance = look_from(at, actual)
+                        if error_distance <= 25 then
+                            local length, current_aim, hit = settle_aim(context, point)
+                            if hit then return length, current_aim, hit end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not applied or not valid(contact) then
+        local restored, position_restored = pcall(function()
+            local located = not moved or guest:K2_TeleportTo(original.position, original.pawn)
+            controller:SetControlRotation(original.control)
+            camera:K2_SetRelativeRotation(original.camera, false, {}, true)
+            muzzle:K2_SetRelativeRotation(original.muzzle, false, {}, true)
+            guest:ForceNetUpdate()
+            return located
+        end)
+        if not restored or not position_restored then error("mutation_unverified_native_bandit_aim_pose", 0) end
+        error(applied and "No exact stock Bandit line of fire from the qualified staging points"
+            or "Stock Bandit aim could not be verified (" .. tostring(distance) .. ")", 0)
+    end
+    guest:ForceNetUpdate()
+    aim_fixture = { world = state.world, guest = guest, name = name, distance = distance,
+        yaw = aim.Yaw, pitch = aim.Pitch, component = contact:GetFullName() }
+    return "stock Bandit aim verified"
+end
+
 function npc.command(fields, state, phase)
     local action = fields[2]
-    if action ~= "native-bandit-position" and action ~= "native-bandit-spawn" and action ~= "native-bandit-client-spawner-probe" then return end
+    if action ~= "native-bandit-position" and action ~= "native-bandit-spawn" and action ~= "native-bandit-client-spawner-probe"
+        and action ~= "native-bandit-aim-fixture" then return end
     local pawn = active(state, phase)
     if not pawn or type(SilverfishReadNativeBandit) ~= "function" then error("The staged Playtest Bandit scope is unavailable", 0) end
     local source, arrow = source_in(state.world)
@@ -112,6 +303,10 @@ function npc.command(fields, state, phase)
         error("The stock Bandit fixture requires an exact paired listen host", 0)
     end
     local before = read(pawn, guest)
+    if action == "native-bandit-aim-fixture" then
+        if #fields ~= 3 then error("The stock Bandit aim requires one exact live actor name", 0) end
+        return bandit_aim(state, phase, pawn, guest, before, fields[3])
+    end
     if not before[1] or before[2] ~= "waiting_for_stock_bandit" then error("The stock Bandit fixture requires an empty baseline", 0) end
 
     if action == "native-bandit-spawn" then

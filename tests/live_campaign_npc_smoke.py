@@ -1,8 +1,9 @@
-"""Observe natural CrossRoads Husk squads on a fresh, fixture-free headless loopback party."""
+"""Observe natural CrossRoads Husk squads on a fresh headless loopback party."""
 
 import argparse
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -66,6 +67,16 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         counters = ("natural_calls", "authority", "simulated", "other", "simulated_controllers", "ai_denials",
                     "antfarm_initialized")
         result.update(zip(counters, map(int, census[3:]), strict=True))
+        approach = [row for row in rows if row[0] == "native-campaign-npc-approach"]
+        if approach and viewer == "host":
+            move, = approach
+            if len(move) != 7 or move[1] != MAP:
+                return None
+            distances = list(map(float, move[5:7]))
+            if not all(math.isfinite(distance) and 0 < distance <= 4000 for distance in distances):
+                return None
+            result["approach"] = {"target": move[2], "host_pawn": move[3], "guest_pawn": move[4],
+                                  "host_distance_cm": distances[0], "guest_distance_cm": distances[1]}
         return result
     except (IndexError, OSError, ValueError):
         return None
@@ -95,7 +106,7 @@ def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bo
 
 
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
-                   require_client_denial: bool) -> None:
+                   require_client_denial: bool, approach: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
@@ -114,7 +125,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
-    evidence = {"map": MAP, "mode": "replicated" if replicate else "observed"}
+    evidence = {"map": MAP, "mode": "replicated" if replicate else "observed", "approach_requested": approach}
 
     async def command(*arguments):
         process = await asyncio.create_subprocess_exec(
@@ -173,13 +184,50 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             return client_replica(guest_npcs, host_npcs["cohort"], require_client_denial)
         return guest_npcs["replicated"] == guest_npcs["spawn_denials"] == guest_npcs["ai_denials"] == 0
 
+    def approach_pair(server):
+        game = server.get("game", {})
+        pawns = game.get("pawns", {})
+        host_pawn, guest_pawn = pawns.get("local", {}), pawns.get("guest", {})
+        host_name, guest_name = host_pawn.get("name"), guest_pawn.get("name")
+        if not host_name or not guest_name or host_name == guest_name:
+            return None
+        scope = game.get("native_guest_save_members", {}).get(guest_name) or game.get("native_guest_save", {})
+        connections = game.get("native_roster", {}).get("connections", [])
+        participant = server.get("gameplay", {}).get("players", {}).get("guest", {})
+        if (scope.get("state") != "bound" or scope.get("pawn") != guest_name or len(connections) != 1
+                or connections[0].get("state") != "ready" or connections[0].get("pawn") != guest_name
+                or connections[0].get("controller") != guest_pawn.get("controller")
+                or participant.get("character_id") != invitation["character_id"] or participant.get("downed") is not False):
+            return None
+        return host_name, guest_name
+
     try:
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
-                    "--native-events", "--native-guest", "--start-zone", MAP)
+                    "--native-events", "--native-guest", "--start-zone", MAP, *(("--fixtures",) if approach else ()))
         await wait("The CrossRoads host did not start", lambda server, _, __: server.get("state") == "hosting", 45)
         invitation = await command("invite", *primary, "--name", "Husk canary guest", "--character", "Husk observer")
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
-        server, client, snapshot = await wait("No fixture-free stock Husk proof appeared", proved)
+        if approach:
+            def ready(server, client, snapshot):
+                return paired(server, client) and stock_cohort(snapshot["host"], True) and approach_pair(server)
+
+            before, _, natural = await wait("No natural Husk cohort and enrolled pair appeared", ready)
+            evidence["before_approach"] = {"host": natural["host"], "guest": natural["guest"]}
+            host_pawn, guest_pawn = approach_pair(before)
+            target = natural["host"]["members"][0]
+            await command("action", *primary, "native-campaign-npc-approach", "--target", target)
+
+            def approached(server, client, snapshot):
+                move = (snapshot["host"] or {}).get("approach", {})
+                return (proved(server, client, snapshot) and move.get("target") == target
+                        and (move.get("host_pawn"), move.get("guest_pawn")) == (host_pawn, guest_pawn)
+                        and approach_pair(server) == (host_pawn, guest_pawn)
+                        and target in snapshot["host"]["members"])
+
+            server, client, snapshot = await wait("The approached cohort did not yield stock client replicas", approached, 45)
+            evidence["approach"] = snapshot["host"]["approach"]
+        else:
+            server, client, snapshot = await wait("No fixture-free stock Husk proof appeared", proved)
         if client.get("character_id") != invitation["character_id"]:
             raise AssertionError("The authenticated guest did not activate its invited character")
         evidence.update({"host": snapshot["host"], "guest": snapshot["guest"], "zone_epoch": server["zone_epoch"]})
@@ -238,14 +286,17 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="root of an already prepared stage")
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--replicate", action="store_true", help="enable the exact native Husk cohort replication canary")
+    parser.add_argument("--approach", action="store_true",
+                        help="bring the paired pawns near a naturally spawned stock cohort after verification")
     parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client Husk spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
-    if options.require_client_denial and not options.replicate:
-        parser.error("--require-client-denial requires --replicate")
+    if (options.require_client_denial or options.approach) and not options.replicate:
+        parser.error("--require-client-denial and --approach require --replicate")
     if not 15 <= options.timeout <= 360:
         parser.error("--timeout must be between 15 and 360 seconds")
     if options.vanilla_saved and not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing directory")
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
-                         timeout=options.timeout, require_client_denial=options.require_client_denial))
+                         timeout=options.timeout, require_client_denial=options.require_client_denial,
+                         approach=options.approach))

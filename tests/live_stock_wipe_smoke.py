@@ -16,7 +16,8 @@ OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 LOOSE_PICKUP = "observatory-comp-board"
 
 
-async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool) -> None:
+async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool,
+                   wipe_view: bool) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -97,8 +98,28 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                 break
             await asyncio.sleep(.2)
         assert draft and {item["guid"] for item in draft["items"]} == {gun, reserve}, draft
-        await action(secondary, "keep", "--keep", f"{gun}=1")
-        await action(primary, "keep")
+        if wipe_view:
+            async def key(owner, button):
+                return (await action(owner, "native-wipe-view-key-fixture", "--target", button))["native_wipe_view"]
+
+            for directory in (host, guest):
+                await wait(directory, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "selecting")
+            current = (await command("status", *secondary))["game"]["native_wipe_view"]
+            if current["guid"] != gun:
+                current = await key(secondary, "down")
+            assert current["guid"] == gun and current["limit"] == 1 and current["total"] == 2, current
+            selected = await key(secondary, "toggle")
+            assert selected["selected"] == 1 and selected["guid"] == gun, selected
+            submitted = []
+            for owner, count in ((secondary, 1), (primary, 0)):
+                confirmed = await key(owner, "submit")
+                assert confirmed["state"] == "confirming" and confirmed["selected"] == count, confirmed
+                ready = await key(owner, "submit")
+                assert ready["state"] == "submitting" and ready["sequence"] > 0, ready
+                submitted.append(ready)
+        else:
+            await action(secondary, "keep", "--keep", f"{gun}=1")
+            await action(primary, "keep")
         revived = await wait(host, lambda status: status.get("state") == "hosting"
                              and status.get("gameplay", {}).get("native_backpacks")
                              and status["gameplay"].get("wipe") is None and not status["gameplay"].get("pending_spawns"))
@@ -124,6 +145,8 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         after_recovery = (await action(secondary, "native-inventory-list"))["native_inventory"]
         assert {row["guid"] for row in after_recovery["items"]} == {gun, reserve}, after_recovery
         proof = {"rest": rest, "retained": after_wipe, "backpack": bag, "recovered": after_recovery}
+        if wipe_view:
+            proof["native_inventory_selection_input"] = submitted
         if visible_bag:
             await wait(guest, lambda status: status.get("game", {}).get("state") == "connected"
                        and not status["game"].get("native_bag_projection", {}).get("count")
@@ -181,6 +204,7 @@ if __name__ == "__main__":
     arguments.add_argument("--visible-bag", action="store_true")
     arguments.add_argument("--authored-pickup", action="store_true")
     arguments.add_argument("--stock-rules", action="store_true")
+    arguments.add_argument("--wipe-view", action="store_true")
     options = arguments.parse_args()
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved, options.visible_bag, options.authored_pickup,
-                         options.stock_rules))
+                         options.stock_rules, options.wipe_view))

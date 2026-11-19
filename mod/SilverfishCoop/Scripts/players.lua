@@ -381,6 +381,15 @@ function players.is_downed(pawn)
     return record ~= nil and same(record.pawn, pawn) and same(record.world, pawn:GetWorld())
 end
 
+function players.is_standing_guest(pawn, name)
+    for slot, detail in pairs(slot_pawns) do
+        if slot ~= "local" and detail.name == name and same(detail.pawn, pawn) then
+            return desired[name] == nil and applied[name] == nil
+        end
+    end
+    return false
+end
+
 function players.command(fields, state, phase)
     local command = fields[2]
     if command == "native-interaction-fixture" then

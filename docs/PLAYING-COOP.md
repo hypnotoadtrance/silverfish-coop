@@ -1,0 +1,127 @@
+# Playing Project Silverfish Co-op
+
+Use Direct IP through the co-op launcher on Windows. The default mode starts a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. Its largest verified loopback session had one host and two guests. [Current native coverage](NATIVE-INTEGRATION.md)
+
+## Stage the same build on each PC
+
+Open PowerShell in the mod repository. Use Python 3.11 or later, a Steam installation of Project Silverfish, and the extracted [UE4SS v4.0.0 release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0). Point the launcher at the release folder that contains `dwmapi.dll` and `ue4ss`.
+
+```powershell
+python -m venv .venv
+$sfPython = (Resolve-Path '.\.venv\Scripts\python.exe').Path
+& $sfPython -m pip install -r requirements.txt
+
+$sfWork = 'C:\Path\To\Silverfish-Coop-Work'
+$sfGame = 'C:\Program Files (x86)\Steam\steamapps\common\Project Silverfish'
+$sfUe4ss = 'C:\Path\To\Extracted\UE4SS_v4.0.0'
+$sfCli = @('-m', 'tools.silverfish', '--work', $sfWork)
+& $sfPython @sfCli stage --source $sfGame --ue4ss $sfUe4ss
+```
+
+Use a new workspace for each fresh stage. To load the game's signatures, extract `zCustomGameConfigs.zip` from the same UE4SS release and pass `--signatures` with its `Project Silverfish\UE4SS_Signatures` directory. Use the same game build and mod revision on every PC. The launcher copies the stock game files and writes co-op profiles under the workspace. The original Steam launch continues to use the single-player save directory.
+
+Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace path is local to each PC. On one PC both terminals can use the same stage with separate campaign and guest profiles.
+
+## Host and join
+
+On the host, bind to the host machine's LAN address and choose the UDP port the guest will use. Replace the example address with the address of your host.
+
+```powershell
+& $sfPython @sfCli host --campaign expedition --bind 192.168.1.25 --port 7777
+```
+
+For two processes on one PC, omit `--bind` to use `127.0.0.1`. On separate PCs, the guest needs to reach the chosen UDP endpoint. The host's firewall may need to allow that port. Across networks, the chosen endpoint may also require router configuration. Only the launcher port carries remote traffic. Unreal connects to the launcher over loopback.
+
+In a second host terminal, confirm that the campaign reports `state: hosting`. Issue one invitation per guest.
+
+```powershell
+& $sfPython @sfCli status --campaign expedition
+& $sfPython @sfCli invite --campaign expedition --name 'Guest' --character 'Scout'
+```
+
+Share the returned `invite_file` privately. It carries the guest credential and the certificate used to authenticate the host. Use `invite --address <reachable-host-address>` when the guest uses a different address from the bind address. The invitation's endpoint uses the port from the running host.
+
+On the guest PC, use the invitation in a dedicated terminal. The guest profile name is local. The invitation holds the default character.
+
+```powershell
+$sfInvite = 'C:\Path\To\Received.invite.json'
+& $sfPython @sfCli join --profile scout --invite $sfInvite
+```
+
+To select or create another character owned by the same guest, use the catalog before launching the guest game. Pass the chosen character ID with `join --character <id>`.
+
+```powershell
+& $sfPython @sfCli characters --invite $sfInvite
+& $sfPython @sfCli create-character --invite $sfInvite --name 'Pathfinder'
+```
+
+Check guest status from another terminal. A ready gameplay session reports `state: connected`, `link_connected: true`, and `game.state: connected` on the guest. In windowed play, use the ordinary game controls to move. Use `--headless` on both launch commands for unattended diagnostics.
+
+## Rejoin and resume
+
+Leave the host and guest launchers running during a brief network interruption. The guest can retry automatically. The host reserves the character for 90 seconds. The reserved pawn still counts for party travel and other active-player checks. Rejoining within that window can restore control of the same pawn. After the reservation expires, the host attempts a final native checkpoint where supported, retires the old connection, and restores the character near the host on a fresh join.
+
+Reuse the invitation and character selection for a later session. Keep the host campaign's `save` and `game-user` directories together. The native campaign uses both for its checkpoint and stock save generations. Restart the host with the same campaign name and native flags. Its saved zone is selected on startup.
+
+Use the guest's `stop` action to close that guest instance. Use the host's `checkpoint` and `stop` actions for a saved shutdown.
+
+## Optional stock campaign mode
+
+Use the [native build instructions](../native/README.md) for a matched UE4SS runtime and C++ add-on. Stage both DLLs on each PC with `--cpp-runtime` and `--cpp-addon` in a separate workspace. This example starts an authored-map session on the matched stage.
+
+```powershell
+$sfCrossRoads = '/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P'
+& $sfPython @sfCli host --campaign crossings --bind 192.168.1.25 --port 7777 --native-events --native-guest --native-zones --native-zone-walls --start-zone $sfCrossRoads
+```
+
+Use the same invitation workflow and the campaign name `crossings`. The invitation carries the host's native travel, wall, and supported interaction settings. Keep the native feature flags for subsequent launches and omit the initial `--start-zone` when resuming after travel.
+
+| Option | Scope |
+| --- | --- |
+| `--native-start-preset wanderer` | Experimental fresh campaign initialization for the stock Wanderer preset at the Observatory under the Mercy rules. Add `--native-world-seed N` for a fixed initial seed from 1 to 999999. This path still needs an end-to-end startup and restart test. |
+| `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
+| `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Live verification covers up to two guests on loopback. |
+| `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
+| `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
+| `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
+| Guest `--native-guest-inventory-view` | The stock inventory key opens the guest's first native inventory page. Page Up and Page Down move the selection, Home twice confirms a supported equip, and End closes it. |
+| Guest `--native-guest-primary-input --native-guest-reload-input` | Routes the qualified SMG and Light Pistol inputs to the host. The stock primary path handles one shot per press. |
+
+In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
+
+The current stage has qualified stock paths for selected rest points, exits, transport items, an authored CrossRoads loot crate, finite merchants, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
+
+## Machine-readable controls
+
+Run the commands below on the PC with the targeted launcher. Use `--campaign` for the host and `--profile` for the guest.
+
+```powershell
+& $sfPython @sfCli status --campaign expedition
+& $sfPython @sfCli status --profile scout
+& $sfPython @sfCli events --campaign expedition --tail 20
+& $sfPython @sfCli action --campaign expedition checkpoint
+& $sfPython @sfCli action --profile scout drop-link
+& $sfPython @sfCli action --profile scout reconnect
+& $sfPython @sfCli action --profile scout stop
+& $sfPython @sfCli action --campaign expedition stop
+```
+
+- `status` reports the launcher state, `link_connected`, and an Unreal snapshot under `game`. Check `active`, `stale`, and both connection layers before acting. On the guest, check `gameplay_fresh` before treating the host's replicated party state as current. `game.pawns` includes positions and health where measurable. A `null` health value indicates an unavailable or shared stock field.
+- `events` returns an object with an `events` array. Use `generation` to distinguish launcher runs, `time_unix` for event time, and `command_id` where provided to match a result to its action.
+- `action` replies include an `id` and `ok` when the controller replies. Failed commands also return an error and a nonzero exit status. A missing response may mean the action was already applied. For receipt-backed transactions, retry with the same 32-character lowercase hex `--operation-id` and identical arguments. Inspect the current state before retrying other mutations.
+- `drop-link` suspends automatic retries until the guest requests `reconnect`. Use it to test the 90-second reservation. Actions remain scoped to the local launcher through its workspace.
+
+For a bounded movement test, use `action --profile scout walk --x 0 --y 1 --milliseconds 300`, then read the guest and host pawn positions again.
+
+The authored campaign supports local reads for the current native scope. Use the quoted item IDs and the live position for any subsequent interaction.
+
+```powershell
+& $sfPython @sfCli action --profile scout native-inventory-list
+& $sfPython @sfCli action --profile scout native-quest-list --target stock
+& $sfPython @sfCli action --profile scout native-finite-shop-list
+& $sfPython @sfCli action --profile scout native-loot-inspect
+```
+
+Inventory and quest listings expose `next_offset`. To page the guest inventory, pass the offset in `--target`. The host version of `native-inventory-list` uses `--target` for the enrolled role and `--amount` for the offset. For stock quests, use a target such as `stock@8`. For a confirmed merchant quote, use `native-finite-shop-buy --target GUID@PRICE` or `native-finite-shop-sell --target GUID@PRICE`. Use `native-finite-shop-sale-quote --target GUID` before confirming a sale. During a qualified stock wipe, use `native-wipe-items` and `keep --keep GUID=1` for whole-row selection. The owner's `gameplay.native_backpacks` lists exact recovery IDs and death positions for `native-wipe-recover --target BACKPACK_ID`.
+
+The raw run directories are `campaigns/<campaign>/run` and `clients/<profile>/run` under the chosen workspace. Keep their credentials, invitation files, saves, and generated stage outside commits. The CLI emits telemetry without requiring tools to read the invitation contents.

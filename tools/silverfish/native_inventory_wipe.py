@@ -178,6 +178,14 @@ def _choice(guids):
     return set(guids)
 
 
+def selection_policy(item: dict) -> str:
+    if item["source"] != "backpack":
+        return "selectable"
+    if item["class_path"] == BLACK_STONE:
+        return "locked"
+    return "excluded" if item["cannot_keep"] else "selectable"
+
+
 def _partition(items, chosen, keep_slots, drop_bone_pile):
     if keep_slots is None:
         if chosen:
@@ -187,12 +195,12 @@ def _partition(items, chosen, keep_slots, drop_bone_pile):
     by_guid = {item["guid"]: item for item in items}
     if chosen - by_guid.keys():
         raise InventoryWipeError("native_wipe_item_unavailable")
-    forced = [item["guid"] for item in items if item["source"] == "backpack" and item["class_path"] == BLACK_STONE]
+    forced = [item["guid"] for item in items if selection_policy(item) == "locked"]
     if len(forced) > 1:
         raise InventoryWipeError("ambiguous_black_stone")
     if chosen.intersection(forced):
         raise InventoryWipeError("black_stone_keep_slot_locked")
-    excluded = {item["guid"] for item in items if item["source"] == "backpack" and item["cannot_keep"]} - set(forced)
+    excluded = {item["guid"] for item in items if selection_policy(item) == "excluded"}
     if chosen.intersection(excluded):
         raise InventoryWipeError("native_wipe_item_cannot_be_kept")
     if len(chosen) > max(0, keep_slots - len(forced)):

@@ -262,7 +262,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
            expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
-           native_shop_view: bool = False, guest_primary_input: bool = False):
+           native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
+           guest_regen: bool = False, broker_input: bool = False, native_wipe_view: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -273,6 +274,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_REGEN", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE", None)
     env.pop("SILVERFISH_COOP_NATIVE_ZONE_WALLS", None)
     env.pop("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES", None)
@@ -286,12 +288,16 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_SHOP_VIEW", None)
+    env.pop("SILVERFISH_COOP_NATIVE_BROKER_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_WIPE_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES", None)
     backend = native_death_backend(work)
     if native_events and (backend != "cpp" or port is None):
         raise ValueError("Native event scope requires a staged C++ listen host")
     if native_guest and not native_events:
         raise ValueError("Native guest ownership requires native event scope")
+    if guest_regen and (not native_guest or not native_zones):
+        raise ValueError("Stock guest regeneration requires native campaign guest ownership")
     if native_zones and backend != "cpp":
         raise ValueError("Natural exit handling requires a staged C++ game")
     if native_zone_walls and not native_zones:
@@ -304,12 +310,20 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("The guest inventory view requires a staged native client")
     if native_shop_view and (not native_zones or port is not None and not native_guest):
         raise ValueError("The merchant view requires scoped native guest ownership")
+    if native_loot_input and (not native_zones or port is not None and not native_guest):
+        raise ValueError("Natural stock crate interaction requires scoped native guest ownership")
+    if broker_input and (not native_zones or port is not None):
+        raise ValueError("Broker interact input requires a staged native guest")
+    if native_wipe_view and (not native_zones or port is not None and not native_guest):
+        raise ValueError("The stock item retention overlay requires staged native guest ownership")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
     if native_events:
         env["SILVERFISH_COOP_NATIVE_EVENTS"] = "1"
     if native_guest:
         env["SILVERFISH_COOP_NATIVE_GUEST_SAVE"] = "1"
+    if guest_regen:
+        env["SILVERFISH_COOP_NATIVE_GUEST_REGEN"] = "1"
     if native_zones:
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
@@ -317,6 +331,10 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         if port is not None and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
+    if native_loot_input:
+        env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
+        if headless and port is None:
+            env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_zone_walls:
         env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
     if expanded_zones:
@@ -333,6 +351,12 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_SHOP_VIEW"] = "1"
         if headless and port is None:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
+    if broker_input:
+        env["SILVERFISH_COOP_NATIVE_BROKER_INPUT"] = "1"
+        if headless:
+            env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
+    if native_wipe_view:
+        env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
@@ -383,6 +407,7 @@ class Bridge:
         self.inventory_equip_offset = 0
         self.primary_input_offset = 0
         self.shop_view_offset = 0
+        self.broker_input_offset = 0
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -483,6 +508,24 @@ class Bridge:
                             for value in fields[1:3])
                     and all(len(value) <= 512 for value in fields[4:])):
                 events.append((int(fields[1]), int(fields[2]), *fields[3:]))
+        return events
+
+    def native_broker_requests(self) -> list[tuple[int, str, str, str]]:
+        try:
+            with (self.directory / "native-broker-input-events").open("rb") as stream:
+                stream.seek(self.broker_input_offset)
+                batch = stream.read(4096)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.broker_input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) == 5 and fields[0] == "native-broker-input" and fields[1].isascii() and fields[1].isdigit()
+                    and len(fields[1]) <= 16 and 0 < (sequence := int(fields[1])) < 2**53
+                    and len(fields[2]) <= 256 and all(len(value) <= 512 for value in fields[3:])):
+                events.append((sequence, *fields[2:]))
         return events
 
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
@@ -732,6 +775,28 @@ class Bridge:
                     }
                 elif fields[0] == "native-bandit":
                     data["native_bandit"] = parse_bandit(fields)
+                elif fields[0] == "native-bandit-aim" and len(fields) == 8:
+                    data["native_bandit_aim"] = {"map": fields[1], "bandit": fields[2], "pawn": fields[3],
+                                                 "range": _finite(fields[4]), "yaw": _finite(fields[5]), "pitch": _finite(fields[6]),
+                                                 "component": fields[7]}
+                elif fields[0] == "native-broker-input" and len(fields) == 6:
+                    data["native_broker_input"] = {"map": fields[1], "pawn": fields[2], "station": fields[3],
+                                                   "state": fields[4], "sequence": int(fields[5])}
+                elif fields[0] == "native-network-timeout" and len(fields) == 2:
+                    data["native_network_timeout"] = _finite(fields[1])
+                elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
+                    fresh = dict(zip(("state", "preset", "difficulty", "map", "working_slot"), fields[1:6]))
+                    seeds_and_counters = ("instance_seed", "world_seed", "artifact_seed", "storm_seed", "cash", "debt", "xp", "backpack_count")
+                    fresh.update(zip(seeds_and_counters, map(int, fields[6:14])))
+                    fresh.update(zip(("armor", "rest_level", "proof"), fields[14:]))
+                    data["native_fresh_campaign"] = fresh
+                elif fields[0] == "native-enemy-loot" and len(fields) == 18 and fields[13] in ("0", "1"):
+                    data["native_enemy_loot"] = {"map": fields[1], "bandit": fields[2], "state": fields[3], "hits": int(fields[4]),
+                                                 "killer_role": fields[5], "killer_pawn": fields[6], "projectile": fields[7],
+                                                 "damage": _finite(fields[8]), "hp_before": _finite(fields[9]), "hp_after": _finite(fields[10]),
+                                                 "loot_calls": int(fields[11]), "bounty_calls": int(fields[12]), "bounty_active": fields[13] == "1",
+                                                 "bounty_instances": int(fields[14]), "ammo_actor": fields[15], "ammo_class": fields[16],
+                                                 "ammo_quantity": int(fields[17])}
                 elif fields[0] == "native-campaign-npc" and len(fields) == 10:
                     data["native_campaign_npc"] = {
                         "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
@@ -744,6 +809,10 @@ class Bridge:
                     data["native_campaign_npc"].update(zip(metrics, map(int, fields[3:])))
                 elif fields[0] == "native-campaign-npc-member" and len(fields) == 4 and "native_campaign_npc" in data:
                     data["native_campaign_npc"]["members"].append(fields[3])
+                elif fields[0] == "native-campaign-npc-approach" and len(fields) == 7:
+                    data["native_campaign_npc_approach"] = {"map": fields[1], "member": fields[2], "host_pawn": fields[3],
+                                                           "guest_pawn": fields[4], "host_distance": _finite(fields[5]),
+                                                           "guest_distance": _finite(fields[6])}
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
                 elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in ("smg", "light-pistol"):
@@ -759,6 +828,33 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
+                elif fields[0] == "native-guest-regen" and len(fields) in (4, 16):
+                    effect = {"state": fields[1], "map": fields[2], "pawn": fields[3]}
+                    if len(fields) == 16:
+                        keys = ("total_seconds", "pulse_seconds", "health_before", "health_after", "ceiling", "delay_before",
+                                "delay_after", "food_before", "food_after", "stim_before", "stim_after")
+                        effect.update(zip(keys, map(_finite, fields[5:])))
+                        effect["pulses"] = int(fields[4])
+                    data.setdefault("native_guest_regen", {})[fields[3]] = effect
+                elif fields[0] == "native-guest-revive" and len(fields) == 6:
+                    data.setdefault("native_guest_revivals", {})[fields[2]] = {
+                        "map": fields[1], "pawn": fields[2], "owner": fields[3], "health": _finite(fields[4]), "maximum": _finite(fields[5]),
+                    }
+                elif fields[0] == "native-wipe-view" and len(fields) == 13:
+                    data["native_wipe_view"] = {"state": fields[1], "id": fields[2], "map": fields[3], "pawn": fields[4],
+                                                "owner": fields[5], "deadline": int(fields[6]), "offset": int(fields[7]),
+                                                "total": int(fields[8]), "guid": fields[9], "selected": int(fields[10]),
+                                                "limit": int(fields[11]), "sequence": int(fields[12])}
+                elif fields[0] == "native-loot-crate-input" and len(fields) == 4:
+                    data["native_loot_crate_input"] = {"map": fields[1], "crate": fields[2], "state": fields[3]}
+                elif fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10:
+                    data["native_loot_crate_diagnostic"] = {"map": fields[1], "crate": fields[2], "phase": fields[3],
+                                                             "scope": fields[4], "door": fields[5], "box": fields[6],
+                                                             "looted": None if fields[7] == "-" else fields[7] == "1",
+                                                             "collision": _finite(fields[8]), "roll": _finite(fields[9])}
+                elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
+                    data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
+                                                            "sequence": int(fields[4]), "entry": fields[5]}
                 elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
                     data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
                                                            "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}

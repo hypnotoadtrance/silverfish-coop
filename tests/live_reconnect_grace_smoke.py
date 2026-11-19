@@ -23,6 +23,7 @@ TRAVEL_RADIUS = 1500
 ARRIVAL_RADIUS = 250
 SETTLE_SECONDS = 2
 SETTLE_RADIUS = 25
+OUTAGE_FRAME_GAP_SECONDS = 3
 
 
 def status(run: Path) -> dict:
@@ -235,21 +236,51 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
         evidence["first_reserved_frame"] = paused
         evidence["initial_blocker"] = await blocked_travel()
         seq = first_reserved["game"]["sequence"]
+
+        def outage_proof(server, client):
+            return {
+                "pawn": native_guest(server, character), "lease": lease(server, character),
+                "host": {key: server.get(key) for key in ("state", "active", "link_connected", "updated_unix")},
+                "peer": {key: client.get(key) for key in ("state", "active", "link_connected", "updated_unix",
+                                                         "reconnect_suspended")},
+            }
+
+        def holds(proof):
+            pawn, hold, server, client = (proof[key] for key in ("pawn", "lease", "host", "peer"))
+            return (pawn and exact_identity(pawn) == exact_identity(initial)
+                    and math.dist(pawn["location"], paused["location"]) <= 100 and hold.get("state") == "reserved"
+                    and server["active"] is True and server["link_connected"] is False
+                    and client["link_connected"] is False and client["reconnect_suspended"] is True)
+
+        last_consistent_at, last_frame = time.monotonic(), None
+        last_good, last_bad = None, None
+        mismatch_count = 0
         while time.monotonic() - started < outage:
             current, peer = status(host_run), status(guest_run)
-            last = native_guest(current, character)
-            hold = lease(current, character)
-            if (not last or exact_identity(last) != exact_identity(initial) or hold.get("state") != "reserved"
-                    or current.get("link_connected") is not False or peer.get("link_connected") is not False
-                    or peer.get("reconnect_suspended") is not True or not current.get("active")):
-                raise AssertionError("The host lost the original pawn, native binding, or reservation during the outage")
-            if math.dist(last["location"], paused["location"]) > 100:
-                raise AssertionError({"first_reserved_frame": paused, "moved_during_outage": last})
+            now = time.monotonic()
+            frame = (current.get("updated_unix"), peer.get("updated_unix"))
+            fresh = all(type(stamp) in (float, int) for stamp in frame) and (
+                last_frame is None or all(stamp != prior for stamp, prior in zip(frame, last_frame)))
+            if fresh:
+                last_frame = frame
+                proof = outage_proof(current, peer)
+                if holds(proof):
+                    last_consistent_at, last_good = now, proof
+                    mismatch_count = 0
+                else:
+                    last_bad = proof
+                    mismatch_count += 1
+            gap = now - last_consistent_at
+            if gap >= OUTAGE_FRAME_GAP_SECONDS or (mismatch_count >= 3 and gap >= 1):
+                evidence["last_good_outage_frame"] = last_good
+                evidence["last_bad_outage_frame"] = last_bad
+                evidence["missed_outage_seconds"] = round(gap, 3)
+                evidence["successive_mismatches"] = mismatch_count
+                raise AssertionError("The exact active guest could not be verified across successive outage frames")
             await asyncio.sleep(0.25)
         evidence["late_blocker"] = await blocked_travel()
         late, _ = await wait("The final outage frame did not contain the in-grace pawn",
-            lambda state, _: state.get("game", {}).get("sequence", 0) > seq
-            and lease(state, character).get("state") == "reserved" and native_guest(state, character), 5)
+            lambda state, peer: state.get("game", {}).get("sequence", 0) > seq and holds(outage_proof(state, peer)), 5)
         retained = native_guest(late, character)
         evidence["outage_seconds"] = round(time.monotonic() - started, 3)
         evidence["in_grace"] = retained

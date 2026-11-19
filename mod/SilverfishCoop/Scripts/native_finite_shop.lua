@@ -4,11 +4,19 @@ local pickup = require("native_pickup")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local world_name = "World " .. map .. ".Observitory_P"
-local target_name = "Shop_BP_C " .. map .. ".Observitory_P:PersistentLevel.Shop_BP_C_2"
+local merchants = {
+    ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P"] = {
+        level = "Observitory_P", actor = "Shop_BP_C_2", data = "Observitory_ShopData",
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"] = {
+        level = "Shop_ScavBar_P", actor = "Shop_BP_C_2", data = "ScavBar_ShopData",
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"] = {
+        level = "Shop_BlackMarket_01", actor = "Shop_BP_C_1", data = "BlacMarket_ShopData",
+    },
+}
+local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
 local shop_class = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"
-local merchant_data = "/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData"
 local panel_path = "/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C"
 local widget_library = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local max_money, max_offers = 2147483647, 128
@@ -60,10 +68,13 @@ local function guid(value)
 end
 
 local function merchant(state, phase, pawn_name)
-    if not enabled or phase ~= "hosting" or state.map ~= map or not state.listening or state.server ~= false
-        or not valid(state.world) or state.world:GetFullName() ~= world_name then
-        refused("exact_listen_world_unavailable")
-    end
+    local profile = merchants[state.map]
+    if not enabled or not profile or phase ~= "hosting" or not state.listening or state.server ~= false
+        or not valid(state.world) then refused("exact_listen_world_unavailable") end
+    local world = state.map .. "." .. profile.level
+    if state.world:GetFullName() ~= "World " .. world then refused("exact_listen_world_unavailable") end
+    local target_name = "Shop_BP_C " .. world .. ":PersistentLevel." .. profile.actor
+    local merchant_data = merchant_data_root .. profile.data .. "." .. profile.data
     local accepted, pawn, stock = pcall(pickup.enrolled, state, phase, pawn_name)
     if not accepted or not valid(pawn) or not valid(stock) or same(pawn.Save, stock) or pawn.Dead ~= false
         or not finite(pawn.Save.PlayerHealth) or pawn.Save.PlayerHealth <= 0 then
@@ -84,7 +95,7 @@ local function merchant(state, phase, pawn_name)
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then
         refused("exact_stock_merchant_unavailable")
     end
-    return {pawn = pawn, stock = stock, actor = actor, instance = instance}
+    return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance}
 end
 
 local function quote_panel(context)
@@ -157,7 +168,7 @@ function shop.fixture_position(state, phase, pawn_name)
                     if vector(actual) and distance_squared(actual, location) < 625
                         and distance_squared(actual, anchor) < range ^ 2 then
                         pawn:ForceNetUpdate()
-                        return "exact Observatory merchant approach verified"
+                        return "exact stock merchant approach verified"
                     end
                 end
             end
@@ -212,14 +223,15 @@ function shop.command(fields, state, phase)
         or not integer(cash_before, 0, max_money) or not integer(cash_after, 0, max_money) then
         error(mutates and "mutation_unverified_shop_offer_result" or "finite_shop_invalid_offer_result", 0)
     end
-    last = {world = state.world, status = status, pawn = fields[3], before = before, after = after,
+    last = {world = state.world, map = state.map, actor = context.name, status = status, pawn = fields[3],
+        before = before, after = after,
         cash_before = cash_before, cash_after = cash_after, rows = rows}
-    return "exact Observatory finite merchant verified"
+    return "exact stock finite merchant verified"
 end
 
 function shop.rows(state, phase, status_row)
-    if not last or phase ~= "hosting" or state.map ~= map or not same(last.world, state.world) then return {} end
-    local rows = { status_row("native-finite-shop", last.status, map, last.pawn, target_name, last.before,
+    if not last or phase ~= "hosting" or state.map ~= last.map or not same(last.world, state.world) then return {} end
+    local rows = { status_row("native-finite-shop", last.status, last.map, last.pawn, last.actor, last.before,
         last.after, last.cash_before, last.cash_after, #last.rows) }
     for _, row in ipairs(last.rows) do rows[#rows + 1] = status_row("native-finite-shop-item", table.unpack(row)) end
     return rows

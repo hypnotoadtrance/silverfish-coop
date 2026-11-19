@@ -27,6 +27,11 @@ local native_inventory = require("native_inventory")
 local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_loot_actions = require("native_loot_actions")
+local native_loot_crate_input = require("native_loot_crate_input")
+local native_enemy_loot = require("native_enemy_loot")
+local native_broker_input = require("native_broker_input")
+local native_wipe_view = require("native_wipe_view")
+local native_fresh_campaign = require("native_fresh_campaign")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -48,6 +53,7 @@ local native_guest_npc = require("native_guest_npc")
 local native_guest_reload_input = require("native_guest_reload_input")
 local native_guest_primary_input = require("native_guest_primary_input")
 local native_guest_consumable = require("native_guest_consumable")
+local native_guest_regen = require("native_guest_regen")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
@@ -174,6 +180,7 @@ local function inspect()
         if own_session and not leaving and driver.ConnectionTimeout ~= connection_timeout_seconds then
             driver.ConnectionTimeout = connection_timeout_seconds
         end
+        if own_session then state.connection_timeout = driver.ConnectionTimeout end
     end
 
     local known_pawns = {}
@@ -361,6 +368,9 @@ local function run_command(fields, state, current_phase)
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
+        native_guest_regen.clear(command == "native-guest-clear" and argument or nil)
+        if command ~= "native-guest-clear" then native_wipe_view.clear() end
+        native_enemy_loot.clear()
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
     if command == "join" or command == "leave" then
@@ -371,8 +381,16 @@ local function run_command(fields, state, current_phase)
         native_shop_view.clear()
         native_campaign_npc.clear()
         native_guest_primary_input.reset()
+        native_loot_crate_input.clear()
+        native_broker_input.clear()
+        native_wipe_view.clear()
     end
-    if command == "native-extraction-prepare" then
+    if command == "native-fresh-campaign-prepare" then
+        if not authored_routes or role ~= "idle" or #fields ~= 5 then
+            error("The stock start preset requires a fresh authored co-op campaign", 0)
+        end
+        return native_fresh_campaign.prepare(state, current_phase, fields[3], fields[4], fields[5])
+    elseif command == "native-extraction-prepare" then
         if not authored_routes or role ~= "idle" or #fields ~= 5 then
             error("Stock extraction settings require a new authored co-op campaign", 0)
         end
@@ -744,6 +762,11 @@ local function run_command(fields, state, current_phase)
         or native_guest_primary_input.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
+        or native_loot_crate_input.command(fields, state, current_phase)
+        or native_enemy_loot.command(fields, state, current_phase)
+        or native_broker_input.command(fields, state, current_phase)
+        or native_wipe_view.command(fields, state, current_phase)
+        or native_campaign_npc.command(fields, state, current_phase)
         or native_black_stone.command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
@@ -797,6 +820,7 @@ local function write_status(state, current_phase, failure)
         status_row("seq", sequence),
         status_row("ack", acknowledged_id, acknowledged_result, acknowledged_message),
         status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0),
+        status_row("native-network-timeout", state.connection_timeout or "-"),
     }
     if world_view_enabled and current_phase == "hosting" then
         if not same_object(state.world, host_world_view_world) or host_world_view_check ~= os.time() then
@@ -853,7 +877,13 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_wipe_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_fresh_campaign.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_black_stone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_nothing_return.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1000,6 +1030,8 @@ local function tick()
     native_inventory_view.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
+    native_enemy_loot.sync(state, current_phase)
+    native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
     native_zone.sync(state, current_phase)
     native_rest.sync_hook(state, current_phase)
@@ -1041,6 +1073,7 @@ local function tick()
             or fields[2] == "native-dream-place-guest" or fields[2] == "native-matrix-place"
             or fields[2] == "native-broker-position-fixture" or fields[2] == "native-authored-arrival"
             or fields[2] == "native-loot-approach" or fields[2] == "native-dream-stone-position"
+            or fields[2] == "native-campaign-npc-approach"
             or fields[2] == "native-dream-nothing-position"
             or fields[2] == "restore" or fields[2] == "restore-exact" then
             state, current_phase = observe_session()
@@ -1056,7 +1089,13 @@ local function tick()
     local projected, failure = pcall(function()
         vitals.sync(state, current_phase)
         players.sync(state, current_phase)
+        native_wipe_view.sync(state, current_phase)
+        return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
     end)
+    if projected and failure then
+        state, current_phase = observe_session()
+        if not state then return end
+    end
     write_status(state, current_phase, not projected and failure or nil)
 end
 
@@ -1064,6 +1103,8 @@ players.start(bridge)
 native_inventory_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
+native_broker_input.start(bridge, players.is_downed)
+native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)
 native_zone.start(bridge)

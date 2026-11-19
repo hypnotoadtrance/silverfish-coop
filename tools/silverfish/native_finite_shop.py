@@ -8,6 +8,13 @@ from .travel import OBSERVATORY
 
 
 ACTOR = f"Shop_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Shop_BP_C_2"
+SCAV_BAR = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+BLACK_MARKET = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+MERCHANTS = {
+    OBSERVATORY: ACTOR,
+    SCAV_BAR: f"Shop_BP_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.Shop_BP_C_2",
+    BLACK_MARKET: f"Shop_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1",
+}
 ACTIONS = ("native-finite-shop-list", "native-finite-shop-buy", "native-finite-shop-sale-quote", "native-finite-shop-sell")
 MAX_PRICE = (1 << 31) - 1
 
@@ -24,11 +31,11 @@ def parse_item(fields: list[str]) -> dict:
             "value": int(fields[4]), "price": int(fields[5])}
 
 
-def matching_report(snapshot: dict, pawn: str, expected_state: str) -> dict:
+def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str) -> dict:
     report = snapshot.get("native_finite_shop", {})
     offers = report.get("offers")
-    if (snapshot.get("state") != "hosting" or snapshot.get("map") != OBSERVATORY
-            or tuple(report.get(key) for key in ("state", "map", "pawn", "actor")) != (expected_state, OBSERVATORY, pawn, ACTOR)
+    if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
+            or tuple(report.get(key) for key in ("state", "map", "pawn", "actor")) != (expected_state, area, pawn, MERCHANTS[area])
             or type(offers) is not list or report.get("count") != len(offers) or len(offers) > 128
             or any(type(report.get(key)) is not int or not 0 <= report[key] <= MAX_PRICE for key in (
                 "wallet_before", "wallet_after", "merchant_cash_before", "merchant_cash_after"))):
@@ -45,9 +52,10 @@ def matching_report(snapshot: dict, pawn: str, expected_state: str) -> dict:
 
 
 async def perform(host, bridge, character: str, action: str, target: str | None, operation_id: str) -> dict:
+    area = host.last_game.get("map")
     if (not host.native_zones or not host.native_guest or host.native_profile is None or host.stopping
             or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
-            or host.last_game.get("map") != OBSERVATORY or time.monotonic() - host.last_seen > 3):
+            or area not in MERCHANTS or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_finite_shop_unavailable")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
@@ -92,7 +100,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         if str(error).startswith("finite_shop_refused_"):
             raise party.RuleError(str(error)) from error
         raise
-    listing = matching_report(snapshot, pawn, "sale-quote" if sale else "listed")
+    listing = matching_report(snapshot, area, pawn, "sale-quote" if sale else "listed")
     if (listing["wallet_before"] != listing["wallet_after"] or listing["merchant_cash_before"] != listing["merchant_cash_after"]
             or sale and (len(listing["offers"]) != 1 or listing["offers"][0]["guid"] != guid
                          or listing["offers"][0]["price"] != listing["offers"][0]["value"])):
@@ -125,7 +133,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
-        proof = matching_report(snapshot, pawn, "sold" if sale else "purchased")
+        proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased")
         if (proof["offers"] != [offer] or proof["wallet_before"] != wallet or proof["wallet_after"] != wallet + wallet_change
                 or proof["merchant_cash_before"] != merchant_cash or proof["merchant_cash_after"] != merchant_cash - wallet_change):
             raise RuntimeError("The finite merchant did not verify the exact transfer and wallet changes")

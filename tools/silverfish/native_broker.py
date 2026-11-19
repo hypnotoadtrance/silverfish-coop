@@ -17,6 +17,7 @@ LEVEL = BLACK_MARKET + ".Shop_BlackMarket_01:PersistentLevel."
 BROKER = "NPC_Broker_C " + LEVEL + "NPC_Broker_C_1"
 STATION = "ItemRequest_TradeStation_BP_C " + LEVEL + "ItemRequest_TradeStation_BP_C_1"
 STEPS = {"missing": None, "active": 1, "ready": 2, "completed": -10}
+INTERACT = "native-quest-interact"
 
 
 async def _command(host, bridge, verb: str, pawn: str, *arguments: str, quest_id: str = QUEST_ID) -> dict:
@@ -32,6 +33,24 @@ async def _command(host, bridge, verb: str, pawn: str, *arguments: str, quest_id
         raise RuntimeError("The authoritative stock Broker quest report could not be verified")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
+
+
+async def interact(host, bridge, character: str, station: str) -> dict:
+    if (not host.broker_input or host.last_game.get("map") != BLACK_MARKET or station != STATION or host.transitioning
+            or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]):
+        raise party.RuleError("stock_broker_station_unavailable")
+    member = host.native_recipients().get(character)
+    player = host.party["players"].get(character)
+    if not member or not member["connected"] or not player or player["downed"]:
+        raise party.RuleError("stock_broker_interactor_unavailable")
+    available = []
+    for quest, (prefix, _) in QUESTS.items():
+        proof = await _command(host, bridge, f"{prefix}-inspect", member["pawn"], quest_id=quest)
+        if proof["step"] in (1, 2) and valid_guid(proof["manifest_guid"]):
+            available.append(quest)
+    if len(available) != 1:
+        raise party.RuleError("stock_broker_objective_required" if not available else "stock_broker_choose_exact_quest")
+    return await action(host, bridge, character, "native-quest-turnin", quest_id=available[0])
 
 
 async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False, quest_id: str = QUEST_ID) -> dict:

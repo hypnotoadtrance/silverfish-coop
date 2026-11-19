@@ -31,10 +31,31 @@ namespace
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
 
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
-    constexpr auto shop_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_2");
+    struct MerchantProfile
+    {
+        const Unreal::TCHAR* world;
+        const Unreal::TCHAR* actor;
+        const Unreal::TCHAR* data;
+    };
+
+    constexpr std::array merchants{
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Shop_BP_C_2"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData"),
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.Shop_BP_C_2"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/ScavBar_ShopData.ScavBar_ShopData"),
+        },
+        MerchantProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Shop_BP_C_1"),
+            STR("/Game/Classes/Libraries/DataAssets/Merchants/BlacMarket_ShopData.BlacMarket_ShopData"),
+        },
+    };
     constexpr auto shop_class = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
-    constexpr auto merchant_data = STR("/Game/Classes/Libraries/DataAssets/Merchants/Observitory_ShopData.Observitory_ShopData");
     constexpr auto panel_class = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C");
     constexpr auto calc_markup = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C:Calc_ShopMarkup");
     constexpr auto calc_item = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C:CalcItemMarkup");
@@ -209,11 +230,20 @@ namespace
 
     std::string_view bind_context(const std::array<Address, 5>& input, Context& context)
     {
-        context.world = find<Unreal::UWorld>(world_path);
-        context.shop = find<Unreal::UObject>(shop_path);
-        auto* data = find<Unreal::UObject>(merchant_data);
+        const MerchantProfile* profile = nullptr;
+        for (const auto& listed : merchants)
+        {
+            auto* actor = find<Unreal::UObject>(listed.actor);
+            if (!actor || address(actor) != input[3]) continue;
+            context.shop = actor;
+            profile = &listed;
+            break;
+        }
+        if (!profile) return "shop_exact_merchant_unavailable";
+        context.world = find<Unreal::UWorld>(profile->world);
+        auto* data = find<Unreal::UObject>(profile->data);
         if (!live(context.world) || !exact(context.shop, find<Unreal::UClass>(shop_class)) ||
-            address(context.shop) != input[3] || !authority(context.shop, context.world) || !live(data) ||
+            !authority(context.shop, context.world) || !live(data) ||
             static_cast<Unreal::AActor*>(context.shop)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
             read_object(context.shop, STR("MerchantData")) != data || !read_bool(context.shop, STR("IsCheatShop"), false))
             return "shop_exact_merchant_unavailable";

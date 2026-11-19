@@ -2,7 +2,7 @@
 
 A Windows Direct IP prototype with an optional native campaign lab. The native lab has been tested on loopback with one host and two guests. See the [18 locked rules](docs/DESIGN.md) for the full design.
 
-The launcher copies the stock game into a separate runtime, installs a small UE4SS bridge in the copy, and starts Unreal with a separate user-data directory. Players connect directly to the host's UDP port using an authenticated, encrypted QUIC connection. The launcher relays game packets to Unreal over loopback.
+The launcher copies the stock game into a separate runtime, installs a small UE4SS bridge in the copy, and starts Unreal with a separate user-data directory. Players connect directly to the host's UDP port using an authenticated, encrypted QUIC connection. The launcher relays game packets to Unreal over loopback. [Player and automation guide](docs/PLAYING-COOP.md)
 
 ## Setup
 
@@ -59,17 +59,19 @@ The host starts on the shipped `PlaytestMap_01`. Add `--headless` to host and jo
 & $sfPython -m tools.silverfish action --campaign expedition stop
 ```
 
-`drop-link` deliberately stops the guest's Direct IP transport and suspends automatic retries. `reconnect` resumes them. A real link failure can trigger automatic retry. A short lapse can preserve the native Unreal pawn while it remains live. If Unreal tears it down, a replacement can restore the character's saved position when available. Full 90-second pawn retention after engine teardown is future campaign work.
+`drop-link` deliberately stops the guest's Direct IP transport and suspends automatic retries. `reconnect` resumes them. A real link failure can trigger automatic retry. The host reserves the character for 90 seconds. The retained pawn remains eligible for party rules during that window. At expiry, the host attempts a final native save before retiring the old connection. A fresh join after expiry spawns near the host using the character's saved state.
 
 Action responses have an `id` and an `ok` flag. Events carry the session generation and, for actions, the command ID. Inspect `stale` before trusting a status. Host and guest status files are under `campaigns/<campaign>/run` and `clients/<profile>/run` within the workspace. The interface accepts allowlisted commands from the local workspace.
 
 On native campaign stages, `native-inventory-list` reads an exact stock inventory page. Run it against a guest profile to read that character. On the host, the same action reads the host's inventory or the enrolled role selected with `--target`. Use `next_offset` to advance the page. The guest passes the offset through `--target`. The host uses `--amount`.
 
-Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Pass `--native-guest-reload-input` to route short presses of the stock reload key to the host for the qualified guest SMG and Light Pistol.
+Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Use Page Up or Page Down to select a row, Home twice to equip a supported weapon, and End to cancel or close. Pass `--native-guest-primary-input` and `--native-guest-reload-input` to route a stock primary press or short reload press to the host for the qualified guest SMG and Light Pistol.
 
 In a new authored campaign with native guest ownership, set `--native-extraction-keep N` to enable the stock extraction mode and keep up to `N` inventory rows after a wipe. Add `--native-extraction-backpacks` for owner-only drops and `--native-extraction-lose-slot` to reduce the host's saved retention limit after each wipe. These settings are stored in the campaign's native save and resume automatically.
 
-During a stock retention wipe, `native-wipe-items` returns the caller's frozen stock inventory. Select a whole row or stack with `keep --keep GUID=1`. An empty `keep` submits an empty selection. Once the party has respawned, the owner's `native_backpacks` status contains their backpack IDs and death positions. Use `native-wipe-recover --target BACKPACK_ID` while nearby.
+During a stock retention wipe, the host and guests see their own frozen inventory. Use Page Up or Page Down to move, Space to toggle a whole row, and Home twice to submit. An empty selection is allowed. Local automation can use `native-wipe-items` and `keep --keep GUID=1`. Once the party has respawned, the owner's `native_backpacks` status contains their backpack IDs and death positions. Use `native-wipe-recover --target BACKPACK_ID` while nearby.
+
+Use `native-quest-list` to inspect the host's stock quest progress from a guest profile. `--target stock` lists the shipped templates. Follow `next_offset` with a target such as `stock@8`. At the Black Market Broker station, the guest's interact key submits the supported objective when exactly one is eligible.
 
 At the Observatory merchant, use `native-finite-shop-list` for stock prices and `native-finite-shop-buy --target GUID@PRICE` to buy a whole stock row. Use `native-finite-shop-sale-quote --target GUID` and `native-finite-shop-sell --target GUID@PRICE` to sell a qualified backpack row into the merchant's buyback stock. With `--native-shop-view` on the host, a guest can also use the stock interact key to open the purchase overlay. Use the arrow keys to select, press Enter to review and confirm, and press Backspace to close.
 

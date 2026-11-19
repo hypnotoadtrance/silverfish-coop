@@ -61,11 +61,14 @@ def parser() -> argparse.ArgumentParser:
                       help="enable supervised host-side native event scope in the C++ lab")
     host.add_argument("--native-guest", action="store_true",
                       help="detach the authenticated guest's native save for the C++ playtest")
+    host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")
     host.add_argument("--start-zone", choices=sorted((AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS) - DREAM_MAPS - {GOLD_NEXUS}),
                       help="start a new campaign in a qualified zone")
+    host.add_argument("--native-start-preset", choices=("wanderer",), help="start a new campaign with a qualified stock character preset")
+    host.add_argument("--native-world-seed", type=int, help="choose the initial stock preset seed from 1 to 999999")
     host.add_argument("--fixtures", action="store_true", help="enable the playtest loot marker and controlled damage")
     host.add_argument("--native-shop-view", action="store_true", help="enable the qualified native guest merchant overlay")
     host.add_argument("--native-extraction-keep", type=int, choices=range(11),
@@ -132,12 +135,15 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-inventory-view-key-fixture",
+        "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-quest-list",
+        "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
+        "native-campaign-npc-approach",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",
         "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
         "native-bag-projection-fixture",
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
-        "native-loot-claim", "native-loot-open-fixture",
+        "native-loot-claim", "native-loot-open-fixture", "native-loot-crate-fixture",
         "native-inventory-list",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
@@ -196,6 +202,8 @@ async def execute(opts):
                         native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
                         native_zone_walls=opts.native_zone_walls, start_zone=opts.start_zone, max_guests=opts.max_guests,
                         expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
+                        guest_regen=opts.native_guest_regen, start_preset=opts.native_start_preset,
+                        world_seed=opts.native_world_seed,
                         extraction=None if opts.native_extraction_keep is None else (
                             opts.native_extraction_keep, opts.native_extraction_backpacks, opts.native_extraction_lose_slot))
         return {"ok": True, "state": "stopped"}
