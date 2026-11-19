@@ -69,6 +69,14 @@ namespace
         return property ? property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(target)) : nullptr;
     }
 
+    bool trigger_cache_matches(U::UObject* trigger, U::UObject* instance, bool allow_empty)
+    {
+        auto* property = field<U::FObjectProperty>(trigger, STR("As Game Instance FP"));
+        if (!property || !instance) return false;
+        auto* cached = property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(trigger));
+        return cached == instance || (allow_empty && !cached);
+    }
+
     template <typename T, typename Value>
     bool equals(U::UObject* target, const U::TCHAR* name, Value expected)
     {
@@ -279,8 +287,9 @@ namespace
             !authority(trigger, world) || static_cast<U::AActor*>(jammer)->GetLevel() != level ||
             static_cast<U::AActor*>(trigger)->GetLevel() != level ||
             sole_object(jammer, STR("Activate_OnDeath")) != trigger ||
-            object(trigger, STR("As Game Instance FP")) != next.instance.Get() ||
             !equals<U::FIntProperty>(jammer, STR("Salt"), 112725360)) return "stock_exact_jammer_or_trigger_unavailable";
+        // The powered stock signal fills the trigger's GameInstance cache before accessing the quest.
+        if (!trigger_cache_matches(trigger, next.instance.Get(), true)) return "stock_jammer_trigger_cache_unqualified";
 
         auto* base = find<U::UClass>(base_type);
         if (!base || !jammer->IsA(base)) return "stock_jammer_damage_schema_unqualified";
@@ -359,20 +368,21 @@ namespace
         const double hp = scope.health->GetPropertyValueInContainer(jammer);
         Proof next;
         if (!std::isfinite(hp) || hp > 0 || sole_object(jammer, STR("Activate_OnDeath")) != receiver ||
-            object(receiver, STR("As Game Instance FP")) != scope.instance.Get() || !take_snapshot(scope, next.before)) return;
+            !trigger_cache_matches(receiver, scope.instance.Get(), true) || !take_snapshot(scope, next.before)) return;
         attribute(*deal, next);
         scope.proof = std::move(next);
         scope.frame = &frame;
     }
 
-    void after(Iteration& iteration, U::UObject*, U::FFrame& frame, void*)
+    void after(Iteration& iteration, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!available() || scope.frame != &frame) return;
         scope.frame = nullptr;
         if (iteration.OriginalFunctionCallPrevented()) return;
         auto& proof = scope.proof;
         proof.observed = true;
-        if (!current(scope) || !take_snapshot(scope, proof.after))
+        if (!current(scope) || receiver != scope.trigger.Get() ||
+            !trigger_cache_matches(receiver, scope.instance.Get(), false) || !take_snapshot(scope, proof.after))
         {
             proof.state = "mutation_unverified_stock_jammer_objective_readback";
             return;
