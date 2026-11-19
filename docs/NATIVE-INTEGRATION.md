@@ -64,7 +64,7 @@ The native guest ownership mode keeps a different stock save generation per char
 
 A staged guest resumed the same native pawn and connection after a 76-second Direct IP interruption. The absent pawn continued to block host travel from beyond 15 meters. A second interruption crossed the 90-second grace deadline. The host committed the expiring character's stock save while its pawn was still present, then a fresh connection restored the saved weapon in a replacement pawn 110 centimeters from the host.
 
-The guest inventory key opened a passive stock overlay. Its selection and confirmation keys equipped an exact owned Light Pistol. The stock primary binding produced one guest-owned projectile and debited one round. The typed ammunition and the shot receipt survived travel and host restart. This input path currently handles one shot per press for the two qualified weapons.
+The guest inventory key opened a passive stock overlay. Its selection and confirmation keys equipped an exact owned Light Pistol. The stock primary binding produced one guest-owned projectile and debited one round. The typed ammunition and the shot receipt survived travel and host restart. The qualified firearm paths use one shot per press.
 
 The staged stock interaction input dispatches a scoped revive through the cooked Enhanced Input binding. One guest revived the other in place at 25 HP. Both guests were refused at the stock Observatory bed on the authority and in their local game. The host confirmed one hour of sleep through the stock sleep screen. The three characters later wiped and respawned at the verified bed Arrow.
 
@@ -119,6 +119,8 @@ The Flood Plains run accepted the contract at Borough and used six stock route l
 After a Copper Stop restart, the guest equipped the rewarded scoped Nagant, crossed the stock exit into City, and fired five FMJ rounds through the stock primary input. The stock reload input switched the empty rifle to incendiary ammunition and loaded one round. The sixth shot produced one stock incendiary projectile. The guest kept the original reserve GUID with 13 rounds, and the host kept its own 14-round stack.
 
 At the Observatory, the guest fired seven stock rounds from the suppressed Light Pistol and seven from the standard SMG. Both magazines reached zero. In each case, stock reload moved nine 9mm Ball rounds from the guest's reserve into the magazine. The exact weapons retained all nine loaded rounds after a host restart, and the original save hashes matched.
+
+The Army Pistol, Pistol, Pistol02, and Tac Pistol passed the same stock input sequence. The headless fixture converted each exact stock item into an owned inventory row. The guest emptied each seven-round load, reloaded nine 9mm Ball rounds from their own reserve, and kept the exact item and all nine rounds after restart. The original save hashes matched.
 
 Borough's stock board withheld the Dead Bridge turret photography contract at zero host XP. At 4 stock host XP the catalog grew from three offers to seven, and the guest accepted the new contract. The party traveled through the authored Scientist door, where the guest bought a camera. In Dead Bridge the guest equipped that exact camera. The stock photo targets recorded full visibility for each of the two distinct turrets. A separate press of the original primary input with neither target in frame reached the host and left the quest step unchanged.
 
