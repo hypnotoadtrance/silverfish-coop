@@ -23,6 +23,7 @@ from tools.silverfish.travel import CITY, CROSSROADS
 CASES = {
     "city": (CITY, (("city-couple-bills-7", "guest"), ("city-couple-bills-8", "host"))),
     "city-large-stack": (CITY, (("city-large-stack-1", "guest"),)),
+    "city-massive-pile": (CITY, (("city-massive-pile-1", "guest"),)),
     "crossroads-small-stack": (CROSSROADS, (("crossroads-small-stack-1", "guest"),)),
 }
 
