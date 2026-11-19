@@ -83,6 +83,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | Option | Scope |
 | --- | --- |
 | `--native-start-preset wanderer` | Starts a fresh stock Wanderer campaign at the Observatory using Mercy rules. Add `--native-world-seed N` for a fixed initial seed from 1 to 999999. Omit `--start-zone` and the extraction switches when creating this preset. Omit the preset and seed when resuming. |
+| `--native-difficulty Respawn_WtPenalty` or `--native-difficulty Decimation` | Selects stock extraction rules when creating a Wanderer campaign. Both enable owner-only backpack drops. `Respawn_WtPenalty` allows five retained items and enables stock loot replenishment. `Decimation` sets the retention limit to zero and disables replenishment. The campaign restores the chosen rules on restart. |
 | `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
 | `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Loopback testing covered four guests at once. |
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
