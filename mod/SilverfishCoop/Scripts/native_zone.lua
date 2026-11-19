@@ -28,6 +28,7 @@ local guest_denied = 0
 local too_far = 0
 local decision = ""
 local door_decision = ""
+local door_detail
 local door_denied = 0
 local door_requests = 0
 local status = "inactive"
@@ -129,9 +130,10 @@ end
 
 local function handle_door_event()
     if type(SilverfishTakeNativeDoorEvent) ~= "function" then return end
-    local value = SilverfishTakeNativeDoorEvent()
+    local value, detail = SilverfishTakeNativeDoorEvent()
     if not value then return end
     door_decision = value
+    door_detail = detail
     if value == "guest_denied" then door_denied = door_denied + 1 end
     if value == "travel_requested" then door_requests = door_requests + 1 end
 end
@@ -1025,7 +1027,7 @@ function zone.rows(state, phase, status_row)
     if not enabled then return {} end
     local rows = wall.rows(status_row)
     rows[#rows + 1] = status_row("native-zone", status, decision, requests, guest_denied, too_far, failure)
-    rows[#rows + 1] = status_row("native-door", door_decision, door_denied, door_requests)
+    rows[#rows + 1] = status_row("native-door", door_decision, door_denied, door_requests, door_detail)
     if keypad_proof and keypad_proof.map == state.map and phase == "hosting" then
         local proof = keypad_proof
         rows[#rows + 1] = status_row("native-cistern-keypad", proof.map, proof.pawn, proof.target,

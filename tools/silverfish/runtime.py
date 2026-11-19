@@ -971,10 +971,12 @@ class Bridge:
                     })
                     if (area, exit_actor, display) == (regroup["map"], regroup["exit_actor"], regroup["display"]):
                         regroup["blockers"].append({"pawn": pawn, "role": role, "name": name, "distance_m": distance})
-                elif fields[0] == "native-door" and len(fields) == 4:
+                elif fields[0] == "native-door" and len(fields) in (4, 5):
                     data["native_door"] = {
                         "decision": fields[1], "guest_denied": int(fields[2]), "requests": int(fields[3]),
                     }
+                    if len(fields) == 5 and fields[4]:
+                        data["native_door"]["detail"] = fields[4]
                 elif fields[0] == "native-transport" and len(fields) == 7:
                     data["native_transport"] = {
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],

@@ -279,6 +279,7 @@ namespace
         const ScriptedDreamRoute* scripted_dream{};
         std::string_view event;
         std::string_view door_event;
+        std::string_view door_detail;
         Unreal::FWeakObjectPtr pending_door;
         Unreal::FWeakObjectPtr pending_child;
         Clock::time_point pending_expires{};
@@ -814,12 +815,27 @@ namespace
         const auto* authored = expanded_route(scope, door);
         scope.pending_door.Reset();
         scope.pending_child.Reset();
-        if (!door || !locked || !locals || !scope.exit_powered || !scope.exit_instigator ||
-            !scope.exit_powered->GetPropertyValueInContainer(locals) || read_object(scope.exit_instigator, locals) ||
-            locked->GetPropertyValueInContainer(door) || matching_door_child(door, authored) != context ||
-            Clock::now() >= scope.pending_expires || !host_is_ready(local) || !allows_distance(scope, local))
+        std::string_view detail;
+        if (!door || !locked || !locals || !scope.exit_powered || !scope.exit_instigator)
+            detail = "stock_power_context";
+        else if (!scope.exit_powered->GetPropertyValueInContainer(locals))
+            detail = "stock_power_disabled";
+        else if (read_object(scope.exit_instigator, locals))
+            detail = "stock_power_instigator";
+        else if (locked->GetPropertyValueInContainer(door))
+            detail = "stock_door_locked";
+        else if (matching_door_child(door, authored) != context)
+            detail = "stock_door_child_changed";
+        else if (Clock::now() >= scope.pending_expires)
+            detail = "stock_power_late";
+        else if (!host_is_ready(local))
+            detail = "host_not_ready";
+        else if (!allows_distance(scope, local))
+            detail = "party_out_of_range";
+        if (!detail.empty())
         {
             scope.door_event = "handoff_denied";
+            scope.door_detail = detail;
             return;
         }
         queue_request(authored, "door_request");
@@ -1074,8 +1090,11 @@ namespace
             return 1;
         }
         lua.set_string(scope.door_event);
+        if (scope.door_event == "handoff_denied" && !scope.door_detail.empty()) lua.set_string(scope.door_detail);
+        else lua.set_nil();
         scope.door_event = {};
-        return 1;
+        scope.door_detail = {};
+        return 2;
     }
 
     int lua_release_request(const Lua&)
