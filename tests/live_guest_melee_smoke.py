@@ -86,7 +86,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         row = status.get("game", {}).get(SOURCES_KEY, {}).get(OLD_PIPE, {})
         return tuple(row.get(key) for key in ("map", "actor", "class_path", "state")) == (*SOURCES[OLD_PIPE], "available")
 
-    async def normal_primary(guid, expected, target="-"):
+    async def normal_primary(guid, expected, target="-", *, allow_patrol_miss=False):
         press = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         assert (press["guid"], press["stock_wrappers"]) == (guid, 2), press
         for _ in range(50):
@@ -105,11 +105,16 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                                             and row["stage"] != "awaiting_contact", timeout=5)
                     proof["headless_contact"] = diagnostic["game"][CONTACT_KEY]
                     assert proof["headless_contact"]["camera_scope"] in ("unchanged", "restored"), proof["headless_contact"]
+                expected_status = "stock_miss_verified" if (
+                    allow_patrol_miss and swing["status"] == "stock_miss_verified"
+                ) else expected
                 assert (swing["map"], swing["guid"], swing["status"], swing["presses"], swing["releases"],
                         swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
-                    area, guid, expected, 1, 1, 1, 1, True, True), swing
-                assert (verified_damage if expected == "stock_damage_verified" else verified_miss)(swing), swing
-                assert swing["target"] == target, (swing, target)
+                    area, guid, expected_status, 1, 1, 1, 1, True, True), swing
+                if expected_status == "stock_damage_verified":
+                    assert verified_damage(swing) and swing["target"] == target, (swing, target)
+                else:
+                    assert verified_miss(swing), swing
                 reply = await action(guest, SWING, "--target", guid, "--operation-id", event["operation_id"])
                 assert reply[SWING_KEY] == swing, reply
                 directory = host_run.parent
@@ -208,10 +213,17 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
             proof["unassisted_primary_miss"] = await normal_primary(guid, "stock_miss_verified")
             lane = ("--amount", "2") if second_cqc else ()
             target = CQC_ZONES[area].actors[int(second_cqc)]
-            posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid, *lane))[AIM_KEY]
-            assert (posed["map"], posed["pawn"], posed["guid"], posed["target"]) == (area, equipped["pawn"], guid, target), posed
-            proof["headless_aim_setup"] = posed
-            proof["ordinary_primary_damage"] = await normal_primary(guid, "stock_damage_verified", target)
+            for _ in range(3 if refinery else 1):
+                posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid, *lane))[AIM_KEY]
+                assert (posed["map"], posed["pawn"], posed["guid"], posed["target"]) == (area, equipped["pawn"], guid, target), posed
+                proof["headless_aim_setup"] = posed
+                strike = await normal_primary(guid, "stock_damage_verified", target, allow_patrol_miss=refinery)
+                if strike["host_receipt"]["status"] == "stock_damage_verified":
+                    proof["ordinary_primary_damage"] = strike
+                    break
+                proof.setdefault("patrol_misses", []).append({"strike": strike, "contact": proof["headless_contact"]})
+            else:
+                raise AssertionError(f"All three qualified approaches to {target} missed the stock patrol")
             after = await inventory_item(character, guid)
             assert after == held, (held, after)
             proof.update(unchanged_equipment=after, verified=True)
