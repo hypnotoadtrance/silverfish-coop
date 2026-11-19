@@ -249,6 +249,10 @@ local function claim(fields, state, phase, profile)
         return "authored loose pickup reported"
     end
     if profile.stock_supply then
+        if type(SilverfishMergeNativeAuthoredSupply) ~= "function" then
+            report.status = "authored_supply_merge_bridge_unavailable"
+            return "authored loose pickup reported"
+        end
         local checked, visible = pcall(stock_input_fixture.authority_sight, state, phase, profile, pawn, StaticFindObject(profile.path))
         if not checked or visible ~= true then
             report.status = "authored_pickup_exact_authority_sight_required"
@@ -275,6 +279,24 @@ local function claim(fields, state, phase, profile)
         return "authored loose pickup reported"
     end
     report.guid = item
+    if profile.stock_supply then
+        local accepted, reason, stack, before, after = SilverfishMergeNativeAuthoredSupply(
+            pawn:GetAddress(), save:GetAddress(), restored:GetAddress(), profile.source, item)
+        if accepted == true and reason == "merged" then
+            report.applied = true
+            report.ok = guid(stack) and stack ~= item and math.type(before) == "integer" and before > 0
+                and math.type(after) == "integer" and after > before and after <= 0x7fffffff
+            report.status = report.ok and "merged" or "mutation_unverified_authored_supply_merge_proof"
+            if report.ok then report.stack, report.before, report.after = stack, before, after end
+            return "authored loose pickup reported"
+        end
+        if accepted ~= true or reason ~= "append" then
+            report.status = accepted == false and type(reason) == "string" and reason
+                or "mutation_unverified_authored_supply_merge_abi"
+            report.applied = report.status:match("^mutation_unverified_") ~= nil
+            return "authored loose pickup reported"
+        end
+    end
     local applied, status, count = SilverfishRecoverNativeInventoryBag(restored:GetAddress(), save:GetAddress(), pawn:GetAddress())
     report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
     report.ok = applied == true and status == "recovered" and count == 1
@@ -363,6 +385,10 @@ function pickup.rows(state, phase, status_row)
     if report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
+        if report.stack then
+            rows[#rows + 1] = status_row("native-authored-supply-merge", report.source, state.map, report.pawn,
+                report.slot, report.guid, report.stack, report.before, report.after)
+        end
     end
     return rows
 end

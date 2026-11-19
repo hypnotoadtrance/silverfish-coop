@@ -69,6 +69,8 @@ ACTION = "native-authored-pickup-claim"
 STATE_KEY = "native_authored_pickups"
 SOURCES_KEY = "native_authored_pickup_sources"
 INTERACTIONS_KEY = "native_authored_pickup_interactions"
+MERGE_TAG = "native-authored-supply-merge"
+MERGE_KEY = "native_authored_supply_merge"
 APPROACH = "native-authored-pickup-approach"
 FIXTURE = "native-authored-pickup-fixture"
 STOCK_FIXTURE = "native-authored-pickup-stock-fixture"
@@ -126,6 +128,32 @@ def _current_pawn(host, character: str) -> str | None:
         return host.last_game.get("pawns", {}).get("local", {}).get("name")
     member = host.native_recipients().get(character) or {}
     return member.get("pawn") if member.get("connected") else None
+
+
+def _matches_merge(claim: dict, merge: dict) -> bool:
+    name, slot = merge.get("source"), merge.get("slot")
+    source = STOCK_SUPPLIES.get(name) if isinstance(name, str) else None
+    before, after = merge.get("before"), merge.get("after")
+    return (source is not None and source.area == merge.get("map") and claim.get("ok") is True
+            and claim.get("applied") is True and claim.get("status") == "merged"
+            and all(merge.get(key) == claim.get(key) for key in ("source", "map", "pawn", "slot"))
+            and isinstance(merge.get("pawn"), str) and bool(merge["pawn"])
+            and isinstance(slot, str) and native_host_save.SLOT.fullmatch(slot) is not None
+            and valid_guid(merge.get("source_guid")) and merge["source_guid"] == claim.get("guid")
+            and valid_guid(merge.get("stack_guid")) and merge["stack_guid"] != merge["source_guid"]
+            and type(before) is int and type(after) is int and 0 < before < after < 2**31
+            and after - before == source.units)
+
+
+def parse_merge(fields: list[str], snapshot: dict) -> dict:
+    if len(fields) != 9 or snapshot.get("state") != "hosting":
+        raise ValueError("Invalid authored supply merge report")
+    source, area, pawn, slot, source_guid, stack_guid, before, after = fields[1:]
+    report = {"source": source, "map": area, "pawn": pawn, "slot": slot, "source_guid": source_guid,
+              "stack_guid": stack_guid, "before": int(before), "after": int(after)}
+    if snapshot.get("map") != area or not _matches_merge(snapshot.get("native_authored_pickup_claim", {}), report):
+        raise ValueError("The authored supply merge does not match its typed source and owner")
+    return report
 
 
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
@@ -186,12 +214,22 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         if not report["ok"] and not report["applied"]:
             host.native_checkpoint_unsafe = False
             raise party.RuleError(report["status"])
-        if not report["ok"] or not report["applied"] or report["status"] != "claimed" or not valid_guid(report["guid"]):
+        if (not report["ok"] or not report["applied"] or report["status"] not in ("claimed", "merged")
+                or not valid_guid(report["guid"])):
             raise RuntimeError(f"The authored pickup did not verify ({report['status']})")
+        merge = snapshot.get(MERGE_KEY)
+        if report["status"] == "merged":
+            if not is_supply or not isinstance(merge, dict) or not _matches_merge(report, merge):
+                raise RuntimeError("The authored supply merge did not verify its stock stack and quantity")
+        elif merge is not None:
+            raise RuntimeError("The authored pickup append reported an unexpected stack merge")
         await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         host.last_game, host.last_seen = snapshot, time.monotonic()
         row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "guid": report["guid"],
                "owner": character}
+        if merge is not None:
+            row.update(guid=merge["stack_guid"], source_guid=report["guid"],
+                       stack_before=merge["before"], stack_after=merge["after"])
         result = {"native_authored_pickup_claim": row}
         candidate = party.load_party(host.party)
         candidate.setdefault(STATE_KEY, {})[target] = row

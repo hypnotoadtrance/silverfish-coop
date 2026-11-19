@@ -29,7 +29,7 @@ FIRST_SOURCE = {"slums": SLUMS_BUCKSHOT, "city": CITY_AMMO}
 ROLES = ("guest", "guest2")
 
 
-async def exercise(work: Path, vanilla_saved: Path, first_site: str) -> None:
+async def exercise(work: Path, vanilla_saved: Path, first_site: str, same_stack: bool = False) -> None:
     first_placement = FIRST_SOURCE[first_site]
     if not vanilla_saved.is_dir():
         raise ValueError("The original Saved directory is missing")
@@ -195,14 +195,43 @@ async def exercise(work: Path, vanilla_saved: Path, first_site: str) -> None:
         delayed = await local(clients[1], pickup.ACTION, expected=False,
                               target=f"{CROSSROADS_AMMO.source}@{first_visit['zone_epoch']}")
         assert delayed["error"] == "native_authored_pickup_stale_zone", delayed
+        existing_guid = None
+        existing_rounds = 0
+        if same_stack:
+            pistol_guid, existing_guid = uuid.uuid4().hex.upper(), uuid.uuid4().hex.upper()
+            await local(run, "native-guest-weapon-seed", target=ROLES[1], item_guid=pistol_guid, kind="1911")
+            equipped = await local(clients[1], "native-guest-weapon-equip", target=pistol_guid)
+            assert equipped["native_guest_weapon"]["status"] == "equipped", equipped
+            await local(run, "native-guest-weapon-seed-ammo", target=ROLES[1], item_guid=existing_guid)
+            baseline[1] = await inventory(clients[1], party_members[1])
+            stock = baseline[1][existing_guid]
+            assert (stock["class_path"], stock["source"], stock["quantity"], stock["stackable"]) == (
+                CROSSROADS_AMMO.ammo.item_path, "backpack", CROSSROADS_AMMO.ammo.fixture_units, True), stock
+            existing_rounds = stock["quantity"]
         second = await pickup_with_stock_f(CROSSROADS_AMMO, 1, crossroads)
         assert first["guid"] != second["guid"]
+        replay_operation = None
+        if same_stack:
+            assert (second["guid"], second["stack_before"], second["stack_after"]) == (
+                existing_guid, existing_rounds, existing_rounds + CROSSROADS_AMMO.units), second
+            assert valid_guid(second["source_guid"]) and second["source_guid"] not in {first["guid"], existing_guid}, second
+            receipts = status(run)["campaign"]["world"]["party"]["receipts"][party_members[1]]
+            replay_operation, = (entry["id"] for entry in receipts
+                                 if entry["result"].get("native_authored_pickup_claim") == second)
+            replay = await local(clients[1], pickup.ACTION, target=CROSSROADS_AMMO.source, operation_id=replay_operation)
+            assert replay["native_authored_pickup_claim"] == second, replay
+            contested_merge = await local(clients[0], pickup.ACTION, expected=False, target=CROSSROADS_AMMO.source)
+            assert contested_merge["error"] == "native_authored_pickup_already_claimed", contested_merge
+            proof["merge"] = {"receipt": second, "replay": replay_operation, "contested": contested_merge["error"]}
         owned = [await inventory(directory, identity) for directory, identity in zip(clients, party_members)]
         for index, (placement, receipt) in enumerate(zip((first_placement, CROSSROADS_AMMO), (first, second), strict=True)):
             row = owned[index][receipt["guid"]]
             assert (row["class_path"], row["source"], row["quantity"], row["stackable"]) == (
-                placement.ammo.item_path, "backpack", placement.units, True), row
-            assert {guid: item for guid, item in owned[index].items() if guid != receipt["guid"]} == baseline[index]
+                placement.ammo.item_path, "backpack", placement.units + (existing_rounds if index == 1 else 0), True), row
+            assert {guid: item for guid, item in owned[index].items() if guid != receipt["guid"]} == {
+                guid: item for guid, item in baseline[index].items() if guid != receipt["guid"]}
+        if same_stack:
+            assert second["source_guid"] not in owned[1]
         assert await inventory(run, "host") == host_items
 
         await local(run, "checkpoint")
@@ -219,6 +248,9 @@ async def exercise(work: Path, vanilla_saved: Path, first_site: str) -> None:
         assert ledger(restored) == {first["source"]: first, second["source"]: second}
         for directory in (run, *clients):
             await wait(directory, lambda state: projected(state, CROSSROADS_AMMO, "claimed"))
+        if replay_operation:
+            replay = await local(clients[1], pickup.ACTION, target=CROSSROADS_AMMO.source, operation_id=replay_operation)
+            assert replay["native_authored_pickup_claim"] == second, replay
         rail = await travel(restored, RAIL_YARD)
         await travel(rail, first_placement.area)
         for directory in (run, *clients):
@@ -248,5 +280,6 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, required=True, help="original Saved directory to hash before and after")
     parser.add_argument("--first-site", choices=FIRST_SOURCE, default="slums")
+    parser.add_argument("--same-stack", action="store_true", help="preload a typed .45 reserve for the second stock pickup")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), args.first_site))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), args.first_site, args.same_stack))

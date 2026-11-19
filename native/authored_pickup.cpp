@@ -1,4 +1,5 @@
 #include "authored_pickup.hpp"
+#include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
 
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -178,6 +180,8 @@ namespace
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto default_item_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeDefaultItem");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
+    constexpr auto stack_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:StackItem_Stats");
+    constexpr auto stack_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.Default__FL_Items_C");
     constexpr auto tape_station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
     constexpr auto blank_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
     struct TapeExchangeProfile
@@ -277,6 +281,7 @@ namespace
         const Profile* profile{};
         bool host{}, claimed{}, original_collision{}, original_hidden{};
         Observation observed{};
+        Guid merged_source{};
     };
 
     std::array<Scope, profiles.size()> scopes{};
@@ -747,6 +752,277 @@ namespace
         }
     };
 
+    constexpr int max_supply_backpack = 1024;
+
+    struct FreeValue
+    {
+        U::FProperty* property{};
+        void operator()(void* value) const { property->DestroyAndFreeValue(value); }
+    };
+    using StackValue = std::unique_ptr<void, FreeValue>;
+
+    StackValue copy_value(U::FProperty* property, const void* original)
+    {
+        StackValue value(property->AllocateAndInitializeValue(), {property});
+        if (value) property->CopyCompleteValue(value.get(), original);
+        return value;
+    }
+
+    bool same_backpack(const RowSchema& rows, const void* first, const void* second)
+    {
+        U::FScriptArrayHelper a(rows.array, first);
+        U::FScriptArrayHelper b(rows.array, second);
+        if (a.Num() < 0 || a.Num() > max_supply_backpack || a.Num() != b.Num() ||
+            (a.Num() && a.GetRawPtr(0) == b.GetRawPtr(0))) return false;
+        for (int index = 0; index < a.Num(); ++index)
+            if (!rows.identical(a.GetRawPtr(index), b.GetRawPtr(index))) return false;
+        return true;
+    }
+
+    struct StockStackValues
+    {
+        U::FIntProperty* quantity{};
+        U::FIntProperty* value{};
+        U::FDoubleProperty* weight{};
+        int unit_value{};
+        double unit_weight{};
+
+        bool bind(const RowSchema& rows, U::UClass* type, const Profile& profile)
+        {
+            auto* defaults = type->GetClassDefaultObject().Get();
+            auto* stock_value = field<U::FIntProperty>(defaults, STR("Value"));
+            auto* stock_weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+            quantity = field<U::FIntProperty>(rows.type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+            value = field<U::FIntProperty>(rows.type, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
+            weight = field<U::FDoubleProperty>(rows.type, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"));
+            if (!stock_value || !stock_weight || !quantity || !value || !weight ||
+                !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || defaults->GetClassPrivate() != type ||
+                !boolean(defaults, STR("Stacks"), true)) return false;
+            unit_value = stock_value->GetPropertyValueInContainer(defaults);
+            unit_weight = stock_weight->GetPropertyValueInContainer(defaults);
+            return unit_value > 0 && unit_weight > 0 && std::isfinite(unit_weight) &&
+                units_safe(*profile.stack_units) && unit_value * *profile.stack_units == profile.stack_value &&
+                std::abs(unit_weight * *profile.stack_units - profile.stack_weight) <= 1e-9;
+        }
+
+        bool units_safe(int units) const
+        {
+            return units > 0 && units <= (std::numeric_limits<int>::max)() / unit_value &&
+                std::isfinite(units * unit_weight);
+        }
+
+        bool matches(const void* row, int units) const
+        {
+            return units_safe(units) && quantity->GetPropertyValueInContainer(row) == units &&
+                value->GetPropertyValueInContainer(row) == units * unit_value &&
+                std::abs(weight->GetPropertyValueInContainer(row) - units * unit_weight) <= 1e-9;
+        }
+
+        void write(void* row, int units) const
+        {
+            quantity->SetPropertyValueInContainer(row, units);
+            value->SetPropertyValueInContainer(row, units * unit_value);
+            weight->SetPropertyValueInContainer(row, units * unit_weight);
+        }
+    };
+
+    bool stock_stack_matches(const RowSchema& rows, U::UObject* pawn,
+                             const void* previous, const void* expected, int difference)
+    {
+        auto* fn = find<U::UFunction>(stack_path);
+        auto* library = find<U::UObject>(stack_library);
+        auto* input = parameter<U::FStructProperty>(fn, STR("InventoryItem_Struct"), 0, true);
+        auto* delta = parameter<U::FIntProperty>(fn, STR("Difference"), 0x50);
+        auto* context = parameter<U::FObjectProperty>(fn, STR("__WorldContext"), 0x58);
+        auto* output = parameter<U::FStructProperty>(fn, STR("StackedStruct"), 0x60, true);
+        if (!fn || !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            fn->GetOuterPrivate() != library->GetClassPrivate() || fn->GetNumParms() != 4 ||
+            fn->GetReturnProperty() || fn->GetParmsSize() > parameter_capacity ||
+            fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || !input || !delta || !context || !output ||
+            !input->HasAnyPropertyFlags(U::CPF_ReferenceParm) || !input->HasAnyPropertyFlags(U::CPF_ConstParm) ||
+            output->HasAnyPropertyFlags(U::CPF_ReferenceParm) || input->GetSize() != 0x50 || output->GetSize() != 0x50 ||
+            input->GetStruct().Get() != rows.type || output->GetStruct().Get() != rows.type ||
+            context->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/CoreUObject.Object"))) return false;
+
+        alignas(std::max_align_t) std::array<std::byte, parameter_capacity> buffer{};
+        auto* storage = buffer.data();
+        input->InitializeValue_InContainer(storage);
+        output->InitializeValue_InContainer(storage);
+        auto release = [input, output](std::byte* data) {
+            output->DestroyValue_InContainer(data);
+            input->DestroyValue_InContainer(data);
+        };
+        const std::unique_ptr<std::byte, decltype(release)> lifetime(storage, release);
+        input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), previous);
+        delta->SetPropertyValue_InContainer(storage, difference);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), pawn);
+        library->ProcessEvent(fn, storage);
+        return rows.identical(output->ContainerPtrToValuePtr<void>(storage), expected);
+    }
+
+    int merge_supply(const Lua& lua)
+    {
+        const auto fail = [&](std::string_view reason) { return result(lua, false, reason); };
+        if (!ready() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5)) return fail("authored_supply_merge_arguments");
+        const auto pawn_address = static_cast<Address>(lua.get_integer());
+        const auto save_address = static_cast<Address>(lua.get_integer());
+        const auto escrow_address = static_cast<Address>(lua.get_integer());
+        auto* scope = select_source(lua);
+        Guid source_id{};
+        if (!parse_guid(lua.get_string(), source_id)) return fail("authored_supply_merge_source_guid_unqualified");
+        RowSchema rows;
+        TapeStores stores{rows};
+        auto* pawn = live_address(pawn_address, find<U::UClass>(pawn_path));
+        auto* target = object(pawn, STR("Save"));
+        if (!scope || !scope->profile || !scope->profile->stock_ammo || !scope->profile->stack_units ||
+            address(target) != save_address || !authorized(*scope, pawn, target))
+            return fail("authored_supply_merge_authority_unavailable");
+        const auto& profile = *scope->profile;
+        if (scope->merged_source != Guid{}) return fail("mutation_unverified_authored_supply_merge_reentered");
+        auto* world = scope->world.Get();
+        auto* instance = object(world, STR("OwningGameInstance"));
+        auto* canonical = object(instance, STR("SaveSlot_Ref"));
+        const auto owner_current = [&] {
+            return authorized(*scope, pawn, target) && object(world, STR("OwningGameInstance")) == instance &&
+                object(instance, STR("SaveSlot_Ref")) == canonical &&
+                (target == canonical || silverfish::native_guest_regen::qualifies_detached_guest(pawn, target, canonical));
+        };
+        if (!owner_current() || !rows.bind() || !stores.valid())
+            return fail("authored_supply_merge_inventory_unqualified");
+        auto* escrow = isolated(escrow_address, rows);
+        auto* actor = scope->actor.Get();
+        if (!escrow || escrow == target || !actor) return fail("authored_supply_merge_escrow_unavailable");
+        auto* type = actor->GetClassPrivate();
+        auto* original_data = rows.array->ContainerPtrToValuePtr<void>(target);
+        auto* escrow_data = rows.array->ContainerPtrToValuePtr<void>(escrow);
+        U::FScriptArrayHelper carried(rows.array, original_data);
+        U::FScriptArrayHelper source(rows.array, escrow_data);
+        if (carried.Num() < 0 || carried.Num() > max_supply_backpack || source.Num() != 1 ||
+            (carried.Num() && source.GetRawPtr(0) == carried.GetRawPtr(0)) ||
+            rows.identity(source.GetRawPtr(0)) != source_id || !rows.matches_actor(source.GetRawPtr(0), actor))
+            return fail("authored_supply_merge_escrow_unqualified");
+
+        int index = 0;
+        while (index < carried.Num() && read(rows.klass, carried.GetRawPtr(index)) != type) ++index;
+        if (index == carried.Num())
+        {
+            U::FScriptArrayHelper equipment(stores.equipment, stores.equipment->ContainerPtrToValuePtr<void>(target));
+            if (equipment.Num() < 0 || equipment.Num() > max_supply_backpack)
+                return fail("authored_supply_merge_inventory_unqualified");
+            for (int slot = 0; slot < equipment.Num(); ++slot)
+                if (read(rows.klass, equipment.GetRawPtr(slot)) == type)
+                    return fail("authored_supply_merge_equipped_stack_unqualified");
+            return result(lua, true, "append");
+        }
+
+        auto* selected = carried.GetRawPtr(index);
+        const auto stack_id = rows.identity(selected);
+        TapeStores::Found incoming, owned;
+        if (stack_id == Guid{} || stack_id == source_id ||
+            !stores.scan(target, source_id, incoming) || incoming.count != 0 ||
+            !stores.scan(target, stack_id, owned) || owned.count != 1 || owned.backpack_row != selected)
+            return fail("authored_supply_merge_guid_conflict");
+        StockStackValues stats;
+        if (!stats.bind(rows, type, profile)) return fail("authored_supply_merge_stock_values_unqualified");
+        const int before = stats.quantity->GetPropertyValueInContainer(selected);
+        const int difference = *profile.stack_units;
+        if (!stats.matches(selected, before) || !stats.matches(source.GetRawPtr(0), difference) ||
+            before > (std::numeric_limits<int>::max)() - difference || !stats.units_safe(before + difference))
+            return fail("authored_supply_merge_stack_size_unqualified");
+        const int after = before + difference;
+
+        std::array<U::UObject*, 4> protected_saves{};
+        std::size_t count = 0;
+        if (target != canonical) protected_saves[count++] = canonical;
+        bool distinct = true;
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (candidate == pawn || !exact(candidate, pawn_path) || role(candidate) != 3 ||
+                static_cast<U::AActor*>(candidate)->GetWorld() != world) return RC::LoopAction::Continue;
+            auto* other = object(candidate, STR("Save"));
+            if (!exact(other, save_path) || other == target || other == escrow)
+            {
+                distinct = false;
+                return RC::LoopAction::Break;
+            }
+            if (std::ranges::find(protected_saves, other) != protected_saves.end()) return RC::LoopAction::Continue;
+            if (count == protected_saves.size())
+            {
+                distinct = false;
+                return RC::LoopAction::Break;
+            }
+            protected_saves[count++] = other;
+            return RC::LoopAction::Continue;
+        });
+        if (!distinct) return fail("authored_supply_merge_save_alias");
+
+        std::array<StackValue, 4> frozen_saves{};
+        for (std::size_t position = 0; position < count; ++position)
+        {
+            auto* other = protected_saves[position];
+            auto* other_data = rows.array->ContainerPtrToValuePtr<void>(other);
+            U::FScriptArrayHelper other_rows(rows.array, other_data);
+            TapeStores::Found other_id;
+            if (!stores.scan(other, stack_id, other_id) || other_id.count ||
+                !stores.scan(other, source_id, other_id) || other_id.count ||
+                other_rows.Num() < 0 || other_rows.Num() > max_supply_backpack ||
+                (other_rows.Num() && (other_rows.GetRawPtr(0) == carried.GetRawPtr(0) ||
+                                      other_rows.GetRawPtr(0) == source.GetRawPtr(0))))
+                return fail("authored_supply_merge_other_owner_conflict");
+            frozen_saves[position] = copy_value(rows.array, other_data);
+            if (!frozen_saves[position] || !same_backpack(rows, frozen_saves[position].get(), other_data))
+                return fail("authored_supply_merge_snapshot_unavailable");
+        }
+        auto frozen = copy_value(rows.array, original_data);
+        auto proposed = copy_value(rows.array, original_data);
+        auto frozen_escrow = copy_value(rows.array, escrow_data);
+        auto* equipment = stores.equipment->ContainerPtrToValuePtr<void>(target);
+        auto frozen_equipment = copy_value(stores.equipment, equipment);
+        auto* armor = stores.armor->ContainerPtrToValuePtr<void>(target);
+        auto frozen_armor = copy_value(stores.armor, armor);
+        auto* helmet = stores.helmet->ContainerPtrToValuePtr<void>(target);
+        auto frozen_helmet = copy_value(stores.helmet, helmet);
+        if (!frozen || !proposed || !frozen_escrow || !frozen_equipment || !frozen_armor || !frozen_helmet ||
+            !same_backpack(rows, frozen.get(), original_data) || !same_backpack(rows, proposed.get(), original_data))
+            return fail("authored_supply_merge_snapshot_unavailable");
+        const auto unchanged = [&] {
+            return same_backpack(rows, frozen_escrow.get(), escrow_data) &&
+                stores.equipment->Identical(frozen_equipment.get(), equipment) &&
+                rows.identical(frozen_armor.get(), armor) && rows.identical(frozen_helmet.get(), helmet) &&
+                [&] {
+                    for (std::size_t position = 0; position < count; ++position)
+                        if (!same_backpack(rows, frozen_saves[position].get(),
+                                           rows.array->ContainerPtrToValuePtr<void>(protected_saves[position]))) return false;
+                    return true;
+                }();
+        };
+        if (!unchanged()) return fail("authored_supply_merge_snapshot_unavailable");
+        U::FScriptArrayHelper staged(rows.array, proposed.get());
+        auto* staged_row = staged.GetRawPtr(index);
+        stats.write(staged_row, after);
+        const bool stock_agrees = stock_stack_matches(rows, pawn, selected, staged_row, difference);
+        if (!unchanged() || !same_backpack(rows, frozen.get(), original_data))
+            return fail("mutation_unverified_authored_supply_stock_calculation");
+        if (!stock_agrees || !owner_current()) return fail("authored_supply_merge_stock_calculation_unqualified");
+        rows.array->CopyCompleteValue(original_data, proposed.get());
+        if (!owner_current() || !unchanged() || !same_backpack(rows, proposed.get(), original_data))
+        {
+            if (owner_current())
+            {
+                rows.array->CopyCompleteValue(original_data, frozen.get());
+                if (unchanged() && same_backpack(rows, frozen.get(), original_data))
+                    return fail("authored_supply_merge_rolled_back");
+            }
+            return fail("mutation_unverified_authored_supply_merge");
+        }
+        scope->merged_source = source_id;
+        result(lua, true, "merged");
+        lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", stack_id[0], stack_id[1], stack_id[2], stack_id[3]));
+        lua.set_integer(before);
+        lua.set_integer(after);
+        return 5;
+    }
+
     U::UWorld* tape_owner_world(U::UObject* pawn, U::UObject* target, U::UObject* canonical,
                               const TapeExchangeProfile& profile)
     {
@@ -1004,7 +1280,7 @@ namespace
         if (!scope || address(target) != supplied[1] || !authorized(*scope, pawn, target))
             return result(lua, false, "authored_pickup_exact_claimant_unavailable");
         if (!rows.bind()) return result(lua, false, "authored_pickup_inventory_schema_unavailable");
-        if (scope->profile->stack_units)
+        if (scope->profile->stack_units && !scope->profile->stock_ammo)
         {
             auto* equipment = field<U::FArrayProperty>(target, STR("PlayerEquipment"));
             auto* equipment_row = equipment ? U::CastField<U::FStructProperty>(equipment->GetInner()) : nullptr;
@@ -1114,6 +1390,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);
+        lua.register_function("SilverfishMergeNativeAuthoredSupply", merge_supply);
         lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape<stone_maze_tape>);
         lua.register_function("SilverfishExchangeEatherPumpTape", exchange_tape<eather_pump_tape>);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);

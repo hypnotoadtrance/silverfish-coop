@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import authored_supply, generate_authored_supply, native_authored_pickup as pickup, party, runtime
 from tools.silverfish.service import Client
@@ -13,6 +13,7 @@ from tools.silverfish.travel import CITY, CROSSROADS
 CITY_AMMO, CROSSROADS_AMMO = authored_supply.CITY_AMMO, authored_supply.CROSSROADS_AMMO
 EPOCH, OLD_EPOCH = "a" * 32, "b" * 32
 PAWN, CHARACTER = "Player_FP_C exact guest", "guest-1"
+SOURCE_GUID, STACK_GUID = "AA" * 16, "BB" * 16
 
 
 def source_row(profile):
@@ -50,6 +51,31 @@ class SupplyCatalogTests(unittest.TestCase):
                 self.assertEqual(status[pickup.SOURCES_KEY], {profile.source: source_row(profile)})
             else:
                 self.assertIsNone(status)
+
+    def test_merge_wire_requires_exact_claim_source_stack_and_quantity(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        bridge = runtime.Bridge(directory, Mock())
+        slot = "SFCoop_" + "1" * 32
+        header = f"schema\t1\nsession\thost\thosting\t{CITY}\t1\t0\n"
+        claim = f"{pickup.ACTION}\t{CITY_AMMO.source}\t{CITY}\t{PAWN}\t1\t1\tmerged\t{SOURCE_GUID}\t{slot}\n"
+        wire = [pickup.MERGE_TAG, CITY_AMMO.source, CITY, PAWN, slot, SOURCE_GUID, STACK_GUID, "11", "21"]
+
+        def snapshot(rows):
+            (directory / "status.tsv").write_text(header + rows, encoding="utf-8")
+            return bridge.snapshot()
+
+        valid = "\t".join(wire) + "\n"
+        proof = snapshot(claim + valid)[pickup.MERGE_KEY]
+        self.assertEqual((proof["source_guid"], proof["stack_guid"], proof["before"], proof["after"]),
+                         (SOURCE_GUID, STACK_GUID, 11, 21))
+        self.assertIsNone(snapshot(valid))
+        self.assertIsNone(snapshot(claim + valid + valid))
+        for index, invalid in ((1, CROSSROADS_AMMO.source), (2, CROSSROADS), (3, "other"), (4, "bad slot"), (5, STACK_GUID),
+                               (6, SOURCE_GUID), (7, "-1"), (8, "22")):
+            mutated = wire.copy()
+            mutated[index] = invalid
+            with self.subTest(wire=mutated):
+                self.assertIsNone(snapshot(claim + "\t".join(mutated) + "\n"))
 
 
 class SupplyClaimTests(unittest.IsolatedAsyncioTestCase):
@@ -116,3 +142,56 @@ class SupplyClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(host.stopping)
         self.assertNotIn(pickup.STATE_KEY, host.party)
         self.assertEqual(host.party["receipts"], {})
+
+    async def test_same_ammo_merge_keeps_source_receipt_and_owned_stack_through_replay(self):
+        host = self.host()
+        target = pickup.request_target(CITY_AMMO.source, EPOCH)
+        operation = "c" * 32
+
+        async def merged(_action, pawn, slot, source, *, timeout):
+            self.assertEqual((pawn, source, timeout), (PAWN, CITY_AMMO.source, 7))
+            claim = {"source": source, "map": CITY, "pawn": pawn, "slot": slot,
+                     "ok": True, "applied": True, "status": "merged", "guid": SOURCE_GUID}
+            return {**host.last_game, "native_authored_pickup_claim": claim, pickup.MERGE_KEY: {
+                "source": source, "map": CITY, "pawn": pawn, "slot": slot, "source_guid": SOURCE_GUID,
+                "stack_guid": STACK_GUID, "before": 11, "after": 21,
+            }}
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=merged))
+        with patch.object(pickup.native_host_save, "record") as record:
+            result = await pickup.claim(host, bridge, CHARACTER, target, operation)
+            self.assertEqual(await pickup.claim(host, bridge, CHARACTER, target, operation), result)
+            other = "other"
+            party.add_player(host.party, other)
+            with self.assertRaisesRegex(party.RuleError, "already_claimed"):
+                await pickup.claim(host, bridge, other, target, operation)
+        record.assert_called_once()
+        bridge.command.assert_awaited_once()
+        self.assertEqual(host.checkpoint_native.await_count, 2)
+        self.assertEqual(host.checkpoint_native.call_args.kwargs["require_guest_frames"], {CHARACTER})
+        stored = host.party[pickup.STATE_KEY][CITY_AMMO.source]
+        self.assertEqual(stored, result["native_authored_pickup_claim"])
+        self.assertEqual(tuple(stored[key] for key in ("guid", "source_guid", "stack_before", "stack_after", "owner")),
+                         (STACK_GUID, SOURCE_GUID, 11, 21, CHARACTER))
+        self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_unverified_or_equipped_only_merge_does_not_publish_claim(self):
+        target = pickup.request_target(CITY_AMMO.source, EPOCH)
+        cases = ((False, "authored_supply_merge_equipped_stack_unqualified", party.RuleError),
+                 (True, "merged", RuntimeError))
+        for mutated, state, error in cases:
+            with self.subTest(state=state):
+                host = self.host()
+
+                async def incomplete(_action, pawn, slot, source, *, timeout):
+                    return {**host.last_game, "native_authored_pickup_claim": {
+                        "source": source, "map": CITY, "pawn": pawn, "slot": slot,
+                        "ok": mutated, "applied": mutated, "status": state, "guid": SOURCE_GUID,
+                    }}
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=incomplete))
+                with self.assertRaises(error):
+                    await pickup.claim(host, bridge, CHARACTER, target, "c" * 32)
+                host.checkpoint_native.assert_awaited_once_with(bridge)
+                self.assertEqual((host.native_checkpoint_unsafe, host.stopping), (mutated, mutated))
+                self.assertNotIn(pickup.STATE_KEY, host.party)

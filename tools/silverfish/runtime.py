@@ -1536,6 +1536,10 @@ class Bridge:
                     data["native_authored_pickup_claim"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
                                                             "ok": fields[4] == "1", "applied": fields[5] == "1",
                                                             "status": fields[6], "guid": fields[7], "slot": fields[8]}
+                elif fields[0] == native_authored_pickup.MERGE_TAG:
+                    if native_authored_pickup.MERGE_KEY in data:
+                        raise ValueError("Repeated authored supply merge report")
+                    data[native_authored_pickup.MERGE_KEY] = native_authored_pickup.parse_merge(fields, data)
                 elif fields[0] == "native-rest-guard" and len(fields) == 4:
                     data["native_rest_guard"] = {"armed": fields[1] == "1", "status": fields[2],
                                                "guest_denials": int(fields[3])}
