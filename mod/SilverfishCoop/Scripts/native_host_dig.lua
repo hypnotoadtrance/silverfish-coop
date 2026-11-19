@@ -24,7 +24,7 @@ local actions = {
     ["native-host-dig-collect-fixture"] = "collect",
     ["native-host-dig-inspect-fixture"] = "inspect",
 }
-local current, proof
+local current, proof, acquiring
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -128,6 +128,55 @@ local function held(ctx, class)
         and same(actor.Player_Ref, ctx.pawn) and same(actor.User, ctx.pawn) and same(actor.Instigator, ctx.pawn)
         and actor.HeldByPlayer == true and actor.Ammo == -1 and actor.Stacks == false then
         return actor, found.guid
+    end
+end
+
+local function read_acquisition(ctx, pending)
+    local type_ref = StaticFindObject(spade_class)
+    local amount, row = inventory(ctx.save, type_ref)
+    local guest_amount = inventory(ctx.detached, type_ref)
+    local placed = StaticFindObject(spade_path)
+    local retired = not valid(placed) or same(placed, pending.source) and placed:IsActorBeingDestroyed()
+    local actor = ctx.pawn.EquipedItem
+    local bindings = same(ctx.pawn.Save, ctx.save) and same(ctx.guest.Save, ctx.detached)
+    local slot = amount == 1 and row and row.source == "PlayerEquipment" and row.index == 0 and row.ammo == -1
+    local equipped, guid = held(ctx, type_ref)
+    if retired and guest_amount == 0 and bindings and slot and equipped and row.guid == guid then
+        return guid
+    end
+    if pending.samples >= 2 and not pending.retried and retired and slot and guest_amount == 0 and bindings
+        and not valid(actor) and ctx.pawn.IsChangingAmmo == false and ctx.pawn.UsingItem == false
+        and ctx.pawn.Speaking == false and ctx.pawn.Dead == false then
+        pending.retried = true
+        ctx.pawn:Equip_NextItem(0, false)
+        return read_acquisition(ctx, pending)
+    end
+    local owner = valid(actor) and same(actor:GetOwner(), ctx.pawn)
+    local instigator = valid(actor) and same(actor.Instigator, ctx.pawn)
+    local reference = valid(actor) and same(actor.Player_Ref, ctx.pawn)
+    local user = valid(actor) and same(actor.User, ctx.pawn)
+    return nil, ("pickup=%s,rows=%s,row=%s/%s/%s,index=%s,actor=%s,owned=%s/%s/%s/%s,held=%s,ammo=%s,guest=%s,save=%s,retry=%s"):format(
+        retired and "retired" or "live", tostring(amount), row and row.source or "-", row and row.index or "-",
+        row and row.ammo or "-", tostring(ctx.save.PlayerEquipIndex), valid(actor) and actor:GetClass():GetName() or "-",
+        tostring(owner == true), tostring(instigator == true), tostring(reference == true), tostring(user == true),
+        tostring(valid(actor) and actor.HeldByPlayer == true), valid(actor) and tostring(actor.Ammo) or "-",
+        tostring(guest_amount), tostring(bindings), tostring(pending.retried == true))
+end
+
+local function settle_acquisition(ctx)
+    if not acquiring then return end
+    local pending = acquiring
+    if not same(pending.world, ctx.world) or not same(pending.pawn, ctx.pawn) or not same(pending.save, ctx.save)
+        or not same(pending.guest, ctx.guest) or not same(pending.detached, ctx.detached) then return end
+    pending.samples = pending.samples + 1
+    local guid, diagnosis = read_acquisition(ctx, pending)
+    if guid then
+        proof = {status = "equipped", guid = guid, flag = 0, stock_f = pending.sequence}
+        acquiring = nil
+    elseif os.time() >= pending.expires then
+        proof = {status = "failed", guid = "-", flag = 0, stock_f = pending.sequence,
+            fault = "mutation_unverified_stock_host_dig_stock_spade_equip_readback:" .. diagnosis}
+        acquiring = nil
     end
 end
 
@@ -301,6 +350,7 @@ function dig.command(fields, state, phase)
     local guest_spade, guest_package = inventory(ctx.detached, spade_type), inventory(ctx.detached, package_type)
     need(guest_spade == 0 and guest_package == 0, "guest_inventory_unqualified")
     if action == "acquire" then
+        need(not acquiring, "spade_pickup_already_pending")
         local actor = StaticFindObject(spade_path)
         local slot = ctx.save.PlayerEquipment[1]
         need(not present and not valid(ctx.pawn.EquipedItem) and slot and not valid(slot[item_class])
@@ -312,11 +362,10 @@ function dig.command(fields, state, phase)
         need(actual and squared(actual, spade_position) <= 25, "placed_stock_spade_position:" .. coordinates(actual))
         need(actor.Physics == false and actor.Stacks == false and actor.Ammo == -1, "placed_stock_spade_shape")
         local sequence = stock_f(ctx, actor, actor.Box, "spade")
-        local equipped, guid = held(ctx, spade_type)
-        need(equipped and guid and (not valid(actor) or actor:IsActorBeingDestroyed()) and
-            inventory(ctx.detached, spade_type) == 0, "stock_spade_equip_readback", true)
-        proof = {status = "equipped", guid = guid, flag = 0, stock_f = sequence}
-        return "ordinary stock Interact equipped the placed spade"
+        acquiring = {world = ctx.world, pawn = ctx.pawn, save = ctx.save, guest = ctx.guest, detached = ctx.detached,
+            source = actor, sequence = sequence, samples = 0, expires = os.time() + 3}
+        proof = {status = "acquiring", guid = "-", flag = 0, stock_f = sequence}
+        return "ordinary stock Interact dispatched for the placed spade"
     end
     if action == "inspect" then
         local amount, row = inventory(ctx.save, package_type)
@@ -365,6 +414,7 @@ function dig.rows(state, phase, status_row)
     if not proof then return {} end
     local ctx = context(state, phase)
     if not ctx then return {} end
+    if proof.status == "acquiring" then settle_acquisition(ctx) end
     if proof.status == "pressed" and matches(ctx) then
         local ok, status, address, x, y, z, holes, incidental =
             SilverfishInspectNativeHostDigFixture(ctx.world:GetAddress(), ctx.pawn:GetAddress())
@@ -400,7 +450,7 @@ function dig.rows(state, phase, status_row)
 end
 
 function dig.clear()
-    current, proof = nil, nil
+    current, proof, acquiring = nil, nil, nil
 end
 
 return dig

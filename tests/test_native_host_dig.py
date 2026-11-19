@@ -29,3 +29,17 @@ class StockHostDigTests(unittest.TestCase):
                 dig.parse(row, "hosting", CROSSROADS)
         with self.assertRaises(ValueError):
             dig.parse(self.row(), "connected", CROSSROADS)
+
+    def test_stock_interact_waits_for_an_exact_typed_equipped_guid(self):
+        fields = self.row()
+        fields[3:5] = ["acquiring", "-"]
+        fields[6:15] = ["0", "-", "-", "-", "-", "-", "-", "-", "-"]
+        pending = dig.parse(fields, "hosting", CROSSROADS)
+        self.assertEqual((pending["state"], pending["guid"], pending["stock_f"]), ("acquiring", None, 6))
+        fields[4] = "A" * 32
+        with self.assertRaises(ValueError):
+            dig.parse(fields, "hosting", CROSSROADS)
+        fields[3:5] = ["failed", "-"]
+        fields[16] = "mutation_unverified_stock_host_dig_stock_spade_equip_readback:pickup=retired,rows=0"
+        failed = dig.parse(fields, "hosting", CROSSROADS)
+        self.assertEqual((failed["state"], failed["guid"], failed["fault"]), ("failed", None, fields[16]))

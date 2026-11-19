@@ -25,15 +25,17 @@ _PAWN = re.compile(re.escape(f"Player_FP_C {WORLD}:PersistentLevel.Player_FP_C_"
 _PACKAGE = re.compile(re.escape(f"Package_Item_FarmHouse_C {WORLD}:PersistentLevel.Package_Item_FarmHouse_C_") + r"[0-9]+")
 _MATERIALS = frozenset(f"PhysicalMaterial /Game/Classes/Libraries/PhysicMaterials/PM_{kind}.PM_{kind}"
                        for kind in ("Dirt", "Debris", "Grass", "MossyDirt", "Mud", "Sand"))
-_PHASES = {"equipped", "pressed", "dug", "collected", "restored", "failed"}
+_PHASES = {"acquiring", "equipped", "pressed", "dug", "collected", "restored", "failed"}
 
 
 def parse(fields: list[str], phase: str, area: str) -> dict:
     if len(fields) != 17:
         raise ValueError("Invalid stock host dig report size")
     tag, reported, pawn, state, tool, flag, flag_value, actor, package, x, y, z, material, holes, incidental, press, fault = fields
+    unidentified_tool = (state == "acquiring" or state == "failed" and press != "-")
     if (tag != TAG or (phase, area, reported) != ("hosting", CROSSROADS, CROSSROADS) or _PAWN.fullmatch(pawn) is None
-            or state not in _PHASES or not valid_guid(tool) or flag != FLAG or flag_value not in ("0", "1")
+            or state not in _PHASES or (tool != "-" if unidentified_tool else not valid_guid(tool))
+            or flag != FLAG or flag_value not in ("0", "1")
             or actor != "-" and _PACKAGE.fullmatch(actor) is None or package != "-" and not valid_guid(package)
             or holes not in ("-", "1") or incidental not in ("-", "0", "1")
             or press != "-" and (not press.isascii() or not press.isdigit() or len(press) > 16 or not 0 < int(press) < 2**53)):
@@ -46,10 +48,13 @@ def parse(fields: list[str], phase: str, area: str) -> dict:
             or (state == "failed") != (fault != "-")
             or state in ("dug", "collected") and (actor == "-" or flag_value != "1" or holes != "1" or incidental == "-" or contact is None)
             or state in ("collected", "restored") and (package == "-" or flag_value != "1")
-            or state in ("equipped", "collected") and press == "-"
-            or state in ("equipped", "pressed") and (flag_value, actor, package, holes, incidental) != ("0", "-", "-", "-", "-")):
+            or state in ("acquiring", "equipped", "collected") and press == "-"
+            or (state in ("acquiring", "equipped", "pressed") or unidentified_tool)
+               and (flag_value, actor, package, holes, incidental) != ("0", "-", "-", "-", "-")
+            or unidentified_tool and contact is not None):
         raise ValueError("Invalid stock host dig readback")
-    return {"map": area, "pawn": pawn, "state": state, "guid": tool, "flag": flag, "flag_value": int(flag_value),
+    return {"map": area, "pawn": pawn, "state": state, "guid": None if unidentified_tool else tool,
+            "flag": flag, "flag_value": int(flag_value),
             "source": SOURCE, "actor": None if actor == "-" else actor, "package_guid": None if package == "-" else package,
             "contact": contact, "material": None if material == "-" else material,
             "holes": None if holes == "-" else int(holes), "incidental": None if incidental == "-" else int(incidental),
@@ -116,6 +121,13 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             raise
         report = frame(snapshot)
         if action == ACQUIRE:
+            if report.get("state") == "acquiring":
+                press = report.get("stock_f")
+                snapshot = await bridge.wait_for(lambda sample: frame(sample).get("state") in ("equipped", "failed")
+                                                and frame(sample).get("stock_f") == press, timeout=5)
+                report = frame(snapshot)
+            if report.get("state") == "failed":
+                raise RuntimeError(report.get("fault"))
             if report.get("state") != "equipped" or not valid_guid(report.get("guid")):
                 raise RuntimeError("Stock Interact did not equip the exact placed spade")
         else:
