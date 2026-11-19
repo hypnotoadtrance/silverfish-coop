@@ -1295,6 +1295,36 @@ class Bridge:
                     data["native_campaign_npc_approach"] = {"map": fields[1], "member": fields[2], "host_pawn": fields[3],
                                                            "guest_pawn": fields[4], "host_distance": _finite(fields[5]),
                                                            "guest_distance": _finite(fields[6])}
+                elif fields[0] == "native-campaign-flayer-projectile" and len(fields) == 9:
+                    area, serial, shooter, victim, projectile, before, after, amount = fields[1:]
+                    level = area + ".CrossRoads_P:PersistentLevel."
+                    sequence = int(serial)
+                    before, after, amount = map(_finite, (before, after, amount))
+                    rows = data.setdefault("native_campaign_flayer_projectile_hits", [])
+                    suffixes = [name.removeprefix(f"{kind} {level}{kind}_") for kind, name in (
+                        ("Player_FP_C", shooter), ("NPC_Flayer_C", victim), ("Projectile_Pistol_Light_C", projectile))]
+                    if (area != "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P" or data.get("map") != area
+                            or data.get("state") != "hosting" or not 1 <= sequence < 2**53 or len(rows) >= 16
+                            or (rows and rows[-1]["sequence"] <= sequence) or None in (before, after, amount)
+                            or not 0 < after < before <= 180 or not 0 < amount <= 180
+                            or abs(before - after - amount) > 1e-6
+                            or any(not suffix.isascii() or not suffix.isdecimal() for suffix in suffixes)):
+                        raise ValueError("Invalid exact stock Flayer projectile hit")
+                    rows.append(dict(map=area, sequence=sequence, shooter=shooter, victim=victim, projectile=projectile,
+                                     before=before, after=after, damage=amount))
+                elif fields[0] == "native-campaign-flayer-projectile-status" and len(fields) == 3:
+                    area, proof = fields[1:]
+                    if (area == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P" and data.get("map") == area
+                            and data.get("state") == "hosting" and len(proof) <= 64
+                            and proof.isascii() and proof.islower() and proof.replace("_", "").isalpha()):
+                        data["native_campaign_flayer_projectile_status"] = proof
+                elif fields[0] == "native-campaign-flayer-shot-aim" and len(fields) == 5:
+                    area, victim, shooter, reach = fields[1:]
+                    reach = _finite(reach)
+                    if (area != "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P" or data.get("map") != area
+                            or data.get("state") != "hosting" or reach is None or not 300 <= reach <= 660):
+                        raise ValueError("Invalid exact stock Flayer shooting fixture")
+                    data["native_campaign_flayer_shot_aim"] = dict(map=area, victim=victim, shooter=shooter, reach=reach)
                 elif fields[0] == "native-campaign-npc-approach-geometry" and len(fields) == 8:
                     data["native_campaign_npc_approach_geometry"] = {
                         "map": fields[1], "member": fields[2], "sweep": _finite(fields[3]),

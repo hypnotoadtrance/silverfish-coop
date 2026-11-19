@@ -14,6 +14,7 @@ import time
 import uuid
 
 from live_multi_smoke import saved_hashes
+from live_guest_held_fire_smoke import wait_event
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,6 +38,7 @@ SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
 FLAYER_REPLAY_SHA = "8f17247a7b18f3e91ba33ec6c4bd72d711935a2217667a5933e8713084e93c95"
 FLAYER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999494537]
 FLAYER_GEOMETRY_REFUSAL = "stock_flayer_approach_no_verified_position "
+FLAYER_SHOT_REFUSAL = "stock_flayer_shot_no_stock_lane "
 
 
 def seed_flayer_replay(source: Path, destination: Path) -> dict:
@@ -308,7 +310,8 @@ def stock_flayer_infection(server: dict, report: dict) -> bool:
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
-                   stock_refresh: bool = False, flayer_replay: Path | None = None) -> None:
+                   stock_refresh: bool = False, flayer_replay: Path | None = None,
+                   projectile_tap: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
@@ -344,7 +347,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     launched = []
     flayer_combat = combat and family == "flayer"
     evidence = {"map": MAP, "family": family, "mode": "replicated" if replicate else "observed",
-                "verification_scope": "join" if join_only else "combat" if combat else "encounter", "approach_requested": approach,
+                "verification_scope": ("join" if join_only else "combat" if combat
+                                       else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
                 "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat}
     if prepared:
@@ -401,7 +405,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             raise
         reply = json.loads(output) if output and (not process.returncode or allow_flayer_geometry_refusal) else {}
         if (allow_flayer_geometry_refusal and reply.get("ok") is False
-                and str(reply.get("error", "")).startswith(FLAYER_GEOMETRY_REFUSAL)):
+                and str(reply.get("error", "")).startswith((FLAYER_GEOMETRY_REFUSAL, FLAYER_SHOT_REFUSAL))):
             return reply
         if process.returncode:
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
@@ -466,8 +470,73 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             return None
         return host_name, guest_name
 
+    async def ordinary_flayer_tap(server, natural):
+        host_pawn, guest_pawn = approach_pair(server)
+        members = natural["host"]["members"]
+        guid = uuid.uuid4().hex.upper()
+        seeded = (await command("action", *primary, "native-guest-weapon-seed-light-pistol",
+                                "--target", "guest", "--item-guid", guid))["native_guest_weapon"]
+        equipment = (await command("action", *secondary, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
+        evidence["stock_light_pistol"] = {"fixture_item": seeded, "ordinary_equip": equipment}
+        assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
+        assert (equipment["map"], equipment["pawn"], equipment["guid"], equipment["status"],
+                equipment["actor_ammo"], equipment["stored_ammo"]) == (MAP, guest_pawn, guid, "equipped", 7, 7), equipment
+
+        def armed(server, client, snapshot):
+            scope = client.get("game", {}).get("native_guest_primary_scope", {})
+            return (proved(server, client, snapshot) and approach_pair(server) == (host_pawn, guest_pawn)
+                    and (scope.get("map"), scope.get("guid"), scope.get("kind")) == (MAP, guid, "light-pistol"))
+
+        _, client, _ = await wait("No ordinary primary mapping for the equipped, detached pistol", armed, 15)
+        client_pawn = client["game"]["pawns"]["local"]["name"]
+        client_generation = client["generation"]
+        attempts = evidence["ordinary_projectile_taps"] = []
+        magazine = 7
+        for target in (*members, *members):
+            reply = await command("action", *primary, "native-campaign-npc-approach", "--target", target,
+                                  "--amount", "1", allow_flayer_geometry_refusal=True)
+            if not reply.get("ok"):
+                attempts.append({"target": target, "refusal": reply["error"]})
+                continue
+            aim = reply["native_campaign_flayer_shot_aim"]
+            assert (aim["map"], aim["victim"], aim["shooter"]) == (MAP, target, guest_pawn), aim
+            start = max((hit["sequence"] for hit in status(host).get("game", {}).get(
+                "native_campaign_flayer_projectile_hits", [])), default=0)
+            press = (await command("action", *secondary, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+            attempt = {"aim": aim, "stock_input": press}
+            attempts.append(attempt)
+            assert (press["map"], press["pawn"], press["guid"], press["stock_wrappers"]) == (MAP, client_pawn, guid, 2), press
+            event = await wait_event(guest, "native_guest_primary_input", lambda row:
+                row.get("sequence") == press["sequence"] and row.get("generation") == client_generation)
+            shot = attempt["authoritative_shot"] = event["native_guest_weapon"]
+            assert (shot["map"], shot["pawn"], shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
+                MAP, guest_pawn, guid, magazine, magazine - 1, 1), shot
+            magazine -= 1
+
+            def hit_from_tap(server):
+                hits = server.get("game", {}).get("native_campaign_flayer_projectile_hits", [])
+                return next((hit for hit in hits if hit["sequence"] > start and hit["map"] == MAP
+                             and hit["shooter"] == guest_pawn and hit["victim"] == target), None)
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                current, viewer = status(host), status(guest)
+                if diagnostic := current.get("game", {}).get("native_campaign_flayer_projectile_status"):
+                    attempt["observer"] = diagnostic
+                if hit := hit_from_tap(current):
+                    assert 0 < hit["after"] < hit["before"] <= 180, hit
+                    assert math.isclose(hit["damage"], hit["before"] - hit["after"], abs_tol=1e-6), hit
+                    snapshot = frames()
+                    if proved(current, viewer, snapshot):
+                        assert target in snapshot["host"]["members"], snapshot
+                        evidence["stock_flayer_guest_projectile_hit"] = hit
+                        return current, viewer, snapshot
+                await asyncio.sleep(0.1)
+            attempt["outcome"] = "no_exact_nonlethal_hit_observed"
+        raise RuntimeError("No ordinary guest pistol tap verified the exact stock Flayer HP debit")
+
     try:
-        fixture_flags = ("--fixtures",) if approach else ()
+        fixture_flags = ("--fixtures",) if approach or projectile_tap else ()
         if flayer_combat:
             fixture_flags += ("--native-guest-sickness",)
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
@@ -477,7 +546,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if prepared:
             evidence["flayer_replay"]["adopted"] = verify_flayer_restore(host, initial, prepared)
         invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
-        await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
+        client_flags = ("--native-guest-primary-input",) if projectile_tap else ()
+        await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"], *client_flags)
         if join_only:
             def initial_join(server, client, snapshot):
                 return (paired(server, client) and snapshot["guest"] is not None
@@ -502,7 +572,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             if inspection["stock_refresh"]["state"] == "eligible" and not stock_cohort(inspection, replicate, family):
                 refreshed = await director_report("refresh")
                 evidence["stock_refresh_result"] = refreshed["stock_refresh"]
-        if approach:
+        if approach or projectile_tap:
             def ready(server, client, snapshot):
                 pair = approach_pair(server)
                 return (paired(server, client) and stock_cohort(snapshot["host"], True, family) and pair
@@ -510,6 +580,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
 
             before, _, natural = await wait(f"No stock {family} cohort and enrolled pair appeared", ready)
             evidence["before_approach"] = {"host": natural["host"], "guest": natural["guest"]}
+        if projectile_tap:
+            server, client, snapshot = await ordinary_flayer_tap(before, natural)
+        elif approach:
             host_pawn, guest_pawn = approach_pair(before)
             members = natural["host"]["members"]
             if flayer_combat:
@@ -614,6 +687,8 @@ if __name__ == "__main__":
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
     parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
     parser.add_argument("--combat", action="store_true", help="observe a stock melee attack against the exact detached guest")
+    parser.add_argument("--projectile-tap", action="store_true",
+                        help="verify an ordinary guest Light Pistol tap against the exact restored stock Flayer cohort")
     parser.add_argument("--stock-refresh", action="store_true",
                         help="inspect stock Husk reinforcement readiness and permit one eligible stock director refresh")
     parser.add_argument("--join-only", action="store_true", help="verify stock cohort start and guest map admission only")
@@ -631,6 +706,11 @@ if __name__ == "__main__":
         parser.error("--stock-refresh requires the Husk encounter test")
     if options.combat and options.cohort == "flayer":
         options.flayer_veto = True
+    if options.projectile_tap:
+        if (options.cohort != "flayer" or not options.flayer_replay
+                or options.combat or options.join_only or options.approach):
+            parser.error("--projectile-tap requires --cohort flayer and --flayer-replay, and excludes other approach modes")
+        options.replicate = options.flayer_veto = True
     if (options.require_client_denial or options.approach) and not options.replicate:
         parser.error("--require-client-denial and --approach require --replicate")
     if options.flayer_veto and options.cohort != "flayer":
@@ -649,4 +729,4 @@ if __name__ == "__main__":
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
                          join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
-                         flayer_replay=options.flayer_replay))
+                         flayer_replay=options.flayer_replay, projectile_tap=options.projectile_tap))

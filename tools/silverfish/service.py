@@ -2195,16 +2195,36 @@ class Host:
                     self.last_seen = time.monotonic()
                     result = {"native_enemy_shell_fixture": proof}
                 elif action == "native-campaign-npc-approach" and self.native_guest and self.fixtures:
-                    target = request.get("target")
+                    target, mode = request.get("target"), request.get("amount")
                     authority = self.last_game.get("native_campaign_npc", {})
-                    if self.last_game.get("map") != CROSSROADS or target not in authority.get("members", []):
-                        raise ValueError("Choose an exact observed stock CrossRoads Husk")
-                    self.last_game = await bridge.command(action, target, timeout=6)
+                    if (self.last_game.get("map") != CROSSROADS or not isinstance(target, str)
+                            or target not in authority.get("members", [])):
+                        raise ValueError("Choose an exact observed stock CrossRoads enemy")
+                    if mode is not None and (type(mode) is not int or mode != 1
+                                             or not target.startswith("NPC_Flayer_C ")):
+                        raise ValueError("Choose an exact observed Flayer for the stock projectile fixture")
+                    arguments = (target, "projectile") if mode == 1 else (target,)
+                    try:
+                        self.last_game = await bridge.command(action, *arguments, timeout=6)
+                    except RuntimeError as error:
+                        if mode == 1 and str(error).startswith("mutation_unverified_"):
+                            self.native_checkpoint_unsafe = self.stopping = True
+                        raise
                     self.last_seen = time.monotonic()
-                    proof = self.last_game.get("native_campaign_npc_approach", {})
-                    if proof.get("member") != target or proof.get("map") != CROSSROADS:
-                        raise RuntimeError("The stock Husk approach did not verify both exact pawns")
-                    result = {"native_campaign_npc_approach": proof}
+                    if mode == 1:
+                        key = "native_campaign_flayer_shot_aim"
+                        proof = self.last_game.get(key, {})
+                        guest = self.last_game.get("pawns", {}).get("guest", {}).get("name")
+                        if not guest or (proof.get("map"), proof.get("victim"), proof.get("shooter")) != (
+                                CROSSROADS, target, guest):
+                            self.native_checkpoint_unsafe = self.stopping = True
+                            raise RuntimeError("The stock Flayer shooting fixture did not verify its exact actor and guest")
+                    else:
+                        key = "native_campaign_npc_approach"
+                        proof = self.last_game.get(key, {})
+                        if (proof.get("member"), proof.get("map")) != (target, CROSSROADS):
+                            raise RuntimeError("The stock enemy approach did not verify both exact pawns")
+                    result = {key: proof}
                 elif action == "native-campaign-npc-refresh" and self.native_guest and self.native_zones and self.fixtures:
                     mode = request.get("target")
                     if self.last_game.get("map") != CROSSROADS or mode not in ("inspect", "refresh"):

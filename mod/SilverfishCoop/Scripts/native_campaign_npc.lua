@@ -31,7 +31,7 @@ local trace_color = { R = 0, G = 0, B = 0, A = 0 }
 local approach_radius, readback_tolerance = 4000, 60
 local flayer_sweep, flayer_sweep_margin = 350, 25
 local flayer_angles = { 0, 30, -30, 50, -50 }
-local active, approach, refresh
+local active, approach, refresh, shot_aim
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -46,7 +46,7 @@ local function exact(object, path)
 end
 
 function campaign_npc.clear()
-    active, approach, refresh = nil, nil, nil
+    active, approach, refresh, shot_aim = nil, nil, nil, nil
     if enabled and type(SilverfishClearCampaignNpc) == "function" then SilverfishClearCampaignNpc() end
 end
 
@@ -306,6 +306,91 @@ local function place_pair(world, host, guest, target, cohort)
     error("stock_husk_approach_no_safe_floor_pair", 0)
 end
 
+local function flayer_projectile_aim(state, host, guest, target, cohort)
+    local pawn, controller = guest.pawn, guest.controller_object
+    local weapon, camera = pawn.EquipedItem, pawn.Camera
+    local muzzle = valid(weapon) and weapon.Arrow_Muzzle
+    local capsule = target.CapsuleComponent
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local original = placement(pawn)
+    if not original or not valid(trace) or not exact(weapon, "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")
+        or not weapon:HasAuthority() or not same(weapon:GetWorld(), state.world) or not same(weapon:GetOwner(), pawn)
+        or not same(weapon:GetInstigator(), pawn) or not same(weapon.User, pawn) or not same(weapon.Player_Ref, pawn)
+        or weapon.HeldByPlayer ~= true or target.Alive ~= true
+        or not exact(camera, "/Script/Engine.CameraComponent") or not same(camera:GetOwner(), pawn)
+        or not exact(muzzle, "/Script/Engine.ArrowComponent") or not same(muzzle:GetOwner(), weapon)
+        or not exact(capsule, "/Script/Engine.CapsuleComponent") or not same(capsule:GetOwner(), target)
+        or pawn.IsWeaponBlocked ~= false then error("stock_flayer_shot_exact_pistol_or_components_unqualified", 0) end
+    local control_pose, eye_pose, muzzle_pose = rotation(controller:GetControlRotation()),
+        rotation(camera.RelativeRotation), rotation(muzzle.RelativeRotation)
+    local anchor = point(capsule:K2_GetComponentLocation())
+    if not anchor or not control_pose or not eye_pose or not muzzle_pose then error("stock_flayer_shot_pose_unqualified", 0) end
+    local ignored = {host.pawn, pawn, weapon}
+    for _, member in ipairs(cohort) do ignored[#ignored + 1] = member end
+    local function toward(from, to)
+        local dx, dy, dz = to.X - from.X, to.Y - from.Y, to.Z - from.Z
+        return {Pitch = math.deg(math.atan(dz, math.sqrt(dx^2 + dy^2))), Yaw = math.deg(math.atan(dy, dx)), Roll = 0}
+    end
+    local moved, floors, rays = false, 0, 0
+    local function verified_reach(floor)
+        local aim = toward(floor, anchor)
+        if pawn:K2_TeleportTo(floor, {Pitch = 0, Yaw = aim.Yaw, Roll = 0}) ~= true then return end
+        moved = true
+        local eye = point(camera:K2_GetComponentLocation())
+        if not eye or not at(pawn, floor, 18) then return end
+        local view_aim = toward(eye, anchor)
+        controller:SetControlRotation(view_aim)
+        camera:K2_SetWorldRotation(view_aim, false, {}, true)
+        local from = point(muzzle:K2_GetComponentLocation())
+        if not from or distance(eye, from) > 180 then return end
+        muzzle:K2_SetWorldRotation(toward(from, anchor), false, {}, true)
+        local forward = point(muzzle:GetForwardVector())
+        local reach = distance(from, anchor)
+        if not forward or reach < 300 or reach > 660 then return end
+        local ray = {X = from.X + (reach + 10) * forward.X, Y = from.Y + (reach + 10) * forward.Y,
+            Z = from.Z + (reach + 10) * forward.Z}
+        local hit = {}
+        rays = rays + 1
+        local found = trace:LineTraceSingle(pawn, from, ray, 0, true, {pawn, weapon}, 0, hit, true, trace_color, trace_color, 0)
+        hit = hit.OutHit or hit
+        local component = hit.Component and hit.Component:Get()
+        if found == true and valid(component) and same(component:GetOwner(), target)
+            and hit.PenetrationDepth == 0 and finite(hit.Time) and hit.Time > 0 and hit.Time <= 1 then
+            pawn:ForceNetUpdate()
+            return reach
+        end
+    end
+    local applied, result = pcall(function()
+        local bearing = math.atan(original.origin.Y - anchor.Y, original.origin.X - anchor.X)
+        for _, radius in ipairs({455, 550, 385}) do
+            for _, offset in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
+                local angle = bearing + math.rad(offset)
+                local floor = floor_at(trace, original, anchor, anchor.X + radius * math.cos(angle),
+                    anchor.Y + radius * math.sin(angle), ignored)
+                if floor and math.abs(floor.Z - anchor.Z) <= 120 then
+                    floors = floors + 1
+                    local reach = verified_reach(floor)
+                    if reach then return reach end
+                end
+            end
+        end
+    end)
+    if applied and result then return result end
+    if moved then
+        local restored, located = pcall(function()
+            local found = pawn:K2_TeleportTo(original.origin, original.facing)
+            controller:SetControlRotation(control_pose)
+            camera:K2_SetRelativeRotation(eye_pose, false, {}, true)
+            muzzle:K2_SetRelativeRotation(muzzle_pose, false, {}, true)
+            pawn:ForceNetUpdate()
+            return found == true and at(pawn, original.origin, 18)
+        end)
+        if not restored or not located then error("mutation_unverified_stock_flayer_shot_pose_restore", 0) end
+    end
+    if not applied then error("stock_flayer_shot_probe_failed: " .. tostring(result), 0) end
+    error(("stock_flayer_shot_no_stock_lane floors=%d rays=%d"):format(floors, rays), 0)
+end
+
 function campaign_npc.command(fields, state, phase)
     if fields[2] == "native-campaign-npc-refresh" then
         local mode = fields[3]
@@ -320,12 +405,20 @@ function campaign_npc.command(fields, state, phase)
         return "stock Husk director result reported"
     end
     if fields[2] ~= "native-campaign-npc-approach" then return end
-    if not fixture or #fields ~= 3 then error("stock_husk_approach_fixture_disabled", 0) end
+    local projectile = #fields == 4 and fields[4] == "projectile"
+    if not fixture or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
+        or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end
     approach = nil
     local host, guest, detached = paired(state, phase)
     if not host then error("stock_husk_approach_exact_pair_unavailable", 0) end
     local target, cohort = stock_member(state.world, host.pawn, fields[3])
     if not target then error("stock_husk_approach_cohort_member_unavailable", 0) end
+    if projectile then
+        shot_aim = nil
+        local reach = flayer_projectile_aim(state, host, guest, target, cohort)
+        shot_aim = {world = state.world:GetAddress(), victim = fields[3], shooter = guest.name, reach = reach}
+        return "stock light pistol shot lane verified"
+    end
     local first, second = placement(host.pawn), placement(guest.pawn)
     if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
     if combat_fixture then
@@ -418,6 +511,20 @@ local function read_rows(state, phase, status_row)
             if infection.n == 13 then
                 rows[#rows + 1] = status_row("native-campaign-npc-melee-sickness", map, table.unpack(infection))
             end
+        end
+    end
+    if host and type(SilverfishReadCampaignFlayerProjectile) == "function" then
+        local diagnostic = SilverfishReadCampaignFlayerProjectile(-1)
+        if type(diagnostic) == "string" then
+            rows[#rows + 1] = status_row("native-campaign-flayer-projectile-status", state.map, diagnostic)
+        end
+        for age = 0, 15 do
+            local hit = table.pack(SilverfishReadCampaignFlayerProjectile(age))
+            if hit.n ~= 7 then break end
+            rows[#rows + 1] = status_row("native-campaign-flayer-projectile", state.map, table.unpack(hit, 1, hit.n))
+        end
+        if shot_aim and shot_aim.world == active then
+            rows[#rows + 1] = status_row("native-campaign-flayer-shot-aim", state.map, shot_aim.victim, shot_aim.shooter, shot_aim.reach)
         end
     end
     if host and approach and approach.world == active and state.local_pawn.name == approach.host

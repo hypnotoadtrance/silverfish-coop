@@ -1,5 +1,6 @@
 #include "campaign_npc.hpp"
 #include "guest_sickness.hpp"
+#include "guest_regen.hpp"
 
 #include <algorithm>
 #include <array>
@@ -58,6 +59,10 @@ namespace
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto npc_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage");
+    constexpr auto projectile_base = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
+    constexpr auto projectile_calc = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C:CalcDmg");
+    constexpr auto light_projectile = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C");
     constexpr auto combat_watch_time = std::chrono::seconds(45);
     constexpr int flayer_infection = 8;
     constexpr int flayer_infection_reads = 2;
@@ -433,6 +438,16 @@ namespace
         Observation latest;
         ClientBirths client_births;
         Counts counts;
+        struct ProjectileHit
+        {
+            std::int64_t serial{};
+            std::string shooter, victim, projectile;
+            double before{}, after{}, damage{};
+        };
+        static constexpr std::size_t hit_capacity = 16;
+        std::array<ProjectileHit, hit_capacity> hits{};
+        std::int64_t hit_serial{};
+        std::string_view hit_status{"awaiting_stock_damage"};
     };
 
     struct RefreshObservation
@@ -493,6 +508,16 @@ namespace
         SicknessSnapshot swing_after{};
     } combat_watch;
 
+    struct PendingFlayerHit
+    {
+        U::FFrame* frame{};
+        U::FWeakObjectPtr victim, shooter, detached, canonical, projectile;
+        double before{};
+        U::FDoubleProperty* health{};
+        U::FDoubleProperty* damage{};
+        U::FBoolProperty* lethal{};
+    } flayer_hit;
+
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
         Hook::ERROR_ID};
@@ -509,6 +534,7 @@ namespace
         attempt = {};
         flayer_load = {};
         combat_watch = {};
+        flayer_hit = {};
         scope.world = active.world;
         scope.driver = active.driver;
         scope.seat = active.seat;
@@ -711,6 +737,117 @@ namespace
         return stock_npc_authority(actor, flayer ? flayer_class : npc_class, world) && stock_npc_controller(actor, world) &&
             bool_field(actor, STR("Alive"), true) && infection &&
             infection->GetPropertyValueInContainer(actor) == (flayer ? flayer_infection : 0);
+    }
+
+    bool published_flayer(const Network& active, U::UObject* actor)
+    {
+        const auto& cohort = scope.flayers.latest;
+        return publish_flayers && veto_flayer_spawns && active.seat == Seat::Host && scope.seat == Seat::Host &&
+            scope.world.Get() == active.world && scope.driver.Get() == active.driver && cohort.stage == "stock_antfarm" &&
+            cohort.replicated > 0 && cohort.cohort.size() == static_cast<std::size_t>(cohort.replicated) &&
+            contains(cohort.cohort, actor) && stock_npc_for_combat(actor, active.world, NpcFamily::Flayer) &&
+            bool_field(actor, STR("bReplicates"), true) && byte_field(actor, STR("RemoteRole")) == 1;
+    }
+
+    template <class T>
+    T* hit_field(U::UFunction* function, const U::TCHAR* name, int offset, bool out = false)
+    {
+        auto* value = field<T>(function, name);
+        return value && value->HasAnyPropertyFlags(U::CPF_Parm) && value->HasAnyPropertyFlags(U::CPF_OutParm) == out &&
+            !value->HasAnyPropertyFlags(U::CPF_ReturnParm) && value->GetOffset_Internal() == offset &&
+            offset + value->GetSize() <= function->GetParmsSize() ? value : nullptr;
+    }
+
+    void* hit_output(U::FFrame& frame, U::FProperty* field)
+    {
+        auto* parameter = frame.OutParms();
+        void* value{};
+        for (int remaining = frame.Node()->GetNumParms(); parameter && remaining > 0; --remaining, parameter = parameter->NextOutParm)
+        {
+            if (parameter->Property != field) continue;
+            if (value) return nullptr;
+            value = parameter->PropAddr;
+        }
+        return parameter ? nullptr : value;
+    }
+
+    void before_flayer_projectile(U::UObject* victim, U::FFrame& frame)
+    {
+        if (flayer_hit.frame || !publish_flayers || !veto_flayer_spawns || npc_family(victim) != NpcFamily::Flayer) return;
+        const auto active = network(static_cast<U::AActor*>(victim)->GetWorld());
+        if (!published_flayer(active, victim)) return;
+        auto& status = scope.flayers.hit_status;
+        auto* caller = frame.PreviousFrame();
+        auto* projectile = caller ? caller->Object() : nullptr;
+        if (!exact(projectile, light_projectile))
+        {
+            status = "outside_stock_light_projectile";
+            return;
+        }
+        auto* base = find<U::UClass>(projectile_base);
+        auto* calc = find<U::UFunction>(projectile_calc);
+        auto* function = frame.Node();
+        status = "stock_damage_frame_unqualified";
+        if (!frame.Locals() || function != find<U::UFunction>(npc_damage_path) || function->GetNumParms() != 7 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+            !base || !projectile->IsA(base) || !calc || calc->GetOuterPrivate() != base || calc->GetNumParms() != 1 ||
+            calc->GetReturnProperty() || calc->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+            caller->Node() != calc || !in_level(projectile, active.world) || byte_field(projectile, STR("Role")) != 3) return;
+        status = "stock_damage_abi_unqualified";
+        auto* instigator = hit_field<U::FObjectProperty>(function, STR("Instigator"), 0x150);
+        auto* hit = hit_field<U::FStructProperty>(function, STR("Hit"), 0x58);
+        auto* hit_type = find<U::UScriptStruct>(STR("/Script/Engine.HitResult"));
+        auto* component_field = field<U::FWeakObjectProperty>(hit_type, STR("Component"));
+        auto* damage = hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true);
+        auto* lethal = hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true);
+        if (!instigator || !hit || !hit_type || hit->GetStruct().Get() != hit_type || !component_field ||
+            component_field->GetOffset_Internal() != 0xd8 || !damage || !lethal) return;
+        auto* component = component_field->GetPropertyValueInContainer(hit->ContainerPtrToValuePtr<void>(frame.Locals())).Get();
+        auto* shooter = get_object(instigator, frame.Locals());
+        auto* detached = object(shooter, STR("Save"));
+        auto* canonical = object(active.instance, STR("SaveSlot_Ref"));
+        auto* health = field<U::FDoubleProperty>(victim, STR("Health"));
+        auto* maximum = field<U::FDoubleProperty>(victim, STR("Max_Health"));
+        status = "stock_damage_component_unqualified";
+        if (!live(component) || component->GetOuterPrivate() != victim) return;
+        status = "stock_damage_owner_unqualified";
+        if (!exact(shooter, pawn_class) ||
+            object(projectile, STR("Owner")) != shooter || object(projectile, STR("Instigator")) != shooter ||
+            !silverfish::native_guest_regen::qualifies_detached_guest(shooter, detached, canonical)) return;
+        status = "stock_damage_health_unqualified";
+        if (!health || !maximum || maximum->GetPropertyValueInContainer(victim) != 180.0) return;
+        const auto before = health->GetPropertyValueInContainer(victim);
+        if (!std::isfinite(before) || before <= 0 || before > 180.0) return;
+        status = "awaiting_stock_damage_output";
+        flayer_hit = {&frame, victim, shooter, detached, canonical, projectile, before, health, damage, lethal};
+    }
+
+    void after_flayer_projectile(Iteration& call, U::UObject* victim, U::FFrame& frame)
+    {
+        const auto hit = flayer_hit;
+        flayer_hit = {};
+        auto* shooter = hit.shooter.Get();
+        auto* projectile = hit.projectile.Get();
+        const auto active = network(U::Cast<U::UWorld>(scope.world.Get()));
+        auto& status = scope.flayers.hit_status;
+        status = "stock_damage_post_identity_unqualified";
+        if (call.OriginalFunctionCallPrevented() || !shooter || !projectile || victim != hit.victim.Get() ||
+            !published_flayer(active, victim) || object(victim, STR("LastDamagedMe")) != shooter ||
+            object(projectile, STR("Owner")) != shooter || object(projectile, STR("Instigator")) != shooter ||
+            !silverfish::native_guest_regen::qualifies_detached_guest(shooter, hit.detached.Get(), hit.canonical.Get())) return;
+        const auto* damage = hit_output(frame, hit.damage);
+        const auto* lethal = hit_output(frame, hit.lethal);
+        const auto after = hit.health->GetPropertyValueInContainer(victim);
+        const auto amount = damage ? hit.damage->GetPropertyValue(damage) : -1.0;
+        status = "stock_damage_hp_delta_unqualified";
+        if (!lethal || hit.lethal->GetPropertyValue(lethal) || !std::isfinite(after) || !std::isfinite(amount) ||
+            after <= 0 || amount <= 0 || std::abs((hit.before - after) - amount) > 1e-6) return;
+        if (scope.flayers.hit_serial >= (std::int64_t{1} << 53) - 1) return;
+        const auto serial = ++scope.flayers.hit_serial;
+        auto& result = scope.flayers.hits[static_cast<std::size_t>(serial - 1) % Flayers::hit_capacity];
+        result = {serial, RC::to_utf8_string(shooter->GetFullName()), RC::to_utf8_string(victim->GetFullName()),
+            RC::to_utf8_string(projectile->GetFullName()), hit.before, after, amount};
+        status = "stock_damage_verified";
     }
 
     bool current_sickness(SicknessSnapshot& result)
@@ -937,9 +1074,10 @@ namespace
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         static const U::FName damage_name{STR("DealDamage")};
         const auto name = frame.Node()->GetFName();
-        if (watch_combat && name == damage_name)
+        if (name == damage_name)
         {
-            before_stock_melee(receiver, frame);
+            if (watch_combat) before_stock_melee(receiver, frame);
+            if (publish_flayers && veto_flayer_spawns) before_flayer_projectile(receiver, frame);
             return;
         }
         if (name != spawn_name && name != load_name && name != init_name && name != perceive_name) return;
@@ -1030,6 +1168,11 @@ namespace
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!hook_ready()) return;
+        if (flayer_hit.frame == &frame)
+        {
+            after_flayer_projectile(call, receiver, frame);
+            return;
+        }
         if (combat_watch.damage_frame == &frame)
         {
             after_stock_melee(call, receiver);
@@ -1393,6 +1536,30 @@ namespace
         return reply(true);
     }
 
+    int read_flayer_projectile(const Lua& lua)
+    {
+        if (!hook_ready() || !publish_flayers || !veto_flayer_spawns || lua.get_stack_size() != 1 || !lua.is_integer() ||
+            scope.seat != Seat::Host || !scope.world.Get()) return 0;
+        const auto age = lua.get_integer();
+        if (age == -1)
+        {
+            lua.set_string(scope.flayers.hit_status);
+            return 1;
+        }
+        if (age < 0 || age >= static_cast<std::int64_t>(Flayers::hit_capacity) || age >= scope.flayers.hit_serial) return 0;
+        const auto serial = scope.flayers.hit_serial - age;
+        const auto& hit = scope.flayers.hits[static_cast<std::size_t>(serial - 1) % Flayers::hit_capacity];
+        if (hit.serial != serial) return 0;
+        lua.set_integer(serial);
+        lua.set_string(hit.shooter);
+        lua.set_string(hit.victim);
+        lua.set_string(hit.projectile);
+        lua.set_number(hit.before);
+        lua.set_number(hit.after);
+        lua.set_number(hit.damage);
+        return 7;
+    }
+
     int read_combat(const Lua& lua)
     {
         if (!hook_ready() || !watch_combat || lua.get_stack_size() != 0 || !combat_current()) return 0;
@@ -1577,6 +1744,8 @@ namespace silverfish::campaign_npc
     {
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
+        if (publish_flayers && veto_flayer_spawns)
+            lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);
         if (watch_combat)
         {
@@ -1596,6 +1765,7 @@ namespace silverfish::campaign_npc
             attempt = {};
             flayer_load = {};
             combat_watch = {};
+            flayer_hit = {};
         }
     }
 }
