@@ -28,17 +28,17 @@ namespace
     using Guid = std::array<std::uint32_t, 4>;
     constexpr int max_guests = 4;
     constexpr int max_inventory = 4096;
-    constexpr int ammo_count = 14;
-    constexpr int ammo_unit_value = 12;
-    constexpr double ammo_unit_weight = 0.014;
     constexpr auto borough_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough");
     constexpr auto scientist_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01");
+    constexpr auto black_market_world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto weapon_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C");
+    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_Pistol_Auto.Wep_Pistol_Auto_C");
+    constexpr auto ball_ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto wire_path = STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C");
     constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -49,6 +49,17 @@ namespace
     constexpr auto inventory_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
     constexpr auto make_stack_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeItemStack");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
+
+    struct RewardItems
+    {
+        const U::TCHAR* weapon_path;
+        const U::TCHAR* ammo_path;
+        int units;
+        int unit_value;
+        double unit_weight;
+    };
+    constexpr RewardItems copper_stop_items{weapon_path, ammo_path, 14, 12, 0.014};
+    constexpr RewardItems meet_broker_items{pistol_path, ball_ammo_path, 9, 3, 0.01};
 
     bool opt_in(const char* name)
     {
@@ -172,7 +183,7 @@ namespace
         return find<U::UWorld>(path.c_str()) == world ? world : nullptr;
     }
 
-    enum class PartyWorld { borough, scientist, current_campaign };
+    enum class PartyWorld { borough, scientist, black_market, current_campaign };
 
     struct Party
     {
@@ -190,8 +201,10 @@ namespace
                   PartyWorld location = PartyWorld::borough)
         {
             auto* pawn_class = find<U::UClass>(pawn_path);
+            const auto* world_path = location == PartyWorld::scientist ? scientist_world_path :
+                location == PartyWorld::black_market ? black_market_world_path : borough_world_path;
             world = location == PartyWorld::current_campaign ? current_campaign_world(pawn_address, pawn_class) :
-                find<U::UWorld>(location == PartyWorld::scientist ? scientist_world_path : borough_world_path);
+                find<U::UWorld>(world_path);
             if (!live(world)) return false;
             auto* save_class = find<U::UClass>(save_path);
             auto* controller_class = find<U::UClass>(controller_path);
@@ -275,7 +288,7 @@ namespace
     enum class WirePhase { active, complete };
 
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
-                          U::UClass* weapon, U::UClass* ammo, WirePhase phase)
+                          U::UClass* weapon, U::UClass* ammo, WirePhase phase, int expected_final_step = 2)
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -292,7 +305,7 @@ namespace
         auto* cash = field<U::FIntProperty>(type, STR("Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"));
         const U::FName id{quest, U::FNAME_Find};
         if (!type || !key || !row || row->GetStruct().Get() != type || key->GetOffset_Internal() != 0 ||
-            !step || !final_step || !objective || !wanted || !consumed || !item || !xp || !cash ||
+            !step || !final_step || !objective || (!wanted && expected_final_step != 1) || !consumed || !item || !xp || !cash ||
             id.IsNone() || id.ToString() != quest) return false;
         const auto layout = U::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
@@ -309,12 +322,15 @@ namespace
             if (found) return false;
             found = row->ContainerPtrToValuePtr<void>(entry);
         }
-        if (!found || final_step->GetPropertyValueInContainer(found) != 2 || !consumed->GetPropertyValueInContainer(found) ||
+        if (!found || final_step->GetPropertyValueInContainer(found) != expected_final_step ||
+            consumed->GetPropertyValueInContainer(found) != (wanted != nullptr) ||
             xp->GetPropertyValueInContainer(found) != 1 || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
         const auto current_step = step->GetPropertyValueInContainer(found);
-        if (phase == WirePhase::complete ? current_step != -10 : current_step != 1 && current_step != 2) return false;
+        if (phase == WirePhase::complete ? current_step != -10 : current_step < 1 || current_step > expected_final_step)
+            return false;
         U::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(found));
-        if (requested.Num() != 1 || objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted) return false;
+        if (requested.Num() != (wanted ? 1 : 0) ||
+            (wanted && objective->GetObjectPropertyValue(requested.GetRawPtr()) != wanted)) return false;
         U::FScriptArrayHelper rewards(items, items->ContainerPtrToValuePtr<void>(found));
         if (!weapon && !ammo) return rewards.Num() == 0;
         return weapon && ammo && rewards.Num() == 2 && item->GetObjectPropertyValue(rewards.GetRawPtr(0)) == weapon &&
@@ -328,10 +344,13 @@ namespace
 
     struct Inventory
     {
+        const RewardItems& reward_items;
+        explicit Inventory(const RewardItems& rewards = copper_stop_items) : reward_items(rewards) {}
+
         U::UClass* save_class = find<U::UClass>(save_path);
         U::UClass* base_class = find<U::UClass>(item_base_path);
-        U::UClass* weapon_class = find<U::UClass>(weapon_path);
-        U::UClass* ammo_class = find<U::UClass>(ammo_path);
+        U::UClass* weapon_class = find<U::UClass>(reward_items.weapon_path);
+        U::UClass* ammo_class = find<U::UClass>(reward_items.ammo_path);
         U::UScriptStruct* type = find<U::UScriptStruct>(item_path);
         U::FArrayProperty* backpack = field<U::FArrayProperty>(save_class, STR("PlayerBackpack"));
         U::FArrayProperty* equipment = field<U::FArrayProperty>(save_class, STR("PlayerEquipment"));
@@ -381,9 +400,9 @@ namespace
             if (!ammo_defaults || !ammo_defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
                 !weapon_defaults || !weapon_defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
                 !bool_value(ammo_defaults, STR("Stacks"), true) || !bool_value(weapon_defaults, STR("Stacks"), false) ||
-                !count || count->GetPropertyValueInContainer(ammo_defaults) != ammo_count ||
-                !unit_value || unit_value->GetPropertyValueInContainer(ammo_defaults) != ammo_unit_value ||
-                !unit_weight || unit_weight->GetPropertyValueInContainer(ammo_defaults) != ammo_unit_weight || !capacity)
+                !count || count->GetPropertyValueInContainer(ammo_defaults) != reward_items.units ||
+                !unit_value || unit_value->GetPropertyValueInContainer(ammo_defaults) != reward_items.unit_value ||
+                !unit_weight || unit_weight->GetPropertyValueInContainer(ammo_defaults) != reward_items.unit_weight || !capacity)
                 return false;
             weapon_capacity = capacity->GetPropertyValueInContainer(weapon_defaults);
             return weapon_capacity > 0 && weapon_capacity <= 256;
@@ -431,9 +450,9 @@ namespace
             auto* original_tag = field<U::FNameProperty>(ammo_defaults, STR("DataTag"));
             auto* original_data = field<U::FStructProperty>(ammo_defaults, STR("DataStruct"));
             auto* important = field<U::FBoolProperty>(ammo_defaults, STR("NeverDrop"));
-            return ammo->GetPropertyValueInContainer(input) == ammo_count &&
-                std::abs(weight->GetPropertyValueInContainer(input) - ammo_count * ammo_unit_weight) < 1e-9 &&
-                value->GetPropertyValueInContainer(input) == ammo_count * ammo_unit_value && original_tag &&
+            return ammo->GetPropertyValueInContainer(input) == reward_items.units &&
+                std::abs(weight->GetPropertyValueInContainer(input) - reward_items.units * reward_items.unit_weight) < 1e-9 &&
+                value->GetPropertyValueInContainer(input) == reward_items.units * reward_items.unit_value && original_tag &&
                 tag->GetPropertyValueInContainer(input) == original_tag->GetPropertyValueInContainer(ammo_defaults) &&
                 original_data && original_data->GetStruct().Get() == data->GetStruct().Get() &&
                 data->Identical(data->ContainerPtrToValuePtr<void>(input), original_data->ContainerPtrToValuePtr<void>(ammo_defaults)) &&
@@ -532,7 +551,7 @@ namespace
         const auto cleanup = [out](std::byte* memory) { out->DestroyValue_InContainer(memory); };
         std::unique_ptr<std::byte, decltype(cleanup)> guard(container, cleanup);
         item->SetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(container), inventory.ammo_class);
-        units->SetPropertyValueInContainer(container, ammo_count);
+        units->SetPropertyValueInContainer(container, inventory.reward_items.units);
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(container), host);
         library->ProcessEvent(function, container);
         const void* output = out->ContainerPtrToValuePtr<void>(container);
@@ -607,13 +626,13 @@ namespace
             return weapon_id != ammo_id;
         }
 
-        int response(const Lua& lua, std::string_view status) const
+        int response(const Lua& lua, std::string_view status, int units) const
         {
             reply(lua, true, status);
             lua.set_string(guid_text(weapon_id));
             lua.set_string(guid_text(ammo_id));
             lua.set_integer(rounds);
-            lua.set_integer(ammo_count);
+            lua.set_integer(units);
             return 6;
         }
     };
@@ -741,6 +760,17 @@ namespace
         return reply(lua, true, "staged");
     }
 
+    template <bool MeetBroker>
+    bool completed_reward_recipe(const Party& party, const Inventory& inventory)
+    {
+        if constexpr (MeetBroker)
+            return inventory.weapon_class && inventory.ammo_class &&
+                objective_recipe(party.stock, STR("MeetBroker"), nullptr, 0, inventory.weapon_class,
+                                 inventory.ammo_class, WirePhase::complete, 1);
+        return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::complete);
+    }
+
+    template <bool MeetBroker>
     int capture(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
@@ -749,9 +779,10 @@ namespace
         const auto guid = read_guid(lua.get_string());
         if (guid == Guid{}) return fail("reward_stock_weapon_guid_required");
         Party party;
-        Inventory inventory;
-        if (!party.read(args[0], args[1], args[1], false)) return fail("reward_canonical_host_required");
-        if (!inventory.bind() || !wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::complete))
+        Inventory inventory(MeetBroker ? meet_broker_items : copper_stop_items);
+        constexpr auto location = MeetBroker ? PartyWorld::black_market : PartyWorld::borough;
+        if (!party.read(args[0], args[1], args[1], false, location)) return fail("reward_canonical_host_required");
+        if (!inventory.bind() || !completed_reward_recipe<MeetBroker>(party, inventory))
             return fail("reward_completed_recipe_required");
         auto* escrow = isolated_save(args[2], inventory);
         if (!escrow || !inventory.same_as_defaults(escrow)) return fail("reward_isolated_template_required");
@@ -766,7 +797,7 @@ namespace
         auto ammo = make_ammo(inventory, party.host);
         if (!weapon || !ammo || inventory.identity(ammo.get()) == guid) return fail("reward_stock_ammo_template_unverified");
         Party current;
-        if (!current.read(args[0], args[1], args[1], false) || !party.same_identity(current) || !stock_before.unchanged() ||
+        if (!current.read(args[0], args[1], args[1], false, location) || !party.same_identity(current) || !stock_before.unchanged() ||
             isolated_save(args[2], inventory) != escrow) return fail("reward_host_or_template_changed");
 
         AppendPair pending{rows};
@@ -775,9 +806,10 @@ namespace
             stored.weapon_id != guid || stored.ammo_id != inventory.identity(ammo.get()) || !stock_before.unchanged())
             return fail("reward_escrow_template_append_unverified");
         pending.committed = true;
-        return stored.response(lua, "captured");
+        return stored.response(lua, "captured", inventory.reward_items.units);
     }
 
+    template <bool MeetBroker>
     int verify_template(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
@@ -792,7 +824,7 @@ namespace
         const auto source_address = compare_source ? lua.get_integer() : 0;
         if (compare_source && (source_address <= 0 || static_cast<Address>(source_address) == args[0]))
             return fail("reward_distinct_template_readback_required");
-        Inventory inventory;
+        Inventory inventory(MeetBroker ? meet_broker_items : copper_stop_items);
         if (!inventory.bind()) return fail("reward_inventory_schema_unavailable");
         Template stored;
         if (!stored.read(inventory, isolated_save(args[0], inventory)) || stored.weapon_id != weapon || stored.ammo_id != ammo)
@@ -804,9 +836,10 @@ namespace
                 !inventory.identical(source.weapon, stored.weapon) || !inventory.identical(source.ammo, stored.ammo))
                 return fail("reward_serialized_template_payload_changed");
         }
-        return stored.response(lua, "verified");
+        return stored.response(lua, "verified", inventory.reward_items.units);
     }
 
+    template <bool MeetBroker>
     int grant(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
@@ -817,10 +850,10 @@ namespace
         const auto ammo = read_guid(lua.get_string());
         if (weapon == Guid{} || ammo == Guid{} || weapon == ammo) return fail("reward_distinct_guest_guids_required");
         Party party;
-        Inventory inventory;
+        Inventory inventory(MeetBroker ? meet_broker_items : copper_stop_items);
         if (!party.read(args[0], args[1], args[2], true, PartyWorld::current_campaign))
             return fail("reward_exact_detached_guest_required");
-        if (!inventory.bind() || !wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::complete))
+        if (!inventory.bind() || !completed_reward_recipe<MeetBroker>(party, inventory))
             return fail("reward_completed_recipe_required");
         auto* escrow = isolated_save(args[3], inventory);
         Template stored;
@@ -863,7 +896,7 @@ namespace
         const auto granted = [&](std::string_view status) {
             reply(lua, true, status);
             lua.set_integer(stored.rounds);
-            lua.set_integer(ammo_count);
+            lua.set_integer(inventory.reward_items.units);
             return 4;
         };
         if (prior_weapon.count || prior_ammo.count)
@@ -883,7 +916,7 @@ namespace
         const auto still_qualified = [&] {
             Party current;
             return current.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) &&
-                party.same_identity(current) && wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::complete);
+                party.same_identity(current) && completed_reward_recipe<MeetBroker>(party, inventory);
         };
         if (!still_qualified()) return fail("reward_current_authority_or_recipe_changed");
         AppendPair pending{destination};
@@ -914,7 +947,10 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     if (!enabled()) return;
     lua.register_function("SilverfishStageWireQuestObjective", stage_objective<false>);
     lua.register_function("SilverfishStageComputerBoardObjective", stage_objective<true>);
-    lua.register_function("SilverfishCaptureWireRewards", capture);
-    lua.register_function("SilverfishVerifyWireRewards", verify_template);
-    lua.register_function("SilverfishGrantWireRewards", grant);
+    lua.register_function("SilverfishCaptureWireRewards", capture<false>);
+    lua.register_function("SilverfishVerifyWireRewards", verify_template<false>);
+    lua.register_function("SilverfishGrantWireRewards", grant<false>);
+    lua.register_function("SilverfishCaptureMeetBrokerRewards", capture<true>);
+    lua.register_function("SilverfishVerifyMeetBrokerRewards", verify_template<true>);
+    lua.register_function("SilverfishGrantMeetBrokerRewards", grant<true>);
 }

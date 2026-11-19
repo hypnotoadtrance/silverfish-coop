@@ -78,6 +78,7 @@ options.add_argument("--native-loot-nonempty", action="store_true", help="use a 
 options.add_argument("--native-loot-view", action="store_true", help="claim a stock crate item through the guest overlay")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
+options.add_argument("--native-meet-broker", action="store_true", help="verify the stock Black Market board and personal starter rewards")
 options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
 options.add_argument("--native-broker-drill", action="store_true", help="exercise the stock Drill Head quest and debt voucher")
 options.add_argument("--native-broker-input", action="store_true", help="hand in a Broker objective through stock guest Interact")
@@ -148,11 +149,14 @@ if args.native_loot_view and not (args.native_loot_nonempty and args.native_zone
     options.error("--native-loot-view requires --native-zones and a deterministic native loot draw")
 if args.native_shop and not (args.native_guest and args.native_quest_flow):
     options.error("--native-shop requires --native-guest and --native-quest-flow")
-if args.native_broker and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
-                                                       args.native_gold, args.native_blue, args.native_red,
-                                                       args.native_green, args.native_purple, args.native_stardust,
-                                                       args.native_matrix))):
-    options.error("--native-broker requires --native-zones and its own stock merchant map")
+broker_map = args.native_broker or args.native_meet_broker
+if broker_map and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
+                                               args.native_gold, args.native_blue, args.native_red,
+                                               args.native_green, args.native_purple, args.native_stardust,
+                                               args.native_matrix))):
+    options.error("Broker tests require --native-zones and their own stock merchant map")
+if args.native_meet_broker and (not args.native_guest or args.native_broker or args.native_weapon_use):
+    options.error("--native-meet-broker requires its own run with --native-guest")
 if args.native_matrix and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
                                                        args.native_gold, args.native_blue, args.native_red,
                                                        args.native_green, args.native_purple, args.native_stardust))):
@@ -382,6 +386,15 @@ def broker_stock_balances(character_id):
         "host_xp": host_flags.get("Player_Xp", 0), "host_cash": host_flags.get("Player_Cash", 0),
         "guest_xp": guest_flags.get("Player_Xp", 0), "guest_cash": guest_flags.get("Player_Cash", 0),
     }
+
+
+async def meet_broker_reward_rows(owner):
+    inventory = (await command("action", *owner, "native-inventory-list"))["native_inventory"]
+    assert inventory["next_offset"] is None, inventory
+    reward_classes = {"/Game/Classes/Weapons/Wep_Pistol_Auto.Wep_Pistol_Auto_C",
+                      "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"}
+    return {item["guid"]: (item["class_path"], item["quantity"]) for item in inventory["items"]
+            if item["class_path"] in reward_classes}
 
 
 def gold_ledger(status):
@@ -1198,7 +1211,7 @@ async def smoke():
         authored_route = any((args.authored_zone, args.native_door, args.native_gold,
                               args.native_blue, random_cube, args.native_stardust, args.observatory_zone,
                               args.native_matrix, args.native_weapon_use))
-        initial_zone = ["--start-zone", black_market if args.native_broker else crossroads] if authored_route or args.native_broker else []
+        initial_zone = ["--start-zone", black_market if broker_map else crossroads] if authored_route or broker_map else []
         host = await start("host", "--campaign", campaign, "--port", "0", "--headless", *fixtures, *initial_zone)
         host_status = await wait(run, lambda state: state.get("state") == "hosting")
         port = host_status["endpoint"]["port"]
@@ -1300,6 +1313,34 @@ async def smoke():
             note("stock_quest_catalog_reads_exact_ids_and_rewards", {
                 "sequence": catalog["sequence"], "stock_rows": stock["total"], "active_rows": catalog["active"]["total"],
             })
+        if args.native_meet_broker:
+            host_owner = ("--campaign", campaign)
+            guest_owner = ("--profile", profile)
+            await wait(run, lambda state: party_in_zone(state, black_market) and state.get("game", {}).get("native_guest_xp_ready"))
+            await command("action", *host_owner, "native-meet-broker-approach", "--target", chosen)
+            await command("action", *host_owner, "checkpoint")
+            balances = broker_stock_balances(chosen)
+            old_kits = [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)]
+            accepted = await command("action", *guest_owner, "native-quest-start", "--target", "MeetBroker")
+            assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == ("MeetBroker", 1, chosen), accepted
+            meet_redeem = ("action", *guest_owner, "native-quest-turnin", "--target", "MeetBroker")
+            meet_turn_in = await command(*meet_redeem)
+            assert (meet_turn_in["step"], meet_turn_in["cash"], meet_turn_in["xp"],
+                    meet_turn_in["ammo_units"]) == (-10, 0, 1, 9), meet_turn_in
+            assert set(meet_turn_in["recipients"]) == {"host", chosen}, meet_turn_in
+            meet_kits = [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)]
+            for index, (old, kit) in enumerate(zip(old_kits, meet_kits, strict=True)):
+                added = {guid: row for guid, row in kit.items() if guid not in old}
+                pistol, = [guid for guid, (kind, quantity) in added.items() if kind.endswith("Wep_Pistol_Auto_C") and quantity == 1]
+                assert sum(quantity for kind, quantity in kit.values() if kind.endswith("Ammo_Pistol_BP_C")) == (
+                    sum(quantity for kind, quantity in old.values() if kind.endswith("Ammo_Pistol_BP_C")) + 9)
+                if index == 0:
+                    assert pistol == meet_turn_in["weapon_guid"]
+            assert not set(meet_kits[0]) & set(meet_kits[1]), meet_kits
+            assert (await command(*meet_redeem))["effect"] == "native_quest_already_settled"
+            meet_balances = broker_stock_balances(chosen)
+            assert meet_balances == dict(balances, host_xp=balances["host_xp"] + 1, guest_xp=balances["guest_xp"] + 1)
+            note("meet_broker_stock_board_awards_separate_typed_starter_kits", {"result": meet_turn_in, "kits": meet_kits})
         if args.native_broker:
             quest_id = "Clt_DrillHead_Brkr" if args.native_broker_drill else "Clct_EManifest"
             cash_reward = 0 if args.native_broker_drill else 10_000
@@ -1445,7 +1486,7 @@ async def smoke():
             assert before["native_guest_save"]["pawn"] == original_guest
             assert before["native_death_hook"]["sequence"] == 0
             native_health = before["pawns"]["guest"]["health"]
-        if args.native_guest and (not args.native_broker or args.native_pair):
+        if args.native_guest and (not broker_map or args.native_pair):
             if args.native_weapon:
                 weapon = (await command("action", "--campaign", campaign, "native-weapon-roundtrip")
                           )["native_weapon_roundtrip"]
@@ -1979,7 +2020,7 @@ async def smoke():
                        and not state.get("awaiting_zone_guest") and len(state["game"]["pawns"]) == 2)
             await wait(client_run, lambda state: state.get("state") == "connected" and state["game"]["map"] == expected_map)
             note("stock_transition_door_returns_party", {"map": expected_map, "entrance": "CR_Cstrn"})
-        elif (args.zones or args.native_zones) and not args.native_broker:
+        elif (args.zones or args.native_zones) and not broker_map:
             stock_overworld = host_status["game"]["map"] == crossroads
             destination = ("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P" if stock_overworld
                            else "/Game/Classes/Maps/PlaytestMap_02")
@@ -2148,6 +2189,11 @@ async def smoke():
             note("native_guest_health_restored_after_host_restart", {
                 "guest_health": rebound["pawns"]["guest"]["health"], "same_character_id": chosen,
             })
+            if args.native_meet_broker:
+                assert [await meet_broker_reward_rows(owner) for owner in (host_owner, guest_owner)] == meet_kits
+                assert broker_stock_balances(chosen) == meet_balances
+                assert (await command(*meet_redeem))["effect"] == "native_quest_already_settled"
+                note("meet_broker_starter_kits_and_xp_survive_host_restart", {"character_id": chosen, **meet_balances})
             if args.native_broker:
                 await command("action", "--campaign", campaign, "checkpoint")
                 assert broker_stock_balances(chosen) == broker_paid

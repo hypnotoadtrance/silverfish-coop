@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer,
                native_gold, native_green, native_guest_clock, native_guest_consumable, native_guest_npc,
-               native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
+               native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
@@ -39,7 +39,7 @@ NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolum
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
-                        native_computer_board.PREFLIGHT, native_flood_jammer.PREFLIGHT,
+                        native_computer_board.PREFLIGHT, native_flood_jammer.PREFLIGHT, native_meet_broker.PREFLIGHT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1444,6 +1444,8 @@ class Host:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action == native_computer_board.PREFLIGHT and target is None:
                 result = await native_computer_board.preflight(self, bridge, character)
+            elif action == native_meet_broker.PREFLIGHT and target is None:
+                result = await native_meet_broker.preflight(self, bridge, character)
             elif action == native_flood_jammer.PREFLIGHT and target is None:
                 result = await native_flood_jammer.preflight(self, bridge, character)
             elif action == "native-wipe-items":
@@ -1488,6 +1490,7 @@ class Host:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_rewards.settle(self, bridge)
             await native_wire_quest.settle(self, bridge)
+            await native_wire_quest.settle(self, bridge, native_meet_broker.REWARDS)
             if not self.fixtures:
                 return
             await native_quest.project(self, bridge)
@@ -2220,6 +2223,10 @@ class Host:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action == native_computer_board.PREFLIGHT and request.get("target") is None:
                     result = await native_computer_board.preflight(self, bridge, "host")
+                elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
+                    result = await native_meet_broker.preflight(self, bridge, "host")
+                elif action == native_meet_broker.APPROACH and self.fixtures:
+                    result = await native_meet_broker.approach(self, bridge, request.get("target") or "host")
                 elif action == native_computer_board.APPROACH and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_computer_board.approach(self, bridge, actor)

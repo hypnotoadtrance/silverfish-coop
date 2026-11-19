@@ -891,6 +891,11 @@ class Bridge:
                 elif (fields[0] == "native-computer-board-reputation" and len(fields) == 4
                       and fields[1] in ("2", "4", "5") and "native_computer_board" in data):
                     data["native_computer_board"]["reputation"][fields[1]] = {"before": int(fields[2]), "after": int(fields[3])}
+                elif fields[0] == "native-meet-broker" and len(fields) == 13:
+                    proof = dict(zip(("operation", "map", "pawn", "board", "quest"), fields[1:6]))
+                    numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
+                    proof.update((name, None if value == "-" else int(value)) for name, value in zip(numbers, fields[6:12]))
+                    data["native_meet_broker"] = dict(proof, weapon_guid=fields[12])
                 elif fields[0] == "native-flood-jammer" and len(fields) == 12:
                     names = ("operation", "map", "pawn", "board", "quest")
                     numbers = ("step_before", "step_after", "cash_before", "cash_after", "xp_before", "xp_after")
@@ -1362,10 +1367,11 @@ class Bridge:
                     data["native_wire_quest_redemption"].update(zip(
                         ("ammo_units", "native_cash", "native_xp", "rep_before", "rep_after"), map(int, fields[6:11])))
                     data["native_wire_quest_redemption"].update(objective_guid=fields[11], objective_owner=fields[12])
-                elif fields[0] == "native-wire-reward" and len(fields) == 9:
-                    data["native_wire_quest_reward"] = dict(zip(
+                elif fields[0] in ("native-wire-reward", "native-meet-broker-reward") and len(fields) == 9:
+                    reward = "native_wire_quest_reward" if fields[0] == "native-wire-reward" else "native_meet_broker_reward"
+                    data[reward] = dict(zip(
                         ("state", "map", "pawn", "slot", "weapon_guid", "ammo_guid"), fields[1:7]))
-                    data["native_wire_quest_reward"].update(weapon_mag=int(fields[7]), ammo_units=int(fields[8]))
+                    data[reward].update(weapon_mag=int(fields[7]), ammo_units=int(fields[8]))
                 elif fields[0] == "native-broker-position" and len(fields) == 8:
                     data["native_broker_position"] = {"map": fields[1], "pawn": fields[2], "target": fields[3],
                                                      "point": fields[4], "location": [_finite(axis) for axis in fields[5:]]}

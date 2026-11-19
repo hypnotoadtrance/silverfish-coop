@@ -128,7 +128,7 @@ local function live_board(world, instance, profile)
         or not same(board:GetWorld(), world) or not board:HasAuthority() or board:IsActorBeingDestroyed()
         or not same(board["As Game Instance FP"], instance)
         or board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
-        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= false
+        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true)
         or board.ShowAllContracts ~= false then
         refused("board_unqualified")
     end

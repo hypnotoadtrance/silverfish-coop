@@ -9,7 +9,7 @@ import uuid
 
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
-from .travel import BOROUGH
+from .travel import BLACK_MARKET, BOROUGH
 
 
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
@@ -127,24 +127,28 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
-    wire_quest = party.get("native_wire_quest_reward")
-    if wire_quest is not None:
-        if (type(wire_quest) is not dict or type(wire_quest.get("escrow")) is not dict
-                or wire_quest["escrow"].get("map") != BOROUGH or not valid_guid(wire_quest.get("weapon"))
-                or not valid_guid(wire_quest.get("ammo")) or wire_quest["weapon"] == wire_quest["ammo"]
-                or type(wire_quest.get("weapon_mag")) is not int or not 0 <= wire_quest["weapon_mag"] <= 256
-                or type(wire_quest.get("pending")) is not dict or not wire_quest["pending"]):
-            raise CampaignFormatError("The campaign's stock Copper Wire reward record is invalid")
-        used = {wire_quest["weapon"], wire_quest["ammo"]}
-        for character, items in wire_quest["pending"].items():
+    quests = []
+    for key, area in (("native_wire_quest_reward", BOROUGH), ("native_meet_broker_reward", BLACK_MARKET)):
+        reward = party.get(key)
+        if reward is None:
+            continue
+        if (type(reward) is not dict or type(reward.get("escrow")) is not dict
+                or reward["escrow"].get("map") != area or not valid_guid(reward.get("weapon"))
+                or not valid_guid(reward.get("ammo")) or reward["weapon"] == reward["ammo"]
+                or type(reward.get("weapon_mag")) is not int or not 0 <= reward["weapon_mag"] <= 256
+                or type(reward.get("pending")) is not dict or not reward["pending"]):
+            raise CampaignFormatError("The campaign's stock quest reward record is invalid")
+        used = {reward["weapon"], reward["ammo"]}
+        for character, items in reward["pending"].items():
             if (character not in checkpoint["characters"] or type(items) is not list or len(items) != 2
                     or any(not valid_guid(item) or item in used for item in items) or items[0] == items[1]):
-                raise CampaignFormatError("The campaign's pending Copper Wire recipient or reward identity is invalid")
+                raise CampaignFormatError("The campaign's pending stock quest recipient or reward identity is invalid")
             used.update(items)
+        quests.append(reward["escrow"])
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
             + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]
-            + ([wire_quest["escrow"]] if wire_quest else []))
+            + quests)
 
 
 def verify_checkpoint(profile: Path, checkpoint: dict) -> None:

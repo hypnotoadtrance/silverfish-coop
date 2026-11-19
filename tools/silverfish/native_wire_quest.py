@@ -3,6 +3,7 @@
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 
 from . import native_host_save, native_rewards, party
 from .native_gold import valid_guid
@@ -17,6 +18,16 @@ START = "native-wire-quest-start"
 APPROACH = "native-wire-quest-approach"
 TURN_IN = "native-wire-quest-turn-in"
 REWARD_KEY = "native_wire_quest_reward"
+
+@dataclass(frozen=True)
+class RewardProfile:
+    key: str
+    area: str
+    command: str
+    ammo_units: int
+
+
+COPPER_STOP_REWARDS = RewardProfile(REWARD_KEY, BOROUGH, "native-wire-quest", 14)
 
 
 def _pawn(host, actor: str) -> str:
@@ -95,25 +106,26 @@ async def start(host, bridge, actor: str) -> dict:
         host.transitioning = False
 
 
-async def _reward_command(host, bridge, verb, arguments, pawn, slot, outcomes) -> dict:
+async def _reward_command(host, bridge, profile, operation, arguments, pawn, slot, outcomes) -> dict:
     area = host.last_game.get("map")
-    if area not in host.allowed_maps or verb == "native-wire-quest-capture" and area != BOROUGH:
-        raise RuntimeError("The stock Copper Wire reward is outside its qualified listen world")
+    if area not in host.allowed_maps or operation == "capture" and area != profile.area:
+        raise RuntimeError("The stock quest reward is outside its qualified listen world")
+    verb = f"{profile.command}-{operation}"
     snapshot = await bridge.command(verb, *arguments, timeout=7)
-    proof = snapshot.get("native_wire_quest_reward", {})
+    proof = snapshot.get(profile.key, {})
     if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("slot")) != (
             "hosting", area, area, pawn, slot) or proof.get("state") not in outcomes:
-        raise RuntimeError("The stock Copper Wire reward report did not match its exact recipient")
+        raise RuntimeError("The stock quest reward report did not match its exact recipient")
     if (not valid_guid(proof.get("weapon_guid")) or not valid_guid(proof.get("ammo_guid"))
             or proof["weapon_guid"] == proof["ammo_guid"] or type(proof.get("weapon_mag")) is not int
-            or not 0 <= proof["weapon_mag"] <= 256 or proof.get("ammo_units") != 14):
-        raise RuntimeError("The stock Copper Wire escrow did not report both exact typed items")
+            or not 0 <= proof["weapon_mag"] <= 256 or proof.get("ammo_units") != profile.ammo_units):
+        raise RuntimeError("The stock quest reward escrow did not report both exact typed items")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
 
-async def _grant(host, bridge, candidate: dict) -> list[str]:
-    reward = candidate[REWARD_KEY]
+async def _grant(host, bridge, candidate: dict, profile: RewardProfile) -> list[str]:
+    reward = candidate[profile.key]
     if not host.last_game.get("native_guest_xp_ready"):
         return []
     eligible = host.native_recipients()
@@ -121,20 +133,20 @@ async def _grant(host, bridge, candidate: dict) -> list[str]:
     if not accepted:
         return []
     frame = reward["escrow"]
-    if frame.get("map") != BOROUGH:
-        raise RuntimeError("The Copper Wire reward escrow belongs to the wrong map")
+    if frame.get("map") != profile.area:
+        raise RuntimeError("The stock quest reward escrow belongs to the wrong map")
     await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
     for character in accepted:
         pawn = eligible[character]["pawn"]
         weapon, ammo = reward["pending"][character]
-        proof = await _reward_command(host, bridge, "native-wire-quest-grant",
+        proof = await _reward_command(host, bridge, profile, "grant",
                                       (pawn, frame["slot"], reward["weapon"], reward["ammo"], weapon, ammo),
                                       pawn, frame["slot"], ("granted", "already_granted"))
         if (proof["weapon_guid"], proof["ammo_guid"], proof["weapon_mag"]) != (weapon, ammo, reward["weapon_mag"]):
-            raise RuntimeError("The guest's stock Copper Wire reward did not match the immutable template")
+            raise RuntimeError("The guest's stock quest reward did not match the immutable template")
         del reward["pending"][character]
     if not reward["pending"]:
-        candidate.pop(REWARD_KEY)
+        candidate.pop(profile.key)
     return accepted
 
 
@@ -143,6 +155,26 @@ async def _grant_xp(host, bridge, candidate: dict, accepted: list[str]) -> None:
         native_rewards.queue(candidate["players"][character], 1)
     projected = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in accepted]
     await native_rewards.project(host, bridge, candidate, projected)
+
+async def stage_party_rewards(host, bridge, candidate: dict, profile: RewardProfile, recipients: list[str],
+                              stock_weapon_guid: str) -> list[str]:
+    award = uuid.uuid4()
+    guest_awards = {
+        character: [uuid.uuid5(award, f"{character}:{item}").hex.upper() for item in ("weapon", "ammo")]
+        for character in recipients if character != "host"
+    }
+    if not guest_awards:
+        return []
+    slot = native_host_save.new_slot()
+    host_pawn = host.last_game["pawns"]["local"]["name"]
+    template = await _reward_command(host, bridge, profile, "capture", (slot, stock_weapon_guid),
+                                     host_pawn, slot, ("captured",))
+    if template["weapon_guid"] != stock_weapon_guid:
+        raise RuntimeError("The quest template did not capture the exact awarded stock weapon")
+    frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, profile.area, flush=True)
+    candidate[profile.key] = {"escrow": frame, "weapon": template["weapon_guid"], "ammo": template["ammo_guid"],
+                              "weapon_mag": template["weapon_mag"], "pending": guest_awards}
+    return await _grant(host, bridge, candidate, profile)
 
 
 async def turn_in(host, bridge, actor: str) -> dict:
@@ -174,23 +206,7 @@ async def turn_in(host, bridge, actor: str) -> dict:
             raise RuntimeError("The stock Copper Wire completion did not reconcile")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         candidate = party.load_party(host.party)
-        award = uuid.uuid4()
-        guest_awards = {
-            character: [uuid.uuid5(award, f"{character}:{item}").hex.upper() for item in ("weapon", "ammo")]
-            for character in recipients if character != "host"
-        }
-        accepted = []
-        if guest_awards:
-            slot = native_host_save.new_slot()
-            host_pawn = snapshot["pawns"]["local"]["name"]
-            template = await _reward_command(host, bridge, "native-wire-quest-capture", (slot, proof["weapon_guid"]),
-                                             host_pawn, slot, ("captured",))
-            if template["weapon_guid"] != proof["weapon_guid"]:
-                raise RuntimeError("The Copper Wire template did not capture the exact awarded stock weapon")
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, BOROUGH, flush=True)
-            candidate[REWARD_KEY] = {"escrow": frame, "weapon": template["weapon_guid"], "ammo": template["ammo_guid"],
-                                     "weapon_mag": template["weapon_mag"], "pending": guest_awards}
-            accepted = await _grant(host, bridge, candidate)
+        accepted = await stage_party_rewards(host, bridge, candidate, COPPER_STOP_REWARDS, recipients, proof["weapon_guid"])
         for character in recipients:
             player = candidate["players"][character]
             player["quest_xp"] = player.get("quest_xp", 0) + 1
@@ -212,20 +228,21 @@ async def turn_in(host, bridge, actor: str) -> dict:
         host.transitioning = False
 
 
-async def settle(host, bridge) -> None:
+async def settle(host, bridge, profile: RewardProfile = COPPER_STOP_REWARDS) -> None:
     if (host.last_game.get("state") != "hosting" or host.last_game.get("map") not in host.allowed_maps
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
-            or not host.party.get(REWARD_KEY)):
+            or not host.party.get(profile.key)):
         return
     candidate = party.load_party(host.party)
     host.native_checkpoint_unsafe = True
     try:
-        accepted = await _grant(host, bridge, candidate)
+        accepted = await _grant(host, bridge, candidate, profile)
         if accepted:
             await _grant_xp(host, bridge, candidate, accepted)
             revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(accepted))
             host.party = candidate
-            host.control.event("native_wire_quest_pending_awards_committed", revision=revision, recipients=accepted)
+            host.control.event(f"{profile.command.replace('-', '_')}_pending_awards_committed",
+                               revision=revision, recipients=accepted)
         host.native_checkpoint_unsafe = False
     except (OSError, RuntimeError, ValueError):
         host.stopping = True

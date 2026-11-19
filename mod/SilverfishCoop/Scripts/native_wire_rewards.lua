@@ -2,7 +2,10 @@ local rewards = {}
 local guest_save = require("guest_save")
 local zones = require("zone_maps")
 
-local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
+local profiles = {
+    wire = {map = "/Game/Classes/Maps/Maps_SafeZones/Borough", units = 14, native = "Wire"},
+    meet_broker = {map = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01", units = 9, native = "MeetBroker"},
+}
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
@@ -37,12 +40,12 @@ local function slot_name(value)
     return type(value) == "string" and #value == 39 and value:match("^SFCoop_[0-9a-f]+$") ~= nil
 end
 
-local function scope(state, phase, borough_only)
+local function scope(state, phase, required_map)
     local map = state.map
     local route = zones[map]
     local leaf = route and map:match("/([^/]+)$")
     require_true(enabled and phase == "hosting" and state.listening and state.server == false and leaf
-        and (not route.expanded or expanded_zones) and (not borough_only or map == borough)
+        and (not route.expanded or expanded_zones) and (not required_map or map == required_map)
         and valid(state.world) and state.world:GetFullName() == "World " .. map .. "." .. leaf, "wire_reward_stock_map_required")
     local host = state.local_pawn and state.local_pawn.pawn
     local controller = state.controller
@@ -66,19 +69,20 @@ local function standard_result(ok, detail, fallback)
     error(fallback, 0)
 end
 
-local function mags(weapon_mag, ammo_units)
-    return math.type(weapon_mag) == "integer" and weapon_mag >= 0 and weapon_mag <= 256 and ammo_units == 14
+local function mags(weapon_mag, ammo_units, profile)
+    return math.type(weapon_mag) == "integer" and weapon_mag >= 0 and weapon_mag <= 256 and ammo_units == profile.units
 end
 
-local function loaded_template(statics, slot, weapon_guid, ammo_guid, source)
-    require_true(type(SilverfishVerifyWireRewards) == "function", "wire_reward_template_verifier_unavailable")
+local function loaded_template(profile, statics, slot, weapon_guid, ammo_guid, source)
+    local verify = _G["SilverfishVerify" .. profile.native .. "Rewards"]
+    require_true(type(verify) == "function", "wire_reward_template_verifier_unavailable")
     local loaded = statics:LoadGameFromSlot(slot, 0)
     require_true(exact(loaded, save_path), "wire_reward_template_load_failed")
     local arguments = {loaded:GetAddress(), weapon_guid, ammo_guid}
     if source then arguments[4] = source:GetAddress() end
-    local ok, detail, weapon, ammo, magazine, units = SilverfishVerifyWireRewards(table.unpack(arguments))
+    local ok, detail, weapon, ammo, magazine, units = verify(table.unpack(arguments))
     standard_result(ok, detail, "wire_reward_template_verification_failed")
-    require_true(detail == "verified" and weapon == weapon_guid and ammo == ammo_guid and mags(magazine, units),
+    require_true(detail == "verified" and weapon == weapon_guid and ammo == ammo_guid and mags(magazine, units, profile),
         "wire_reward_template_readback_changed")
     return loaded, magazine, units
 end
@@ -88,37 +92,41 @@ local function report(status, map, pawn, slot, weapon, ammo, magazine, units)
         weapon_guid = weapon, ammo_guid = ammo, weapon_mag = magazine, ammo_units = units }
 end
 
-function rewards.capture(state, phase, slot, weapon_guid)
-    require_true(slot_name(slot) and guid(weapon_guid) and type(SilverfishCaptureWireRewards) == "function",
+function rewards.capture(state, phase, slot, weapon_guid, kind)
+    local profile = profiles[kind or "wire"]
+    local capture = profile and _G["SilverfishCapture" .. profile.native .. "Rewards"]
+    require_true(slot_name(slot) and guid(weapon_guid) and type(capture) == "function",
         "wire_reward_capture_scope_invalid")
-    local host, stock, statics, class, map = scope(state, phase, true)
+    local host, stock, statics, class, map = scope(state, phase, profile.map)
     require_true(statics:DoesSaveGameExist(slot, 0) == false, "wire_reward_template_slot_exists")
     local scratch = statics:CreateSaveGameObject(class)
     require_true(exact(scratch, save_path) and not same(scratch, stock), "wire_reward_template_create_failed")
     local ok, detail, weapon, ammo, magazine, units =
-        SilverfishCaptureWireRewards(host:GetAddress(), stock:GetAddress(), scratch:GetAddress(), weapon_guid)
+        capture(host:GetAddress(), stock:GetAddress(), scratch:GetAddress(), weapon_guid)
     standard_result(ok, detail, "wire_reward_capture_failed")
-    require_true(detail == "captured" and weapon == weapon_guid and guid(ammo) and weapon ~= ammo and mags(magazine, units),
+    require_true(detail == "captured" and weapon == weapon_guid and guid(ammo) and weapon ~= ammo and mags(magazine, units, profile),
         "wire_reward_captured_proof_invalid")
     require_true(statics:SaveGameToSlot(scratch, slot, 0) == true, "wire_reward_template_write_failed")
-    local loaded, stored_magazine, stored_units = loaded_template(statics, slot, weapon, ammo, scratch)
-    local active_host, active_stock = scope(state, phase, true)
+    local loaded, stored_magazine, stored_units = loaded_template(profile, statics, slot, weapon, ammo, scratch)
+    local active_host, active_stock = scope(state, phase, profile.map)
     require_true(not same(loaded, scratch) and same(active_host, host) and same(active_stock, stock)
         and stored_magazine == magazine and stored_units == units, "wire_reward_template_save_readback_changed")
     return report(detail, map, host, slot, weapon, ammo, magazine, units)
 end
 
-function rewards.grant(state, phase, guest_name, slot, weapon_template, ammo_template, guest_weapon, guest_ammo)
+function rewards.grant(state, phase, guest_name, slot, weapon_template, ammo_template, guest_weapon, guest_ammo, kind)
+    local profile = profiles[kind or "wire"]
+    local grant = profile and _G["SilverfishGrant" .. profile.native .. "Rewards"]
     require_true(slot_name(slot) and guid(weapon_template) and guid(ammo_template) and weapon_template ~= ammo_template
         and guid(guest_weapon) and guid(guest_ammo) and guest_weapon ~= guest_ammo and type(guest_name) == "string"
-        and type(SilverfishGrantWireRewards) == "function", "wire_reward_guest_grant_scope_invalid")
+        and type(grant) == "function", "wire_reward_guest_grant_scope_invalid")
     local host, stock, statics, _, map = scope(state, phase)
     local pawn, save = guest_save.exact_item_context(state, phase, guest_name)
     require_true(exact(pawn, pawn_path) and pawn:GetFullName() == guest_name and exact(save, save_path)
         and same(pawn:GetWorld(), state.world) and same(pawn.Save, save) and not same(save, stock),
         "wire_reward_exact_guest_required")
-    local escrow, expected_magazine, expected_units = loaded_template(statics, slot, weapon_template, ammo_template)
-    local called, ok, detail, magazine, units = pcall(SilverfishGrantWireRewards, pawn:GetAddress(),
+    local escrow, expected_magazine, expected_units = loaded_template(profile, statics, slot, weapon_template, ammo_template)
+    local called, ok, detail, magazine, units = pcall(grant, pawn:GetAddress(),
         save:GetAddress(), stock:GetAddress(), escrow:GetAddress(), guest_weapon, guest_ammo)
     if not called then error("mutation_unverified_wire_reward_call", 0) end
     standard_result(ok, detail, "wire_reward_guest_grant_failed")
@@ -131,8 +139,8 @@ function rewards.grant(state, phase, guest_name, slot, weapon_template, ammo_tem
     return report(detail, map, pawn, slot, guest_weapon, guest_ammo, magazine, units)
 end
 
-function rewards.row(receipt, status_row)
-    return status_row("native-wire-reward", receipt.state, receipt.map, receipt.pawn, receipt.slot,
+function rewards.row(receipt, status_row, row_name)
+    return status_row(row_name or "native-wire-reward", receipt.state, receipt.map, receipt.pawn, receipt.slot,
         receipt.weapon_guid, receipt.ammo_guid, receipt.weapon_mag, receipt.ammo_units)
 end
 
