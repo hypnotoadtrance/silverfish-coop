@@ -63,7 +63,7 @@ async def verify(work: Path, vanilla_saved: Path):
                           and state["game"].get("native_inventory_split_capability") == 1)
 
     async def page(owner, expected_owner):
-        inventory = (await ask("action", *owner, "native-inventory-list", "--target", "0"))["native_inventory"]
+        inventory = (await ask("action", *owner, "native-inventory-list"))["native_inventory"]
         assert (inventory["owner"], inventory["offset"], inventory["next_offset"]) == (expected_owner, 0, None), inventory
         return inventory["items"]
 
