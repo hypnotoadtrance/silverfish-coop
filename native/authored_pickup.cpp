@@ -142,6 +142,13 @@ namespace
             30714.073646980298, -137718.5051940477, 2043.691163490359, 0,
         },
         Profile{
+            "fort-leto-locker-key-543",
+            STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1"),
+            STR("/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
+            -2411.2730396058255, -28557.413414035567, 542.1560096044024, 0,
+        },
+        Profile{
             "city-canned-peaches",
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedPeaches_C_1"),
@@ -151,6 +158,11 @@ namespace
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
+    constexpr auto secure_locker_class = STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C");
+    constexpr auto secure_locker_input =
+        STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C:SendInteractionToActor");
+    constexpr auto trench_savlo_locker =
+        STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P:PersistentLevel.LootLocker_Secure_BP_C_16");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto pawn_script = STR("/Game/Classes/Player/Player_FP.Player_FP_C:ExecuteUbergraph_Player_FP");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
@@ -440,6 +452,19 @@ namespace
         static const U::FName add_name{STR("AddItemToInventory")};
         const auto name = function->GetFName();
         if (name != interact_name && name != put_name && name != pickup_name && name != add_name) return;
+        if (name == interact_name && function == find<U::UFunction>(secure_locker_input) &&
+            exact(context, secure_locker_class) && context->GetPathName() == trench_savlo_locker)
+        {
+            for (const auto& scope : scopes)
+            {
+                if (scope.profile && scope.profile->source == "trench-savlo-keycard" && !scope.host && local_scope(scope) &&
+                    static_cast<U::AActor*>(context)->GetWorld() == scope.world.Get())
+                {
+                    call.PreventOriginalFunctionCall();
+                    return;
+                }
+            }
+        }
         if (name == add_name)
         {
             if (function != find<U::UFunction>(add_path)) return;

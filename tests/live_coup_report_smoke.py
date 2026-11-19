@@ -18,10 +18,10 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from tools.silverfish import native_dust_cabinet as stock_cabinet, native_host_save
+from tools.silverfish import native_dust_cabinet as stock_cabinet, native_host_save, native_savlo_locker as stock_locker
 from tools.silverfish import native_computer_board as collections
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from tools.silverfish.native_authored_pickup import DEAD_END, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
+from tools.silverfish.native_authored_pickup import DEAD_END, FORT_LETO, FORT_LETO_LOCKER_KEY, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
 from tools.silverfish.native_mosby_station_view import FIXTURE as STATION_FIXTURE, KEY as STATION_VIEW
 from tools.silverfish.native_tape_profiles import BLANK_CLASS
 from tools.silverfish.travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, RAIL_YARD
@@ -38,6 +38,7 @@ class CollectionSmoke:
     stackable: bool = False
     advantage: tuple[tuple[str, int], ...] = ()
     cabinet: stock_cabinet.Cabinet | None = None
+    savlo_locker: bool = False
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -242,9 +243,54 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         if start_area == BOROUGH:
             evidence["stock_xp_setup"] = await action(host, "native-turret-photo-xp-fixture")
 
+        async def collect_locker_key():
+            source = FORT_LETO_LOCKER_KEY
+            key_map, key_actor, key_class = SOURCES[source]
+            assert current["game"]["map"] == key_map
+            selected = ("--pickup-source", source)
+            await wait(run, lambda s: s.get("game", {}).get("native_authored_pickup_sources", {}).get(source, {}).get("state") == "available")
+            await action(host, "native-authored-pickup-approach", "--target", "host", *selected)
+            interaction = (await action(host, "native-authored-pickup-stock-fixture", *selected))["native_authored_pickup_interaction"]
+            assert (interaction["source"], interaction["entry"]) == (source, "stock"), interaction
+            claimed = await wait(run, lambda s: source in s.get("gameplay", {}).get(PICKUPS, {}))
+            claim = claimed["gameplay"][PICKUPS][source]
+            assert (claim["actor"], claim["owner"], claim["map"], claim["class_path"]) == (key_actor, "host", key_map, key_class), claim
+            key = claim["guid"]
+            row = (await inventory(host))[key]
+            assert (row["source"], row["quantity"], row["class_path"], row["stackable"]) == ("backpack", 1, key_class, False), row
+            assert key not in await inventory(guest)
+            evidence["stock_locker_key"] = {"interaction": interaction, "claim": claim, "inventory": row}
+            return key
+
+        async def open_savlo_locker(key):
+            assert key and key in await inventory(host) and key not in await inventory(guest)
+            host_locked = await wait(run, lambda s: stock_locker.observed(s.get("game", {}), "locked"))
+            replica_closed = await wait(client_run, lambda s: stock_locker.observed(s.get("game", {}), "locked")
+                                        or stock_locker.observed(s.get("game", {}), "unlocked"))
+            initial = replica_closed["game"][stock_locker.KEY]
+            blocked = await action(guest, "native-authored-pickup-claim", "--target", source, accepted=False)
+            assert blocked["error"] == "native_authored_pickup_savlo_locker_closed", blocked
+            stages = []
+            for expected in ("unlocked", "opened"):
+                report = (await action(host, stock_locker.FIXTURE))[stock_locker.KEY]
+                assert (report["state"], report["actor"], report["map"], report["pawn"], report["locked"]) == (
+                    expected, stock_locker.ACTOR, stock_locker.TRENCH, host_locked["game"][stock_locker.KEY]["pawn"], False), report
+                stages.append(report)
+            replica = await wait(client_run, lambda s: stock_locker.observed(s.get("game", {}), "projected").get("epoch") == current["zone_epoch"])
+            clear = replica["game"][stock_locker.KEY]
+            assert (clear["actor"], clear["pawn"], clear["locked"]) == (initial["actor"], initial["pawn"], initial["locked"]), clear
+            assert (await inventory(host))[key] == evidence["stock_locker_key"]["inventory"]
+            evidence["stock_savlo_locker"] = {"closed_claim_refused": blocked["error"], "authority": stages, "replica": clear,
+                                              "retained_key_guid": key}
+
+        locker_key = None
+
         async def collect_pickup():
             selected = ("--pickup-source", source)
             profile = plan.cabinet
+            if plan.savlo_locker:
+                assert plan.stock_pickup and source == stock_locker.SOURCE and pickup_map == stock_locker.TRENCH
+                await open_savlo_locker(locker_key)
             if profile:
                 assert plan.stock_pickup and (profile.source, profile.area) == (source, pickup_map)
                 for directory in (run, client_run):
@@ -257,13 +303,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                     s.get("game", {}), "projected").get("epoch") == current["zone_epoch"])
                 evidence["stock_pickup_cabinet"] = {"authority": opened, "replica": clear["game"][profile.key]}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
-            if profile:
+            if profile or plan.savlo_locker:
                 def near(state, role, point, radius):
                     game = state.get("game", {})
                     position = game.get("pawns", {}).get(role, {}).get("location")
                     return game.get("map") == pickup_map and position and math.dist(position, point) <= radius
 
-                approached = await wait(run, lambda state: near(state, "guest", profile.pickup_location, 240))
+                placement = profile.pickup_location if profile else (30714.073647, -137718.505194, 2043.691163)
+                approached = await wait(run, lambda state: near(state, "guest", placement, 240))
                 authority = approached["game"]["pawns"]["guest"]["location"]
                 await wait(client_run, lambda state: near(state, "local", authority, 25))
             if plan.stock_pickup:
@@ -307,6 +354,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
             current = await paired(route.destination, (current["generation"], current["zone_epoch"]))
             evidence["routes"].append(evidence.pop("pending_route"))
+            if plan.savlo_locker and route.destination == FORT_LETO:
+                locker_key = await collect_locker_key()
             if route.destination == pickup_map and guid is None:
                 guid = await collect_pickup()
             if exchange and route.destination == exchange.map:
@@ -354,6 +403,10 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         await launch(guest, "guest-restart", "join", *guest, "--headless", "--native-zones", "--invite", renewed["invite_file"])
         restarted = await paired(redemption)
         assert guid not in await inventory(guest) and await stock_balances() == after
+        if plan.savlo_locker:
+            assert (await inventory(host))[locker_key] == evidence["stock_locker_key"]["inventory"]
+            assert locker_key not in await inventory(guest)
+            evidence["stock_locker_key_retained_after_restart"] = locker_key
         if exchange:
             trade = restarted["campaign"]["world"]["party"][exchange.ledger][evidence["stock_download"]["receipt"]["blank_guid"]]
             assert trade["filled_guid"] == guid and trade["station"] == exchange.station and trade["owner"] == character, trade

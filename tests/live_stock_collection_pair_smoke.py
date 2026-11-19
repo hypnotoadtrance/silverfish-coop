@@ -6,7 +6,7 @@ from pathlib import Path
 
 from live_coup_report_smoke import CollectionSmoke, exercise
 
-from tools.silverfish.native_authored_pickup import TRENCH
+from tools.silverfish.native_authored_pickup import FORT_LETO, TRENCH
 from tools.silverfish.native_computer_board import MOLASSES, SAVLO_KEYCARD
 from tools.silverfish.native_dust_cabinet import MOLASSES as MOLASSES_CABINET
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, NORTHEAST_RAIL, OBSERVATORY, SHOPKEEP
@@ -14,15 +14,18 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, NORTHEAST_RAIL, OBS
 
 ANNEX = "/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
+RUIN_FIELDS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
+BEACH = "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"
 MOLASSES_RUN = CollectionSmoke(
     "molasses", MOLASSES, (SHOPKEEP, NORTHEAST_RAIL, SHOPKEEP), {},
     accept_before_pickup=True, stock_pickup=True, cabinet=MOLASSES_CABINET,
 )
 SAVLO_KEYCARD_RUN = CollectionSmoke(
     "savlo-keycard", SAVLO_KEYCARD,
-    (OBSERVATORY, CROSSROADS, DEAD_BRIDGE, STONE_MAZE, ANNEX, TRENCH, ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, OBSERVATORY),
+    (OBSERVATORY, CROSSROADS, RUIN_FIELDS, BEACH, FORT_LETO, BEACH, RUIN_FIELDS, CROSSROADS,
+     DEAD_BRIDGE, STONE_MAZE, ANNEX, TRENCH, ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, OBSERVATORY),
     {"8": ("Rep_Freelancer", 100)}, accept_before_pickup=True, stock_pickup=True,
-    advantage=(("Adv_Freelancer", 300),),
+    advantage=(("Adv_Freelancer", 300),), savlo_locker=True,
 )
 
 

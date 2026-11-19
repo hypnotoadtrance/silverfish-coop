@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_dust_cabinet, native_host_save, party
+from . import native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .native_gold import valid_guid
 from .travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
 
@@ -27,6 +27,8 @@ DUST_FILTER = "railyard-dust-filter"
 MOLASSES = "northeast-rail-molasses"
 SAVLO_KEYCARD = "trench-savlo-keycard"
 TRENCH = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
+FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
+FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -55,6 +57,8 @@ SOURCES = {
                "/Game/Classes/Items/Item_Molasis.Item_Molasis_C"),
     SAVLO_KEYCARD: (TRENCH, f"KeyCard_Savlo_BP_C {TRENCH}.Trench_01_P:PersistentLevel.KeyCard_Savlo_BP_C_1",
                     "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
+    FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
+                          "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
 }
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
@@ -123,6 +127,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
+    if target == SAVLO_KEYCARD and not native_savlo_locker.observed(host.last_game, "opened"):
+        raise party.RuleError("native_authored_pickup_savlo_locker_closed")
     blocker = native_dust_cabinet.SOURCES.get(target)
     if blocker and not native_dust_cabinet.observed(host.last_game, "opened"):
         raise party.RuleError(f"native_authored_pickup_{blocker.kind}_cabinet_closed")

@@ -12,18 +12,26 @@ local sources = {
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
     ["northeast-rail-molasses"] = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P",
     ["trench-savlo-keycard"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
+    ["trench-savlo-locker"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
+    ["fort-leto-locker-key-543"] = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local dust_filter = "railyard-dust-filter"
 local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
+local savlo_locker = "trench-savlo-locker"
+local fort_leto_key = "fort-leto-locker-key-543"
 local precise_distances = {
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
+    [savlo_locker] = {95, 125, 150, 185},
+    [fort_leto_key] = {120, 155, 185, 220},
 }
 local cabinet_front = {[dust_filter] = 0, [molasses] = 180}
+local cabinet_labels = {[dust_filter] = "authored_dust_cabinet", [molasses] = "authored_molasses_cabinet",
+    [savlo_locker] = "authored_savlo_locker"}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 local function valid(object)
@@ -271,8 +279,9 @@ end
 
 function input.open_cabinet(state, phase, pawn, actor, box, source)
     local press = SilverfishProbeNativeInteractInput
-    local label = source == dust_filter and "authored_dust_cabinet" or "authored_molasses_cabinet"
-    if not cabinet_front[source] or not approach_scope(state, phase, pawn, actor, sources[source])
+    local label = cabinet_labels[source]
+    if not label then error("authored_cabinet_unknown_fixture", 0) end
+    if not approach_scope(state, phase, pawn, actor, sources[source])
         or not same(pawn, state.local_pawn.pawn)
         or not owned(pawn.Camera, pawn, "CameraComponent") or type(press) ~= "function" then
         error(label .. "_fixture_scope_unavailable", 0)

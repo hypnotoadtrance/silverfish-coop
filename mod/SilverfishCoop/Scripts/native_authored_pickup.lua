@@ -18,6 +18,7 @@ local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
+local fort_leto = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 local profiles = {
     {
         map = observatory,
@@ -123,6 +124,14 @@ local profiles = {
         class = "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C",
         name = "KeyCard_Savlo_BP_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = fort_leto,
+        source = "fort-leto-locker-key-543",
+        path = fort_leto .. ".FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
+        class = "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C",
+        name = "LockerKey_543_C",
+        approach = { { 140, 0 }, { 115, 115 }, { 115, -115 }, { -115, 0 } },
     },
     {
         map = city,
