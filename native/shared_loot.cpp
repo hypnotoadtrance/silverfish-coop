@@ -12,12 +12,14 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/Engine/UDataTable.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
@@ -999,6 +1001,103 @@ namespace
         }
         return seed_result(lua, true, "seeded");
     }
+    using LabLootWeights = std::unordered_map<Unreal::UClass*, double>;
+
+    bool read_lab_loot_weights(Unreal::FMapProperty* property, const void* container, Unreal::UClass* item_base,
+                               LabLootWeights& weights)
+    {
+        if (!property || !container || !item_base) return false;
+        auto* key = Unreal::CastField<Unreal::FClassProperty>(property->GetKeyProp());
+        auto* weight = Unreal::CastField<Unreal::FDoubleProperty>(property->GetValueProp());
+        if (!key || key->GetMetaClass().Get() != item_base || key->GetOffset_Internal() != 0 ||
+            key->GetSize() != sizeof(void*) || !weight || weight->GetSize() != sizeof(double)) return false;
+        const auto layout = Unreal::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), weight->GetSize(), weight->GetMinAlignment());
+        const auto offset = weight->GetOffset_Internal();
+        if (offset != 0 && offset != layout.ValueOffset) return false;
+
+        const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(container);
+        const auto count = map->Num();
+        const auto maximum = map->GetMaxIndex();
+        if (count < 1 || count > maximum || maximum > 128) return false;
+        for (int index = 0; index < maximum; ++index)
+        {
+            if (!map->IsValidIndex(index)) continue;
+            const auto* entry = static_cast<const std::byte*>(map->GetData(index, layout));
+            if (!entry) return false;
+            auto* type = Unreal::Cast<Unreal::UClass>(key->GetObjectPropertyValue(entry));
+            const auto value = weight->GetPropertyValue(entry + layout.ValueOffset);
+            if (!live(type) || !type->IsChildOf(item_base) || !std::isfinite(value) || value <= 0.0 ||
+                !weights.emplace(type, value).second) return false;
+        }
+        return weights.size() == static_cast<std::size_t>(count);
+    }
+
+    std::string_view verify_lab_cabinet_loot(Unreal::UObject* cabinet, Unreal::FMapProperty* items)
+    {
+        constexpr auto controller_path = STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.DynaimicSpawnControler_BP_C_1");
+        constexpr auto controller_type = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C");
+        constexpr auto region_table_path = STR("/Game/Classes/Libraries/DataTables/Region_SpawnPool_DT.Region_SpawnPool_DT");
+        constexpr auto loot_table_path = STR("/Game/Classes/Libraries/DataTables/LootTables_DT.LootTables_DT");
+        auto* controller = find<Unreal::AActor>(controller_path);
+        auto* controller_class = find<Unreal::UClass>(controller_type);
+        auto* world = static_cast<Unreal::AActor*>(cabinet)->GetWorld();
+        if (!live(controller) || !controller_class || controller->GetClassPrivate() != controller_class ||
+            !live(world) || controller->GetWorld() != world || controller->GetLevel() != object_field(world, STR("PersistentLevel")))
+            return "cabinet_lab_loot_controller";
+
+        auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* spawn_table = field<Unreal::FStructProperty>(controller, STR("SpawnTable"));
+        auto* table_field = field<Unreal::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* row_field = field<Unreal::FNameProperty>(handle_type, STR("RowName"));
+        auto* table_class = find<Unreal::UClass>(STR("/Script/Engine.DataTable"));
+        auto* region = find<Unreal::UObject>(region_table_path);
+        const Unreal::FName lab_row{STR("Lab_E206"), Unreal::FNAME_Find};
+        if (!handle_type || !spawn_table || spawn_table->GetStruct().Get() != handle_type || !table_class ||
+            !table_field || table_field->GetPropertyClass().Get() != table_class || !row_field || lab_row.IsNone() ||
+            !live(region) || region->GetClassPrivate() != table_class)
+            return "cabinet_lab_loot_source_schema";
+        const void* handle = spawn_table->ContainerPtrToValuePtr<void>(controller);
+        if (table_field->GetObjectPropertyValue(table_field->ContainerPtrToValuePtr<void>(handle)) != region ||
+            row_field->GetPropertyValueInContainer(handle) != lab_row) return "cabinet_lab_loot_source_changed";
+
+        auto* region_modifier = field<Unreal::FDoubleProperty>(cabinet, STR("RegionSpawnMod"));
+        if (!read_bool(cabinet, STR("ForceOverride_MapLootTables"), false) || !region_modifier ||
+            region_modifier->GetPropertyValueInContainer(cabinet) != 1.0) return "cabinet_lab_loot_mode_changed";
+        auto* loot = find<Unreal::UObject>(loot_table_path);
+        auto* row_type = find<Unreal::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/LootTable_Struct.LootTable_Struct"));
+        auto* loot_weights = field<Unreal::FMapProperty>(row_type, STR("LootMap_11_CA9A8DCF42896A52267711B3383A0F7A"));
+        auto* item_base = find<Unreal::UClass>(item_class);
+        if (!live(loot) || loot->GetClassPrivate() != table_class || !row_type || !loot_weights || !item_base)
+            return "cabinet_lab_loot_table_schema";
+        auto* table = static_cast<Unreal::UDataTable*>(loot);
+        if (table->GetRowStruct().Get() != row_type) return "cabinet_lab_loot_table_schema";
+
+        struct WeightedRow { const Unreal::TCHAR* name; double multiplier; std::size_t count; };
+        constexpr std::array rows{WeightedRow{STR("Security_Basic"), 0.5, 12}, WeightedRow{STR("LabSupplies"), 1.0, 47}};
+        LabLootWeights expected;
+        // Stock Configure_LootTables overwrites duplicate class weights with the later region row.
+        for (const auto& row : rows)
+        {
+            const Unreal::FName name{row.name, Unreal::FNAME_Find};
+            const auto* data = name.IsNone() ? nullptr : table->FindRowUnchecked(name);
+            LabLootWeights weights;
+            if (!read_lab_loot_weights(loot_weights, data, item_base, weights) || weights.size() != row.count)
+                return "cabinet_lab_loot_table_row";
+            for (const auto& [type, weight] : weights)
+            {
+                auto* defaults = type->GetClassDefaultObject().Get();
+                auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+                if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !category)
+                    return "cabinet_lab_loot_item_category";
+                const auto value = category->GetPropertyValueInContainer(defaults);
+                if (value != 4 && value != 7) expected.insert_or_assign(type, weight * row.multiplier);
+            }
+        }
+        LabLootWeights active;
+        if (!read_lab_loot_weights(items, cabinet, item_base, active)) return "cabinet_lab_loot_items_schema";
+        return active == expected ? std::string_view{} : "cabinet_lab_loot_items_changed";
+    }
 }
 
 namespace silverfish::shared_loot
@@ -1059,10 +1158,10 @@ namespace silverfish::shared_loot
             if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
                 return refuse("cabinet_opened_delegate_bound");
             if (!items) return refuse("cabinet_default_items_schema");
-            if (!items->Identical(items->ContainerPtrToValuePtr<void>(crate), items->ContainerPtrToValuePtr<void>(defaults)))
-                return refuse("cabinet_default_items_changed");
+            if (const auto failure = verify_lab_cabinet_loot(crate, items); !failure.empty()) return refuse(failure);
             if (!rate) return refuse("cabinet_default_chance_schema");
-            if (rate->GetPropertyValueInContainer(crate) != rate->GetPropertyValueInContainer(defaults))
+            if (rate->GetPropertyValueInContainer(defaults) != 0.2 ||
+                rate->GetPropertyValueInContainer(crate) != rate->GetPropertyValueInContainer(defaults))
                 return refuse("cabinet_default_chance_changed");
             if (!read_bool(crate, STR("bReplicates"), false)) return refuse("cabinet_replication");
         }
