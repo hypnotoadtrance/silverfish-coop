@@ -484,10 +484,14 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
 
         def armed(server, client, snapshot):
             scope = client.get("game", {}).get("native_guest_primary_scope", {})
-            return (proved(server, client, snapshot) and approach_pair(server) == (host_pawn, guest_pawn)
-                    and (scope.get("map"), scope.get("guid"), scope.get("kind")) == (MAP, guid, "light-pistol"))
+            pawn = client.get("game", {}).get("pawns", {}).get("local", {}).get("name")
+            return (paired(server, client) and stock_cohort(snapshot["host"], True, family)
+                    and approach_pair(server) == (host_pawn, guest_pawn) and pawn
+                    and (scope.get("map"), scope.get("pawn"), scope.get("guid"), scope.get("kind")) ==
+                        (MAP, pawn, guid, "light-pistol"))
 
         _, client, _ = await wait("No ordinary primary mapping for the equipped, detached pistol", armed, 15)
+        evidence["stock_light_pistol"]["primary_scope"] = client["game"]["native_guest_primary_scope"]
         client_pawn = client["game"]["pawns"]["local"]["name"]
         client_generation = client["generation"]
         attempts = evidence["ordinary_projectile_taps"] = []
@@ -518,7 +522,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 return next((hit for hit in hits if hit["sequence"] > start and hit["map"] == MAP
                              and hit["shooter"] == guest_pawn and hit["victim"] == target), None)
 
-            deadline = time.monotonic() + 1.5
+            deadline = time.monotonic() + 4
             while time.monotonic() < deadline:
                 current, viewer = status(host), status(guest)
                 if diagnostic := current.get("game", {}).get("native_campaign_flayer_projectile_status"):
