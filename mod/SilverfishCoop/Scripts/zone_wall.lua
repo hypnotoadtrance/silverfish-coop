@@ -428,6 +428,13 @@ function wall.command(fields, state, phase)
         error("Position the pawn near the exit before the swept wall probe", 0)
     end
     if nexus_probe then
+        if plan.actor == "Level_Exit_BP_C_179" and plan.entrance == "Nexus_M35" then
+            local inward = record.original:GetRightVector()
+            local depth = (start.X - center.X) * inward.X + (start.Y - center.Y) * inward.Y
+            if not finite(depth) or depth < -150 or depth >= -20 then
+                error("Position the pawn in the outward Gold Nexus Rail crypt pocket before the swept wall probe", 0)
+            end
+        end
         center = nexus_probe_target(pawn, pawn_capsule, record.original, start, center)
         start = pawn:K2_GetActorLocation()
     end
@@ -443,9 +450,9 @@ function wall.command(fields, state, phase)
     if outcome == "other" then
         local name = valid(component) and component:GetFullName() or "unknown component"
         local owner = valid(component) and component:GetOwner()
-        return string.format("native exit sweep other%s (%s on %s, start %.1f %.1f %.1f, target %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
+        return string.format("native exit sweep other%s (%s on %s, start %.1f %.1f %.1f, target %.1f %.1f %.1f, hit fraction %.3f, penetration depth %.3f)",
             plan and " at stock " .. plan.actor or "", name, valid(owner) and owner:GetFullName() or "unknown actor",
-            start.X, start.Y, start.Z, center.X, center.Y, center.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
+            start.X, start.Y, start.Z, center.X, center.Y, center.Z, hit.Time or -1, hit.PenetrationDepth or -1)
     end
     return "native exit sweep " .. outcome .. (plan and " at stock " .. plan.actor or "")
 end

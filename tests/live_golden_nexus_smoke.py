@@ -156,6 +156,23 @@ async def exercise(work, vanilla_saved, pad):
         for role in ("host", "guest"):
             placed = await command("action", *authority, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
             assert (placed["exit_actor"], placed["entrance"], placed["target"]) == (pad.actor, pad.entrance, role), placed
+        if pad.actor == DEFAULT_PAD:
+            def pocket(state):
+                pawns = state.get("game", {}).get("pawns", {})
+                coordinates = {}
+                for side, alias in ((-1, "local"), (1, "guest")):
+                    point = pawns.get(alias, {}).get("location")
+                    if not point or not all(type(value) in (float, int) and math.isfinite(value) for value in point):
+                        return None
+                    dx, dy = point[0] - 707.1067725825, point[1] + 707.1067897906
+                    depth, lane = (dy - dx) / math.sqrt(2), (dx + dy) / math.sqrt(2)
+                    if not -150 <= depth < -20 or not 0 < side * lane < 75:
+                        return None
+                    coordinates[alias] = {"location": point, "depth_cm": depth, "lane_cm": lane}
+                return coordinates
+
+            approach = await wait(run, pocket, timeout=8)
+            evidence["stock_rail_crypt_approach"] = pocket(approach)
         await wait(run, lambda state: (wall := state.get("game", {}).get("native_zone_wall", {})).get("host_open") is True
                    and pad.actor + " (" not in wall.get("failure", ""), timeout=12)
         evidence["guest_wall"] = await sweep("guest", "wall")

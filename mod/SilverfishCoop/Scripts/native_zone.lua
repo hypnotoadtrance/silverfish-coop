@@ -367,6 +367,28 @@ local function nexus_fixture_floor(world, world_name)
     return component
 end
 
+local function nexus_rail_pocket(world, world_name, center, normal, sign)
+    local path = world_name .. ":PersistentLevel.Lantern_Portal_BP_C_2"
+    local portal = StaticFindObject(path)
+    local portal_class = StaticFindObject("/Game/Classes/Actors/Lantern_Portal_BP.Lantern_Portal_BP_C")
+    local crypt = valid(portal) and portal.SM_Env_Entrance_Crypt_01
+    local cube = valid(portal) and portal.Cube
+    local mesh = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_BuildingSets/Tunnels_Dungeons/SM_Env_Entrance_Crypt_01.SM_Env_Entrance_Crypt_01")
+    if not valid(portal) or not same(portal:GetClass(), portal_class) or not same(portal:GetWorld(), world)
+        or not portal:HasAuthority() or portal:IsActorBeingDestroyed() or not valid(crypt) or not valid(cube)
+        or not same(crypt:GetOwner(), portal) or not same(cube:GetOwner(), portal) or not same(crypt.StaticMesh, mesh)
+        or crypt:GetFullName() ~= "StaticMeshComponent " .. path .. ".SM_Env_Entrance_Crypt_01" then
+        error("The exact stock Gold Nexus Rail crypt is unavailable", 0)
+    end
+    local origin, back, right = crypt:K2_GetComponentLocation(), cube:K2_GetComponentLocation(), crypt:GetRightVector()
+    if not vector(origin) or not vector(back) or not vector(right)
+        or (origin.X - center.X)^2 + (origin.Y - center.Y)^2 > 3^2
+        or (right.X * normal.X + right.Y * normal.Y) * sign < .99
+        or math.abs(side_of(back, center, normal) * sign + 217.56) > 4 then
+        error("The stock Gold Nexus Rail crypt orientation did not verify", 0)
+    end
+end
+
 local function place_expanded_overlap(state, details, route, position)
     local pawn = details.pawn
     local exit = placed_actor("Level_Exit_BP_C", route.actor, state.world)
@@ -428,6 +450,7 @@ local function place_expanded_overlap(state, details, route, position)
         if valid(detail.pawn) then ignored[#ignored + 1] = detail.pawn end
     end
     local candidates = {}
+    local rail_pocket = floor and route.actor == "Level_Exit_BP_C_179" and route.entrance == "Nexus_M35" and position == "near"
     local function add_point(distance, offset)
         local side = math.max(-lane_limit, math.min(lane_limit, lane + offset))
         candidates[#candidates + 1] = {center.X + distance * sign * normal.X + side * tangent.X,
@@ -442,6 +465,18 @@ local function place_expanded_overlap(state, details, route, position)
         end
         -- The cooked mound extends beyond the court wall. Use the outward side of the selected pad.
         for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(-depth, offset) end
+    elseif rail_pocket then
+        -- The narrow inward opening and the rear stone both block a capsule. The pocket lies inside the crypt.
+        nexus_rail_pocket(state.world, world_name, center, normal, sign)
+        local lane_edge = math.min(lane_limit, 55, 120 - radius)
+        local side = (index % 2 == 0 and -1 or 1) * lane_edge
+        for _, clearance in ipairs({30, 45, 20}) do
+            local distance = width + radius + clearance
+            -- The cooked cube's inner face is around 168 cm behind the pad.
+            if distance + radius < 160 then
+                for _, offset in ipairs({side, side * .75}) do add_point(-distance, offset) end
+            end
+        end
     elseif floor then
         local distance = inside and 0 or depth + index * 105
         local side = (index % 2 == 0 and -1 or 1) * lane_limit
@@ -479,7 +514,8 @@ local function place_expanded_overlap(state, details, route, position)
                 if pawn:K2_TeleportTo(point, facing) then
                     moved = true
                     local actual = pawn:K2_GetActorLocation()
-                    if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= 70^2
+                    local tolerance = rail_pocket and 10 or 70
+                    if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= tolerance^2
                         and box:IsOverlappingActor(pawn) == inside then
                         pawn:ForceNetUpdate()
                         return "positioned authoritative pawn " .. position .. " the stock " .. route.actor
