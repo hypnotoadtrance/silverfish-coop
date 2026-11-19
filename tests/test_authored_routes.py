@@ -1,11 +1,42 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import time
 import unittest
 
+from tools.silverfish.__main__ import execute, parser
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, MAPS, ROUTE_MAPS
+from tools.silverfish.control import write_json
 from tools.silverfish.generate_authored_exit_registry import render, render_wall_routes
 from tools.silverfish.travel import (
     BEACH, CISTERN, CROSSROADS, DEAD_BRIDGE, EAST_WING, GOLD_NEXUS, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD,
     RUIN_FIELDS, SCI_TUNNEL, SCIENTIST_SHOP, SLUMS,
 )
+
+
+class AuthoredRouteCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_routes_preserve_distinct_pads_and_require_a_fresh_connected_view(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "clients" / "scout" / "run" / "status.json"
+            path.parent.mkdir(parents=True)
+            session = {"active": True, "role": "client", "state": "connected", "updated_unix": time.time(),
+                       "zone_epoch": "a" * 32, "gameplay_fresh": True,
+                       "game": {"state": "connected", "map": GOLD_NEXUS}}
+            write_json(path, session)
+            options = parser().parse_args(["--work", directory, "routes", "--profile", "scout"])
+            result = await execute(options)
+            self.assertTrue(result["live"])
+            self.assertEqual(result["zone_epoch"], session["zone_epoch"])
+            self.assertEqual(len(result["routes"]), 7)
+            pads = [row["actor"] for row in result["routes"] if row["entrance"] == "Nexus_CrossRoads"]
+            self.assertEqual(pads, ["Level_Exit_BP_C_178", "Level_Exit_BP_C_181", "Level_Exit_BP_C_182"])
+
+            for changes in ({"gameplay_fresh": False}, {"updated_unix": time.time() - 30},
+                            {"game": {"state": "traveling", "map": GOLD_NEXUS}}):
+                write_json(path, {**session, **changes})
+                suppressed = await execute(options)
+                self.assertFalse(suppressed["live"])
+                self.assertEqual(suppressed["routes"], [])
+                self.assertIsNone(suppressed["zone_epoch"])
 
 
 class AuthoredRouteTests(unittest.TestCase):

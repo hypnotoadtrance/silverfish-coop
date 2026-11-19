@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
+from dataclasses import asdict
 import json
 from pathlib import Path
 
 from .control import select_run, status, submit
-from .authored_routes import MAPS as EXPANDED_MAPS
+from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS
 from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
 from .native_guest_weapon import SEED_KINDS
 from .native_host_save import STOCK_START_MODES
@@ -118,6 +119,8 @@ def parser() -> argparse.ArgumentParser:
 
     inspect = commands.add_parser("status", help="read the latest structured session status")
     _target(inspect)
+    routes = commands.add_parser("routes", help="list the current map's stock exit catalog")
+    _target(routes)
     events = commands.add_parser("events", help="read recent structured session events")
     _target(events)
     events.add_argument("--tail", type=_bounded_count, default=30)
@@ -288,6 +291,18 @@ async def execute(opts):
     directory = _repository_run(opts) / "run"
     if operation == "status":
         return status(directory)
+    if operation == "routes":
+        current = status(directory)
+        game = current.get("game") or {}
+        role = current.get("role")
+        expected = {"host": "hosting", "client": "connected"}.get(role)
+        live = (expected is not None and current.get("active") is True and not current["stale"]
+                and current.get("state") == game.get("state") == expected
+                and (role == "host" or current.get("gameplay_fresh") is True))
+        area = game.get("map") if live else None
+        return {"schema": 1, "role": role, "state": current.get("state"), "map": area,
+                "zone_epoch": current.get("zone_epoch") if live else None, "live": live,
+                "routes": [asdict(route) for route in AUTHORED_ROUTES if route.source == area]}
     if operation == "events":
         return _events(directory, opts.tail)
     if opts.kind is not None:
