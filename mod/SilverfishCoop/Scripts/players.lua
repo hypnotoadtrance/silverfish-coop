@@ -1,6 +1,7 @@
 local players = {}
 local native_bag_projection = require("native_bag_projection")
 local native_authored_pickup = require("native_authored_pickup")
+local native_enemy_shell_view = require("native_enemy_shell_view")
 
 local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -62,12 +63,13 @@ end
 local function write_interaction(pawn, pickup_source)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
+    local target = pickup_source or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
     local file = io.open(input_file, "ab")
     if not file then return end
     input_sequence = input_sequence + 1
-    local target = pickup_source or native_bag_projection.focused_target(pawn)
-    file:write("interact\t", tostring(input_sequence), target and "\t" .. target or "", "\n")
-    file:close()
+    local written = file:write("interact\t", tostring(input_sequence), target and "\t" .. target or "", "\n")
+    local closed = file:close()
+    if written and closed then return target end
 end
 
 local function sync_native_interact(phase)
@@ -91,11 +93,13 @@ local function sync_native_interact(phase)
         if not source then break end
         write_interaction(pawn, source)
     end
+    local target
     for _ = 1, 8 do
         local sequence, matched = SilverfishTakeNativeInteractPress(address)
         if matched ~= address or type(sequence) ~= "number" or sequence < 1 then break end
-        write_interaction(pawn)
+        target = write_interaction(pawn)
     end
+    return target
 end
 
 local function roster(state, phase)
@@ -670,6 +674,16 @@ end
 
 function players.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-enemy-shell-input-fixture" and #fields == 3 then
+        local pawn = local_player and local_player.pawn
+        if not valid(pawn) or desired[local_player.name] or native_interact_address ~= pawn:GetAddress()
+            or type(SilverfishProbeNativeInteractInput) ~= "function" then error("native_enemy_shell_fixture_scope_unavailable", 0) end
+        return native_enemy_shell_view.fixture(state, phase, fields[3], function()
+            local ok, reason = SilverfishProbeNativeInteractInput(native_interact_address)
+            if not ok then error(reason, 0) end
+            return sync_native_interact(phase)
+        end)
+    end
     if command == "native-interaction-fixture" then
         local pawn = local_player and local_player.pawn
         if #fields ~= 2 or not active(phase) or not valid(pawn) or desired[local_player.name]

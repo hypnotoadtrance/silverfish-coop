@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from .native_guest_consumable import parse_mre
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
@@ -523,11 +523,14 @@ class Bridge:
             if len(fields) not in (2, 3) or fields[0] != b"interact" or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
             target = fields[2] if len(fields) == 3 else None
-            if (target is not None and target not in AUTHORED_PICKUP_TARGETS
+            if target is not None and not target.isascii():
+                continue
+            decoded = target.decode("ascii") if target is not None else None
+            if (target is not None and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
-                            target.decode("ascii") if target else None))
+                            decoded))
         return results
 
     def native_inventory_view_requests(self) -> list[tuple[int, bool, str, str]]:
@@ -1186,6 +1189,11 @@ class Bridge:
                 elif fields in (["native-enemy-loot-cqc-capability", "1"], ["native-enemy-loot-cqc-capability", "2"]):
                     data["native_enemy_loot_cqc_capability"] = True
                     data["native_enemy_loot_cqc_version"] = int(fields[1])
+                elif fields == ["native-enemy-shell-view-capability", "1"]:
+                    data["native_enemy_shell_view_capability"] = True
+                elif fields[0] == "native-enemy-shell-view" and len(fields) == 5 and fields[1] == data.get("map"):
+                    if view := native_enemy_shells.parse_view(*fields[1:]):
+                        data[native_enemy_shells.KEY] = view
                 elif fields[0] == "native-enemy-loot-cqc" and len(fields) == 6 and all(value in ("0", "1") for value in fields[4:]):
                     _enemy_row(data, "native_enemy_loot_cqc", fields[2], {"map": fields[1], "bandit": fields[2],
                                                      "killer_character": None if fields[3] == "-" else fields[3],

@@ -75,7 +75,7 @@ async def wait(directory: Path, predicate, *, timeout=42) -> dict:
 async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: bool, require_movement: bool,
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
-                   automatic_cqc_loot: bool = False, both_cqc: bool = False) -> dict:
+                   automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None) -> dict:
     area = DEAD_BRIDGE if dead_bridge_cqc else MAP
     encounter = "dead-bridge-cqc" if dead_bridge_cqc else f"bandit-{subject}"
     profile = f"{encounter}-{uuid.uuid4().hex[:8]}"
@@ -412,24 +412,51 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     repeated = accepted("repeat the bank request", await combat_action(
                         run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
                     assert repeated == roll, repeated
-                accepted("place the host within stock pickup range", await combat_action(
-                    run, "native-enemy-loot-approach", f"host|{guid}"))
-                operation = uuid.uuid4().hex
-                claimed = accepted("claim the stock shells for the host", await combat_action(
-                    run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
-                assert claimed == dict(roll, claimed_by="host"), claimed
-                retry = accepted("replay the stock host claim", await combat_action(
-                    run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
+                winner = stock_shell_input or "host"
+                recipient = invitation["character_id"] if winner == "guest" else "host"
+                winner_run, loser_run = (guest_run, run) if winner == "guest" else (run, guest_run)
+                accepted("place the claimant within stock pickup range", await combat_action(
+                    run, "native-enemy-loot-approach", f"{winner}|{guid}"))
+                selection, operation = guid, uuid.uuid4().hex
+                if stock_shell_input:
+                    def marked(state):
+                        marker = state.get("game", {}).get("native_enemy_shell_view", {})
+                        return (marker.get("map"), marker.get("epoch")) == (DEAD_BRIDGE, roll["epoch"]) and guid in marker.get("markers", ())
+
+                    for local_run in (run, guest_run):
+                        await wait(local_run, marked, timeout=10)
+                    selection = f"enemy-shell:{roll['epoch']}:{guid}"
+                    press = accepted("exercise the claimant's stock Interact", await combat_action(
+                        winner_run, "native-enemy-shell-input-fixture", selection,
+                    ))["native_enemy_shell_fixture"]
+                    assert press == {"map": DEAD_BRIDGE, "epoch": roll["epoch"], "guid": guid}, press
+                    settled = await wait(run, lambda state: state.get("gameplay", {}).get(
+                        "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
+                    claimed = settled["gameplay"]["native_enemy_loot_rolls"][guid]
+                    events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+                    event, = [entry for entry in events if (entry.get("event"), entry.get("guid")) == (
+                        "native_enemy_loot_claim_committed", guid
+                    )]
+                    operation = event["operation_id"]
+                    for local_run in (run, guest_run):
+                        await wait(local_run, lambda state: state.get("active") and not marked(state), timeout=10)
+                    proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_cues_cleared": True}
+                else:
+                    claimed = accepted("claim the stock shells for the host", await combat_action(
+                        run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
+                assert claimed == dict(roll, claimed_by=recipient), claimed
+                retry = accepted("replay the exact stock claim", await combat_action(
+                    winner_run, "native-enemy-loot-claim", selection, operation_id=operation))["native_enemy_loot_claim"]
                 assert retry == claimed, retry
-                refused = await combat_action(guest_run, "native-enemy-loot-claim", guid)
+                refused = await combat_action(loser_run, "native-enemy-loot-claim", guid)
                 assert refused.get("ok") is False and refused.get("error") == "native_enemy_loot_already_claimed", refused
-                home = accepted("inspect the exact host inventory", await combat_action(run, "native-inventory-list"))["native_inventory"]
-                away = accepted("inspect the killer's separate inventory", await combat_action(guest_run, "native-inventory-list"))["native_inventory"]
+                home = accepted("inspect the claimant's inventory", await combat_action(winner_run, "native-inventory-list"))["native_inventory"]
+                away = accepted("inspect the other member's inventory", await combat_action(loser_run, "native-inventory-list"))["native_inventory"]
                 row, = [item for item in home["items"] if item["guid"] == guid]
                 assert (row["class_path"], row["quantity"]) == (roll["class_path"], roll["quantity"]), row
                 assert all(item["guid"] != guid for item in away["items"]), away
                 proof_log["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
-                                                       "duplicate_guest_claim": refused["error"]}
+                                                       "duplicate_guest_claim" if winner == "host" else "duplicate_host_claim": refused["error"]}
                 if dead_bridge_cqc:
                     settled = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid) == claimed)
@@ -493,7 +520,8 @@ async def main(args) -> None:
                        require_movement=args.require_movement, require_damage=args.require_damage,
                        enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty,
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
-                       automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc)
+                       automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc,
+                       stock_shell_input=args.stock_shell_input)
 
 
 if __name__ == "__main__":
@@ -512,10 +540,13 @@ if __name__ == "__main__":
     parser.add_argument("--automatic-cqc-loot", action="store_true",
                         help="arm and bank the exact stock CQC kill through the ordinary host path")
     parser.add_argument("--both-cqc", action="store_true", help="defeat and claim from both placed CQC in one native visit")
+    parser.add_argument("--stock-shell-input", choices=("host", "guest"), help="claim visible shells through stock Interact")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
     if args.both_cqc and not args.automatic_cqc_loot:
         parser.error("--both-cqc requires --automatic-cqc-loot")
+    if args.stock_shell_input and not args.automatic_cqc_loot:
+        parser.error("--stock-shell-input requires --automatic-cqc-loot")
     if args.automatic_cqc_loot and (not args.dead_bridge_cqc or args.enemy_bounty):
         parser.error("--automatic-cqc-loot requires --dead-bridge-cqc and uses existing character traits")
     if args.dead_bridge_cqc:

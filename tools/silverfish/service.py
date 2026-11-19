@@ -14,7 +14,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
-               native_dream, native_enemy_loot, native_finite_shop, native_flood_jammer, native_lenny,
+               native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
@@ -194,6 +194,7 @@ class Host:
         self.native_shop_view = native_shop_view
         self.native_loot_input = native_loot_input
         self.native_dead_bridge_enemy_loot = native_dead_bridge_enemy_loot
+        self.enemy_shell_view = native_enemy_shells.ShellView() if native_dead_bridge_enemy_loot else None
         self.guest_regen = guest_regen
         self.guest_sickness = guest_sickness
         self.guest_mre = guest_mre
@@ -574,6 +575,8 @@ class Host:
             view[native_loot.STATE_KEY] = rolls
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
+            if frame := native_enemy_loot.shell_frame(self):
+                view[native_enemy_shells.FRAME_KEY] = frame
         if pending := pending_cube(self.party):
             cube, itinerary = pending
             view["pending_item_travel"] = {"item": cube, "source": itinerary["source"],
@@ -2143,6 +2146,12 @@ class Host:
                 elif action == native_enemy_loot.CLAIM:
                     result = await native_enemy_loot.claim(self, bridge, "host", request.get("target"),
                                                           request.get("operation_id") or path.stem)
+                elif action == native_enemy_shells.FIXTURE and self.fixtures:
+                    self.last_game, proof = await native_enemy_shells.fixture(
+                        bridge, self.last_game, self.zone_epoch, request.get("target"),
+                    )
+                    self.last_seen = time.monotonic()
+                    result = {"native_enemy_shell_fixture": proof}
                 elif action == "native-campaign-npc-approach" and self.native_guest and self.fixtures:
                     target = request.get("target")
                     authority = self.last_game.get("native_campaign_npc", {})
@@ -2916,6 +2925,13 @@ class Host:
             await self.observe(bridge, transport)
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
+            if self.enemy_shell_view:
+                with contextlib.suppress(OSError, RuntimeError):
+                    snapshot = await self.enemy_shell_view.sync(
+                        bridge, self.last_game, "hosting", self.zone_epoch, native_enemy_loot.shell_frame(self),
+                    )
+                    if snapshot is not self.last_game:
+                        self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_flood_jammer.observe(self, bridge)
             await native_lenny.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
@@ -2960,6 +2976,8 @@ class Host:
                 try:
                     if target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
+                    elif native_enemy_shells.target_parts(target):
+                        await native_enemy_loot.claim(self, bridge, "host", target, operation_id)
                     elif target:
                         await native_inventory_death.recover(self, bridge, "host", target, operation_id)
                     else:
@@ -3375,6 +3393,7 @@ class Client:
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
         self.downed_markers = native_downed_markers.MarkerView()
+        self.enemy_shell_view = native_enemy_shells.ShellView()
         self.shop_view = native_shop_view.ShopView() if invite.get("native_shop_view") else None
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
@@ -3995,6 +4014,11 @@ class Client:
                 elif action == "native-interaction-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
+                elif action == native_enemy_shells.FIXTURE and self.transport.game_access:
+                    self.last_game, proof = await native_enemy_shells.fixture(
+                        self.bridge, self.last_game, self.zone_epoch, request.get("target"),
+                    )
+                    result = {"native_enemy_shell_fixture": proof}
                 elif action == "native-rest-guest-interaction-fixture":
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     if not pawn or self.last_game.get("state") != "connected":
@@ -4084,11 +4108,18 @@ class Client:
             await self.service_inventory_use(active)
             if self.shop_view:
                 await self.shop_view.sync(self, active)
+            frame = (self.gameplay.get(native_enemy_shells.FRAME_KEY) if active and self.transport.game_access
+                     and self.expected_zone == DEAD_BRIDGE and time.monotonic() - self.gameplay_seen < 2 else None)
+            with contextlib.suppress(OSError, RuntimeError):
+                self.last_game = await self.enemy_shell_view.sync(
+                    self.bridge, self.last_game, "connected", self.zone_epoch, frame,
+                )
             interactions = self.bridge.interactions()
             if active and not self.stopping:
                 for operation_id, target in interactions:
                     try:
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
+                                  else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
                                   else "native-wipe-recover" if target else "interact")
                         result = await self.gameplay_action(action, operation_id, target)
                         self.control.event("local_interaction", operation_id=operation_id, **result)

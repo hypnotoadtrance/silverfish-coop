@@ -1,6 +1,7 @@
 local enemy_loot = {}
 local guest_save = require("guest_save")
 local transport = require("native_transport")
+local shell_view = require("native_enemy_shell_view")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
@@ -327,7 +328,8 @@ local function claim(state, phase, fields)
     if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
-    if #fields ~= 8 or not is_slot(slot) or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z)
+    local focus = #fields == 9 and fields[9] == "stock-focus" and cqc
+    if (#fields ~= 8 and not focus) or not is_slot(slot) or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z)
         or not valid(host) or type(SilverfishClaimNativeEnemyLootEscrow) ~= "function" then
         error("native_enemy_loot_claim_unavailable", 0)
     end
@@ -338,6 +340,10 @@ local function claim(state, phase, fields)
     if not at or not finite(reach) or reach <= 0 or reach > 1000 or
         (at.X - x)^2 + (at.Y - y)^2 + (at.Z - z)^2 > math.min(reach, 250)^2 then
         error("native_enemy_loot_out_of_reach", 0)
+    end
+    if focus then
+        local checked, visible = pcall(shell_view.clear_line, pawn, { X = x, Y = y, Z = z })
+        if not checked or visible ~= true then error("native_enemy_loot_focus_obstructed", 0) end
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pool = valid(api) and api:LoadGameFromSlot(slot, 0)

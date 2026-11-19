@@ -32,6 +32,7 @@ package.loaded.guest_save = {
 }
 local fresh = true
 package.loaded.native_transport = {scoped_host = function() return {pawn = host}, fresh end}
+package.loaded.native_enemy_shell_view = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_shell_view.lua"))()
 local npc_class_path = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C"
 local npc_path = root .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 local npc_class, npc = object(7, npc_class_path), object(8, "NPC_State_Infantry_CQC_C " .. npc_path)

@@ -5,7 +5,8 @@ import math
 import os
 import time
 
-from . import native_host_save, native_loot, party
+from . import native_enemy_shells, native_host_save, native_loot, party
+from .native_downed_markers import location
 from .native_gold import valid_guid
 from .native_host_save import CQC_DROP_SOURCE as CQC, CQC_DROP_SOURCES as CQC_ACTORS
 from .runtime import MAP
@@ -149,6 +150,26 @@ def pending(host):
         _cqc_receipt(host.last_game, target).get("reserved") is True for target in CQC_ACTORS)
 
 
+def shell_frame(host) -> dict | None:
+    game, epoch = host.last_game, host.zone_epoch
+    if (not _ordinary(host, game.get("map")) or game.get("state") != "hosting" or host.stopping
+            or host.transitioning or host.party["wipe"] or host.native_checkpoint_unsafe
+            or time.monotonic() - host.last_seen >= 2 or not native_enemy_shells.valid_epoch(epoch)):
+        return None
+    rolls = host.party.get(STATE_KEY, {})
+    shells = {}
+    for target in CQC_ACTORS:
+        guid = defeated_cqc(rolls, epoch, target)
+        if not guid:
+            continue
+        drop, scope = rolls[guid], _cqc_receipt(game, target)
+        if (drop.get("claimed_by") is None and isinstance(drop.get("escrow"), dict)
+                and location(drop.get("position")) and scope.get("captured") is True and scope.get("reserved") is False
+                and source_for(game, target).get("ammo_actor") == drop["actor"]):
+            shells[guid] = [drop["quantity"], *drop["position"]]
+    return {"map": DEAD_BRIDGE, "epoch": epoch, "shells": shells} if shells else None
+
+
 def _stock_killer(host, source):
     if not _ordinary(host, source.get("map")):
         member = host.roles().get(source.get("killer_role"))
@@ -264,19 +285,25 @@ async def bank(host, bridge, target: str | None) -> dict:
 
 async def claim(host, bridge, character: str, target: str | None, operation: str) -> dict:
     area = _available(host)
-    if not valid_guid(target) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+    focus = native_enemy_shells.target_parts(target)
+    guid = focus[1] if focus else target
+    if not valid_guid(guid) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("native_enemy_loot_exact_claim_required")
+    if focus and (not _ordinary(host, area) or focus[0] != host.zone_epoch):
+        raise party.RuleError("native_enemy_loot_stale_focus")
     fingerprint = [CLAIM, target, None]
     for receipt in host.party["receipts"].get(character, []):
         if receipt["id"] == operation:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    roll = host.party.get(STATE_KEY, {}).get(target)
+    roll = host.party.get(STATE_KEY, {}).get(guid)
     if not roll or roll.get("map") != area or (area == DEAD_BRIDGE and roll.get("bandit") not in CQC_ACTORS):
         raise party.RuleError("native_enemy_loot_item_unavailable")
     if roll.get("claimed_by") is not None:
         raise party.RuleError("native_enemy_loot_already_claimed")
+    if focus and guid not in (shell_frame(host) or {}).get("shells", {}):
+        raise party.RuleError("native_enemy_loot_stale_focus")
     record = host.party["players"].get(character)
     pawn = native_loot._scope(host, character)
     if not record or record["downed"] or not pawn or character in host.party["pending_spawns"]:
@@ -290,19 +317,20 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(CLAIM, pawn, frame["slot"], target,
-                                            *(str(axis) for axis in roll["position"]), timeout=7)
+            check = ("stock-focus",) if focus else ()
+            snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
+                                            *(str(axis) for axis in roll["position"]), *check, timeout=7)
         except RuntimeError as error:
-            if str(error) == "native_enemy_loot_out_of_reach":
+            if str(error) in {"native_enemy_loot_out_of_reach", "native_enemy_loot_focus_obstructed"}:
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
         proof = snapshot.get("native_enemy_loot_escrow", {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("slot"), proof.get("guid"))
-                != ("hosting", area, area, pawn, frame["slot"], target) or proof.get("state") not in ("claimed", "already_claimed")):
+                != ("hosting", area, area, pawn, frame["slot"], guid) or proof.get("state") not in ("claimed", "already_claimed")):
             raise RuntimeError("The typed stock enemy claim did not match its exact participant")
         candidate = party.load_party(host.party)
-        committed = candidate[STATE_KEY][target]
+        committed = candidate[STATE_KEY][guid]
         committed["claimed_by"] = character
         committed.pop("escrow")
         report = native_loot.public_roll(committed)
@@ -311,7 +339,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}))
-        host.control.event("native_enemy_loot_claim_committed", revision=revision, **report)
+        host.control.event("native_enemy_loot_claim_committed", revision=revision, operation_id=operation, **report)
         return result
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:

@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_enemy_loot, native_host_save, party
+from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, party
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.runtime import Bridge, MAP
 from tools.silverfish.service import Host
@@ -22,6 +22,20 @@ class DeadBridgeEnemyLootTests(unittest.TestCase):
         self.assertIsNone(watch({"map": DEAD_BRIDGE}, sibling))
         self.assertIsNone(watch({"map": MAP, "native_bandit": {}}, cqc))
         self.assertEqual(watch({"map": MAP, "native_bandit": {"npc": "stock-bandit"}}, "stock-bandit"), "stock-bandit")
+
+    def test_input_events_keep_exact_shell_visit_and_guid_distinct_from_other_targets(self):
+        target = "enemy-shell:" + "b" * 32 + ":" + "A" * 32
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "input.tsv").write_bytes(
+                f"interact\t1\t{target}\ninteract\t2\t{target.lower()}\n".encode("ascii")
+                + b"interact\t3\t\xff\ninteract\t4\n"
+            )
+            bridge = Bridge(directory, Mock())
+            self.assertEqual([selected for _, selected in bridge.interactions()], [target, None])
+            self.assertEqual(bridge.interactions(), [])
+        self.assertEqual(native_enemy_shells.parse_view(DEAD_BRIDGE, "b" * 32, "A" * 32, "A" * 32)["focused"], "A" * 32)
+        self.assertIsNone(native_enemy_shells.parse_view(DEAD_BRIDGE, "b" * 32, "A" * 32, "B" * 32))
 
     def test_campaign_escrow_accepts_only_the_authored_cqc_shell_drop(self):
         guid = "A" * 32
@@ -214,6 +228,51 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({self.first}))
         with self.assertRaisesRegex(party.RuleError, "unavailable"):
             await native_enemy_loot.approach(self.host, bridge, f"host|{self.guid}")
+
+    async def test_stock_shell_view_waits_for_retirement_and_authoritative_focus_is_rechecked(self):
+        roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
+                    guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],
+                    killer=self.second, claimed_by=None, escrow=self.frame)
+        self.party[native_enemy_loot.STATE_KEY] = {self.guid: roll}
+        self.assertIsNone(native_enemy_loot.shell_frame(self.host))
+        self.host.last_game = dict(
+            self.initial, native_enemy_shell_view_capability=True,
+            native_enemy_loot_cqc=dict(self.scope, captured=True, reserved=False),
+        )
+        selected = f"enemy-shell:{self.host.zone_epoch}:{self.guid}"
+        current = {"map": DEAD_BRIDGE, "epoch": self.host.zone_epoch, "shells": {self.guid: [8, 1, 2, 3]}}
+        self.assertEqual(native_enemy_loot.shell_frame(self.host), current)
+        view = native_enemy_shells.ShellView()
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.host.last_game))
+        await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, current)
+        await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, current)
+        bridge.command.assert_awaited_once_with(native_enemy_shells.FRAME, self.host.zone_epoch,
+                                               self.host_pawn, f"{self.guid}|8|1|2|3", timeout=2)
+        await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, None)
+        bridge.command.assert_awaited_with(native_enemy_shells.CLEAR, timeout=2)
+        bridge.command.reset_mock()
+        with self.assertRaisesRegex(party.RuleError, "stale_focus"):
+            await native_enemy_loot.claim(self.host, bridge, self.first, f"enemy-shell:{'a' * 32}:{self.guid}", "b" * 32)
+        bridge.command.assert_not_awaited()
+        with patch.object(native_host_save, "verify_record"):
+            with self.assertRaisesRegex(party.RuleError, "focus_obstructed"):
+                bridge.command.side_effect = RuntimeError("native_enemy_loot_focus_obstructed")
+                await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
+            bridge.command.assert_awaited_once_with(
+                native_enemy_loot.CLAIM, self.first_pawn, self.slot, self.guid, "1", "2", "3", "stock-focus", timeout=7,
+            )
+            self.assertFalse(self.host.native_checkpoint_unsafe or self.host.stopping)
+            self.assertEqual(native_enemy_loot.shell_frame(self.host), current)
+            bridge.command.side_effect = None
+            bridge.command.return_value = dict(
+                self.host.last_game, native_enemy_loot_escrow=dict(self.captured, state="claimed", pawn=self.first_pawn),
+            )
+            claimed = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
+            replay = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
+        self.assertEqual(claimed, replay)
+        self.assertEqual(claimed["native_enemy_loot_claim"]["claimed_by"], self.first)
+        self.assertIsNone(native_enemy_loot.shell_frame(self.host))
+        self.assertEqual(bridge.command.await_count, 2)
 
     async def test_same_thread_travel_hold_banks_before_retiring_the_party(self):
         host = self.host

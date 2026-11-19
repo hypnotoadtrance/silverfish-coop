@@ -150,7 +150,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-guest-mre", "native-guest-mre-fixture", "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
-        "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
+        "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach", "native-enemy-shell-input-fixture",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
         "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture", "native-borough-mama-trade",
         "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",

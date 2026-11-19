@@ -43,6 +43,7 @@ local native_loot_actions = require("native_loot_actions")
 local native_loot_crate_input = require("native_loot_crate_input")
 local native_loot_view = require("native_loot_view")
 local native_enemy_loot = require("native_enemy_loot")
+local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_broker_input = require("native_broker_input")
 local native_wipe_view = require("native_wipe_view")
 local native_fresh_campaign = require("native_fresh_campaign")
@@ -842,6 +843,7 @@ local function run_command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
+        or native_enemy_shell_view.command(fields, state, current_phase)
         or native_broker_input.command(fields, state, current_phase)
         or native_wipe_view.command(fields, state, current_phase)
         or native_campaign_npc.command(fields, state, current_phase)
@@ -982,6 +984,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_flood_jammer_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_enemy_shell_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_fresh_campaign.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1201,6 +1204,7 @@ local function tick()
     end
     local projected, failure = pcall(function()
         vitals.sync(state, current_phase)
+        native_enemy_shell_view.sync(state, current_phase)
         players.sync(state, current_phase)
         native_wire_board.sync(state, current_phase)
         native_dialogue.sync(state, current_phase)
@@ -1217,6 +1221,7 @@ local function tick()
 end
 
 players.start(bridge)
+native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
 native_loot_view.start(bridge, players.is_downed)
