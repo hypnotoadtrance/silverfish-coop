@@ -3718,9 +3718,18 @@ class Client:
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
                 elif action == native_smg_hold.LOCAL_FIXTURE and self.guest_held_input:
                     edge = request.get("target")
-                    if not self.primary_scope or self.primary_scope[3] != "smg-standard" or edge not in ("press", "release"):
+                    if edge not in ("press", "release"):
                         raise ValueError("The held-fire fixture requires the scoped SMG and a press or release")
-                    self.last_game = await self.bridge.command(action, self.primary_scope[1], edge, timeout=4)
+                    observed = self.last_game.get("native_guest_primary_scope", {})
+                    if observed.get("kind") != "smg-standard" and self.transport.connected and not self.needs_travel:
+                        await self.refresh_gameplay()
+                        active = self.last_game.get("state") == "connected" and not self.server_transitioning
+                        self.next_primary_renewal = 0
+                        await self.service_primary_input(active)
+                        observed = self.last_game.get("native_guest_primary_scope", {})
+                    if observed.get("kind") != "smg-standard" or not observed.get("pawn"):
+                        raise ValueError("The held-fire fixture requires the scoped SMG and a press or release")
+                    self.last_game = await self.bridge.command(action, observed["pawn"], edge, timeout=4)
                     result = {"native_guest_held_fire_fixture": self.last_game.get("native_guest_held_fire_fixture", {})}
                 elif action == native_guest_clock.FIXTURE and self.guest_clock:
                     if self.last_game.get("state") != "connected" or not self.last_game.get("native_guest_clock"):

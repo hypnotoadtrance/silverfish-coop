@@ -147,6 +147,8 @@ Within reach of the Observatory Castaway, use `native-dialogue-open --target cas
 
 Use `native-dialogue-open --target mosby` at the Scientist to explore Mosby's stock topics. Once the party has asked about anomalies and drill data, his dialogue can issue Stone Maze Readings for the host campaign. Each guest keeps their own conversation and the party shares the unlocked topics.
 
+Collect the Scientist's authored blank data tape and take it to the Stone Maze download station. Use `native-mosby-tape-preflight --target BLANK_GUID` to inspect the stock offer, then `native-mosby-tape-convert --target BLANK_GUID` to exchange it for the exact filled tape. At the Scientist board, `native-mosby-readings-preflight` confirms the owned tape and `native-quest-turnin --target Clt_Tape_StoneMaze_01` redeems it.
+
 At Borough's board, use Up and Down to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos. Interact checks the selected contract. Press it again to accept or redeem when the panel prompts you. At the Scientist's board, the same controls redeem Find a Computer Board for the player carrying it.
 
 The Dead Bridge photography contract unlocks on Borough's board at 4 host XP. Equip a stock camera and center a turret before pressing primary input. Either player can take either photo. For scripted actions, use `native-turret-photo-capture --target turret-13` or `--target turret-15` while framing the matching turret. The host verifies the shot in the game and records each turret once. Return to Borough and use `native-quest-turnin --target Photo_DB_Turrets` for the shared cash and personal XP.

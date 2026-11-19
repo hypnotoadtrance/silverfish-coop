@@ -188,6 +188,9 @@ async def verify(work: Path, originals_path: Path):
             member["local_pawn"] = scope["pawn"]
             evidence["guests"][role] = {key: value for key, value in member.items() if key != "guest_id"}
         assert len({member["host_pawn"] for member in members}) == 2
+        for index, member in enumerate(members):
+            await wait(client_runs[index], lambda state: state.get("gameplay_fresh") and
+                       state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == member["guid"])
 
         pressed = await asyncio.gather(edge(0, "press"), edge(1, "press"))
         evidence["press_fixtures"] = pressed
