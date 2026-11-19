@@ -1,13 +1,13 @@
 local rest = {}
+local native_bed = require("native_bed")
 
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local enabled = bridge and bridge ~= "" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local headless_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local level = "Observitory_P"
-local world_path = map .. "." .. level
-local actor_name = "SavePoint_BP_C " .. world_path .. ":PersistentLevel.SavePoint_BP_C_3"
-local bed_id = "SavePoint_BP_C_3-Observitory_P-"
-local faction, minimum_reputation = 8, -90
+local observatory = native_bed.profile(map)
+local actor_name = observatory.actor_full_name
 local max_hours = 10
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
@@ -18,13 +18,13 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local bed_path = "/Game/Classes/Actors/SavePoint_BP.SavePoint_BP_C"
 local day_class = "DayCycle_SunControler_BP_C"
 local day_path = "/Game/Classes/Actors/DayCycle_SunControler_BP." .. day_class
-local day_name = day_class .. " " .. world_path .. ":PersistentLevel." .. day_class .. "_0"
 local antfarm_class = "AntfarmController_C"
 local antfarm_path = "/Game/Classes/AntFarm/AntfarmController." .. antfarm_class
 local code_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 
 rest.map, rest.actor = map, actor_name
 local stock_scope
+local stock_guard
 local request_sequence = 0
 
 local function valid(object)
@@ -60,31 +60,37 @@ local function hours_selected(value)
     return math.tointeger(value)
 end
 
-local function world_actor(class, path, world)
+local function world_actor(class, path, world, full_name, allow_proxy)
     local stock_class = StaticFindObject(path)
     local found
     for _, actor in ipairs(FindAllOf(class) or {}) do
-        if exact(actor, stock_class) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+        if exact(actor, stock_class) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+            and (not full_name or actor:GetFullName() == full_name) then
             if found then return nil, "ambiguous" end
             found = actor
         end
     end
     if not found then return nil, "missing" end
-    if not found:HasAuthority() then return nil, "authority_unavailable" end
+    if not allow_proxy and not found:HasAuthority() then return nil, "authority_unavailable" end
     return found
 end
 
-local function host_context(state, phase, pawn_name)
+local function host_context(state, phase, pawn_name, profile)
     local host = state.local_pawn
     local world, controller = state.world, state.controller
-    if not enabled or phase ~= "hosting" or state.map ~= map or not state.listening or state.server ~= false
-        or not valid(world) or world:GetFullName() ~= "World " .. world_path
-        or not host or not same(host.controller_object, controller)
-        or not exact(controller, StaticFindObject(controller_path)) or not controller:HasAuthority()
-        or not controller:IsLocalController() or controller:IsActorBeingDestroyed() or controller.Loading ~= false
-        or not same(controller:GetWorld(), world) then
+    if not enabled or phase ~= "hosting" or state.map ~= profile.map or not state.listening or state.server ~= false then
         error("native_rest_host_unavailable", 0)
     end
+    if not valid(world) or world:GetFullName() ~= "World " .. profile.map .. "." .. profile.level then
+        error("native_rest_host_world_unqualified", 0)
+    end
+    if not host or not same(host.controller_object, controller)
+        or not exact(controller, StaticFindObject(controller_path)) or not controller:HasAuthority()
+        or not controller:IsLocalController() or controller:IsActorBeingDestroyed()
+        or not same(controller:GetWorld(), world) then
+        error("native_rest_host_controller_unqualified", 0)
+    end
+    if controller.Loading ~= false then error("native_rest_host_still_loading", 0) end
     local pawn, driver = host.pawn, world.NetDriver
     if not valid(driver) or not same(driver.World, world) or valid(driver.ServerConnection)
         or not exact(pawn, StaticFindObject(pawn_path)) or pawn:GetFullName() ~= pawn_name
@@ -115,12 +121,13 @@ local function close_to_bed(pawn, box)
 end
 
 local function inspect_bed(state, phase, pawn_name, requested_actor)
-    if requested_actor ~= actor_name then error("native_rest_actor_unqualified", 0) end
-    local context = host_context(state, phase, pawn_name)
-    local actor = world_actor("SavePoint_BP_C", bed_path, context.world)
-    if not actor or actor:GetFullName() ~= actor_name or not same(actor["As Game Instance FP"], context.instance)
+    local profile = native_bed.profile(state.map)
+    if not profile or requested_actor ~= profile.actor_full_name then error("native_rest_actor_unqualified", 0) end
+    local context = host_context(state, phase, pawn_name, profile)
+    local actor = world_actor("SavePoint_BP_C", bed_path, context.world, profile.actor_full_name)
+    if not actor or actor:GetFullName() ~= profile.actor_full_name or not same(actor["As Game Instance FP"], context.instance)
         or not same(context.statics:GetGameInstance(actor), context.instance)
-        or actor.Faction ~= faction or actor.MinSafeRep ~= minimum_reputation
+        or actor.Faction ~= profile.faction or actor.MinSafeRep ~= profile.min_safe_rep
         or not valid(actor.Box) or not same(actor.Box:GetOwner(), actor) then
         error("native_rest_stock_bed_changed", 0)
     end
@@ -128,12 +135,14 @@ local function inspect_bed(state, phase, pawn_name, requested_actor)
     if not valid(library) then error("native_rest_stock_bed_id_unavailable", 0) end
     local id = {}
     library:Calc_UniqueID(actor, actor, id)
-    if text(id.ID) ~= bed_id then error("native_rest_stock_bed_id_changed", 0) end
+    if text(id.ID) ~= profile.bed_id then error("native_rest_stock_bed_id_changed", 0) end
 
     local distance, range, anchor = close_to_bed(context.pawn, actor.Box)
-    local reputation = {}
-    context.instance:Find_PlayerReputation(actor.Faction, reputation, reputation, reputation)
-    if not int32(reputation.Points) then error("native_rest_reputation_unavailable", 0) end
+    local reputation = { Points = 0 }
+    if profile.faction ~= 0 then
+        context.instance:Find_PlayerReputation(actor.Faction, reputation, reputation, reputation)
+        if not int32(reputation.Points) then error("native_rest_reputation_unavailable", 0) end
+    end
 
     local insomnia_name = FName("Insomnia", EFindName.FNAME_Find)
     if insomnia_name:GetComparisonIndex() == 0 or insomnia_name:ToString() ~= "Insomnia" then
@@ -143,12 +152,13 @@ local function inspect_bed(state, phase, pawn_name, requested_actor)
     context.instance:FindPassiveEffect(insomnia_name, false, passive, passive)
     if type(passive.EffectActive) ~= "boolean" then error("native_rest_insomnia_unavailable", 0) end
 
-    -- The authored faction-8 Observatory interaction uses reputation. The
-    -- separate faction-neutral branch reacts to Insomnia with random hours.
+    -- Neutral beds use a random sleep duration when the stock Insomnia effect is active.
     local denied = distance >= range and "out_of_range"
-        or reputation.Points < actor.MinSafeRep and "reputation_too_low"
+        or profile.faction ~= 0 and reputation.Points < actor.MinSafeRep and "reputation_too_low"
+        or profile.faction == 0 and passive.EffectActive and "insomnia_requires_stock_sleep_selection"
         or nil
-    local report = {map = map, pawn = pawn_name, actor = actor_name, bed = bed_id, level = level,
+    local report = {map = profile.map, pawn = pawn_name, actor = profile.actor_full_name,
+        bed = profile.bed_id, level = profile.level,
         eligible = denied == nil, reason = denied, points = reputation.Points, distance = distance, range = range,
         insomnia = passive.EffectActive, x = anchor.X, y = anchor.Y, z = anchor.Z}
     context.actor = actor
@@ -162,9 +172,10 @@ end
 
 function rest.interaction(state, phase, actor, interactor)
     local host = state.local_pawn
-    if not host or not valid(interactor) or not same(interactor, host.pawn)
-        or not valid(actor) or actor:GetFullName() ~= actor_name then return end
-    local report, context = inspect_bed(state, phase, interactor:GetFullName(), actor_name)
+    local profile = native_bed.profile(state.map)
+    if not profile or not host or not valid(interactor) or not same(interactor, host.pawn)
+        or not valid(actor) or actor:GetFullName() ~= profile.actor_full_name then return end
+    local report, context = inspect_bed(state, phase, interactor:GetFullName(), profile.actor_full_name)
     if report.eligible and same(actor, context.actor) then return report end
 end
 
@@ -204,6 +215,7 @@ function rest.apply(state, phase, pawn_name, requested_actor, hours)
     local report, context = inspect_bed(state, phase, pawn_name, requested_actor)
     if not report.eligible then error("native_rest_" .. report.reason, 0) end
     local day = world_actor(day_class, day_path, context.world)
+    local day_name = day_class .. " " .. report.map .. "." .. report.level .. ":PersistentLevel." .. day_class .. "_0"
     local clock = StaticFindObject(math_path)
     if not day or day:GetFullName() ~= day_name or day.Ready ~= true or not finite(day.StaticTimeStep)
         or not same(day["Game Instance"], context.instance) or not valid(clock) then
@@ -212,6 +224,7 @@ function rest.apply(state, phase, pawn_name, requested_actor, hours)
 
     local receiver, ping_reason = sleep_receiver(context)
     local save = context.save
+    local level, bed_id = report.level, report.bed
     local previous_level, previous_bed, previous_entrance = text(save.RespawnLevel), text(save.Bed), text(save.Entrance)
     local before, previous_step = time_seconds(clock, save), day.StaticTimeStep
     local complete, failure = pcall(function()
@@ -252,8 +265,9 @@ function rest.apply(state, phase, pawn_name, requested_actor, hours)
 end
 
 function rest.clear_hook()
-    if not stock_scope then return end
+    if not stock_scope and not stock_guard then return end
     stock_scope = nil
+    stock_guard = nil
     if type(SilverfishClearNativeStockRestScope) == "function" then SilverfishClearNativeStockRestScope() end
 end
 
@@ -269,22 +283,28 @@ local function coordinator_recent()
 end
 
 function rest.sync_hook(state, phase)
-    if not enabled or type(SilverfishSetNativeStockRestScope) ~= "function"
-        or type(SilverfishTakeNativeStockRestRequest) ~= "function" then return end
-    if phase ~= "hosting" or state.map ~= map or not state.local_pawn then
+    if not enabled then return end
+    local profile = native_bed.profile(state.map)
+    local host = phase == "hosting" and state.server == false
+    local client = phase == "connected" and state.server == true
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not profile or not (host or client) or not state.listening or not valid(pawn) then
         rest.clear_hook()
         return
     end
+
+    if type(SilverfishSetNativeStockRestGuard) == "function" then
+        stock_guard = SilverfishSetNativeStockRestGuard(pawn:GetAddress(), host) or stock_guard
+    end
+    if not host or type(SilverfishSetNativeStockRestScope) ~= "function"
+        or type(SilverfishTakeNativeStockRestRequest) ~= "function" then return end
     -- An already scoped, stale UI call is vetoed by the native hook.
     if not coordinator_recent() then return end
-    local pawn = state.local_pawn.pawn
-    if not valid(pawn) then return end
     local bed = stock_scope and stock_scope.bed
-    if not valid(bed) or not same(state.world, bed:GetWorld()) or bed:GetFullName() ~= actor_name then
-        bed = world_actor("SavePoint_BP_C", bed_path, state.world)
+    if not valid(bed) or not same(state.world, bed:GetWorld()) or bed:GetFullName() ~= profile.actor_full_name then
+        bed = world_actor("SavePoint_BP_C", bed_path, state.world, profile.actor_full_name)
     end
-    if not valid(bed) or bed:GetFullName() ~= actor_name
-        or not SilverfishSetNativeStockRestScope(pawn:GetAddress(), bed:GetAddress()) then return end
+    if not valid(bed) or not SilverfishSetNativeStockRestScope(pawn:GetAddress(), bed:GetAddress()) then return end
     stock_scope = { bed = bed }
 
     local took, owner, receiver, hours = SilverfishTakeNativeStockRestRequest()
@@ -300,9 +320,106 @@ function rest.sync_hook(state, phase)
 end
 
 function rest.hook_rows(status_row)
-    if type(SilverfishReadNativeStockRestStatus) ~= "function" then return {} end
-    local installed, armed, fresh, state = SilverfishReadNativeStockRestStatus()
-    return { status_row("native-rest-hook", installed and 1 or 0, armed and 1 or 0, fresh and 1 or 0, state) }
+    local rows = {}
+    if type(SilverfishReadNativeStockRestStatus) == "function" then
+        local installed, armed, fresh, state = SilverfishReadNativeStockRestStatus()
+        rows[#rows + 1] = status_row("native-rest-hook", installed and 1 or 0, armed and 1 or 0, fresh and 1 or 0, state)
+    end
+    if type(SilverfishReadNativeStockRestGuardStatus) == "function" then
+        local armed, decision, guest_denials = SilverfishReadNativeStockRestGuardStatus()
+        rows[#rows + 1] = status_row("native-rest-guard", armed and 1 or 0, decision, guest_denials)
+    end
+    return rows
+end
+
+function rest.ui_fixture(state, phase, pawn_name, hours)
+    local guard = SilverfishSetNativeStockRestTestMenuGuard
+    if not headless_fixture or type(guard) ~= "function" or not stock_scope then
+        error("Native rest UI fixture requires the headless stock guard", 0)
+    end
+    local profile = native_bed.profile(state.map)
+    if not profile then error("The current map has no stock sleep UI fixture", 0) end
+    local report, context = inspect_bed(state, phase, pawn_name, profile.actor_full_name)
+    hours = hours_selected(hours)
+    local stack = context.controller.MenuStack
+    if not report.eligible or not stack or stack:GetArrayNum() ~= 0 or not guard(true) then
+        error("The exact stock sleep menu cannot be opened in the current fixture state", 0)
+    end
+    local opened, problem = pcall(function()
+        context.actor:SendInteractionToActor(context.pawn, context.actor.Box)
+        local top = stack:GetArrayNum() == 1 and stack[1]
+        if not exact(top, StaticFindObject("/Game/Classes/GUI/New/SleepScreen.SleepScreen_C"))
+            or not same(top.Bed, context.actor) or not same(context.actor.Player, context.pawn)
+            or not same(top["As Game Instance FP"], context.instance) or top.Max ~= max_hours then
+            error("The stock save point did not open its exact SleepScreen", 0)
+        end
+        top:SetCount(hours)
+        if top.Count ~= hours then error("The stock sleep-hours selection was not verified", 0) end
+        top:ConfirmSleep()
+        local installed, armed, _, status = SilverfishReadNativeStockRestStatus()
+        if stack:GetArrayNum() ~= 0 or not installed or not armed or status ~= "selected" then
+            error("The stock sleep confirmation did not reach the isolated native handoff (" .. tostring(status) .. ")", 0)
+        end
+    end)
+    guard(false)
+    if not opened then error(problem, 0) end
+    return "verified stock sleep screen selection"
+end
+
+function rest.guest_fixture(state, phase, pawn_name)
+    local read_guard = SilverfishReadNativeStockRestGuardStatus
+    local menu_guard = SilverfishSetNativeStockRestTestMenuGuard
+    local host = phase == "hosting" and state.server == false
+    local client = phase == "connected" and state.server == true
+    local profile = native_bed.profile(state.map)
+    if not headless or (host and not headless_fixture) or not (host or client)
+        or not profile or not valid(state.world)
+        or type(read_guard) ~= "function" or not state.local_pawn or not valid(state.controller) then
+        error("The stock guest rest fixture requires a qualified headless co-op world", 0)
+    end
+    local armed, _, denials = read_guard()
+    if not armed then error("The native stock rest guest guard is unavailable", 0) end
+    local target
+    if host then
+        for _, guest in ipairs(state.guests) do
+            if guest.name == pawn_name then
+                if target then error("The authority guest rest fixture target is ambiguous", 0) end
+                target = guest.pawn
+            end
+        end
+    elseif state.local_pawn.name == pawn_name then
+        target = state.local_pawn.pawn
+    end
+    local actor = world_actor("SavePoint_BP_C", bed_path, state.world, profile.actor_full_name, client)
+    if not exact(target, StaticFindObject(pawn_path)) or not same(target:GetWorld(), state.world)
+        or target:GetFullName() ~= pawn_name or not actor
+        or not valid(actor.Box) or not same(actor.Box:GetOwner(), actor) then
+        error("The exact stock guest rest interaction is unavailable", 0)
+    end
+    -- Use a faction bed in the staged denial probe. If its guard regresses,
+    -- a guest test cannot trigger the stock neutral Insomnia sleep branch.
+    if actor.Faction == 0 or actor.Faction ~= profile.faction then
+        error("The stock guest rest denial fixture requires a qualified faction bed", 0)
+    end
+    local stack = state.controller.MenuStack
+    if not stack or (host and (type(menu_guard) ~= "function" or not menu_guard(true))) then
+        error("The staged guest rest UI safety guard is unavailable", 0)
+    end
+    local function player_address()
+        return valid(actor.Player) and actor.Player:GetAddress() or 0
+    end
+    local accepted, failure = pcall(function()
+        local depth, owner = stack:GetArrayNum(), player_address()
+        actor:SendInteractionToActor(target, actor.Box)
+        local still_armed, decision, after = read_guard()
+        if not still_armed or decision ~= "guest_interaction_denied" or after ~= denials + 1
+            or depth ~= stack:GetArrayNum() or owner ~= player_address() then
+            error("The stock guest rest interaction reached native UI or lacked a denial receipt", 0)
+        end
+    end)
+    if host then menu_guard(false) end
+    if not accepted then error(failure, 0) end
+    return "verified stock guest rest interaction denial"
 end
 
 return rest

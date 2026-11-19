@@ -14,6 +14,8 @@ local slate_return_plane = -18785.228689655527
 local countdown_name = "Dream_CountDown_BP_C_1"
 local countdown_class = "Dream_CountDown_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
+local stock_code_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
+local stock_global_ping = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.FL_CodeLib01_C:GlobalPing"
 local profiles = {
     [exchange] = { level = "Exchange_01_P", multiplier = 1, startup = 3, fade = 3, early_power = true },
     [rook] = { level = "TheRook_P", multiplier = 2, startup = 3, fade = 3, early_power = true },
@@ -34,6 +36,7 @@ local stock_items = {
     stardust = { seconds = 90, reputation = 10 },
     ["fruiting-stardust"] = { seconds = 180, reputation = 20 },
 }
+local continuation = { [exchange] = rook, [rook] = pyroclast, [pyroclast] = slate, [slate] = black_ocean }
 local current
 
 local function valid(object)
@@ -206,25 +209,29 @@ local function read_flag(instance, flag)
     return out.Found, out.Value
 end
 
-local function selection(instance)
+local function selection(instance, source)
     for _, choice in ipairs(tarot_routes) do
         local found, value = read_flag(instance, choice.flag)
         if found and value >= 1 then
             return choice.destination, choice.flag
         end
     end
-    return exchange, ""
+    if source == black_ocean then return nil, "" end
+    return continuation[source] or exchange, ""
 end
 
 function dream.source(state, phase, kind)
     local _, instance = host_context(state, phase, state.map, true)
     local item = stock_items[kind]
-    if not item or not routes[state.map] or dream.supports(state.map) then
+    if not item or not routes[state.map] then
         error("Stardust requires a supported source and exact item kind", 0)
     end
     require_guard()
-    local destination, tarot = selection(instance)
+    local destination, tarot = selection(instance, state.map)
     local profile = profiles[destination]
+    if not profile or destination == state.map then
+        error("The stock Stardust continuation is not qualified for party travel", 0)
+    end
     return { source = state.map, destination = destination, tarot = tarot, kind = kind,
         arrival = routes[destination].player_start, visit_seconds = profile.fixed_seconds or item.seconds * profile.multiplier,
         startup_seconds = profile.startup, fade_seconds = profile.fade, return_plan = bed.source(state, phase) }
@@ -238,10 +245,14 @@ local function reputation(instance)
 end
 
 function dream.apply_effects(state, phase, kind, destination, tarot)
-    local _, instance = host_context(state, phase, state.map, true)
+    local host, instance = host_context(state, phase, state.map, true)
     local route = dream.source(state, phase, kind)
     if route.destination ~= destination or route.tarot ~= tarot then
         error("The stock Tarot selection changed after the Stardust use was committed", 0)
+    end
+    local code = StaticFindObject(stock_code_library)
+    if not valid(code) or not valid(StaticFindObject(stock_global_ping)) then
+        error("The stock Stardust teleport event is unavailable", 0)
     end
     local before = reputation(instance)
     if tarot ~= "" then
@@ -252,7 +263,14 @@ function dream.apply_effects(state, phase, kind, destination, tarot)
     instance:AddPlayerRep(3, stock_items[kind].reputation)
     local after = reputation(instance)
     if after <= before then error("The stock Stardust reputation award did not survive readback", 0) end
-    return { source = state.map, kind = kind, destination = destination, tarot = tarot, before = before, after = after }
+    -- This is the same live player and canonical world context used by stock TeleportToSquad.
+    code:GlobalPing("Player_Teleport", host.pawn, instance)
+    local current_host, current_instance = host_context(state, phase, state.map, true)
+    if not same(current_host.pawn, host.pawn) or not same(current_instance, instance) or reputation(instance) ~= after then
+        error("The stock Stardust teleport event changed its authoritative scope", 0)
+    end
+    return { source = state.map, kind = kind, destination = destination, tarot = tarot,
+        before = before, after = after, event = "Player_Teleport" }
 end
 
 function dream.prepare_duration(context, kind)

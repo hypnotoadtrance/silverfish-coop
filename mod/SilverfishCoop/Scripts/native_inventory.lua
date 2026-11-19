@@ -1,80 +1,49 @@
 local inventory = {}
-local vitals = require("vitals")
-
-local cpp_lab = os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
-local playtest_maps = {
-    ["/Game/Classes/Maps/PlaytestMap_01"] = true,
-    ["/Game/Classes/Maps/PlaytestMap_02"] = true,
-}
-local last_result
-
-local function valid(object)
-    return object ~= nil and object:IsValid()
-end
-
-local function same(first, second)
-    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
-end
-
-local function guest_in(state)
-    for _, details in ipairs(state.pawns) do
-        if details.kind == "guest" then return details.pawn end
-    end
-end
-
-local function active(state, phase)
-    return cpp_lab and phase == "hosting" and playtest_maps[state.map] and state.clients == 1
-        and state.local_pawn and valid(state.local_pawn.pawn)
-end
+local statics_path = "/Script/Engine.Default__GameplayStatics"
+local observation
+local page_size = 16
 
 function inventory.command(fields, state, phase)
-    if fields[2] ~= "native-inventory-probe" then return end
-    last_result = nil
-    if #fields ~= 2 or not active(state, phase) or vitals.active() then
-        error("Inventory proof requires an active C++ lab with stock pawn bindings", 0)
+    if fields[2] ~= "native-inventory-census" then return end
+    observation = nil
+    local slot, offset = fields[3], math.tointeger(tonumber(fields[4]))
+    if #fields ~= 4 or phase ~= "hosting" or not slot or #slot ~= 39 or not slot:match("^SFCoop_[0-9a-f]+$")
+        or not offset or offset < 0 or offset > 8194 or type(SilverfishReadNativeInventoryCensus) ~= "function" then
+        error("The stock inventory census requires a qualified isolated generation", 0)
     end
-    if type(SilverfishCopyNativeGuestSave) ~= "function" or type(SilverfishProbeNativeInventory) ~= "function" then
-        error("The compiled native inventory helpers are unavailable", 0)
+    local statics = StaticFindObject(statics_path)
+    local snapshot = statics and statics:IsValid() and statics:LoadGameFromSlot(slot, 0)
+    if not snapshot or not snapshot:IsValid() then error("The stock inventory census generation is unavailable", 0) end
+    local ok, status, source, total = SilverfishReadNativeInventoryCensus(snapshot:GetAddress())
+    if not ok or status ~= "complete" or type(source) ~= "string" or type(total) ~= "number"
+        or total < 0 or total > 8194 then
+        error("The stock inventory census could not read the exact generation (" .. tostring(status) .. ")", 0)
     end
-    local host, guest = state.local_pawn.pawn, guest_in(state)
-    if not valid(guest) or same(host, guest) or not host:HasAuthority() or not guest:HasAuthority() then
-        error("Two distinct authoritative pawns are required", 0)
-    end
-    local original = host.Save
-    if not same(original, guest.Save) then
-        error("The stock host and guest save bindings are unavailable", 0)
-    end
-    local ok, detail = pcall(function()
-        vitals.command({"native-inventory", "vitals-probe"}, state, phase)
-        local detached = guest.Save
-        if not valid(detached) or same(detached, original) or not same(host.Save, original) then
-            error("Could not verify independent receiver ownership", 0)
+    local rows, seen = {}, 0
+    for line in source:gmatch("[^\n]+") do
+        seen = seen + 1
+        if seen > offset and seen <= offset + page_size then
+            local fields = {}
+            for value in line:gmatch("[^\t]+") do fields[#fields + 1] = value end
+            if #fields ~= 8 then error("The stock inventory census row is incomplete", 0) end
+            rows[#rows + 1] = fields
         end
-        local copied, why = SilverfishCopyNativeGuestSave(original:GetAddress(), detached:GetAddress())
-        if not copied then error(tostring(why), 0) end
-        local verified, result = SilverfishProbeNativeInventory(original:GetAddress(), detached:GetAddress())
-        if not verified and result == "no_populated_native_item_with_guid"
-            and type(SilverfishProbeNativeInventoryFixture) == "function" then
-            verified, result = SilverfishProbeNativeInventoryFixture(original:GetAddress(), detached:GetAddress())
-        end
-        if not verified then error(tostring(result), 0) end
-        return result
-    end)
-    vitals.reset()
-    if not same(host.Save, original) or not same(guest.Save, original) then
-        error("The stock save binding could not be verified after the inventory probe", 0)
     end
-    if not ok then error(detail, 0) end
-    last_result = { guest = guest, detail = detail }
-    return "native inventory ownership verified and stock binding restored"
+    if seen ~= total then error("The stock inventory census row count did not verify", 0) end
+    observation = { slot = slot, total = total, offset = offset, rows = rows, map = state.map }
+    return "isolated stock inventory census verified"
+end
+
+function inventory.reset()
+    observation = nil
 end
 
 function inventory.rows(state, phase, status_row)
-    if active(state, phase) and last_result and same(guest_in(state), last_result.guest) then
-        return { status_row("native-inventory-canary", "copied", 1, last_result.detail) }
-    end
-    last_result = nil
-    return {}
+    local report = observation
+    if not report or phase ~= "hosting" or report.map ~= state.map then return {} end
+    local rows = {status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows)}
+    for _, row in ipairs(report.rows) do rows[#rows + 1] = status_row("native-inventory-census-item", table.unpack(row)) end
+    return rows
 end
 
 return inventory

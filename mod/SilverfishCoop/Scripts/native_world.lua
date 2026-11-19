@@ -42,6 +42,7 @@ local rule_fields = {
     { "can_save_in_menu", "CanSave_InMenu_11_62445BFB482BAF72F8AEECB71E78E918" },
     { "fail_contracts_on_death", "FailContracts_OnDeath_9_2B5C7A364BAB9B21A5358E8D6A55369F" },
     { "items_kept_on_death", "Items_KeptOnDeath_14_9602AB054254974168B43BB0C2924307" },
+    { "lose_slot_per_death", "LoseSlot_PerDeath_41_60DB8A134132D666D7FD9E9714F51A77" },
     { "randomize_loot", "Randomize_Loot_17_A163022E40E9CA62A6DCC1B791990083" },
     { "randomize_npcs", "Randomize_NPCs_19_3AF748864F3403D76A5428AA591EFA30" },
     { "drop_bone_pile", "Drop_BonePile_43_877E5A2C4F77E5E91CB0ED82EBC3738D" },

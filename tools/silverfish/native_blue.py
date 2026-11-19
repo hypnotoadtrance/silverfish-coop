@@ -1,14 +1,29 @@
 """Commit a Blue Cube use and the host's resolved stock rest destination."""
 
 from . import party
+from .authored_routes import MAPS as EXPANDED_MAPS
 from .native_gold import valid_guid
-from .travel import AUTHORED_MAPS, DEAD_BRIDGE, OBSERVATORY
+from .travel import AUTHORED_MAPS, BOROUGH, CITY, DEAD_BRIDGE, LAKE, OBSERVATORY, RUIN_FIELDS, SCAV_BAR
 
-BED_IDS = {DEAD_BRIDGE: "SavePoint_BP_C_1-DeadBridge_P-", OBSERVATORY: "SavePoint_BP_C_3-Observitory_P-"}
+
+_BED_SOURCES = AUTHORED_MAPS | EXPANDED_MAPS
+BED_IDS = {
+    BOROUGH: "SavePoint_BP_C_1-Borough-",
+    CITY: "SavePoint_BP_C_1-City_01_P-",
+    DEAD_BRIDGE: "SavePoint_BP_C_1-DeadBridge_P-",
+    LAKE: "SavePoint_BP_C_1-Lake_01_P-",
+    OBSERVATORY: "SavePoint_BP_C_3-Observitory_P-",
+    RUIN_FIELDS: "SavePoint_BP_C_1-RuinFeilds_P-",
+    SCAV_BAR: "SavePoint_BP_C_1-Shop_ScavBar_P-",
+    "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P": "SavePoint_BP_C_1-DeadEnd_01_P-",
+    "/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P": "SavePoint_BP_C_1-SouthEast_Road_P-",
+    "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P": "SavePoint_BP_C_1-StoneMaze_P-",
+    "/Game/Classes/Maps/Maps_SafeZones/ArtifactForge_P": "SavePoint_BP_C_1-ArtifactForge_P-",
+}
 
 
 def valid_rest(source: str, destination: str, bed: str) -> bool:
-    if (not isinstance(source, str) or source not in AUTHORED_MAPS
+    if (not isinstance(source, str) or source not in _BED_SOURCES
             or not isinstance(destination, str) or destination not in BED_IDS or not isinstance(bed, str)):
         return False
     if not bed:

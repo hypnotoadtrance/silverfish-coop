@@ -7,7 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <ranges>
 #include <string_view>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -28,9 +30,13 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto weapon_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
+    constexpr auto ammo_fixture_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
+    constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
+    constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
     constexpr auto projectile_path =
         STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto primary_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:Use_Item_Primary");
+    constexpr auto update_mag_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:Update_Mag");
     constexpr auto equip_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Equip_NextItem");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
@@ -38,6 +44,8 @@ namespace
     constexpr auto guid_path = STR("/Script/CoreUObject.Guid");
     constexpr auto class_name = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
     constexpr auto ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
+    constexpr auto weight_name = STR("Weight_12_11AB9ED547504E78A849A692A36DC938");
+    constexpr auto value_name = STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9");
     constexpr auto guid_name = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr std::int32_t magazine_fixture = 7;
@@ -129,6 +137,15 @@ namespace
         if (projectiles < 0) return 4;
         lua.set_integer(projectiles);
         return 5;
+    }
+
+    int reload_proof(const Lua& lua, bool ok, std::string_view status, std::int32_t before = -1, std::int32_t after = -1,
+                     std::int32_t reserve_before = -1, std::int32_t reserve_after = -1)
+    {
+        proof(lua, ok, status, before, after);
+        lua.set_integer(reserve_before);
+        lua.set_integer(reserve_after);
+        return 6;
     }
 
     struct Context
@@ -236,6 +253,8 @@ namespace
         Unreal::FArrayProperty* backpack{};
         Unreal::FArrayProperty* equipment{};
         Unreal::FStructProperty* type{};
+        Unreal::FStructProperty* armor{};
+        Unreal::FStructProperty* helmet{};
         Unreal::FClassProperty* item_class{};
         Unreal::FIntProperty* ammo{};
         Unreal::FIntProperty* selected{};
@@ -267,24 +286,25 @@ namespace
         }
     };
 
-    std::string_view locate(const Context& context, Inventory& inventory)
+    std::string_view locate(const Context& context, Inventory& inventory, Unreal::UClass* expected_class = nullptr)
     {
+        if (!expected_class) expected_class = context.weapon;
         inventory.backpack = field<Unreal::FArrayProperty>(context.save, STR("PlayerBackpack"));
         inventory.equipment = field<Unreal::FArrayProperty>(context.save, STR("PlayerEquipment"));
         inventory.type = inventory.backpack ? Unreal::CastField<Unreal::FStructProperty>(inventory.backpack->GetInner()) : nullptr;
         auto* equipment_row = inventory.equipment ?
             Unreal::CastField<Unreal::FStructProperty>(inventory.equipment->GetInner()) : nullptr;
-        auto* armor = field<Unreal::FStructProperty>(context.save, STR("PlayerArmor"));
-        auto* helmet = field<Unreal::FStructProperty>(context.save, STR("PlayerHelmet"));
+        inventory.armor = field<Unreal::FStructProperty>(context.save, STR("PlayerArmor"));
+        inventory.helmet = field<Unreal::FStructProperty>(context.save, STR("PlayerHelmet"));
         auto* row_type = find<Unreal::UScriptStruct>(item_path);
         auto* guid_type = find<Unreal::UScriptStruct>(guid_path);
         inventory.item_class = field<Unreal::FClassProperty>(row_type, class_name);
         inventory.ammo = field<Unreal::FIntProperty>(row_type, ammo_name);
         inventory.guid = field<Unreal::FStructProperty>(row_type, guid_name);
         inventory.selected = field<Unreal::FIntProperty>(context.save, STR("PlayerEquipIndex"));
-        if (!row_type || !inventory.type || !equipment_row || !armor || !helmet ||
+        if (!row_type || !inventory.type || !equipment_row || !inventory.armor || !inventory.helmet ||
             inventory.type->GetStruct().Get() != row_type || equipment_row->GetStruct().Get() != row_type ||
-            armor->GetStruct().Get() != row_type || helmet->GetStruct().Get() != row_type ||
+            inventory.armor->GetStruct().Get() != row_type || inventory.helmet->GetStruct().Get() != row_type ||
             !inventory.item_class || !inventory.ammo || !inventory.selected || !inventory.guid ||
             !guid_type || inventory.guid->GetStruct().Get() != guid_type) return "guest_weapon_inventory_schema_unavailable";
         for (std::size_t index = 0; index < inventory.words.size(); ++index)
@@ -292,8 +312,9 @@ namespace
             inventory.words[index] = field<Unreal::FIntProperty>(guid_type, guid_names[index]);
             if (!inventory.words[index]) return "guest_weapon_guid_schema_unavailable";
         }
-        if (inventory.identity(armor->ContainerPtrToValuePtr<void>(context.save)) == context.guid ||
-            inventory.identity(helmet->ContainerPtrToValuePtr<void>(context.save)) == context.guid) return "guest_weapon_guid_conflict";
+        if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(context.save)) == context.guid ||
+            inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(context.save)) == context.guid)
+            return "guest_weapon_guid_conflict";
 
         const auto scan = [&](Unreal::FArrayProperty* property, int& index) {
             Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(context.save));
@@ -302,7 +323,7 @@ namespace
             {
                 auto* row = rows.GetRawPtr(i);
                 if (inventory.identity(row) != context.guid) continue;
-                if (inventory.item || inventory.row_class(row) != context.weapon) return false;
+                if (inventory.item || inventory.row_class(row) != expected_class) return false;
                 inventory.item = row;
                 index = i;
             }
@@ -334,18 +355,78 @@ namespace
             boolean(actor, STR("HeldByPlayer"), true) ? actor : nullptr;
     }
 
-    enum class Operation { Seed, Equip, Inspect, Fire, Disarm };
+    enum class Operation { Seed, SeedAmmo, Equip, Inspect, Fire, Disarm, Reload };
 
-    int seed(const Lua& lua, const Context& context, const Inventory& inventory)
+    struct AmmoStackSchema
     {
-        if (inventory.item) return result(lua, true, "present");
-        auto* source = context.weapon->GetClassDefaultObject().Get();
-        auto* magazine = field<Unreal::FIntProperty>(source, STR("MagSize"));
+        Unreal::FIntProperty* value{};
+        Unreal::FDoubleProperty* weight{};
+        std::int32_t unit_value{};
+        double unit_weight{};
+
+        bool read(Unreal::UClass* item_class, const Inventory& inventory)
+        {
+            auto* base = find<Unreal::UClass>(ammo_master_path);
+            if (!base || !item_class || !item_class->IsChildOf(base)) return false;
+            auto* defaults = item_class->GetClassDefaultObject().Get();
+            auto* base_value = field<Unreal::FIntProperty>(defaults, STR("Value"));
+            auto* base_weight = field<Unreal::FDoubleProperty>(defaults, STR("Weight"));
+            auto* row_type = inventory.type->GetStruct().Get();
+            value = field<Unreal::FIntProperty>(row_type, value_name);
+            weight = field<Unreal::FDoubleProperty>(row_type, weight_name);
+            if (!defaults || defaults->GetClassPrivate() != item_class ||
+                !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), true) ||
+                !base_value || !base_weight || !value || !weight) return false;
+            unit_value = base_value->GetPropertyValueInContainer(defaults);
+            unit_weight = base_weight->GetPropertyValueInContainer(defaults);
+            return unit_value >= 0 && std::isfinite(unit_weight) && unit_weight >= 0.0;
+        }
+
+        bool qualifies(std::int32_t units) const
+        {
+            return units >= 0 && (unit_value == 0 || units <= INT32_MAX / unit_value) &&
+                std::isfinite(units * unit_weight);
+        }
+
+        void set_totals(void* row, std::int32_t units) const
+        {
+            // Stock FL_Items.StackItem_Stats recomputes both totals from the ammo CDO.
+            value->SetPropertyValueInContainer(row, units * unit_value);
+            weight->SetPropertyValueInContainer(row, units * unit_weight);
+        }
+
+        bool totals_match(const void* row, std::int32_t units) const
+        {
+            return value->GetPropertyValueInContainer(row) == units * unit_value &&
+                weight->GetPropertyValueInContainer(row) == units * unit_weight;
+        }
+    };
+
+    int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class, bool ammo_fixture)
+    {
+        if (inventory.item && !ammo_fixture) return result(lua, true, "present");
+        auto* source = item_class->GetClassDefaultObject().Get();
+        auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture ? STR("Ammo") : STR("MagSize"));
+        const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
+        constexpr auto ammo_fixture_size = 9;
+        const auto units = ammo_fixture ? ammo_fixture_size : magazine_fixture;
+        if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
+            (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) : capacity < units))
+            return result(lua, false, "stock_guest_weapon_seed_schema_unavailable");
+        AmmoStackSchema stack;
+        if (ammo_fixture && (!stack.read(item_class, inventory) || !stack.qualifies(units)))
+            return result(lua, false, "stock_guest_ammo_seed_schema_unavailable");
+        if (inventory.item)
+        {
+            const bool present = inventory.backpack_index >= 0 &&
+                inventory.ammo->GetPropertyValueInContainer(inventory.item) == units &&
+                stack.totals_match(inventory.item, units);
+            return result(lua, present, present ? "present" : "guest_ammo_fixture_guid_conflict");
+        }
         auto* library = find<Unreal::UObject>(library_path);
         auto* converter = find<Unreal::UFunction>(converter_path);
         constexpr std::size_t buffer_size = 256;
-        if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !magazine ||
-            magazine->GetPropertyValueInContainer(source) < magazine_fixture || !library || !converter ||
+        if (!library || !converter ||
             library->GetClassPrivate() != converter->GetOuterPrivate() || converter->GetNumParms() != 3 ||
             converter->GetParmsSize() > buffer_size) return result(lua, false, "stock_guest_weapon_seed_schema_unavailable");
 
@@ -366,20 +447,23 @@ namespace
         world->SetObjectPropertyValue(world->ContainerPtrToValuePtr<void>(storage), context.pawn);
         library->ProcessEvent(converter, storage);
         auto* generated = out->ContainerPtrToValuePtr<void>(storage);
-        const bool valid = ownership_current(context) && inventory.row_class(generated) == context.weapon &&
-                           inventory.identity(generated) != Guid{};
+        const bool valid = ownership_current(context) && inventory.row_class(generated) == item_class &&
+            inventory.identity(generated) != Guid{} &&
+            (!ammo_fixture || inventory.ammo->GetPropertyValueInContainer(generated) == units);
         if (valid)
         {
             inventory.set_identity(generated, context.guid);
-            inventory.ammo->SetPropertyValueInContainer(generated, magazine_fixture);
+            inventory.ammo->SetPropertyValueInContainer(generated, units);
+            if (ammo_fixture) stack.set_totals(generated, units);
             inventory.type->CopyCompleteValue(backpack.GetRawPtr(backpack.AddValue()), generated);
         }
         out->DestroyValue_InContainer(storage);
         if (!valid) return result(lua, false, "stock_guest_weapon_conversion_unverified");
 
         Inventory after;
-        const bool proof = locate(context, after).empty() && after.backpack_index >= 0 &&
-                           after.ammo->GetPropertyValueInContainer(after.item) == magazine_fixture;
+        const bool proof = locate(context, after, item_class).empty() && after.backpack_index >= 0 &&
+            after.ammo->GetPropertyValueInContainer(after.item) == units &&
+            (!ammo_fixture || stack.totals_match(after.item, units));
         return result(lua, proof, proof ? "seeded" : "mutation_unverified_guest_weapon_seed");
     }
 
@@ -587,28 +671,173 @@ namespace
             : report(false, "mutation_unverified_guest_weapon_ammo_commit", before, remaining, 1);
     }
 
+    struct ReserveStack
+    {
+        Guid guid{};
+        int index{};
+        std::int32_t units{};
+        std::int32_t debit{};
+    };
+
+    bool snapshot_reserve(const Context& context, const Inventory& inventory, Unreal::UClass* ammo_class,
+                          std::vector<ReserveStack>& stacks, std::int32_t& total)
+    {
+        Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
+        Unreal::FScriptArrayHelper equipment(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        if (backpack.Num() > max_inventory || equipment.Num() > max_inventory) return false;
+        std::vector<Guid> identities;
+        identities.reserve(static_cast<std::size_t>(backpack.Num() + equipment.Num() + 2));
+        for (int index = 0; index < backpack.Num(); ++index)
+        {
+            const auto* row = backpack.GetRawPtr(index);
+            const auto guid = inventory.identity(row);
+            identities.push_back(guid);
+            if (inventory.row_class(row) != ammo_class) continue;
+            const auto units = inventory.ammo->GetPropertyValueInContainer(row);
+            if (guid == Guid{} || units <= 0 || units > INT32_MAX - total) return false;
+            stacks.push_back({guid, index, units});
+            total += units;
+        }
+        for (int index = 0; index < equipment.Num(); ++index)
+            identities.push_back(inventory.identity(equipment.GetRawPtr(index)));
+        identities.push_back(inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(context.save)));
+        identities.push_back(inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(context.save)));
+        std::ranges::sort(identities);
+        return std::ranges::all_of(stacks, [&](const ReserveStack& stack) {
+            const auto [first, last] = std::ranges::equal_range(identities, stack.guid);
+            return last - first == 1;
+        });
+    }
+
+    int reload(const Lua& lua, const Context& context, const Inventory& inventory)
+    {
+        auto* actor = equipped(context, inventory);
+        if (!actor) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
+        if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
+            !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
+            !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
+            !boolean(actor, STR("SingleReload"), false) || !boolean(actor, STR("UseEatherAsAmmo"), false))
+            return reload_proof(lua, false, "guest_weapon_reload_ineligible");
+
+        auto* rounds = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+        auto* capacity = field<Unreal::FIntProperty>(actor, STR("MagSize"));
+        auto* current_ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
+        auto* ammo_type = current_ammo ? current_ammo->GetStruct().Get() : nullptr;
+        auto* reserve_type = field<Unreal::FClassProperty>(ammo_type, STR("Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"));
+        auto* update = find<Unreal::UFunction>(update_mag_path);
+        const Unreal::FName update_name{STR("Update_Mag")};
+        if (!rounds || !capacity || !ammo_type || ammo_type != find<Unreal::UScriptStruct>(ammo_type_path) ||
+            !reserve_type || !update || actor->GetFunctionByNameInChain(update_name) != update ||
+            update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty())
+            return reload_proof(lua, false, "stock_guest_weapon_reload_schema_unavailable");
+
+        auto* ammo_data = current_ammo->ContainerPtrToValuePtr<void>(actor);
+        auto* ammo_class = static_cast<Unreal::UClass*>(
+            reserve_type->GetObjectPropertyValue(reserve_type->ContainerPtrToValuePtr<void>(ammo_data)));
+        AmmoStackSchema stack_schema;
+        if (!stack_schema.read(ammo_class, inventory))
+            return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
+
+        const auto before = rounds->GetPropertyValueInContainer(actor);
+        const auto cap = capacity->GetPropertyValueInContainer(actor);
+        if (cap <= 0 || before < 0 || before > cap || before != inventory.ammo->GetPropertyValueInContainer(inventory.item))
+            return reload_proof(lua, false, "guest_weapon_magazine_unqualified", before, before);
+
+        std::int32_t reserve_before{};
+        std::vector<ReserveStack> stacks;
+        if (!snapshot_reserve(context, inventory, ammo_class, stacks, reserve_before))
+            return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
+        if (before == cap)
+            return reload_proof(lua, false, "magazine_full", before, before, reserve_before, reserve_before);
+        if (reserve_before == 0)
+            return reload_proof(lua, false, "no_matching_guest_ammo", before, before, 0, 0);
+
+        const auto transferred = std::min(cap - before, reserve_before);
+        auto needed = transferred;
+        for (auto& stack : stacks)
+        {
+            stack.debit = std::min(needed, stack.units);
+            needed -= stack.debit;
+            if (stack.debit > 0 && !stack_schema.qualifies(stack.units - stack.debit))
+                return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before, reserve_before, reserve_before);
+        }
+        if (needed != 0 || !ownership_current(context))
+            return reload_proof(lua, false, "guest_weapon_reload_precondition_changed", before, before, reserve_before, reserve_before);
+
+        // Publish the detached reserve and magazine in one game-thread turn before any stock callback.
+        const auto refilled = before + transferred;
+        Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(context.save));
+        for (auto it = stacks.rbegin(); it != stacks.rend(); ++it)
+        {
+            if (it->debit == 0) continue;
+            const auto remaining = it->units - it->debit;
+            if (remaining == 0)
+            {
+                backpack.RemoveValues(it->index, 1);
+                continue;
+            }
+            auto* row = backpack.GetRawPtr(it->index);
+            inventory.ammo->SetPropertyValueInContainer(row, remaining);
+            stack_schema.set_totals(row, remaining);
+        }
+        inventory.ammo->SetPropertyValueInContainer(inventory.item, refilled);
+        rounds->SetPropertyValueInContainer(actor, refilled);
+        const Unreal::FWeakObjectPtr held_actor{actor};
+        actor->ProcessEvent(update, nullptr);
+
+        Inventory after;
+        if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, after).empty() ||
+            equipped(context, after) != actor)
+            return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_owner", before, -1, reserve_before);
+
+        const auto observed = rounds->GetPropertyValueInContainer(actor);
+        std::int32_t reserve_after{};
+        std::vector<ReserveStack> remaining_stacks;
+        if (observed != refilled || after.ammo->GetPropertyValueInContainer(after.item) != observed ||
+            !snapshot_reserve(context, after, ammo_class, remaining_stacks, reserve_after) ||
+            reserve_after != reserve_before - transferred)
+            return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_commit", before, observed, reserve_before);
+
+        auto surviving = stacks | std::views::filter([](const ReserveStack& stack) { return stack.units != stack.debit; });
+        const bool proven = std::ranges::equal(surviving, remaining_stacks,
+            [&](const ReserveStack& expected, const ReserveStack& actual) {
+                return expected.guid == actual.guid && expected.units - expected.debit == actual.units &&
+                    (expected.debit == 0 || stack_schema.totals_match(backpack.GetRawPtr(actual.index), actual.units));
+            });
+        return reload_proof(lua, proven, proven ? "reloaded" : "mutation_unverified_guest_weapon_reload_stacks",
+                            before, observed, reserve_before, reserve_after);
+    }
+
     template <Operation operation>
     int run(const Lua& lua)
     {
         constexpr bool reports_ammo = operation == Operation::Inspect || operation == Operation::Fire ||
                                       operation == Operation::Disarm;
         const auto fail = [&](std::string_view error) {
+            if constexpr (operation == Operation::Reload) return reload_proof(lua, false, error);
             return reports_ammo ? proof(lua, false, error, -1, -1, operation == Operation::Fire ? 0 : -1)
                                 : result(lua, false, error);
         };
         Context context;
         if (const auto error = resolve(lua, context); !error.empty()) return fail(error);
-        Inventory inventory;
-        if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
-        if constexpr (operation == Operation::Seed)
+        auto* expected_class = context.weapon;
+        if constexpr (operation == Operation::SeedAmmo)
         {
-            return seed(lua, context, inventory);
+            expected_class = find<Unreal::UClass>(ammo_fixture_path);
+            if (!expected_class) return fail("stock_guest_ammo_fixture_class_unavailable");
+        }
+        Inventory inventory;
+        if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
+        if constexpr (operation == Operation::Seed || operation == Operation::SeedAmmo)
+        {
+            return seed(lua, context, inventory, expected_class, operation == Operation::SeedAmmo);
         }
         else
         {
             if (!inventory.item) return fail("owned_guest_weapon_guid_required");
             if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
             if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
+            if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
             return fire(lua, context, inventory, operation == Operation::Disarm);
         }
     }
@@ -618,8 +847,10 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return;
     lua.register_function("SilverfishSeedNativeGuestWeapon", run<Operation::Seed>);
+    lua.register_function("SilverfishSeedNativeGuestAmmo", run<Operation::SeedAmmo>);
     lua.register_function("SilverfishEquipNativeGuestWeapon", run<Operation::Equip>);
     lua.register_function("SilverfishInspectNativeGuestWeapon", run<Operation::Inspect>);
     lua.register_function("SilverfishFireNativeGuestWeapon", run<Operation::Fire>);
     lua.register_function("SilverfishDisarmNativeGuestWeapon", run<Operation::Disarm>);
+    lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
 }

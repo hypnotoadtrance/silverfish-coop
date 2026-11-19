@@ -1,11 +1,12 @@
 """Persist a stock destination draw before debiting its exact consumable GUID."""
 
 from . import party
+from .authored_routes import MAPS as EXPANDED_MAPS
 from .native_gold import valid_guid
 from .travel import AUTHORED_MAPS, DREAM_MAPS
 
 
-SOURCES = AUTHORED_MAPS - DREAM_MAPS
+SOURCES = (AUTHORED_MAPS | EXPANDED_MAPS) - DREAM_MAPS
 
 
 class CubeDraw:

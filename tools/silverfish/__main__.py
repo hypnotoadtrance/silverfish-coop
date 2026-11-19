@@ -82,6 +82,7 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--headless", action="store_true")
     join.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     join.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
+    join.add_argument("--native-guest-reload-input", action="store_true", help="route stock reload input to the staged host")
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
@@ -112,16 +113,24 @@ def parser() -> argparse.ArgumentParser:
         "native-stardust-seed", "native-stardust-inspect", "native-stardust-use-probe", "native-dream-power-fixture",
         "native-fruiting-stardust-seed", "native-fruiting-stardust-inspect", "native-fruiting-stardust-use-probe",
         "native-dream-tarot-fixture",
+        "native-dream-stone-position", "native-dream-stone-fixture",
         "native-pickup-spawn", "native-pickup", "native-quest-start", "native-quest-objective", "native-quest-turnin",
         "native-quest-catalog", "native-broker-issue-fixture", "native-broker-position-fixture",
         "native-broker-grant-manifest",
         "native-weapon-roundtrip",
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
-        "native-rest-inspect", "native-rest", "native-rest-approach",
+        "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
+        "native-guest-reload-input-fixture",
+        "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture",
+        "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
+        "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
+        "native-loot-claim",
+        "native-inventory-list",
+        "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy",
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
         "native-fall-position", "native-fall-return",
-        "native-door-position", "native-door-probe",
+        "native-door-position", "native-door-probe", "native-cistern-keypad",
         "native-transport-probe",
         "native-matrix-inspect", "native-matrix-seed", "native-matrix-equip", "native-matrix-fuel", "native-matrix-probe",
     ])
@@ -172,7 +181,7 @@ async def execute(opts):
         from .service import join_game
         await join_game(opts.work, select_run(opts.work, "clients", opts.profile),
                         opts.invite, opts.headless, opts.character, native_zones=opts.native_zones,
-                        native_zone_walls=opts.native_zone_walls)
+                        native_zone_walls=opts.native_zone_walls, guest_reload_input=opts.native_guest_reload_input)
         return {"ok": True, "state": "stopped"}
     if operation in {"characters", "create-character"}:
         from .service import character_catalog

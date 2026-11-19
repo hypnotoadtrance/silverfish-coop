@@ -25,7 +25,6 @@ local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
 local menu_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local gold_path = "/Game/Classes/Items/Artifacts/Art_Tesseract_Gold.Art_Tesseract_Gold_C"
-local gold_source = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local gold_entries = { action_use = true, quick_move = true, use_held_item = true }
 local gold_actions = {
     ["native-gold-inspect"] = "inspect",
@@ -248,7 +247,7 @@ end
 
 function transport.authorize_gold_travel(guid, state, phase)
     local host = host_snapshot(state, phase)
-    if not enabled or not scoped or not heartbeat_fresh() or not host or state.map ~= gold_source
+    if not enabled or not scoped or not heartbeat_fresh() or not host
         or not exact_guid(guid) or not last_gold or last_gold.action ~= "debit" or last_gold.guid ~= guid
         or last_gold.map ~= state.map or last_gold.pawn ~= host.name then
         return false

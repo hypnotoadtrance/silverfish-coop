@@ -6,13 +6,14 @@ import re
 from dataclasses import dataclass
 
 from . import party
+from .authored_routes import MAPS as EXPANDED_MAPS
 from .native_gold import valid_guid
 from .travel import AUTHORED_MAPS, DREAM_MAPS
 
 
 STATE_KEY = "matrix_transport"
 NOMINAL_COST = 100
-MAPS = frozenset(AUTHORED_MAPS - DREAM_MAPS)
+MAPS = (AUTHORED_MAPS | EXPANDED_MAPS) - DREAM_MAPS
 MAX_POSITION = 100_000_000
 MAX_ROTATION = 360
 MAX_INT32 = 2_147_483_647

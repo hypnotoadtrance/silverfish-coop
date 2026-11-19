@@ -473,7 +473,7 @@ class CampaignStore:
             self._expire_leases(self._clock())
             self._drop_lease(self._get_lease(lease_id))
 
-    def _checkpoint(self, world, character_states):
+    def _checkpoint(self, world, character_states, unleased_states=None):
         self._require_open()
         _validate_state(world)
         if type(character_states) is not dict:
@@ -481,16 +481,25 @@ class CampaignStore:
         self._expire_leases(self._clock())
         candidate = copy.deepcopy(self._data)
         candidate["world"] = copy.deepcopy(world)
+        if unleased_states:
+            if type(unleased_states) is not dict:
+                raise CampaignFormatError("Unleased character snapshots must be keyed by character ID.")
+            leased = {lease.character_id for lease in self._lease_by_id.values()}
+            for character_id, state in unleased_states.items():
+                if character_id in leased or character_id not in candidate["characters"]:
+                    raise LeaseError("The character is leased or no longer exists.")
+                _validate_state(state)
+                candidate["characters"][character_id]["state"] = copy.deepcopy(state)
         for lease_id, state in character_states.items():
             lease = self._get_lease(lease_id)
             _validate_state(state)
             candidate["characters"][lease.character_id]["state"] = copy.deepcopy(state)
         return self._commit(candidate)
 
-    def checkpoint(self, world, character_states):
-        """Save world state and leased character snapshots in a single revision."""
+    def checkpoint(self, world, character_states, *, unleased_states=None):
+        """Save a campaign and its exact character snapshots in one revision."""
         with self._mutex:
-            return self._checkpoint(world, character_states)
+            return self._checkpoint(world, character_states, unleased_states)
 
     def save_character(self, lease_id, state):
         """Save a connected or grace-reserved character and return the revision."""

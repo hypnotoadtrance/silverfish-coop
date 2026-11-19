@@ -14,6 +14,7 @@ return {
     "/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P",
     "/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P",
     "/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P",
+    "/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P",
     "/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P",
     "/Game/Classes/Maps/Maps_Dungeons/Subway_01_P",
     "/Game/Classes/Maps/Maps_Dungeons/TheThroat_P",
@@ -50,6 +51,7 @@ return {
     "/Game/Classes/Maps/Maps_SafeZones/Shop_Craftsman_01",
     "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
     "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
+    "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
     "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P",
     "/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P",
 }

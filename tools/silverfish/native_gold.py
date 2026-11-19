@@ -4,9 +4,11 @@ from dataclasses import dataclass
 import re
 
 from . import party
-from .travel import CROSSROADS, GOLD_NEXUS
+from .authored_routes import MAPS as EXPANDED_MAPS
+from .travel import AUTHORED_MAPS, CROSSROADS, DREAM_MAPS, GOLD_NEXUS
 
 ARRIVAL = "PlayerStart_1"
+SOURCES = (AUTHORED_MAPS | EXPANDED_MAPS) - DREAM_MAPS - {GOLD_NEXUS}
 INVENTORY_ENTRIES = frozenset({"action_use", "quick_move", "use_held_item"})
 _GUID = re.compile(r"[0-9A-F]{32}\Z")
 
@@ -36,23 +38,26 @@ def ledger(state: dict) -> dict:
     if (pending is None and committed) or (pending is not None and (
         type(pending) is not dict or set(pending) != {"guid", "source", "destination", "entrance"}
         or not valid_guid(pending["guid"]) or committed != [pending["guid"]]
-        or pending["source"] != CROSSROADS or pending["destination"] != GOLD_NEXUS or pending["entrance"] != ARRIVAL
+        or not isinstance(pending["source"], str) or pending["source"] not in SOURCES
+        or pending["destination"] != GOLD_NEXUS or pending["entrance"] != ARRIVAL
     )):
         raise ValueError("Invalid pending Golden Cube travel")
     return value
 
 
-def begin(state: dict, guid: str) -> dict:
+def begin(state: dict, guid: str, source: str = CROSSROADS) -> dict:
     current = ledger(state)
     if not valid_guid(guid):
         raise ValueError("Invalid Golden Cube GUID")
+    if not isinstance(source, str) or source not in SOURCES:
+        raise ValueError("Invalid Golden Cube source")
     if guid in current["spent"]:
         raise ValueError("gold_already_spent")
     if current["pending"]:
         raise ValueError("gold_travel_pending")
     candidate = party.load_party(state)
     updated = candidate.setdefault("gold_transport", {"pending": None, "spent": {}})
-    updated["pending"] = {"guid": guid, "source": CROSSROADS, "destination": GOLD_NEXUS, "entrance": ARRIVAL}
+    updated["pending"] = {"guid": guid, "source": source, "destination": GOLD_NEXUS, "entrance": ARRIVAL}
     updated["spent"][guid] = "committed"
     return candidate
 

@@ -4,6 +4,8 @@ local routes = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
+local fixture_mode = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local expanded_fixtures = expanded and fixture_mode and require("authored_wall_routes") or {}
 local event_path
 local expanded_event_path
 local heartbeat_path
@@ -302,31 +304,91 @@ local function probe_player(state, selector)
     return match
 end
 
+local function place_at_named_door(state, pawn, door, direction, rotation, distance)
+    local marker = valid(door.LevelExit_Spawn_BP) and door.LevelExit_Spawn_BP.ChildActor
+    local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not valid(marker) or not valid(marker.Arrow) or not same(marker:GetWorld(), state.world)
+        or not same(marker:GetParentComponent(), door.LevelExit_Spawn_BP)
+        or not valid(library) or not valid(pawn.CapsuleComponent) then
+        error("The named door has no qualified stock staging geometry", 0)
+    end
+    local anchor, origin = marker.Arrow:K2_GetComponentLocation(), door:K2_GetActorLocation()
+    local extents = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    local color = { R = 0, G = 0, B = 0, A = 1 }
+    local ignore = { door }
+    for _, details in ipairs(state.pawns) do
+        if valid(details.pawn) then ignore[#ignore + 1] = details.pawn end
+    end
+    local lateral_x, lateral_y = -direction.Y, direction.X
+    for _, length in ipairs(distance > 1000 and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
+        for _, offset in ipairs({ 0, 90, -90 }) do
+            local x = origin.X + length * direction.X + offset * lateral_x
+            local y = origin.Y + length * direction.Y + offset * lateral_y
+            local hit = {}
+            local top, bottom = math.max(anchor.Z, origin.Z) + 185, math.min(anchor.Z, origin.Z) - 325
+            local found = library:LineTraceSingle(pawn, { X = x, Y = y, Z = top }, { X = x, Y = y, Z = bottom },
+                0, false, ignore, 0, hit, true, color, color, 0)
+            local impact = hit.OutHit or hit
+            if found == true and impact.ImpactPoint and impact.ImpactNormal and impact.ImpactNormal.Z >= .7
+                and impact.ImpactPoint.Z < top - 1 and impact.ImpactPoint.Z >= bottom then
+                local z = impact.ImpactPoint.Z + extents + 2
+                if (distance > 1000 or (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2 <= 320^2)
+                    and pawn:K2_TeleportTo({ X = x, Y = y, Z = z }, rotation) then
+                    pawn:ForceNetUpdate()
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function door_command(fields, state, phase, command)
     local route = routes[state.map]
     local slot = fields[3]
-    if not enabled or phase ~= "hosting" or armed ~= state.map or status ~= "ready" or not route or not route.door then
+    local positioning = command == "native-door-position"
+    local basic_count = positioning and 4 or 3
+    local tag = fields[basic_count + 1]
+    local spec = route and route.door
+    local actor = spec and spec.fixture
+    if tag then
+        actor = nil
+        for _, configured in ipairs(expanded_fixtures[state.map] or {}) do
+            if configured.entrance == tag and configured.kind == "door" then
+                if actor then error("The staged entrance selects multiple doors", 0) end
+                actor = configured.actor
+            end
+        end
+        if not actor and spec and spec.entrance == tag then actor = spec.fixture end
+    end
+    if not enabled or not fixture_mode or phase ~= "hosting" or armed ~= state.map or status ~= "ready"
+        or not actor or #fields ~= (tag and basic_count + 1 or basic_count) then
         error("A qualified authored transition door and authoritative pawn are required", 0)
     end
     local pawn = probe_player(state, slot).pawn
-    local door = valid(pawn) and placed_actor("Dungeon_TransitionDoor_BP_C", route.door.fixture, pawn:GetWorld())
+    local door = valid(pawn) and placed_actor("Dungeon_TransitionDoor_BP_C", actor, pawn:GetWorld())
     if not valid(door) or not valid(door.Box) then error("The authored transition door is unavailable", 0) end
 
-    if command == "native-door-probe" then
-        if #fields ~= 3 then error("Expected native-door-probe local|guest", 0) end
+    if not positioning then
         door:SendInteractionToActor(pawn, door.Box)
         handle_door_event()
         return "native door " .. door_decision
     end
 
     local position = fields[4]
-    if #fields ~= 4 or (position ~= "near" and position ~= "far") then
+    if position ~= "near" and position ~= "far" then
         error("Expected native-door-position local|guest near|far", 0)
     end
     local origin = door:K2_GetActorLocation()
     local direction = door:GetActorForwardVector()
     local rotation = pawn:K2_GetActorRotation()
     local distance = position == "near" and 180 or 2250
+    if tag then
+        if place_at_named_door(state, pawn, door, direction, rotation, distance) then
+            return "positioned " .. slot .. " " .. position .. " the exact authored door"
+        end
+        error("No verified stock floor near the named transition door", 0)
+    end
     for _, sign in ipairs({-1, 1}) do
         local destination = { X = origin.X + sign * distance * direction.X,
             Y = origin.Y + sign * distance * direction.Y, Z = origin.Z + 100 }
@@ -338,9 +400,41 @@ local function door_command(fields, state, phase, command)
     error("No safe pawn location near the authored door", 0)
 end
 
+local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
+local keypad_proof
+
+local function cistern_keypad(fields, state, phase)
+    keypad_proof = nil
+    local key = math.tointeger(tonumber(fields[3]))
+    if not enabled or not expanded or not fixture_mode or phase ~= "hosting" or state.map ~= cistern
+        or armed ~= cistern or #fields ~= 3 or not key or key < 0 or key > 11 then
+        error("The staged Cistern keypad requires one stock key index", 0)
+    end
+    local pawn = probe_player(state, "local").pawn
+    local keypad = placed_actor("KeyCode_Lock_BP_C", "KeyCode_Lock_BP_C_2", state.world)
+    local door = placed_actor("Dungeon_TransitionDoor_BP_C", "Dungeon_TransitionDoor_BP_C_2", state.world)
+    local targets = valid(keypad) and keypad.ActorsToUnlock
+    local keys = valid(keypad) and keypad.Keys
+    local component = keys and keys:GetArrayNum() == 12 and keys[key + 1]
+    if not valid(door) or not valid(keypad) or not keypad:HasAuthority() or not targets or targets:GetArrayNum() ~= 1
+        or not same(targets[1], door) or not valid(component) or not same(component:GetOwner(), keypad) then
+        error("The stock keypad is not linked to the exact Cistern door", 0)
+    end
+    local from, at = pawn:K2_GetActorLocation(), component:K2_GetComponentLocation()
+    local distance = math.sqrt((from.X - at.X)^2 + (from.Y - at.Y)^2 + (from.Z - at.Z)^2)
+    if distance ~= distance or distance > pawn.InteractionRange then
+        error("The exact stock keypad is outside the host interaction range", 0)
+    end
+    keypad:SendInteractionToActor(pawn, component)
+    keypad_proof = { key = key, locked = door.Locked, unlocked = keypad.Unlocked,
+        map = state.map, pawn = pawn:GetFullName(), target = door:GetFullName() }
+    return "exact stock Cistern keypad action verified"
+end
+
 function zone.command(fields, state, phase)
     local name = fields[2]
     if name == "native-exit-wall-probe" then return wall.command(fields, state, phase) end
+    if name == "native-cistern-keypad" then return cistern_keypad(fields, state, phase) end
     if name == "native-door-position" or name == "native-door-probe" then
         return door_command(fields, state, phase, name)
     end
@@ -434,11 +528,16 @@ function zone.command(fields, state, phase)
     error("No safe pawn location near the staged exit box", 0)
 end
 
-function zone.rows(_, _, status_row)
+function zone.rows(state, phase, status_row)
     if not enabled then return {} end
     local rows = wall.rows(status_row)
     rows[#rows + 1] = status_row("native-zone", status, decision, requests, guest_denied, too_far, failure)
     rows[#rows + 1] = status_row("native-door", door_decision, door_denied, door_requests)
+    if keypad_proof and keypad_proof.map == state.map and phase == "hosting" then
+        local proof = keypad_proof
+        rows[#rows + 1] = status_row("native-cistern-keypad", proof.map, proof.pawn, proof.target,
+            proof.key, proof.locked and 1 or 0, proof.unlocked and 1 or 0)
+    end
     return rows
 end
 

@@ -215,7 +215,7 @@ function guest_save.clear(name)
     return changed
 end
 
-local function live_binding(binding, state, host, guest, fresh, now)
+local function verified_binding(binding, state, host, guest)
     if not guest or state.map ~= binding.map or not same(state.world, binding.world)
         or not same(host.pawn, binding.host) or not same(host.controller_object, binding.host_controller)
         or not same(guest.controller_object, binding.controller) or not matches(binding, guest.pawn) then return false end
@@ -224,22 +224,25 @@ local function live_binding(binding, state, host, guest, fresh, now)
             return false
         end
     end
-    if fresh then
-        binding.lease_seen = true
-    elseif binding.lease_seen or now - binding.created > initial_lease_seconds then
-        return false
-    end
     return true
+end
+
+local function live_binding(binding, state, host, guest, fresh, now)
+    if not verified_binding(binding, state, host, guest) then return false end
+    if fresh then binding.lease_seen = true end
+    return fresh or (not binding.lease_seen and now - binding.created <= initial_lease_seconds)
 end
 
 function guest_save.sync(state, phase)
     if not guest_save.active() then return false end
     local host, guests = participants(state, phase)
-    local fresh, now = heartbeat_fresh(), os.time()
+    local fresh = heartbeat_fresh()
     local changed = false
     for _, name in ipairs(sorted_names()) do
         local binding = bindings[name]
-        local checked, live = pcall(live_binding, binding, state, host, guests and guests[name], fresh, now)
+        -- A momentarily late coordinator must not attach this player to the host inventory.
+        local checked, live = pcall(verified_binding, binding, state, host, guests and guests[name])
+        if checked and live and fresh then binding.lease_seen = true end
         if not checked or not live then
             local was_revoked = binding.revoked
             local cleared, removed = pcall(clear_binding, binding)

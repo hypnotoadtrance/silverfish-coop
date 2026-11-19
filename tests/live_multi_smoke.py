@@ -25,7 +25,8 @@ def saved_hashes(root: Path) -> dict[str, str]:
     return result
 
 
-async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False) -> None:
+async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False, rest_ui: bool = False,
+                   rest_guest_denial: bool = False) -> None:
     campaign = "party-" + uuid.uuid4().hex[:8]
     profiles = [f"{campaign}-{index}" for index in (1, 2)]
     run = work / "campaigns" / campaign / "run"
@@ -42,7 +43,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
         if process.returncode:
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
         reply = json.loads(output)
-        if not reply.get("ok"):
+        if reply.get("ok") is False:
             raise RuntimeError(f"{arguments}: {reply}")
         return reply
 
@@ -150,14 +151,48 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
         frames = {entry["character_id"]: entry["state"]["native_guest_save"] for entry in characters}
         assert set(frames) == set(identities) and len({record["slot"] for record in frames.values()}) == 2, frames
         evidence["separate_native_guest_frames"] = frames
+        if rest_guest_denial:
+            def armed(status):
+                return status.get("game", {}).get("native_rest_guard", {}).get("armed") is True
+
+            host_guard = await wait(run, lambda status: armed(status)
+                                    and status["game"].get("native_rest_hook", {}).get("fresh") is True)
+            client_guards = [await wait(client, armed) for client in clients]
+            prior = host_guard["game"]["native_rest_guard"]["guest_denials"]
+            denied = []
+            for index, role in enumerate(("guest", "guest2")):
+                server = (await command("action", "--campaign", campaign,
+                                        "native-rest-guest-interaction-fixture", "--target", role))["native_rest_guard"]
+                local = (await command("action", "--profile", profiles[index],
+                                       "native-rest-guest-interaction-fixture"))["native_rest_guard"]
+                assert server["armed"] and server["status"] == "guest_interaction_denied", server
+                assert local["armed"] and local["status"] == "guest_interaction_denied", local
+                assert server["guest_denials"] == prior + index + 1, server
+                assert local["guest_denials"] == client_guards[index]["game"]["native_rest_guard"]["guest_denials"] + 1, local
+                denied.append({"role": role, "authority": server, "client": local})
+            events = (await command("events", "--campaign", campaign, "--tail", "100"))["events"]
+            assert all(event["event"] != "native_rest_checkpoint" for event in events), events
+            evidence["stock_rest_guest_interaction_denied"] = denied
         if rest_wipe:
             approach = await command("action", "--campaign", campaign, "native-rest-approach")
             assert approach["native_rest"]["eligible"], approach
-            rest_args = ("action", "--campaign", campaign, "native-rest", "--amount", "1",
-                         "--operation-id", uuid.uuid4().hex)
-            slept = (await command(*rest_args))["native_rest"]
+            if rest_ui:
+                await wait(run, lambda status: status.get("game", {}).get("native_rest_hook", {}).get("fresh") is True)
+                confirmation = await command("action", "--campaign", campaign, "native-rest-ui-fixture", "--amount", "1")
+                assert confirmation["native_rest_hook"]["status"] == "selected", confirmation
+                await wait(run, lambda status: status.get("campaign", {}).get("world", {}).get("native_rest", {})
+                           .get("bed") == "SavePoint_BP_C_3-Observitory_P-")
+                sleeps = [event for event in (await command("events", "--campaign", campaign, "--tail", "100"))["events"]
+                          if event["event"] == "native_rest_checkpoint"]
+                assert len(sleeps) == 1, sleeps
+                slept = sleeps[0]
+                evidence["stock_sleep_screen_confirmation"] = confirmation["native_rest_hook"]
+            else:
+                rest_args = ("action", "--campaign", campaign, "native-rest", "--amount", "1",
+                             "--operation-id", uuid.uuid4().hex)
+                slept = (await command(*rest_args))["native_rest"]
+                assert (await command(*rest_args))["native_rest"] == slept
             assert slept["bed"] == "SavePoint_BP_C_3-Observitory_P-" and slept["after"] - slept["before"] == 3600, slept
-            assert (await command(*rest_args))["native_rest"] == slept
             for role in ("host", "guest", "guest2"):
                 await position(role, "near")
             await position("host", "inside")
@@ -203,5 +238,11 @@ if __name__ == "__main__":
     options.add_argument("--work", type=Path, required=True)
     options.add_argument("--vanilla-saved", type=Path)
     options.add_argument("--native-rest-wipe", action="store_true", help="rest, leave, and wipe back to the exact stock bed")
+    options.add_argument("--native-rest-ui", action="store_true", help="use the stock sleep screen during the rest-wipe check")
+    options.add_argument("--native-rest-guest-denial", action="store_true",
+                         help="verify authority and client stock interaction denial for each guest")
     args = options.parse_args()
-    asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe))
+    if args.native_rest_ui and not args.native_rest_wipe:
+        options.error("--native-rest-ui requires --native-rest-wipe")
+    asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe,
+                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial))

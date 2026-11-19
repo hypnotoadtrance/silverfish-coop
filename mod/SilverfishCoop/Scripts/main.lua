@@ -17,7 +17,11 @@ local native_hazard = require("native_hazard")
 local native_host_save = require("native_host_save")
 local native_world_flush = require("native_world_flush")
 local native_rest = require("native_rest")
+local native_black_stone = require("native_black_stone")
+local native_world_view = require("native_world_view")
 local native_inventory = require("native_inventory")
+local native_wipe_inventory = require("native_wipe_inventory")
+local native_loot_actions = require("native_loot_actions")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -33,14 +37,12 @@ local vitals = require("vitals")
 local wallet = require("wallet")
 local weapon_inventory = require("weapon_inventory")
 local native_guest_weapon = require("native_guest_weapon")
+local native_guest_npc = require("native_guest_npc")
+local native_guest_reload_input = require("native_guest_reload_input")
 local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
-local blue_destinations = {
-    ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P"] = true,
-    ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true,
-}
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local expanded_routes = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local stock_save_probes = {
@@ -70,6 +72,8 @@ local last_blue_route, last_blue_arrival, last_dream_route, last_dream_arrival, 
 local last_quest_catalog, last_purple_arrival, last_broker_quest, last_broker_position
 local last_world_flush
 local last_rest
+local host_world_view, host_world_view_check, host_world_view_world
+local world_view_enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local last_guest_xp
 local last_authored_arrival
 local last_green_options, last_green_arrival
@@ -349,6 +353,7 @@ local function run_command(fields, state, current_phase)
         native_hazard.clear("co-op session is changing")
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
+    if command == "join" or command == "leave" then native_world_view.clear() end
     if command == "host" then
         local carry, dream_kind
         local load_save = #fields >= 5 and #fields <= 7 and fields[4] == "native-save"
@@ -382,7 +387,7 @@ local function run_command(fields, state, current_phase)
         expected_map = argument
         return "listen travel requested"
     elseif command == "travel" then
-        local blue = #fields == 5 and fields[4] == "blue" and blue_destinations[argument]
+        local blue = #fields == 5 and fields[4] == "blue" and native_bed.profile(argument)
         local destination_route = zone_maps[argument]
         local red = #fields == 5 and fields[4] == "red" and destination_route
             and destination_route.other_arrivals and destination_route.other_arrivals.Red_Tes
@@ -394,10 +399,10 @@ local function run_command(fields, state, current_phase)
         local dream_departure = native_dream.supports(argument) and #fields == 5
             and (fields[4] == "stardust" or fields[4] == "fruiting-stardust")
         local dream_return = native_dream.supports(state.map) and #fields == 4 and fields[4] == "stardust-return"
-            and blue_destinations[argument]
+            and native_bed.profile(argument)
         if not supported_map(argument) or argument == state.map
             or (native_dream.supports(argument) and not dream_departure)
-            or (native_dream.supports(state.map) and not dream_return)
+            or (native_dream.supports(state.map) and not (dream_return or dream_departure))
             or (not (blue or red or green or purple or matrix or authored or dream_departure or dream_return)
                 and #fields ~= (argument == gold_nexus and 4 or 3)) then
             error("Expected a different qualified co-op map", 0)
@@ -466,7 +471,7 @@ local function run_command(fields, state, current_phase)
     elseif command == "native-blue-arrival" then
         last_blue_arrival = nil
         if not authored_routes or (#fields ~= 4 and #fields ~= 5) or argument ~= state.map
-            or not blue_destinations[argument] then
+            or not native_bed.profile(argument) then
             error("Blue Cube arrival requires the qualified current world", 0)
         end
         if #fields == 5 and not native_blue.authorize_travel(fields[5], state, current_phase) then
@@ -611,6 +616,32 @@ local function run_command(fields, state, current_phase)
             last_rest = native_rest.inspect(state, current_phase, argument, fields[4])
         end
         return "qualified stock rest inspected"
+    elseif command == "native-rest-ui-fixture" then
+        if #fields ~= 4 or role ~= "host" or current_phase ~= "hosting" then
+            error("Stock sleep confirmation requires the exact host", 0)
+        end
+        return native_rest.ui_fixture(state, current_phase, argument, tonumber(fields[4]))
+    elseif command == "native-rest-guest-interaction-fixture" then
+        if #fields ~= 3 or (current_phase ~= "hosting" and current_phase ~= "connected") then
+            error("Stock rest denial requires the exact enrolled guest", 0)
+        end
+        return native_rest.guest_fixture(state, current_phase, argument)
+    elseif command == "native-world-view-apply" then
+        if not world_view_enabled or (#fields ~= 18 and #fields ~= 23)
+            or current_phase ~= "connected" or role ~= "client" then
+            error("Authoritative sun projection requires the current connected client", 0)
+        end
+        native_world_view.apply(state, current_phase, {
+            epoch = fields[3], sequence = tonumber(fields[4]), map = fields[5], actor = fields[6],
+            game_seconds = tonumber(fields[7]), pitch = tonumber(fields[8]), yaw = tonumber(fields[9]),
+            roll = tonumber(fields[10]), sun_x = tonumber(fields[11]), sun_y = tonumber(fields[12]),
+            sun_z = tonumber(fields[13]), sun_visible = fields[14] == "1", sun_intensity = tonumber(fields[15]),
+            sky_r = tonumber(fields[16]), sky_g = tonumber(fields[17]), sky_b = tonumber(fields[18]),
+            fog_density = tonumber(fields[19]), fog_falloff = tonumber(fields[20]),
+            cloud_bottom_km = tonumber(fields[21]), cloud_height_km = tonumber(fields[22]),
+            cloud_density_offset = tonumber(fields[23]),
+        })
+        return "authenticated host sun and sky projected"
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -666,10 +697,15 @@ local function run_command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
+        or native_wipe_inventory.command(fields, state, current_phase)
         or native_pickup.command(fields, state, current_phase)
         or native_shop.command(fields, state, current_phase)
         or weapon_inventory.command(fields, state, current_phase)
         or native_guest_weapon.command(fields, state, current_phase)
+        or native_guest_npc.command(fields, state, current_phase)
+        or native_guest_reload_input.command(fields, state, current_phase)
+        or native_loot_actions.command(fields, state, current_phase)
+        or native_black_stone.command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
         or native_blue.command(fields, state, current_phase)
@@ -706,6 +742,15 @@ local function read_command()
     return fields
 end
 
+local function world_view_row(mode, view)
+    return status_row("native-world-view", mode, view.map, view.actor, view.epoch or "-", view.sequence,
+        view.game_seconds, view.pitch, view.yaw, view.roll, view.sun_x, view.sun_y, view.sun_z,
+        view.sun_visible and 1 or 0, view.sun_intensity, view.sky_r or "-", view.sky_g or "-", view.sky_b or "-",
+        view.clock_text or "-", view.save_unchanged and 1 or 0, view.sky_verified and 1 or 0,
+        view.fog_density or "-", view.fog_falloff or "-", view.cloud_bottom_km or "-", view.cloud_height_km or "-",
+        view.cloud_density_offset or "-", view.weather_verified and 1 or 0)
+end
+
 local function write_status(state, current_phase, failure)
     sequence = sequence + 1
     local rows = {
@@ -714,6 +759,19 @@ local function write_status(state, current_phase, failure)
         status_row("ack", acknowledged_id, acknowledged_result, acknowledged_message),
         status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0),
     }
+    if world_view_enabled and current_phase == "hosting" then
+        if not same_object(state.world, host_world_view_world) or host_world_view_check ~= os.time() then
+            local checked, view = pcall(native_world_view.observe, state, current_phase)
+            host_world_view_world, host_world_view_check = state.world, os.time()
+            host_world_view = checked and view or nil
+            if host_world_view then host_world_view.sequence = sequence end
+        end
+        if host_world_view then rows[#rows + 1] = world_view_row("sample", host_world_view) end
+    elseif world_view_enabled and current_phase == "connected" then
+        host_world_view = nil
+        local seen = native_world_view.status(state, current_phase)
+        if seen then rows[#rows + 1] = world_view_row("applied", seen) end
+    end
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, details.health or "-",
@@ -741,10 +799,15 @@ local function write_status(state, current_phase, failure)
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(weapon_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_weapon.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_npc.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_reload_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_black_stone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -812,7 +875,7 @@ local function write_status(state, current_phase, failure)
         if last_dream_effects and last_dream_effects.source == state.map then
             local effects = last_dream_effects
             rows[#rows + 1] = status_row("native-dream-effects", effects.source, effects.pawn, effects.kind,
-                effects.destination, effects.tarot, effects.before, effects.after)
+                effects.destination, effects.tarot, effects.before, effects.after, effects.event or "")
         end
         if last_dream_arrival and last_dream_arrival.destination == state.map then
             local arrival = last_dream_arrival
@@ -881,9 +944,11 @@ end
 local function tick()
     local state, current_phase = observe_session()
     if not state then return end
+    native_world_view.sync(state, current_phase)
     native_death.sync(state, current_phase)
     native_zone.sync(state, current_phase)
     native_rest.sync_hook(state, current_phase)
+    native_black_stone.sync(state, current_phase)
     native_transport.sync(state, current_phase)
     native_blue.sync(state, current_phase)
     native_red.sync(state, current_phase)
@@ -904,6 +969,9 @@ local function tick()
         last_rest = nil
         last_guest_xp = nil
         native_guest_weapon.reset()
+        native_loot_actions.reset()
+        native_inventory.reset()
+        native_wipe_inventory.reset()
         last_authored_arrival = nil
         local was_guest_bound = guest_save.active()
         local accepted, message = pcall(run_command, fields, state, current_phase)
@@ -916,6 +984,7 @@ local function tick()
             or fields[2] == "native-purple-arrival" or fields[2] == "native-dream-arrival"
             or fields[2] == "native-dream-place-guest" or fields[2] == "native-matrix-place"
             or fields[2] == "native-broker-position-fixture" or fields[2] == "native-authored-arrival"
+            or fields[2] == "native-loot-approach" or fields[2] == "native-dream-stone-position"
             or fields[2] == "restore" or fields[2] == "restore-exact" then
             state, current_phase = observe_session()
             if not state then return end

@@ -23,11 +23,18 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
 
+#include "black_stone.hpp"
 #include "guest_item.hpp"
+#include "inventory_census.hpp"
+#include "inventory_wipe.hpp"
+#include "guest_npc.hpp"
+#include "guest_reload_input.hpp"
 #include "item_roundtrip.hpp"
+#include "loot_escrow.hpp"
 #include "pickup.hpp"
 #include "transport_items.hpp"
 #include "save_copy.hpp"
+#include "shared_loot.hpp"
 #include "stock_rest.hpp"
 #include "zone_exit.hpp"
 
@@ -1195,6 +1202,10 @@ namespace
             silverfish::native_zone::uninstall_hooks();
             silverfish::native_transport::uninstall_hooks();
             silverfish::native_stock_rest::uninstall_hooks();
+            silverfish::native_guest_npc::uninstall_hooks();
+            silverfish::native_guest_reload_input::uninstall_hooks();
+            silverfish::shared_loot::uninstall_hooks();
+            silverfish::native_black_stone::uninstall_hooks();
             invalidate_bridge();
             hooks_ready.store(false, std::memory_order_release);
             scope_hooks_ready.store(false, std::memory_order_release);
@@ -1212,6 +1223,10 @@ namespace
             silverfish::native_zone::install_hooks();
             silverfish::native_transport::install_hooks();
             silverfish::native_stock_rest::install_hooks();
+            silverfish::native_guest_npc::install_hooks();
+            silverfish::native_guest_reload_input::install_hooks();
+            silverfish::shared_loot::install_hooks();
+            silverfish::native_black_stone::install_hooks();
             if (!enabled)
             {
                 return;
@@ -1265,6 +1280,13 @@ namespace
             silverfish::native_transport::register_lua(lua);
             silverfish::native_guest_item::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
+            silverfish::shared_loot::register_lua(lua);
+            silverfish::loot_escrow::register_lua(lua);
+            silverfish::inventory_census::register_lua(lua);
+            silverfish::inventory_wipe::register_lua(lua);
+            silverfish::native_guest_npc::register_lua(lua);
+            silverfish::native_guest_reload_input::register_lua(lua);
+            silverfish::native_black_stone::register_lua(lua);
             if (!enabled)
             {
                 return;
@@ -1297,6 +1319,8 @@ namespace
                 silverfish::native_zone::clear_scope();
                 silverfish::native_transport::clear_scope();
                 silverfish::native_stock_rest::clear_scope();
+                silverfish::native_guest_npc::clear_scope();
+                silverfish::native_black_stone::clear_scope();
                 invalidate_bridge();
             }
         }

@@ -30,6 +30,7 @@ class AuthoredRoute:
     travel_time_step: int | None = None
     child: str | None = None
     arrival_child: str | None = None
+    arrival_entrance: str | None = None
 
 
 _PACKAGES = {
@@ -38,7 +39,7 @@ _PACKAGES = {
         ("Maps_Dungeons", (
             "Anex_01_P", "Anom_Maze_01", "Cistern_P", "CrashSite_01_P", "DataSilo_01_P", "DryDock_P",
             "Factory_SB_P", "FortLeto_01_P", "Funnel_01_P", "Lab_E206_P", "Lab_EastWing_P", "OldPipes_01_P",
-            "Perdition_01_P", "Refinery_01_P", "Slums_Tunnel_01_P", "Subway_01_P", "TheThroat_P",
+            "Perdition_01_P", "Refinery_01_P", "Sci_Tunnel_01_P", "Slums_Tunnel_01_P", "Subway_01_P", "TheThroat_P",
             "TutTnl_01_P", "Tut_Dock_P", "UtilityTunnels_01_P",
         )),
         ("Maps_OverWorld", (
@@ -49,7 +50,7 @@ _PACKAGES = {
         )),
         ("Maps_SafeZones", (
             "ArtifactForge_P", "Borough", "Rev_NorthBase_P", "Shop_BlackMarket_01", "Shop_Craftsman_01",
-            "Shop_Gunsmith_P", "Shop_ScavBar_P", "Shop_ShopKeep_P", "Shop_Smuggler_P",
+            "Shop_Gunsmith_P", "Shop_ScavBar_P", "Shop_Scientist_01", "Shop_ShopKeep_P", "Shop_Smuggler_P",
         )),
     )
     for name in names
@@ -151,6 +152,8 @@ _DOORS = (
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_134", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_221"),
     ("Cistern_P", "CrossRoads_P", "CR_Cstrn", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_1",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_178", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_268"),
+    ("Cistern_P", "Sci_Tunnel_01_P", "Cistern_Sci", "Dungeon_TransitionDoor_BP_C_2", "Dungeon_TransitionDoor_BP_C_0",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_346", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_0"),
     ("City_01_P", "Subway_01_P", "Subway", "Dungeon_TransitionDoor_BP_C_2", "Dungeon_TransitionDoor_BP_C_1",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_380", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_196"),
     ("CrashSite_01_P", "TutTnl_01_P", "Crash_Tut", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_1",
@@ -179,6 +182,8 @@ _DOORS = (
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_176", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_601"),
     ("Lab_EastWing_P", "RuinFeilds_P", "RgEast_Flood", "Dungeon_TransitionDoor_BP_C_0", "Dungeon_TransitionDoor_BP_C_1",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_136"),
+    ("Lab_EastWing_P", "Shop_Scientist_01", "RgIn", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_4",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_1", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_588"),
     ("Lake_01_P", "Shop_BlackMarket_01", "BlackMarket", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_0",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_50", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_284"),
     ("NorthEast_Rail_P", "Anom_Maze_01", "M35_Warren", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_1",
@@ -205,6 +210,10 @@ _DOORS = (
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_236", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_0"),
     ("RuinFeilds_P", "Lab_EastWing_P", "RgEast_Flood", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_0",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_136", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_0"),
+    ("RuinFeilds_P", "Shop_Scientist_01", "Market_Flood", "Dungeon_TransitionDoor_BP_C_2", "Dungeon_TransitionDoor_BP_C_2",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_191", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_5"),
+    ("Sci_Tunnel_01_P", "Cistern_P", "Cistern_Sci", "Dungeon_TransitionDoor_BP_C_0", "Dungeon_TransitionDoor_BP_C_2",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_346"),
     ("Shop_BlackMarket_01", "Lake_01_P", "BlackMarket", "Dungeon_TransitionDoor_BP_C_0", "Dungeon_TransitionDoor_BP_C_1",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_284", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_50"),
     ("Shop_Craftsman_01", "StoneMaze_P", "ShopCraft", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_2",
@@ -215,6 +224,10 @@ _DOORS = (
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_536"),
     ("Shop_ScavBar_P", "Slums_P", "Bar_Slums", "Dungeon_TransitionDoor_BP_C_2", "Dungeon_TransitionDoor_BP_C_2",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_186", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_280"),
+    ("Shop_Scientist_01", "RuinFeilds_P", "Market_Flood", "Dungeon_TransitionDoor_BP_C_2", "Dungeon_TransitionDoor_BP_C_2",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_5", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_191"),
+    ("Shop_Scientist_01", "Lab_EastWing_P", "RgIn", "Dungeon_TransitionDoor_BP_C_4", "Dungeon_TransitionDoor_BP_C_1",
+     "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_588", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_1"),
     ("Shop_ShopKeep_P", "NorthEast_Rail_P", "ShopKeep", "Dungeon_TransitionDoor_BP_C_0", "Dungeon_TransitionDoor_BP_C_2",
      "Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0", "LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_476"),
     ("Shop_Smuggler_P", "PineRidge_P", "Pine_Fence", "Dungeon_TransitionDoor_BP_C_1", "Dungeon_TransitionDoor_BP_C_1",
@@ -267,6 +280,9 @@ AUTHORED_ROUTES = (
         AuthoredRoute(_PACKAGES[source], _PACKAGES[destination], entrance, "overlap", actor, marker, time_step)
         for source, destination, entrance, actor, marker, time_step in _OVERLAPS
     ),
+    # The stock Observatory marker adds a trailing e to the dock's tag.
+    AuthoredRoute(_PACKAGES["Tut_Dock_P"], _PACKAGES["Observitory_P"], "Obs_Dock", "overlap",
+                  "Level_Exit_BP_C_1", "LevelExit_Spawn_BP_C_213", travel_time_step=10, arrival_entrance="Obs_Docke"),
     *(
         AuthoredRoute(_PACKAGES[source], _PACKAGES[destination], entrance, "door", actor, marker,
                       child=child, arrival_child=arrival_child)

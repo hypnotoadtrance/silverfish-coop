@@ -5,15 +5,30 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local code_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local rest_class = "/Game/Classes/Actors/SavePoint_BP.SavePoint_BP_C"
+local arrow_class = "/Script/Engine.ArrowComponent"
+local alternate_class = "/Game/Classes/ScriptingActors/LevelExit_Spawn_BP.LevelExit_Spawn_BP_C"
+local stock_alternate_z = 50
+
+local function placed(level, faction, minimum, alternate, actor)
+    return {level = level, actor = actor or "SavePoint_BP_C_1", faction = faction, min_safe_rep = minimum,
+        alternate = alternate}
+end
+
+-- Exact placed stock SavePoints. Faction-neutral entries inherit MinSafeRep
+-- from the class, but the stock arrival and interaction branches skip it.
 local profiles = {
-    [observatory] = {
-        level = "Observitory_P", actor = "SavePoint_BP_C_3", alternate = "LevelExit_Spawn_BP_C_1",
-        faction = 8, min_safe_rep = -90,
-    },
-    ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = {
-        level = "DeadBridge_P", actor = "SavePoint_BP_C_1", alternate = "LevelExit_Spawn_BP_C_4",
-        faction = 4, min_safe_rep = 300,
-    },
+    [observatory] = placed("Observitory_P", 8, -90, "LevelExit_Spawn_BP_C_1", "SavePoint_BP_C_3"),
+    ["/Game/Classes/Maps/Maps_OverWorld/City_01_P"] = placed("City_01_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = placed("DeadBridge_P", 4, 300, "LevelExit_Spawn_BP_C_4"),
+    ["/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"] = placed("DeadEnd_01_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"] = placed("Lake_01_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"] = placed("RuinFeilds_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P"] = placed("SouthEast_Road_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"] = placed("StoneMaze_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_SafeZones/ArtifactForge_P"] = placed("ArtifactForge_P", 0, 300),
+    ["/Game/Classes/Maps/Maps_SafeZones/Borough"] = placed("Borough", 2, 0, "LevelExit_Spawn_BP_C_1"),
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"] = placed("Shop_ScavBar_P", 0, 300),
 }
 
 local function valid(object)
@@ -71,6 +86,15 @@ local function actor_name(map, profile, class, name)
     return class .. " " .. map .. "." .. profile.level .. ":PersistentLevel." .. name
 end
 
+function bed.profile(map)
+    local profile = profiles[map]
+    if not profile then return nil end
+    return {map = map, level = profile.level, actor = profile.actor, bed_id = expected_id(profile),
+        actor_full_name = actor_name(map, profile, "SavePoint_BP_C", profile.actor),
+        faction = profile.faction, min_safe_rep = profile.min_safe_rep, alternate = profile.alternate,
+        alternate_full_name = profile.alternate and actor_name(map, profile, "LevelExit_Spawn_BP_C", profile.alternate)}
+end
+
 local function rest_actor(map, world, profile)
     local name = actor_name(map, profile, "SavePoint_BP_C", profile.actor)
     local match
@@ -80,8 +104,11 @@ local function rest_actor(map, world, profile)
             match = actor
         end
     end
-    if not valid(match) or not valid(match.Arrow) or match.Faction ~= profile.faction
-        or match.MinSafeRep ~= profile.min_safe_rep then
+    if not valid(match) or not match:HasAuthority() or not same(match:GetClass(), StaticFindObject(rest_class))
+        or not valid(match.Arrow) or not same(match.Arrow:GetClass(), StaticFindObject(arrow_class))
+        or not same(match.Arrow:GetOwner(), match) or match.Faction ~= profile.faction
+        or match.MinSafeRep ~= profile.min_safe_rep
+        or (not profile.alternate and valid(match.Safe_AltSpawn)) then
         error("The qualified stock rest actor is unavailable or has changed", 0)
     end
     return match
@@ -122,21 +149,25 @@ function bed.source(state, phase)
 end
 
 local function stock_placement(map, world, actor, profile, instance)
-    local out = {}
-    instance:Find_PlayerReputation(actor.Faction, out, out, out)
-    local points = out.Points
-    if not is_int32(points) then error("The canonical host's stock faction reputation is unavailable", 0) end
-    if points >= actor.MinSafeRep then
+    local points = 0
+    if profile.faction ~= 0 then
+        local out = {}
+        instance:Find_PlayerReputation(actor.Faction, out, out, out)
+        points = out.Points
+        if not is_int32(points) then error("The canonical host's stock faction reputation is unavailable", 0) end
+    end
+    if profile.faction == 0 or points >= actor.MinSafeRep then
         return actor.Arrow:K2_GetComponentLocation(), actor.Arrow:K2_GetComponentRotation(), "arrow", points
     end
 
     local alternate = actor.Safe_AltSpawn
-    if not valid(alternate) or alternate:GetFullName() ~= actor_name(map, profile, "LevelExit_Spawn_BP_C", profile.alternate)
-        or not same(alternate:GetWorld(), world) then
+    if not profile.alternate or not valid(alternate) or not alternate:HasAuthority()
+        or not same(alternate:GetClass(), StaticFindObject(alternate_class)) or not same(alternate:GetWorld(), world)
+        or alternate:GetFullName() ~= actor_name(map, profile, "LevelExit_Spawn_BP_C", profile.alternate) then
         error("The stock reputation alternate spawn is unavailable", 0)
     end
     local location = alternate:K2_GetActorLocation()
-    return { X = location.X, Y = location.Y, Z = location.Z + 50 }, alternate:K2_GetActorRotation(), "alternate", points
+    return { X = location.X, Y = location.Y, Z = location.Z + stock_alternate_z }, alternate:K2_GetActorRotation(), "alternate", points
 end
 
 function bed.place_host(pawn, controller, world, target, rotation, placement)

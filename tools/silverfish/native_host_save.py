@@ -89,7 +89,27 @@ def references(checkpoint: dict) -> list[dict]:
     host = [world["native_host_save"]] if world.get("native_host_save") else []
     guest = [record["state"]["native_guest_save"] for record in checkpoint["characters"].values()
              if record["state"].get("native_guest_save")]
-    return host + guest
+    return host + guest + _loot_escrows(world) + list(_wipe_frames(world).values())
+
+
+def _wipe_frames(world: dict) -> dict:
+    party = world.get("party") or {}
+    draft = (party.get("wipe") or {}).get("native")
+    return {} if draft is None else draft["frames"]
+
+
+def _loot_escrows(world: dict) -> list[dict]:
+    party = world.get("party") or {}
+    if type(party) is not dict:
+        raise CampaignFormatError("The campaign's native party records are invalid")
+    rolls = party.get("native_loot_rolls", {})
+    if type(rolls) is not dict or any(type(roll) is not dict for roll in rolls.values()):
+        raise CampaignFormatError("The campaign's native loot records are invalid")
+    bags = party.get("native_backpacks", {})
+    if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
+        raise CampaignFormatError("The campaign's stock backpack records are invalid")
+    return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
+            + [bag["escrow"] for bag in bags.values() if "escrow" in bag])
 
 
 def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
@@ -103,6 +123,18 @@ def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
         if frame["slot"] in slots:
             raise CampaignFormatError("Two campaign owners reference the same Unreal save generation")
         slots.add(frame["slot"])
+    for frame in _loot_escrows(checkpoint["world"]):
+        verify_record(profile, frame)
+        if frame["slot"] in slots:
+            raise CampaignFormatError("The loot escrow shares another Unreal save generation")
+        slots.add(frame["slot"])
+    for character, frame in _wipe_frames(checkpoint["world"]).items():
+        if character == "host":
+            verify_record(profile, frame)
+        elif character in checkpoint["characters"]:
+            guest_record(profile, frame, character)
+        else:
+            raise CampaignFormatError("The stock wipe generation has no campaign owner")
 
 
 def prune(profile: Path, keep: set[str]) -> None:

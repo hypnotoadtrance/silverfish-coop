@@ -5,7 +5,8 @@ import time
 
 from . import party
 
-GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire")
+GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
+                 "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 
@@ -15,7 +16,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
             or time.monotonic() - host.last_seen > 3 or host.last_game.get("state") != "hosting"):
         raise party.RuleError("native_guest_weapon_unavailable")
-    if not isinstance(guid, str) or not GUID.fullmatch(guid):
+    implicit = action == "native-guest-weapon-reload" and guid == "equipped"
+    if not implicit and (not isinstance(guid, str) or not GUID.fullmatch(guid)):
         raise party.RuleError("invalid_weapon_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
@@ -43,9 +45,14 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     try:
         snapshot = await bridge.command(action, pawn, guid, timeout=5)
         proof = snapshot.get("native_guest_weapon", {})
+        observed_guid = proof.get("guid")
+        qualified_guid = (observed_guid == guid if not implicit else
+                          isinstance(observed_guid, str) and (
+                              GUID.fullmatch(observed_guid) is not None
+                              or (observed_guid == guid and proof.get("ok") is False)))
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != source
-                or (proof.get("map"), proof.get("action"), proof.get("pawn"), proof.get("guid"))
-                != (source, operation, pawn, guid)):
+                or (proof.get("map"), proof.get("action"), proof.get("pawn")) != (source, operation, pawn)
+                or not qualified_guid):
             raise RuntimeError("Native guest weapon response did not match the authenticated pawn")
         if proof.get("ok") is not True:
             reason = proof.get("status") or "native_guest_weapon_denied"
@@ -56,13 +63,23 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError(reason)
 
         actor, stored = proof.get("actor_ammo"), proof.get("stored_ammo")
-        if (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
-                or type(actor) is not int or actor != (stored if proof["status"] == "equipped" else -1)):
+        if operation == "seed-ammo":
+            if proof.get("status") not in ("seeded", "present"):
+                raise RuntimeError("The stock guest reserve fixture did not verify the exact ammo GUID")
+        elif (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
+              or type(actor) is not int or actor != (stored if proof["status"] == "equipped" else -1)):
             raise RuntimeError("Native guest stock weapon ammunition did not verify")
         if operation == "fire" and (proof["status"] != "equipped" or type(proof.get("before")) is not int
                                     or proof.get("after") != stored or proof["before"] - stored != 1
                                     or proof.get("projectiles") != 1):
             raise RuntimeError("The stock shot did not produce one verified guest-owned projectile and ammo debit")
+        if operation == "reload":
+            before, reserve_before, reserve_after = (proof.get(key) for key in ("before", "reserve_before", "reserve_after"))
+            if (proof["status"] != "equipped" or proof.get("after") != stored
+                    or any(type(amount) is not int for amount in (before, reserve_before, reserve_after))
+                    or not 0 <= before < stored or not 0 <= reserve_after < reserve_before
+                    or stored - before != reserve_before - reserve_after):
+                raise RuntimeError("Stock reserve ammunition did not move exactly into the guest magazine")
 
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {"native_guest_weapon": proof}

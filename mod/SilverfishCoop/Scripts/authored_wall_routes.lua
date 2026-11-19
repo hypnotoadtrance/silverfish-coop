@@ -11,6 +11,7 @@ return {
     },
     ["/Game/Classes/Maps/Maps_Dungeons/Cistern_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "CR_Cstrn" },
+        { actor = "Dungeon_TransitionDoor_BP_C_2", kind = "door", entrance = "Cistern_Sci" },
     },
     ["/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Crash_Tut" },
@@ -36,6 +37,7 @@ return {
     },
     ["/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "RgEast_Flood" },
+        { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "RgIn" },
     },
     ["/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "NE_Pipe" },
@@ -48,6 +50,9 @@ return {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Refine_DD" },
         { actor = "Level_Exit_BP_C_241", kind = "overlap", entrance = "Refine_Beach" },
         { actor = "Level_Exit_BP_C_242", kind = "overlap", entrance = "Slum_Refine" },
+    },
+    ["/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P"] = {
+        { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "Cistern_Sci" },
     },
     ["/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Slums_GreenLine" },
@@ -63,6 +68,9 @@ return {
     ["/Game/Classes/Maps/Maps_Dungeons/TutTnl_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Crash_Tut" },
         { actor = "Dungeon_TransitionDoor_BP_C_2", kind = "door", entrance = "Tut_Obsrv" },
+    },
+    ["/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"] = {
+        { actor = "Level_Exit_BP_C_1", kind = "overlap", entrance = "Obs_Dock" },
     },
     ["/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "Rail_Utility" },
@@ -154,6 +162,7 @@ return {
     },
     ["/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "RgEast_Flood" },
+        { actor = "Dungeon_TransitionDoor_BP_C_2", kind = "door", entrance = "Market_Flood" },
         { actor = "Level_Exit_BP_C_1", kind = "overlap", entrance = "CR_RF" },
         { actor = "Level_Exit_BP_C_198", kind = "overlap", entrance = "Flood_Beach" },
         { actor = "Level_Exit_BP_C_2", kind = "overlap", entrance = "Ry_Rf" },
@@ -226,6 +235,10 @@ return {
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_1", kind = "door", entrance = "Bar_Docks" },
         { actor = "Dungeon_TransitionDoor_BP_C_2", kind = "door", entrance = "Bar_Slums" },
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"] = {
+        { actor = "Dungeon_TransitionDoor_BP_C_2", kind = "door", entrance = "Market_Flood" },
+        { actor = "Dungeon_TransitionDoor_BP_C_4", kind = "door", entrance = "RgIn" },
     },
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"] = {
         { actor = "Dungeon_TransitionDoor_BP_C_0", kind = "door", entrance = "ShopKeep" },

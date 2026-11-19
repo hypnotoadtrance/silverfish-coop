@@ -12,19 +12,30 @@ LEVEL = OBSERVATORY.rsplit("/", 1)[1]
 BED = BED_IDS[OBSERVATORY]
 ACTOR = f"SavePoint_BP_C {OBSERVATORY}.{LEVEL}:PersistentLevel.SavePoint_BP_C_3"
 
+def site(map_name: str) -> tuple[str, str, str] | None:
+    bed = BED_IDS.get(map_name)
+    if not bed:
+        return None
+    level = map_name.rsplit("/", 1)[1]
+    actor = f"SavePoint_BP_C {map_name}.{level}:PersistentLevel.{bed.split('-', 1)[0]}"
+    return level, bed, actor
+
 
 async def checked(host, bridge, action: str, *arguments: str) -> dict:
+    area = host.last_game.get("map")
+    checkpoint = site(area)
     pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
     if (not host.native_zones or host.native_profile is None or not pawn
-            or host.last_game.get("state") != "hosting" or host.last_game.get("map") != OBSERVATORY):
+            or host.last_game.get("state") != "hosting" or area not in host.allowed_maps or not checkpoint):
         raise party.RuleError("native_rest_unavailable")
-    snapshot = await bridge.command(action, pawn, ACTOR, *arguments, timeout=5)
+    level, bed, actor = checkpoint
+    snapshot = await bridge.command(action, pawn, actor, *arguments, timeout=5)
     proof = snapshot.get("native_rest", {})
-    if (snapshot.get("state") != "hosting" or snapshot.get("map") != OBSERVATORY
+    if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
             or (proof.get("map"), proof.get("pawn"), proof.get("actor"), proof.get("bed"), proof.get("level"))
-            != (OBSERVATORY, pawn, ACTOR, BED, LEVEL)
+            != (area, pawn, actor, bed, level)
             or len(proof.get("location", ())) != 3 or any(axis is None for axis in proof["location"])):
-        raise RuntimeError("The exact stock Observatory rest was not verified")
+        raise RuntimeError("The exact stock rest was not verified")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return proof
 
@@ -37,7 +48,11 @@ async def perform(host, bridge, operation_id: str, hours: int) -> dict:
     if (host.stopping or host.transitioning or host.item_travel_pending() or host.native_checkpoint_unsafe
             or host.party["wipe"] or host.party["pending_spawns"] or host.party["players"]["host"]["downed"]):
         raise party.RuleError("native_rest_unavailable")
-    fingerprint = ["native-rest", ACTOR, hours]
+    area = host.last_game.get("map")
+    checkpoint = site(area)
+    if not checkpoint:
+        raise party.RuleError("native_rest_unavailable")
+    fingerprint = ["native-rest", checkpoint[2], hours]
     for receipt in host.party["receipts"].get("host", []):
         if receipt["id"] == operation_id:
             if receipt["request"] != fingerprint:
@@ -58,7 +73,7 @@ async def perform(host, bridge, operation_id: str, hours: int) -> dict:
         if host.world_flush_supported:
             await host.flush_native_world(bridge)
         candidate = party.load_party(host.party)
-        candidate["checkpoint"] = {"map": OBSERVATORY, "location": list(proof["location"])}
+        candidate["checkpoint"] = {"map": area, "location": list(proof["location"])}
         result = {"native_rest": proof}
         receipts = candidate["receipts"].setdefault("host", [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})

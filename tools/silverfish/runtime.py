@@ -16,6 +16,7 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from .native_guest_npc import parse_bandit
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -24,6 +25,7 @@ from .native_roster import Assignment
 REPO = Path(__file__).resolve().parents[2]
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
+WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
 MANIFEST = Path("Manifest_NonUFSFiles_Win64.txt")
 STOCK_PACKAGES = ("SilverFish-Windows.pak", "SilverFish-Windows.utoc",
                   "SilverFish-Windows.ucas", "global.utoc", "global.ucas")
@@ -63,8 +65,15 @@ def write_json(path: Path, value: object) -> None:
 
 
 def read_json(path: Path, limit: int = 1_048_576) -> dict:
-    with path.open("rb") as source:
-        data = source.read(limit + 1)
+    for attempt in range(5):
+        try:
+            with path.open("rb") as source:
+                data = source.read(limit + 1)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(.01)
     if len(data) > limit:
         raise ValueError("JSON file exceeds its size limit")
     result = json.loads(data)
@@ -250,7 +259,7 @@ def verify_loopback_socket(pid: int, port: int) -> None:
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
-           expanded_zones: bool = False):
+           expanded_zones: bool = False, guest_reload_input: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -266,6 +275,9 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES", None)
     env.pop("SILVERFISH_COOP_NATIVE_TRANSPORT", None)
     env.pop("SILVERFISH_COOP_NATIVE_FIXTURES", None)
+    env.pop("SILVERFISH_COOP_HEADLESS", None)
+    env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
     backend = native_death_backend(work)
     if native_events and (backend != "cpp" or port is None):
         raise ValueError("Native event scope requires a staged C++ listen host")
@@ -275,6 +287,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("Natural exit handling requires a staged C++ game")
     if native_zone_walls and not native_zones:
         raise ValueError("Physical exit blockers require native exit handling")
+    if guest_reload_input and (port is not None or not native_zones):
+        raise ValueError("Stock guest reload input requires a staged native client")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
     if native_events:
@@ -286,17 +300,23 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
         if port is not None and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
+            env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
     if native_zone_walls:
         env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
     if expanded_zones:
         env["SILVERFISH_COOP_NATIVE_EXPANDED_ZONES"] = "1"
+    if guest_reload_input:
+        env["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT"] = "1"
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
         arguments += f" -port={port}"
     info = None
     if headless:
-        arguments += " -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
+        env["SILVERFISH_COOP_HEADLESS"] = "1"
+        arguments += (" -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
+                      " -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,"
+                      "[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock")
         info = subprocess.STARTUPINFO()
         info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         info.wShowWindow = subprocess.SW_HIDE
@@ -572,18 +592,20 @@ class Bridge:
                         "visit_seconds": int(fields[5]), "startup_seconds": int(fields[6]), "fade_seconds": int(fields[7]),
                         "return_map": fields[8], "return_bed": fields[9], "kind": fields[10], "tarot": fields[11],
                     }
-                elif fields[0] == "native-dream-effects" and len(fields) == 8:
+                elif fields[0] == "native-dream-effects" and len(fields) in (8, 9):
                     data["native_dream_effects"] = {
                         "source": fields[1], "pawn": fields[2], "kind": fields[3], "destination": fields[4],
                         "tarot": fields[5], "before": int(fields[6]), "after": int(fields[7]),
                     }
-                elif fields[0] == "native-guest-weapon" and len(fields) == 12:
+                    if len(fields) == 9 and fields[8]:
+                        data["native_dream_effects"]["stock_event"] = fields[8]
+                elif fields[0] == "native-guest-weapon" and len(fields) in (12, 14):
                     data["native_guest_weapon"] = {
                         "map": fields[1], "action": fields[2], "pawn": fields[3], "guid": fields[4],
                         "ok": fields[5] == "1", "status": fields[6],
                         **{key: (None if value == "-" else int(value))
-                           for key, value in zip(("before", "after", "actor_ammo", "stored_ammo", "projectiles"),
-                                                 fields[7:])},
+                           for key, value in zip(("before", "after", "actor_ammo", "stored_ammo", "projectiles",
+                                                  "reserve_before", "reserve_after"), fields[7:])},
                     }
                 elif fields[0] == "native-rest" and len(fields) == 19:
                     data["native_rest"] = {
@@ -594,9 +616,71 @@ class Bridge:
                         "hours": None if fields[15] == "-" else int(fields[15]),
                         "before": _finite(fields[16]), "after": _finite(fields[17]), "ping": fields[18],
                     }
+                elif fields[0] == "native-bandit":
+                    data["native_bandit"] = parse_bandit(fields)
+                elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
+                    data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
+                elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
+                    data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
+                                                           "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}
+                elif fields[0] == "native-rest-guard" and len(fields) == 4:
+                    data["native_rest_guard"] = {"armed": fields[1] == "1", "status": fields[2],
+                                               "guest_denials": int(fields[3])}
                 elif fields[0] == "native-rest-hook" and len(fields) == 5:
                     data["native_rest_hook"] = {"installed": fields[1] == "1", "armed": fields[2] == "1",
                                                "fresh": fields[3] == "1", "status": fields[4]}
+                elif fields[0] == "native-cistern-keypad" and len(fields) == 7:
+                    data["native_cistern_keypad"] = {
+                        "map": fields[1], "pawn": fields[2], "door": fields[3], "key": int(fields[4]),
+                        "locked": fields[5] == "1", "unlocked": fields[6] == "1",
+                    }
+                elif fields[0] == "native-world-view" and len(fields) in (21, 27) and fields[1] in ("sample", "applied"):
+                    row = {"mode": fields[1], "map": fields[2], "actor": fields[3], "epoch": fields[4],
+                           "sequence": int(fields[5]), "sun_visible": fields[13] == "1", "sun_intensity": _finite(fields[14]),
+                           "clock_text": fields[18], "save_unchanged": fields[19] == "1", "sky_verified": fields[20] == "1"}
+                    row.update(zip(("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z"),
+                                   map(_finite, fields[6:13])))
+                    row.update(zip(("sky_r", "sky_g", "sky_b"), map(_finite, fields[15:18])))
+                    if len(fields) == 27:
+                        row.update(zip(WORLD_WEATHER_FIELDS, map(_finite, fields[21:26])))
+                        row["weather_verified"] = fields[26] == "1"
+                    data["native_world_view"] = row
+                elif fields[0] == "native-loot" and len(fields) in (14, 15):
+                    data["native_loot"] = {
+                        "action": fields[1], "map": fields[2], "crate": fields[3], "pawn": fields[4],
+                        "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
+                        "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
+                        "distance": _finite(fields[11]), "item_count": int(fields[12]), "invoked": fields[13] == "1",
+                        "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
+                    }
+                elif fields[0] == "native-loot-item" and len(fields) in (3, 4) and "native_loot" in data:
+                    item = {"actor": fields[1], "class_path": fields[2]}
+                    if len(fields) == 4:
+                        item["guid"] = fields[3]
+                    data["native_loot"]["items"].append(item)
+                elif fields[0] == "native-wipe-inventory" and len(fields) == 8:
+                    data["native_wipe_inventory"] = {
+                        "map": fields[1], "source": fields[2], "replacement": fields[3],
+                        "escrow": None if fields[4] == "-" else fields[4],
+                        "kept": int(fields[5]), "dropped": int(fields[6]), "discarded": int(fields[7]),
+                    }
+                elif fields[0] == "native-wipe-inventory-action" and len(fields) == 9:
+                    data["native_wipe_inventory_action"] = {
+                        "action": fields[1], "map": fields[2], "pawn": fields[3], "source": fields[4],
+                        "replacement": None if fields[5] == "-" else fields[5],
+                        "ok": fields[6] == "1", "status": fields[7], "count": int(fields[8]),
+                    }
+                elif fields[0] == "native-inventory-census" and len(fields) == 6:
+                    data["native_inventory_census"] = {
+                        "slot": fields[1], "map": fields[2], "total": int(fields[3]), "offset": int(fields[4]),
+                        "count": int(fields[5]), "items": [],
+                    }
+                elif fields[0] == "native-inventory-census-item" and len(fields) == 9 and "native_inventory_census" in data:
+                    data["native_inventory_census"]["items"].append({
+                        "guid": fields[1], "source": fields[2], "index": int(fields[3]), "class_path": fields[4],
+                        "quantity": int(fields[5]), "stackable": fields[6] == "1",
+                        "important": fields[7] == "1", "cannot_keep": fields[8] == "1",
+                    })
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
                         "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],
@@ -605,6 +689,12 @@ class Bridge:
                     data["native_dream_isolation"] = {
                         "state": fields[1], "map": fields[2], "actor": fields[3], "detail": fields[4],
                         "early_requested": fields[5] == "1",
+                    }
+                elif fields[0] == "native-black-stone" and len(fields) == 9:
+                    data["native_black_stone"] = {
+                        "map": fields[1], "installed": fields[2] == "1", "armed": fields[3] == "1",
+                        "fresh": fields[4] == "1", "status": fields[5], "guid": fields[6],
+                        "entry": fields[7], "pawn": fields[8],
                     }
                 elif fields[0] == "native-dream-formation" and len(fields) in (3, 5):
                     data["native_dream_formation"] = {"map": fields[1], "adjustments": int(fields[2])}
@@ -713,7 +803,7 @@ class Bridge:
                         "pawn": None if fields[5] == "-" else fields[5],
                     })
                 elif fields[0] == "native-rule" and len(fields) == 3:
-                    data.setdefault("native_rules", {})[fields[1]] = int(fields[2])
+                    data.setdefault("native_rules", {})[fields[1]] = None if fields[2] == "-" else int(fields[2])
                 elif fields[0] == "native-reputation" and len(fields) == 3:
                     data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
                 elif fields[0] in ("native-quest-catalog", "native-quest-entry", "native-quest-reward-item"):

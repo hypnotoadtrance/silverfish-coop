@@ -129,6 +129,16 @@ def select_items(wipe: dict, actor_id: str, retained: dict[str, int], *, now: fl
         raise WipeError("selection_closed")
     if actor_id not in wipe["players"]:
         raise WipeError("actor_unavailable")
+    if stock := wipe.get("native"):
+        from . import native_inventory_wipe
+
+        try:
+            selected = native_inventory_wipe.qualify_choice(stock, actor_id, retained)
+        except native_inventory_wipe.InventoryWipeError as error:
+            raise WipeError(str(error)) from error
+        candidate = deepcopy(wipe)
+        candidate["choices"][actor_id] = selected
+        return candidate
     selected = _inventory(retained)
     if len(selected) > wipe["keep_slots"]:
         raise WipeError("too_many_items")

@@ -94,6 +94,8 @@ namespace silverfish::authored_exits
             STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P")};
         inline constexpr World SavloEstate_P{STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P")};
+        inline constexpr World Sci_Tunnel_01_P{STR("/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P.Sci_Tunnel_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P")};
         inline constexpr World Shop_BlackMarket_01{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01")};
         inline constexpr World Shop_Craftsman_01{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Craftsman_01.Shop_Craftsman_01"),
@@ -102,6 +104,8 @@ namespace silverfish::authored_exits
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P")};
         inline constexpr World Shop_ScavBar_P{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P")};
+        inline constexpr World Shop_Scientist_01{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01")};
         inline constexpr World Shop_ShopKeep_P{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P")};
         inline constexpr World Shop_Smuggler_P{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P.Shop_Smuggler_P"),
@@ -180,6 +184,9 @@ namespace silverfish::authored_exits
         Route{detail::Cistern_P, detail::CrossRoads_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_1"), STR("CR_Cstrn"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_178"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_268")},
+        Route{detail::Cistern_P, detail::Sci_Tunnel_01_P, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_2"), STR("Cistern_Sci"), STR("Dungeon_TransitionDoor_BP_C_0"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_346"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_0")},
         Route{detail::CrashSite_01_P, detail::TutTnl_01_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_1"), STR("Crash_Tut"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_150"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_186")},
@@ -207,6 +214,9 @@ namespace silverfish::authored_exits
         Route{detail::Lab_EastWing_P, detail::RuinFeilds_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_0"), STR("RgEast_Flood"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_136")},
+        Route{detail::Lab_EastWing_P, detail::Shop_Scientist_01, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_1"), STR("RgIn"), STR("Dungeon_TransitionDoor_BP_C_4"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_1"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_588")},
         Route{detail::OldPipes_01_P, detail::NorthEast_Rail_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_0"), STR("NE_Pipe"), STR("Dungeon_TransitionDoor_BP_C_3"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_694")},
@@ -223,6 +233,9 @@ namespace silverfish::authored_exits
             STR("Level_Exit_BP_C_241"), STR("Refine_Beach"), STR("LevelExit_Spawn_BP_C_1"), 12},
         Route{detail::Refinery_01_P, detail::Slums_P, Mode::overlap,
             STR("Level_Exit_BP_C_242"), STR("Slum_Refine"), STR("LevelExit_Spawn_BP_C_1"), 8},
+        Route{detail::Sci_Tunnel_01_P, detail::Cistern_P, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_0"), STR("Cistern_Sci"), STR("Dungeon_TransitionDoor_BP_C_2"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_346")},
         Route{detail::Slums_Tunnel_01_P, detail::Slums_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_1"), STR("Slums_GreenLine"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_92"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_152")},
@@ -242,6 +255,8 @@ namespace silverfish::authored_exits
         Route{detail::TutTnl_01_P, detail::Observitory_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_2"), STR("Tut_Obsrv"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_402"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_208")},
+        Route{detail::Tut_Dock_P, detail::Observitory_P, Mode::overlap,
+            STR("Level_Exit_BP_C_1"), STR("Obs_Dock"), STR("LevelExit_Spawn_BP_C_213"), 10},
         Route{detail::UtilityTunnels_01_P, detail::RailYard_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_0"), STR("Rail_Utility"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_212")},
@@ -376,6 +391,9 @@ namespace silverfish::authored_exits
         Route{detail::RuinFeilds_P, detail::Lab_EastWing_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_1"), STR("RgEast_Flood"), STR("Dungeon_TransitionDoor_BP_C_0"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_136"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_0")},
+        Route{detail::RuinFeilds_P, detail::Shop_Scientist_01, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_2"), STR("Market_Flood"), STR("Dungeon_TransitionDoor_BP_C_2"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_191"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_5")},
         Route{detail::RuinFeilds_P, detail::CrossRoads_P, Mode::overlap,
             STR("Level_Exit_BP_C_1"), STR("CR_RF"), STR("LevelExit_Spawn_BP_C_273"), 20},
         Route{detail::RuinFeilds_P, detail::Beach_01_P, Mode::overlap,
@@ -480,6 +498,12 @@ namespace silverfish::authored_exits
         Route{detail::Shop_ScavBar_P, detail::Slums_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_2"), STR("Bar_Slums"), STR("Dungeon_TransitionDoor_BP_C_2"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_186"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_280")},
+        Route{detail::Shop_Scientist_01, detail::RuinFeilds_P, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_2"), STR("Market_Flood"), STR("Dungeon_TransitionDoor_BP_C_2"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_5"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_191")},
+        Route{detail::Shop_Scientist_01, detail::Lab_EastWing_P, Mode::door,
+            STR("Dungeon_TransitionDoor_BP_C_4"), STR("RgIn"), STR("Dungeon_TransitionDoor_BP_C_1"), std::nullopt,
+            STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_588"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_1")},
         Route{detail::Shop_ShopKeep_P, detail::NorthEast_Rail_P, Mode::door,
             STR("Dungeon_TransitionDoor_BP_C_0"), STR("ShopKeep"), STR("Dungeon_TransitionDoor_BP_C_2"), std::nullopt,
             STR("Level_Exit_BP_GEN_VARIABLE_Level_Exit_BP_C_CAT_0"), STR("LevelExit_Spawn_BP_GEN_VARIABLE_LevelExit_Spawn_BP_C_CAT_476")},
