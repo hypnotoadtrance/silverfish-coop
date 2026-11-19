@@ -73,7 +73,10 @@ def stock_input_result(run: Path, crate: str, sequence: int) -> dict | None:
     return None
 
 
-async def exercise(work: Path, name: str, original_save: Path | None, baseline: str | None = None) -> None:
+async def exercise(work: Path, name: str, original_save: Path | None, baseline: str | None = None,
+                   force_stock_roll: bool = False) -> None:
+    if force_stock_roll and (name != "rail-yard" or original_save is None):
+        raise ValueError("The exact Rail Yard forced stock draw requires single-player save verification")
     area, actors = SCENES[name]
     targets = [full_name(area, actor) for actor in actors]
     assert all(CRATES.get(crate) == area for crate in targets)
@@ -84,7 +87,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     host, guest = ("--campaign", key), ("--profile", key)
     originals = saved_hashes(original_save) if original_save else None
+    if force_stock_roll and not originals:
+        raise ValueError("The single-player save directory must contain files to verify")
     evidence = {"map": area, "stock_interactions": []}
+    if force_stock_roll:
+        evidence["force_stock_roll"] = True
     processes = []
     print(run, flush=True)
 
@@ -114,6 +121,18 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     def public_roll(status, crate):
         return status.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate)
 
+    async def typed_inventory_item(character, guid):
+        offset = 0
+        while offset is not None:
+            page = (await command("action", *guest, "native-inventory-list", "--target", str(offset)))["native_inventory"]
+            assert (page["owner"], page["offset"]) == (character, offset), page
+            item = next((item for item in page["items"] if item["guid"] == guid), None)
+            if item:
+                return item
+            next_offset = page["next_offset"]
+            assert next_offset is None or offset < next_offset <= 4096, page
+            offset = next_offset
+
     try:
         seed = clone_baseline(work, baseline, campaign, area, targets) if baseline else None
         if baseline:
@@ -131,35 +150,54 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
                            and all(status_of(state, crate) == "ready" for crate in targets))
         pawn = ready["game"]["pawns"]["local"]["name"]
-        await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+        bound = await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+        authority_pawn = bound["game"]["native_guest_save"]["pawn"]
         character = invitation["character_id"]
         await command("action", *host, "native-loot-seed", "--target", targets[0])
 
         for position, crate in enumerate(targets):
             await command("action", *host, "native-loot-approach", "--target", crate)
-            pressed = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
-            assert (pressed["map"], pressed["crate"], pressed["entry"], pressed["pawn"]) == (area, crate, "fixture", pawn), pressed
-            await wait(guest_run, lambda _: stock_input_result(guest_run, crate, pressed["sequence"]) is not None)
-            result = stock_input_result(guest_run, crate, pressed["sequence"])
-            if result["event"] != "native_stock_crate_interaction":
-                evidence["failure"] = result
-                raise RuntimeError(result["reason"])
+            forced = None
+            if force_stock_roll:
+                operation = uuid.uuid4().hex
+                reply = await command("action", *host, "native-loot-open-fixture", "--target", f"guest@{crate}",
+                                      "--operation-id", operation)
+                forced, pressed = reply["native_loot_roll"], reply["native_loot_fixture"]
+                assert forced["id"] == operation and forced["items"] and forced["trait_calls"] == 3, forced
+                assert (pressed["map"], pressed["crate"], pressed["pawn"], pressed["action"], pressed["status"]) == (
+                    area, crate, authority_pawn, "open", native_loot.FORCED_ROLL_STATUS), pressed
+                assert (pressed["item_count"], pressed["trait_calls"], pressed["invoked"], pressed["looted"],
+                        pressed["ok"]) == (len(forced["items"]), 3, True, True, True), pressed
+            else:
+                pressed = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
+                assert (pressed["map"], pressed["crate"], pressed["entry"], pressed["pawn"]) == (area, crate, "fixture", pawn), pressed
+                await wait(guest_run, lambda _: stock_input_result(guest_run, crate, pressed["sequence"]) is not None)
+                result = stock_input_result(guest_run, crate, pressed["sequence"])
+                if result["event"] != "native_stock_crate_interaction":
+                    evidence["failure"] = result
+                    raise RuntimeError(result["reason"])
             committed = await wait(run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
             assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
             assert roll["lucky_looter"] and roll["trait_calls"] >= 1, roll
+            if forced:
+                assert roll == forced, (roll, forced)
             for sibling in targets[position + 1:]:
                 assert status_of(committed, sibling) == status_of(replicated, sibling) == "ready", sibling
                 assert public_roll(committed, sibling) is None, sibling
 
             claim = None
+            item = None
             if roll["items"]:
                 target = f"{roll['items'][0]['guid']}@{crate}"
                 request = ("action", *guest, "native-loot-claim", "--target", target, "--operation-id", uuid.uuid4().hex)
                 claim = (await command(*request))["native_loot_claim"]
                 assert claim["claimed_by"] == character and claim["guid"] == roll["items"][0]["guid"], claim
                 assert (await command(*request))["native_loot_claim"] == claim
+                if force_stock_roll:
+                    item = await typed_inventory_item(character, claim["guid"])
+                    assert item and (item["source"], item["class_path"]) == ("backpack", claim["class_path"]), item
                 denied = await command("action", *host, "native-loot-claim", "--target", target, expected=False)
                 assert denied["error"] == "native_loot_already_claimed", denied
                 roll["items"][0]["claimed_by"] = character
@@ -169,10 +207,16 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             native_host_save.verify_checkpoint(campaign / "game-user", saved)
             durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
             assert native_loot.public_roll(durable) == roll, durable
-            evidence["stock_interactions"].append({"receipt": pressed, "roll": roll, "claim": claim})
+            entry = {"receipt": pressed, "roll": roll, "claim": claim}
+            if force_stock_roll:
+                entry["typed_guest_item"] = item
+            evidence["stock_interactions"].append(entry)
 
         rolls = evidence["stock_interactions"]
         assert len({entry["roll"]["id"] for entry in rolls}) == len(targets)
+    except BaseException as error:
+        evidence.setdefault("failure", str(error))
+        raise
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:
@@ -184,15 +228,17 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         process.terminate()
                         await asyncio.wait_for(process.wait(), timeout=10)
         if originals is not None:
-            evidence["original_files_verified"] = len(originals)
-            assert saved_hashes(original_save) == originals
+            hashes_match = saved_hashes(original_save) == originals
+            evidence["original_files_verified"] = len(originals) if hashes_match else 0
         run.mkdir(parents=True, exist_ok=True)
         (run / "live-authored-crate-expansion-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        if originals is not None:
+            assert hashes_match, "The original single-player saves changed"
 
 
 async def main(arguments):
     for name in arguments.area or SCENES:
-        await exercise(arguments.work.resolve(), name, arguments.vanilla_saved, arguments.baseline)
+        await exercise(arguments.work.resolve(), name, arguments.vanilla_saved, arguments.baseline, arguments.force_stock_roll)
 
 
 if __name__ == "__main__":
@@ -201,7 +247,12 @@ if __name__ == "__main__":
     parser.add_argument("--area", action="append", choices=SCENES, help="play this scene instead of running all three")
     parser.add_argument("--vanilla-saved", type=Path)
     parser.add_argument("--baseline", help="resume a copy of a matching crate smoke checkpoint in this lab")
+    parser.add_argument("--force-stock-roll", action="store_true", help="use the scoped Rail Yard stock stream fixture")
     arguments = parser.parse_args()
+    if arguments.force_stock_roll:
+        if (arguments.area is not None and arguments.area != ["rail-yard"]) or not arguments.vanilla_saved:
+            parser.error("--force-stock-roll requires Rail Yard and --vanilla-saved")
+        arguments.area = ["rail-yard"]
     if arguments.baseline and (not arguments.area or len(arguments.area) != 1):
         parser.error("--baseline requires exactly one --area")
     asyncio.run(main(arguments))

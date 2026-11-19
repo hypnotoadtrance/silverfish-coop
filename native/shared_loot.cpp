@@ -408,6 +408,18 @@ namespace
     // scratch copy with the actual engine before changing a fixture's stream.
     constexpr std::int32_t first_fraction_zero = -1768226079;
 
+    struct SeedFixtureProfile
+    {
+        const Unreal::TCHAR* crate;
+        std::array<std::int32_t, 2> child_salts;
+    };
+    constexpr std::array seed_fixture_profiles{
+        SeedFixtureProfile{silverfish::authored_loot::profiles.front().actor, {-73835290, -28604056}},
+        SeedFixtureProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.LootCrate_Small_BP_C_3"),
+            {-36556924, -94896472}},
+    };
+
     struct SeedFixture
     {
         Unreal::UFunction* table{};
@@ -472,6 +484,10 @@ namespace
 
         std::string_view bind(const Context& context, const Schema& schema)
         {
+            const auto crate_path = context.crate->GetPathName();
+            const auto profile = std::ranges::find_if(seed_fixture_profiles,
+                [&](const SeedFixtureProfile& entry) { return crate_path == entry.crate; });
+            if (profile == seed_fixture_profiles.end()) return "stock_loot_fixture_crate_unqualified";
             auto* type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.RandomStream"));
             auto* child_type = context.spawners.front()->GetClassPrivate();
             table = find<Unreal::UFunction>(table_path);
@@ -499,12 +515,11 @@ namespace
             if (!std::isfinite(expected_value) || expected_value <= 0.0)
                 return "stock_loot_fixture_slot_value_unverified";
 
-            constexpr std::array salts{-73835290, -28604056};
             for (std::size_t index = 0; index < children.size(); ++index)
             {
                 auto* child = context.spawners[index];
                 auto* salt = field<Unreal::FIntProperty>(child, STR("SpawnerSalt"));
-                if (!salt || salt->GetPropertyValueInContainer(child) != salts[index])
+                if (!salt || salt->GetPropertyValueInContainer(child) != profile->child_salts[index])
                     return "stock_loot_fixture_authored_spawner_changed";
                 children[index] = child;
             }
@@ -880,7 +895,8 @@ namespace
             latest_roll.produced = scope.produced;
             latest_roll.expires = Clock::now() + std::chrono::seconds(2);
         }
-        return result(lua, ok, ok ? "opened" : scope.problem, looted, address(first), address(second), traits, true);
+        const std::string_view detail = force_nonempty ? "opened_fixture_seeded" : "opened";
+        return result(lua, ok, ok ? detail : scope.problem, looted, address(first), address(second), traits, true);
     }
 
     int seed_result(const Lua& lua, bool ok, std::string_view detail)

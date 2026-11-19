@@ -11,6 +11,7 @@ from .native_gold import valid_guid
 
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
+FORCED_ROLL_STATUS = "opened_fixture_seeded"
 
 
 def public_roll(roll: dict) -> dict:
@@ -272,6 +273,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                     or len({item["guid"] for item in items}) != len(items)
                     or proof["escrow_slot"] != arguments[0]):
                 raise RuntimeError("The exact stock crate roll did not verify")
+            if fixture_nonempty and (proof["status"] != FORCED_ROLL_STATUS or not items or proof["trait_calls"] != 3):
+                raise RuntimeError("The exact staged stock stream draw did not produce a retained item")
             frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], area,
                                             flush=True)
             roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
@@ -283,7 +286,10 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             host.party = candidate
             host.native_checkpoint_unsafe = False
             host.control.event("native_loot_roll_committed", revision=revision, **public_roll(roll))
-            return {"native_loot_roll": public_roll(roll)}
+            result = {"native_loot_roll": public_roll(roll)}
+            if fixture_nonempty:
+                result["native_loot_fixture"] = proof
+            return result
         if action == "claim":
             if (proof["status"] not in ("claimed", "already_claimed") or not proof["invoked"]
                     or proof["escrow_slot"] != arguments[1]):
