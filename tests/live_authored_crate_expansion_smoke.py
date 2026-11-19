@@ -10,6 +10,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
+from live_computer_board_smoke import stock_flags
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -17,8 +18,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_loot
-from tools.silverfish.authored_loot import CRATES, full_name
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, RAIL_YARD
+from tools.silverfish.authored_loot import CRATES, GUARANTEED_REPLENISHMENT, full_name
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -29,6 +30,16 @@ SCENES = {
     "beach": ("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P", ("LootCrate_Small_BP_C_10",)),
     "southeast-road": ("/Game/Classes/Maps/Maps_OverWorld/SouthEast_Road_P", ("LootCrate_Small_BP_C_0",)),
     "trench": ("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P", ("LootCrate_Small_BP_C_1", "LootCrate_Small_BP_C_3")),
+}
+DEFAULT_SCENES = tuple(SCENES)
+GUARANTEED_SCENES = {
+    "guaranteed-observatory": (OBSERVATORY, ("LootCrate_Small_BP_C_1",)),
+    "guaranteed-docks": ("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P", ("LootCrate_Small_BP_C_10", "LootCrate_Small_BP_C_15")),
+}
+SCENES.update(GUARANTEED_SCENES)
+FISH_CANNERY_ITEMS = {
+    "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
+    "/Game/Classes/Items/Item_DeadBeetle.Item_DeadBeetle_C",
 }
 
 
@@ -82,8 +93,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     if force_stock_roll and (name != "rail-yard" or original_save is None):
         raise ValueError("The exact Rail Yard forced stock draw requires single-player save verification")
     area, actors = SCENES[name]
+    guaranteed = name in GUARANTEED_SCENES
     targets = [full_name(area, actor) for actor in actors]
     assert all(CRATES.get(crate) == area for crate in targets)
+    if guaranteed:
+        assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
     key = f"crate-{name}-{uuid.uuid4().hex[:8]}"
     campaign = work / "campaigns" / key
     run = campaign / "run"
@@ -91,13 +105,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     host, guest = ("--campaign", key), ("--profile", key)
     originals = saved_hashes(original_save) if original_save else None
-    if force_stock_roll and not originals:
+    if (force_stock_roll or guaranteed) and not originals:
         raise ValueError("The single-player save directory must contain files to verify")
     evidence = {"map": area, "stock_interactions": []}
     if force_stock_roll:
         evidence["force_stock_roll"] = True
     processes = []
     cash_requests = []
+    exhaustion_flags = {crate: f"{actor}-{area.rsplit('/', 1)[1]}-" for crate, actor in zip(targets, actors)} if guaranteed else {}
     print(run, flush=True)
 
     async def command(*arguments, expected=True):
@@ -125,6 +140,15 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def public_roll(status, crate):
         return status.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate)
+
+    def saved_checkpoint():
+        saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+        native_host_save.verify_checkpoint(campaign / "game-user", saved)
+        return saved
+
+    def permanent_flags(saved):
+        found = stock_flags(native_host_save.directory(campaign / "game-user"), saved["world"]["native_host_save"], area)
+        return {flag: found.get(flag) for flag in exhaustion_flags.values()}
 
     async def typed_inventory_item(character, guid):
         offset = 0
@@ -159,6 +183,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
         character = invitation["character_id"]
         await command("action", *host, "native-loot-seed", "--target", targets[0])
+        if guaranteed:
+            await command("action", *host, "checkpoint")
+            initial = permanent_flags(saved_checkpoint())
+            assert all(value is None for value in initial.values()), initial
+            evidence["stock_persistent_flags_before"] = initial
 
         for position, crate in enumerate(targets):
             await command("action", *host, "native-loot-approach", "--target", crate)
@@ -186,6 +215,10 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             roll = public_roll(committed, crate)
             assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
             assert roll["lucky_looter"] and roll["trait_calls"] >= 1, roll
+            if guaranteed:
+                assert roll["trait_calls"] == 1 and 1 <= len(roll["items"]) <= 2, roll
+            if name == "guaranteed-docks":
+                assert {item["class_path"] for item in roll["items"]} <= FISH_CANNERY_ITEMS, roll
             if forced:
                 assert roll == forced, (roll, forced)
             for sibling in targets[position + 1:]:
@@ -212,7 +245,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     await wait(guest_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == credit["after"])
                     cash_requests.append((request, claim))
                     roll["items"][0]["wallet_credit"] = credit
-                elif force_stock_roll:
+                elif force_stock_roll or guaranteed:
                     item = await typed_inventory_item(character, claim["guid"])
                     assert item and (item["source"], item["class_path"]) == ("backpack", claim["class_path"]), item
                 denied = await command("action", *host, "native-loot-claim", "--target", target, expected=False)
@@ -220,20 +253,28 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 roll["items"][0]["claimed_by"] = character
             replay = (await command("action", *host, "native-loot-open", "--target", crate))["native_loot_roll"]
             assert replay == roll, replay
-            saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
-            native_host_save.verify_checkpoint(campaign / "game-user", saved)
+            saved = saved_checkpoint()
             durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
             assert native_loot.public_roll(durable) == roll, durable
             entry = {"receipt": pressed, "roll": roll, "claim": claim}
-            if force_stock_roll:
+            if force_stock_roll or guaranteed:
                 entry["typed_guest_item"] = item
+            if guaranteed:
+                actual_flags = permanent_flags(saved)
+                expected_flags = {flag: 1 if index <= position else None for index, flag in enumerate(exhaustion_flags.values())}
+                assert actual_flags == expected_flags, actual_flags
+                entry["stock_persistent_flags"] = actual_flags
             evidence["stock_interactions"].append(entry)
 
         rolls = evidence["stock_interactions"]
         assert len({entry["roll"]["id"] for entry in rolls}) == len(targets)
-        if require_cash:
-            assert cash_requests, "The stock crate rolls produced no cash in this campaign"
-            expected = cash_requests[-1][1]["wallet_credit"]["after"]
+        if guaranteed:
+            guids = [item["guid"] for entry in rolls for item in entry["roll"]["items"]]
+            assert len(set(guids)) == len(guids), guids
+        if require_cash or guaranteed:
+            if require_cash:
+                assert cash_requests, "The stock crate rolls produced no cash in this campaign"
+                expected = cash_requests[-1][1]["wallet_credit"]["after"]
             port = opening["endpoint"]["port"]
             for process, controller in reversed(processes):
                 await command("action", *controller, "stop")
@@ -241,19 +282,34 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
             await start("host-restart", host, "host", *host, "--port", str(port), "--headless",
                         "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
-            await wait(run, lambda state: state.get("state") == "hosting"
-                       and state.get("generation") != opening["generation"]
-                       and state.get("game", {}).get("native_wallet") == expected)
+            resumed = await wait(run, lambda state: state.get("state") == "hosting"
+                                 and state.get("generation") != opening["generation"] and state["endpoint"]["port"] == port
+                                 and (not require_cash or state.get("game", {}).get("native_wallet") == expected)
+                                 and (not guaranteed or all(status_of(state, crate) == "exhausted" for crate in targets)))
             fresh = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
             await start("guest-restart", guest, "join", *guest, "--headless", "--invite", fresh["invite_file"])
-            await wait(guest_run, lambda state: state.get("state") == "connected"
-                       and state.get("generation") != ready["generation"]
-                       and state.get("endpoint", {}).get("port") == port
-                       and state.get("gameplay", {}).get("shared_wallet") == expected)
+            peer = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
+                              and state.get("generation") != ready["generation"] and state.get("character_id") == character
+                              and state.get("host_session") == resumed["generation"] and state.get("zone_epoch") == resumed["zone_epoch"]
+                              and (not require_cash or state.get("gameplay", {}).get("shared_wallet") == expected)
+                              and (not guaranteed or all(status_of(state, crate) == "exhausted" for crate in targets)))
             for request, claim in cash_requests:
                 assert (await command(*request))["native_loot_claim"] == claim
                 assert await typed_inventory_item(character, claim["guid"]) is None
-            evidence["wallet_restart"] = {"balance": expected, "same_port": True, "receipt_count": len(cash_requests)}
+            if require_cash:
+                evidence["wallet_restart"] = {"balance": expected, "same_port": True, "receipt_count": len(cash_requests)}
+            if guaranteed:
+                for crate, entry in zip(targets, rolls):
+                    assert public_roll(resumed, crate) == public_roll(peer, crate) == entry["roll"], entry
+                    item = entry["typed_guest_item"]
+                    if item:
+                        restored = await typed_inventory_item(character, item["guid"])
+                        fields = ("guid", "class_path", "source", "quantity")
+                        assert restored and tuple(restored[key] for key in fields) == tuple(item[key] for key in fields), restored
+                await command("action", *host, "checkpoint")
+                persisted = permanent_flags(saved_checkpoint())
+                assert persisted == dict.fromkeys(exhaustion_flags.values(), 1), persisted
+                evidence["stock_persistent_flags_restart"] = {"same_port": True, "flags": persisted}
     except BaseException as error:
         evidence.setdefault("failure", str(error))
         raise
@@ -277,7 +333,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
 
 async def main(arguments):
-    for name in arguments.area or SCENES:
+    for name in arguments.area or DEFAULT_SCENES:
         await exercise(arguments.work.resolve(), name, arguments.vanilla_saved, arguments.baseline,
                        arguments.force_stock_roll, arguments.require_cash)
 
@@ -285,7 +341,7 @@ async def main(arguments):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--area", action="append", choices=SCENES, help="play this scene instead of running every supported smoke scenario")
+    parser.add_argument("--area", action="append", choices=SCENES, help="play this scene instead of running the default smoke scenarios")
     parser.add_argument("--vanilla-saved", type=Path)
     parser.add_argument("--baseline", help="resume a copy of a matching crate smoke checkpoint in this lab")
     parser.add_argument("--force-stock-roll", action="store_true", help="use the scoped Rail Yard stock stream fixture")
@@ -293,6 +349,8 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
+    if any(area in GUARANTEED_SCENES for area in arguments.area or ()) and not arguments.vanilla_saved:
+        parser.error("Guaranteed crate scenes require --vanilla-saved")
     if arguments.force_stock_roll:
         if (arguments.area is not None and arguments.area != ["rail-yard"]) or not arguments.vanilla_saved:
             parser.error("--force-stock-roll requires Rail Yard and --vanilla-saved")
