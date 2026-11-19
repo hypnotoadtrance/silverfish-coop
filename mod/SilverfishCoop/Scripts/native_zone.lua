@@ -600,7 +600,107 @@ local function place_expanded_overlap(state, details, route, position, alternate
     error("No verified stock floor at the requested expanded overlap position", 0)
 end
 
-local function place_at_named_door(state, pawn, door, direction, rotation, distance)
+local beach_leto = "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"
+
+local function place_at_beach_leto(state, pawn, door, library, ignore, color, origin, direction, rotation, height)
+    local level = beach_leto .. ".Beach_01_P:PersistentLevel."
+    local bunker = StaticFindObject(level .. "StaticMeshActor_881")
+    local floor = valid(bunker) and bunker.StaticMeshComponent
+    local mesh = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_BuildingSets/Set_Bunker/SM_Bld_Bunker_03.SM_Bld_Bunker_03")
+    local box, skin, camera = door.Box, door.SK_DungeonDoor_01, pawn.Camera
+    if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. "Dungeon_TransitionDoor_BP_C_1"
+        or math.abs(direction.X) > .01 or math.abs(direction.Y - 1) > .01 or math.abs(direction.Z) > .01
+        or not valid(bunker) or not same(bunker:GetWorld(), state.world) or not bunker:HasAuthority()
+        or bunker:IsActorBeingDestroyed() or not bunker:GetActorEnableCollision()
+        or not same(bunker:GetClass(), StaticFindObject("/Script/Engine.StaticMeshActor"))
+        or not same(floor, bunker.RootComponent) or not same(floor:GetOwner(), bunker)
+        or floor:GetFullName() ~= "StaticMeshComponent " .. level .. "StaticMeshActor_881.StaticMeshComponent0"
+        or not same(floor:GetClass(), StaticFindObject("/Script/Engine.StaticMeshComponent"))
+        or not same(floor.StaticMesh, mesh) or floor:GetCollisionObjectType() ~= 0
+        or floor:GetCollisionResponseToChannel(2) ~= 2
+        or not valid(box) or not same(box:GetOwner(), door) or not valid(camera) or not same(camera:GetOwner(), pawn) then
+        error("The exact Beach_Leto door, bunker floor, or pawn camera is unavailable", 0)
+    end
+    local base, target, initial = floor:K2_GetComponentLocation(), box:K2_GetComponentLocation(), pawn:K2_GetActorLocation()
+    local interaction = pawn.InteractionRange
+    local collision = floor:GetCollisionEnabled()
+    if not vector(base) or not vector(target) or not vector(initial)
+        or math.abs(base.X - origin.X - 242.25) > 2 or math.abs(base.Y - origin.Y - 681.25) > 2
+        or math.abs(base.Z - origin.Z + 11.90) > 2 or (collision ~= 1 and collision ~= 3)
+        or not finite(interaction) or interaction < 150 or interaction > 2000 then
+        error("The exact Beach_Leto bunker geometry or interaction range changed", 0)
+    end
+
+    local function trace(start, stop, channel, complex)
+        local hit = {}
+        if library:LineTraceSingle(pawn, start, stop, channel, complex, ignore, 0, hit, true, color, color, 0) == true then
+            return hit.OutHit or hit
+        end
+    end
+    local function distance_squared(first, second)
+        return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
+    end
+    local function can_see_door()
+        local eye = camera:K2_GetComponentLocation()
+        if not vector(eye) then return false end
+        local distance = math.sqrt(distance_squared(eye, target))
+        if distance < 1 or distance >= interaction then return false end
+        local function endpoint(length)
+            local scale = length / distance
+            return { X = eye.X + (target.X - eye.X) * scale, Y = eye.Y + (target.Y - eye.Y) * scale,
+                Z = eye.Z + (target.Z - eye.Z) * scale }
+        end
+        -- Match stock LookTrace: complex Visibility trims the simple Interactable ray.
+        local visibility = trace(eye, endpoint(interaction), 1, true)
+        local reach = interaction
+        if visibility then
+            if not vector(visibility.ImpactPoint) then return false end
+            reach = math.min(reach, math.sqrt(distance_squared(eye, visibility.ImpactPoint)))
+        end
+        local hit = reach > 1 and trace(eye, endpoint(reach), 4, false)
+        local surface = hit and hit.Component and hit.Component:Get()
+        return same(surface, box) or valid(skin) and same(skin:GetOwner(), door) and same(surface, skin)
+    end
+
+    local local_pawn = state.local_pawn and state.local_pawn.pawn
+    local side = same(local_pawn, pawn) and 1 or -1
+    local hits, reached = 0, 0
+    -- The cooked floor is 0.414 uu above the door root. Begin well below the
+    -- bunker ceiling (+292 uu), inside the chamber on the marker's +Y side.
+    for _, offset in ipairs({{180, 70}, {220, 85}, {145, 90}, {245, 35}, {200, 0}}) do
+        local x, y = origin.X + side * offset[2], origin.Y + offset[1]
+        local hit = trace({ X = x, Y = y, Z = origin.Z + 210 }, { X = x, Y = y, Z = origin.Z - 35 }, 0, false)
+        local surface = hit and hit.Component and hit.Component:Get()
+        if same(surface, floor) and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= .9
+            and math.abs(hit.ImpactPoint.Z - origin.Z - .414) <= 4 then
+            hits = hits + 1
+            local point = { X = x, Y = y, Z = hit.ImpactPoint.Z + height + 2 }
+            if distance_squared(point, origin) <= 320^2 then
+                local moved = pawn:K2_TeleportTo(point, rotation)
+                local actual = pawn:K2_GetActorLocation()
+                if moved and vector(actual) and distance_squared(actual, point) <= 10^2
+                    and distance_squared(actual, origin) <= 320^2 then
+                    reached = reached + 1
+                    if can_see_door() then
+                        pawn:ForceNetUpdate()
+                        return true
+                    end
+                end
+                if moved or not vector(actual) or distance_squared(actual, initial) > 10^2 then
+                    local restored = pawn:K2_TeleportTo(initial, rotation)
+                    actual = pawn:K2_GetActorLocation()
+                    if not restored or not vector(actual) or distance_squared(actual, initial) > 10^2 then
+                        error("The Beach_Leto door fixture could not restore the pawn", 0)
+                    end
+                    pawn:ForceNetUpdate()
+                end
+            end
+        end
+    end
+    error(string.format("No verified Beach_Leto bunker door approach (%d stock floor hits, %d safe positions)", hits, reached), 0)
+end
+
+local function place_at_named_door(state, pawn, door, direction, rotation, distance, tag)
     local marker = valid(door.LevelExit_Spawn_BP) and door.LevelExit_Spawn_BP.ChildActor
     local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     if not valid(marker) or not valid(marker.Arrow) or not same(marker:GetWorld(), state.world)
@@ -615,12 +715,16 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
         error("The named door or pawn has invalid staging geometry", 0)
     end
     local color = { R = 0, G = 0, B = 0, A = 1 }
-    local ignore = { door }
+    local ignore = {}
     for _, details in ipairs(state.pawns) do
         if valid(details.pawn) then ignore[#ignore + 1] = details.pawn end
     end
     local lateral_x, lateral_y = -direction.Y, direction.X
     local far = distance > 1000
+    if headless and not far and state.map == beach_leto and tag == "Beach_Leto" then
+        return place_at_beach_leto(state, pawn, door, library, ignore, color, origin, direction, rotation, extents)
+    end
+    table.insert(ignore, 1, door)
     local candidates = {}
     for _, length in ipairs(far and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
         for _, offset in ipairs({ 0, 90, -90 }) do
@@ -702,7 +806,7 @@ local function door_command(fields, state, phase, command)
     local rotation = pawn:K2_GetActorRotation()
     local distance = position == "near" and 180 or 2250
     if tag then
-        if place_at_named_door(state, pawn, door, direction, rotation, distance) then
+        if place_at_named_door(state, pawn, door, direction, rotation, distance, tag) then
             return "positioned " .. slot .. " " .. position .. " the exact authored door"
         end
         error("No verified stock floor near the named transition door", 0)

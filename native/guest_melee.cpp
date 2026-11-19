@@ -305,7 +305,7 @@ namespace
         return value ? value->GetPropertyValueInContainer(save) : -1.0;
     }
 
-    bool stock_attack(const Swing& current, bool active)
+    bool stock_attack(const Swing& current, void* contact_args = nullptr)
     {
         auto* weapon = current.pipe.Get();
         auto* motor = current.animation.Get();
@@ -317,7 +317,10 @@ namespace
         auto* type = find<U::UScriptStruct>(attack_path);
         if (!combo_row || !attack || !type || !parameter || !charge ||
             charge->GetPropertyValueInContainer(weapon) != 0.6f || attack->GetStruct().Get() != type ||
-            combo_row->GetStruct().Get() != type || parameter->GetStruct().Get() != type) return false;
+            combo_row->GetStruct().Get() != type || parameter->GetStruct().Get() != type ||
+            !parameter->HasAnyPropertyFlags(U::CPF_Parm) ||
+            parameter->HasAnyPropertyFlags(U::CPF_OutParm | U::CPF_ReferenceParm) ||
+            parameter->GetOffset_Internal() != 0) return false;
         U::FScriptArrayHelper rows(combo, combo->ContainerPtrToValuePtr<void>(weapon));
         if (rows.Num() != 2) return false;
         auto* name = field<U::FObjectProperty>(type, animation_name);
@@ -334,7 +337,8 @@ namespace
             range->GetPropertyValueInContainer(first) == 230.0 && radius->GetPropertyValueInContainer(first) == 65.0 &&
             !breach->GetPropertyValueInContainer(first) &&
             blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(first)) == 30.0 &&
-            (!active || attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first));
+            (!contact_args || (attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first) &&
+                              parameter->Identical(parameter->ContainerPtrToValuePtr<void>(contact_args), first)));
     }
 
     bool idle(const Swing& current)
@@ -385,8 +389,9 @@ namespace
             graph->Object() != swing.animation.Get() || !notify || notify->Node() != swing.hit.Get() ||
             notify->Object() != swing.animation.Get())
             return finish("mutation_unverified_guest_melee_contact_path");
-        if (!owner_current(swing) || !stock_attack(swing, true))
-            return finish("mutation_unverified_guest_melee_contact_owner_attack");
+        if (!owner_current(swing)) return finish("mutation_unverified_guest_melee_contact_owner");
+        if (!frame.Locals() || !stock_attack(swing, frame.Locals()))
+            return finish("mutation_unverified_guest_melee_contact_attack");
         ++swing.qualified;
     }
 
@@ -492,7 +497,7 @@ namespace
         candidate.graph = graph;
         if (!owner_current(candidate) || !idle(candidate))
             return proof(lua, false, "native_guest_melee_stock_pose_unqualified");
-        if (!stock_attack(candidate, false)) return proof(lua, false, "native_guest_melee_stock_swing_unqualified");
+        if (!stock_attack(candidate)) return proof(lua, false, "native_guest_melee_stock_swing_unqualified");
         candidate.host_health = health(canonical);
         candidate.guest_health = health(save);
         if (!std::isfinite(candidate.host_health) || candidate.host_health <= 1.0 ||
@@ -517,14 +522,17 @@ namespace
         if (!owner_current(swing)) finish("mutation_unverified_guest_melee_press_owner");
         else
         {
+            // The stock animation sets IsMidSwing from its later swing-start notify.
             const auto pressed = boolean(pipe, STR("Holding_Primary"), true) &&
-                boolean(anim, STR("IsMidSwing"), true) && live(object(anim, STR("ActiveMontage")));
+                boolean(anim, STR("PrimaryInput"), true);
             Primary release{};
             held->SetPropertyValueInContainer(&release, false);
             ++swing.releases;
             pipe->ProcessEvent(primary, &release);
-            if (!pressed || !owner_current(swing) || !boolean(pipe, STR("Holding_Primary"), false))
-                finish("mutation_unverified_guest_melee_press_release");
+            if (!pressed) finish("mutation_unverified_guest_melee_press_readback");
+            else if (!owner_current(swing) || !boolean(pipe, STR("Holding_Primary"), false) ||
+                     !boolean(anim, STR("PrimaryInput"), false))
+                finish("mutation_unverified_guest_melee_release_readback");
         }
         return report(lua);
     }
