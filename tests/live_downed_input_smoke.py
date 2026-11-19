@@ -109,14 +109,16 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
                               "movement": down["game"]["player_effects"]["local"]}
 
         await wait(guest_run, lambda state: guest_observes(state, down, True))
-        assert (await action(guest_owner, "native-interaction-fixture"))["native_interaction_fixture"] is True
+        interaction = await action(guest_owner, "native-interaction-fixture")
+        assert interaction["native_interaction_fixture"] is True, interaction
+        original_movement = baseline["game"]["player_effects"]["local"]
         revived = await wait(host_run, lambda state: state.get("gameplay", {}).get("players", {}).get("host", {}).get("downed") is False
                              and state.get("game", {}).get("native_host_revived_health") == before * 0.10
-                             and input_proof(state["game"], pawn, downed=False, inventory="clear"))
+                             and input_proof(state["game"], pawn, downed=False, inventory="clear")
+                             and state["game"].get("player_effects", {}).get("local") == original_movement)
         game = revived["game"]
         assert game["pawns"]["local"]["name"] == pawn and game["pawns"]["local"]["health"] == 25, game["pawns"]
         assert game["pawns"]["guest"]["name"] == other["name"] and game["pawns"]["guest"]["health"] == other["health"], game["pawns"]
-        assert game["player_effects"]["local"] == baseline["game"]["player_effects"]["local"]
         await wait(guest_run, lambda state: guest_observes(state, revived, False))
         events = (await command("events", *guest_owner, "--tail", "30"))["events"]
         receipts = [row for row in events if (row.get("event"), row.get("effect"), row.get("target")) == (
@@ -127,7 +129,7 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
                                "native_health": 25, "stock_interaction": receipts[0]}
         evidence["verified"] = True
     except BaseException as error:
-        evidence.update(verified=False, failure=str(error))
+        evidence.update(verified=False, failure=str(error) or type(error).__name__)
         raise
     finally:
         try:

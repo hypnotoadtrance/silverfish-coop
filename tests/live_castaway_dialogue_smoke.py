@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -18,6 +19,9 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_dialogue as dialogue
 
 
+CASTAWAY_PLACEMENT = (-2662.4421, 385.7958, 87.9999)
+
+
 async def exercise(work: Path, vanilla_saved: Path | None) -> None:
     name = "castaway-dialogue-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
@@ -28,7 +32,7 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
     print(host_run, flush=True)
     original = saved_hashes(vanilla_saved) if vanilla_saved is not None else None
     processes = []
-    evidence = {"stock_input": []}
+    evidence = {"stock_input": [], "approaches": []}
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
 
     async def command(*args, expected=True):
@@ -64,6 +68,12 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
 
     def view(status):
         return status.get("game", {}).get("native_dialogue_view", {})
+
+    def exact_position(status, pawn):
+        rows = status.get("game", {}).get("pawns", {}).values()
+        return next((row["location"] for row in rows if row.get("name") == pawn
+                     and len(row.get("location", ())) == 3
+                     and all(type(axis) in (int, float) and math.isfinite(axis) for axis in row["location"])), None)
 
     async def stock_press(target, expected_row):
         pending = (await action(profiles[0], dialogue.FIXTURE, target))["native_dialogue_view"]
@@ -103,10 +113,23 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
             await wait(host_run, lambda status: active(status, index + 1), timeout=55)
         assert len(set(local_pawns)) == 2
         before = await effects()
-        for profile, run, pawn, role in zip(profiles, guest_runs, local_pawns, ("guest", "guest2"), strict=True):
+        roster = await wait(host_run, lambda status: active(status, 2)
+                            and all(status.get("gameplay", {}).get("native_pawns", {}).get(role) for role in ("guest", "guest2")))
+        authority_pawns = roster["gameplay"]["native_pawns"]
+        assert len({authority_pawns["guest"], authority_pawns["guest2"]}) == 2
+        for run, pawn, role, character in zip(guest_runs, local_pawns, ("guest", "guest2"), characters, strict=True):
+            assert roster["gameplay"]["players"][role]["character_id"] == character
+            authority_pawn = authority_pawns[role]
             receipt = (await action(host, dialogue.APPROACH, role))["native_dialogue_approach"]
-            assert receipt == {"pawn": pawn, "npc": dialogue.NPC}, receipt
-            await wait(run, lambda status: view(status).get("state") == "armed" and view(status).get("pawn") == pawn)
+            assert receipt == {"pawn": authority_pawn, "npc": dialogue.NPC}, receipt
+            approached = await wait(host_run, lambda status: (point := exact_position(status, authority_pawn)) is not None
+                                    and math.dist(point, CASTAWAY_PLACEMENT) <= 160)
+            position = exact_position(approached, authority_pawn)
+            armed = await wait(run, lambda status: status.get("character_id") == character
+                               and view(status).get("state") == "armed" and view(status).get("pawn") == pawn
+                               and (point := exact_position(status, pawn)) is not None and math.dist(point, position) <= 60)
+            evidence["approaches"].append({"character": character, "authority_pawn": authority_pawn, "client_pawn": pawn,
+                                           "authority_location": position, "client_location": exact_position(armed, pawn)})
 
         first = await stock_press("open", dialogue.ROOT)
         other = (await action(profiles[1], dialogue.OPEN, dialogue.PROFILE))["native_dialogue"]
