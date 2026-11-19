@@ -16,12 +16,15 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.native_authored_pickup import ACTION, APPROACH, OLD_PIPE, SOURCES, SOURCES_KEY
 from tools.silverfish.native_gold import valid_guid
-from tools.silverfish.native_guest_melee import CANARY, CANARY_KEY, DAMAGE, EQUIP, EQUIP_KEY, verified_damage
+from tools.silverfish import native_host_save
+from tools.silverfish.native_guest_melee import (AIM_FIXTURE, AIM_KEY, CANARY, CANARY_KEY, DAMAGE, EQUIP,
+                                                EQUIP_KEY, KIND, SWING, SWING_KEY, verified_damage, verified_miss)
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
 
 
-async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) -> None:
-    name = ("stock-old-pipe-damage-" if stock_damage else "stock-old-pipe-") + uuid.uuid4().hex[:8]
+async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False) -> None:
+    mode = "ordinary-" if ordinary else "damage-" if stock_damage else ""
+    name = "stock-old-pipe-" + mode + uuid.uuid4().hex[:8]
     host, guest = ("--campaign", name), ("--profile", name)
     host_run, guest_run = work / "campaigns" / name / "run", work / "clients" / name / "run"
     host_run.mkdir(parents=True)
@@ -71,6 +74,31 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) 
         row = status.get("game", {}).get(SOURCES_KEY, {}).get(OLD_PIPE, {})
         return tuple(row.get(key) for key in ("map", "actor", "class_path", "state")) == (*SOURCES[OLD_PIPE], "available")
 
+    async def normal_primary(guid, expected):
+        press = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+        assert (press["guid"], press["stock_wrappers"]) == (guid, 2), press
+        for _ in range(50):
+            rows = (await ask("events", *guest, "--tail", "40"))["events"]
+            event = next((row for row in rows if row.get("sequence") == press["sequence"]
+                          and row["event"] in ("native_guest_melee_input", "native_guest_melee_input_rejected")), None)
+            if event:
+                assert event["event"] == "native_guest_melee_input", event
+                swing = event[SWING_KEY]
+                assert (swing["map"], swing["guid"], swing["status"], swing["presses"], swing["releases"],
+                        swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
+                    DEAD_BRIDGE, guid, expected, 1, 1, 1, 1, True, True), swing
+                assert (verified_damage if expected == "stock_damage_verified" else verified_miss)(swing), swing
+                reply = await action(guest, SWING, "--target", guid, "--operation-id", event["operation_id"])
+                assert reply[SWING_KEY] == swing, reply
+                directory = host_run.parent
+                saved = json.loads((directory / "save" / "campaign.json").read_text(encoding="utf-8"))
+                native_host_save.verify_checkpoint(directory / "game-user", saved)
+                receipts = saved["world"]["party"]["receipts"][character]
+                assert any(item["id"] == event["operation_id"] and item["result"][SWING_KEY] == swing for item in receipts)
+                return {"stock_input": press, "host_receipt": swing, "replayed": True, "paired_checkpoint": True}
+            await asyncio.sleep(.16)
+        raise RuntimeError(f"The real guest primary sequence {press['sequence']} did not return a stock Old Pipe receipt")
+
     try:
         await launch("host", host, "--port", "0", "--start-zone", CROSSROADS, "--headless", "--fixtures",
                      "--native-events", "--native-guest", "--native-zones", "--native-guest-melee-canary")
@@ -96,7 +124,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) 
         proof.update(claim=claim, backpack=before)
 
         area = CROSSROADS
-        if stock_damage:
+        if stock_damage or ordinary:
             denied = await action(host, DAMAGE, "--target", "guest", "--item-guid", guid, expected=False)
             assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
             for role, where in (("host", "near"), ("guest", "near"), ("host", "inside")):
@@ -116,13 +144,31 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) 
             denied = await action(host, CANARY, "--target", "guest", "--item-guid", guid, expected=False)
             assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
 
-        equipped = (await action(host, EQUIP, "--target", "guest", "--item-guid", guid))[EQUIP_KEY]
-        assert (equipped["map"], equipped["guid"], equipped["status"], equipped["ok"]) == (
-            area, guid, "old_pipe_equipped", True
-        ), equipped
+        if ordinary:
+            equipped = (await action(guest, "native-guest-weapon-equip", "--target", guid))["native_guest_weapon"]
+            assert (equipped["map"], equipped["guid"], equipped["status"], equipped["ok"], equipped["kind"],
+                    equipped["actor_ammo"], equipped["stored_ammo"]) == (area, guid, "old_pipe_equipped", True, KIND, -1, -1), equipped
+        else:
+            equipped = (await action(host, EQUIP, "--target", "guest", "--item-guid", guid))[EQUIP_KEY]
+            assert (equipped["map"], equipped["guid"], equipped["status"], equipped["ok"]) == (
+                area, guid, "old_pipe_equipped", True
+            ), equipped
         held = await inventory_item(character, guid)
         assert held and held["source"] == "equipment" and held["class_path"] == before["class_path"], held
         proof.update(stock_equipped=equipped, equipment=held)
+
+        if ordinary:
+            await wait(guest_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
+                       and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, KIND))
+            proof["unassisted_primary_miss"] = await normal_primary(guid, "stock_miss_verified")
+            posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid))[AIM_KEY]
+            assert (posed["map"], posed["pawn"], posed["guid"]) == (area, equipped["pawn"], guid), posed
+            proof["headless_aim_setup"] = posed
+            proof["ordinary_primary_damage"] = await normal_primary(guid, "stock_damage_verified")
+            after = await inventory_item(character, guid)
+            assert after == held, (held, after)
+            proof.update(unchanged_equipment=after, verified=True)
+            return
 
         operation = uuid.uuid4().hex
         args = ("--target", "guest", "--item-guid", guid, "--operation-id", operation)
@@ -154,7 +200,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) 
                         await process.wait()
         if originals is not None:
             proof["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        report = "live-old-pipe-damage-verification.json" if stock_damage else "live-old-pipe-verification.json"
+        report = f"live-old-pipe-{mode}verification.json"
         (host_run / report).write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(proof), flush=True)
         if originals is not None:
@@ -165,7 +211,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path)
-    parser.add_argument("--stock-damage", action="store_true", help="take the actual DB_CR exit and verify one stock NPC hit")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--stock-damage", action="store_true", help="take the actual DB_CR exit and verify one stock NPC hit")
+    modes.add_argument("--ordinary-primary", action="store_true", help="exercise the normal guest equip and primary input path")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None,
-                       stock_damage=options.stock_damage))
+                       stock_damage=options.stock_damage, ordinary=options.ordinary_primary))

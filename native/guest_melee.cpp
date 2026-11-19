@@ -66,6 +66,7 @@ namespace
     constexpr auto attack_timeout = std::chrono::milliseconds{2500};
     constexpr int max_rows = 4096;
     constexpr int max_effects = 256;
+    constexpr std::size_t max_fenced_pipes = 32;
     constexpr double sweep_range = 230.0;
     constexpr float sweep_radius = 65.0f;
 
@@ -78,9 +79,16 @@ namespace
 
     bool enabled()
     {
-        return env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") &&
-            env("SILVERFISH_COOP_NATIVE_ZONE") && env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
+        return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && env("SILVERFISH_COOP_NATIVE_ZONE");
     }
+
+    bool fixture_enabled()
+    {
+        return enabled() && env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
+            env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
+    }
+
+    enum class SwingMode { surface_fixture, damage_fixture, ordinary };
 
     template <typename T> T* find(const U::TCHAR* name)
     {
@@ -517,6 +525,7 @@ namespace
         int presses{}, releases{}, contacts{}, qualified{};
         double host_health{}, guest_health{};
         bool pending{}, settled{}, passive_free{};
+        SwingMode mode{SwingMode::surface_fixture};
         struct Damage
         {
             U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
@@ -525,10 +534,13 @@ namespace
             int sweeps{}, calls{};
             double before{-1}, after{-1}, total{-1};
             bool requested{};
+            bool fenced_miss{};
         } damage;
     };
 
     Swing swing;
+    struct PipeFence { U::FWeakObjectPtr pipe, contact; };
+    std::vector<PipeFence> fenced_pipes;
     std::int64_t serial{};
     std::array callbacks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
@@ -660,13 +672,17 @@ namespace
     void tick()
     {
         if (!swing.pending) return;
-        if (!owner_current(swing)) return finish("mutation_unverified_guest_melee_owner");
-        if (Clock::now() >= swing.deadline) return finish("mutation_unverified_guest_melee_timeout");
+        const bool ordinary = swing.mode == SwingMode::ordinary;
+        const auto cancellable = ordinary && !swing.damage.calls;
+        if (!owner_current(swing)) return finish(cancellable ? "stock_swing_cancelled" : "mutation_unverified_guest_melee_owner");
+        if (Clock::now() >= swing.deadline) return finish(cancellable ? "stock_swing_cancelled" : "mutation_unverified_guest_melee_timeout");
         if (swing.contacts != 1 || swing.qualified != 1 || !idle(swing)) return;
         swing.passive_free = passives_unchanged(swing);
         if (!swing.passive_free) return finish("mutation_unverified_guest_melee_passive_readback");
-        if (health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)
+        if (!ordinary && (health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health))
             return finish("mutation_unverified_guest_melee_health_readback");
+        if (ordinary && swing.damage.fenced_miss && !swing.damage.sweeps && !swing.damage.calls)
+            return finish("stock_miss_verified", true);
         if (swing.damage.requested && (swing.damage.sweeps != 1 || swing.damage.calls != 1 || swing.damage.total <= 0))
             return finish("mutation_unverified_guest_melee_stock_damage_missing");
         finish(swing.damage.requested ? "stock_damage_verified" : "surface_verified", true);
@@ -685,7 +701,14 @@ namespace
         };
         auto* graph = frame.PreviousFrame();
         auto* notify = graph ? graph->PreviousFrame() : nullptr;
-        if (!swing.pending || already_vetoed || Clock::now() >= swing.deadline || swing.contacts != 1)
+        if (!swing.pending)
+        {
+            // A terminal receipt stays stable if a later stock notification is fenced.
+            if (!already_vetoed) call.PreventOriginalFunctionCall();
+            --swing.contacts;
+            return;
+        }
+        if (already_vetoed || Clock::now() >= swing.deadline || swing.contacts != 1)
             return refuse("mutation_unverified_guest_melee_unexpected_contact");
         if (frame.Object() != receiver || !graph || graph->Node() != swing.graph.Get() ||
             graph->Object() != swing.animation.Get() || !notify || notify->Node() != swing.hit.Get() ||
@@ -700,15 +723,23 @@ namespace
             ++swing.qualified;
             return;
         }
+        const bool ordinary = swing.mode == SwingMode::ordinary;
         auto* enemy = swing.damage.target.Get();
         const auto hp = enemy_health(enemy);
-        if (!enemy || enemy != placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) ||
-            !std::isfinite(hp) || hp < 100.0 || hp > 160.0 ||
-            health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health ||
-            !passives_unchanged(swing))
+        const bool target_current = enemy && enemy == placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) &&
+            std::isfinite(hp) && hp >= 100.0 && hp <= 160.0;
+        if (!passives_unchanged(swing) || (!ordinary && (!target_current ||
+                health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
-        const auto trace = stock_trace(receiver, swing.pawn.Get(), enemy);
-        if (!trace) return refuse("stock_damage_aim_fenced");
+        const auto trace = target_current ? stock_trace(receiver, swing.pawn.Get(), enemy) : std::nullopt;
+        if (!trace)
+        {
+            if (!ordinary) return refuse("stock_damage_aim_fenced");
+            call.PreventOriginalFunctionCall();
+            ++swing.qualified;
+            swing.damage.fenced_miss = true;
+            return;
+        }
         swing.damage.contact_frame = &frame;
         swing.damage.component = trace->first;
         swing.damage.origin = trace->origin;
@@ -721,6 +752,14 @@ namespace
         if (!U::IsInGameThreadRaw() || !frame.Node()) return;
         if (receiver && receiver == swing.pipe.Get() && frame.Node() == swing.contact.Get())
             return fence_contact(call, receiver, frame, result);
+        static const U::FName contact_name{STR("Contact")};
+        if (receiver && frame.Node()->GetFName() == contact_name && std::ranges::any_of(fenced_pipes, [&](const PipeFence& guard) {
+                return guard.pipe.Get() == receiver && guard.contact.Get() == frame.Node();
+            }))
+        {
+            if (!call.OriginalFunctionCallPrevented()) call.PreventOriginalFunctionCall();
+            return;
+        }
         auto& proof = swing.damage;
         if (!proof.contact_frame) return;
         const auto refuse = [&](std::string_view status) {
@@ -872,7 +911,7 @@ namespace
     {
         bool clear = false;
         std::string_view status = "arguments";
-        if (enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_integer())
+        if (fixture_enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_integer())
         {
             auto* pawn = pawn_at(lua.get_integer());
             auto* save = object(pawn, STR("Save"));
@@ -894,16 +933,19 @@ namespace
         return 2;
     }
 
-    template <bool damage> int start(const Lua& lua)
+    template <SwingMode mode> int start(const Lua& lua)
     {
-        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) ||
+        constexpr bool damage = mode != SwingMode::surface_fixture;
+        constexpr bool ordinary = mode == SwingMode::ordinary;
+        if (!(ordinary ? enabled() : fixture_enabled()) || !U::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
-        if (swing.pending || (swing.serial && swing.pipe.Get()))
+        if (swing.pending || (!ordinary && swing.serial && swing.pipe.Get()))
             return proof(lua, false, "native_guest_melee_fixture_already_bound");
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         const auto guid = lua.get_string();
         Swing candidate;
+        candidate.mode = mode;
         if (pawn_address <= 0 || save_address <= 0 || !guid_from(guid, candidate.guid))
             return proof(lua, false, "native_guest_melee_arguments_unqualified");
         auto* pawn = pawn_at(pawn_address);
@@ -957,6 +999,12 @@ namespace
         candidate.graph = graph;
         if (!owner_current(candidate) || !idle(candidate))
             return proof(lua, false, "native_guest_melee_stock_pose_unqualified");
+        if constexpr (ordinary)
+        {
+            auto* combo_step = field<U::FIntProperty>(anim, STR("ComboStep"));
+            if (!combo_step || combo_step->GetPropertyValueInContainer(anim) != 0)
+                return proof(lua, false, "native_guest_melee_stock_combo_busy");
+        }
         if (!stock_attack(candidate)) return proof(lua, false, "native_guest_melee_stock_swing_unqualified");
         candidate.host_health = health(canonical);
         candidate.guest_health = health(save);
@@ -975,12 +1023,11 @@ namespace
             auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
             auto* contact_graph = local_function(pipe, master, STR("ExecuteUbergraph_MeleeWep_Master_BP"), 1);
             const auto hp = enemy_health(enemy);
-            if (!enemy || !std::isfinite(hp) || hp < 100.0 || hp > 160.0 || !deal || !contact_graph ||
-                !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            if ((!ordinary && (!enemy || !std::isfinite(hp) || hp < 100.0 || hp > 160.0 || !deal || !stock_trace(pipe, pawn, enemy))) ||
+                (enemy && !deal) || !contact_graph || !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
                 library->GetClassPrivate() != find<U::UClass>(effects_class) || !sweep ||
                 sweep->GetOuterPrivate() != library->GetClassPrivate() || sweep->GetNumParms() != 7 ||
-                sweep->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || sweep->GetReturnProperty() ||
-                !stock_trace(pipe, pawn, enemy))
+                sweep->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || sweep->GetReturnProperty())
                 return proof(lua, false, "native_guest_melee_stock_damage_scope_unqualified");
             candidate.damage.requested = true;
             candidate.damage.target = enemy;
@@ -989,8 +1036,13 @@ namespace
             candidate.damage.library = library;
             candidate.damage.graph = contact_graph;
         }
+        std::erase_if(fenced_pipes, [](const PipeFence& fence) { return !fence.pipe.Get() || !fence.contact.Get(); });
+        const bool new_pipe = std::ranges::none_of(fenced_pipes, [&](const PipeFence& fence) { return fence.pipe.Get() == pipe; });
+        if (new_pipe && fenced_pipes.size() == max_fenced_pipes)
+            return proof(lua, false, "native_guest_melee_late_contact_budget_unavailable");
         if (!hooks() || serial >= (std::int64_t{1} << 53) - 1)
             return proof(lua, false, "native_guest_melee_hook_unavailable");
+        if (new_pipe) fenced_pipes.push_back({candidate.pipe, candidate.contact});
 
         candidate.serial = ++serial;
         candidate.deadline = Clock::now() + attack_timeout;
@@ -1026,7 +1078,12 @@ namespace
             return proof(lua, false, "native_guest_melee_serial_unqualified");
         if constexpr (abort)
         {
-            if (swing.pending) finish("aborted_contact_fenced");
+            if (swing.pending)
+            {
+                if (swing.mode == SwingMode::ordinary)
+                    finish(swing.damage.calls ? "mutation_unverified_guest_melee_abort_after_damage" : "stock_swing_cancelled");
+                else finish("aborted_contact_fenced");
+            }
         }
         else tick();
         return report(lua);
@@ -1036,9 +1093,13 @@ namespace
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<false>);
-    lua.register_function("SilverfishStartNativeGuestMeleeDamageCanary", start<true>);
-    lua.register_function("SilverfishCheckNativeGuestMeleeDamagePose", damage_pose);
+    lua.register_function("SilverfishStartNativeGuestOldPipeSwing", start<SwingMode::ordinary>);
+    if (fixture_enabled())
+    {
+        lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<SwingMode::surface_fixture>);
+        lua.register_function("SilverfishStartNativeGuestMeleeDamageCanary", start<SwingMode::damage_fixture>);
+        lua.register_function("SilverfishCheckNativeGuestMeleeDamagePose", damage_pose);
+    }
     lua.register_function("SilverfishReadNativeGuestMeleeCanary", observe<false>);
     lua.register_function("SilverfishAbortNativeGuestMeleeCanary", observe<true>);
 }
@@ -1051,4 +1112,5 @@ void silverfish::native_guest_melee::uninstall_hooks()
         callback = H::ERROR_ID;
     }
     swing = {};
+    fenced_pipes.clear();
 }

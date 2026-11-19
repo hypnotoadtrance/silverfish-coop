@@ -47,6 +47,7 @@ namespace
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37");
     constexpr auto bridge_world = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
+    constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto camera_primary_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C:Use_Item_Primary");
     constexpr std::string_view camera_quest = "Photo_DB_Turrets";
     constexpr auto camera_quest_name = STR("Photo_DB_Turrets");
@@ -71,6 +72,7 @@ namespace
 
     using Equipment = silverfish::guest_weapon_profiles::Profile;
     constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false, nullptr, false};
+    constexpr Equipment old_pipe{"old-pipe", old_pipe_path, false, 0, 0, 0.0, false, nullptr, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -362,6 +364,14 @@ namespace
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
         if (schema.row_class(row) != item) return false;
+        if (current.item == &old_pipe)
+        {
+            auto* amount = field<U::FIntProperty>(held, STR("Ammo"));
+            auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
+            if (!schema.ammo || schema.ammo->GetPropertyValueInContainer(row) != -1 ||
+                !amount || amount->GetPropertyValueInContainer(held) != -1 || !held_by_player ||
+                !held_by_player->GetPropertyValueInContainer(held) || object_field(held, STR("User")) != pawn) return false;
+        }
         const auto actual = schema.identity(row);
         if (!observed) return actual == current.guid;
         *observed = actual;
@@ -599,6 +609,8 @@ namespace
             !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
         if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
+        if (next.item == &old_pipe && (!world || world->GetPathName() != bridge_world || next.seat.host))
+            return "stock_guest_old_pipe_primary_unqualified";
         next.seat.pawn = pawn;
         next.seat.world = world;
         next.seat.controller = controller;
@@ -815,6 +827,7 @@ namespace
         if (pawn <= 0 || controller <= 0 || world <= 0 || !parse_guid(text, next.guid))
             return result(lua, false, "native_guest_primary_exact_scope_required");
         if (kind == camera.kind) next.item = &camera;
+        else if (kind == old_pipe.kind) next.item = &old_pipe;
         else
             for (const auto& candidate : silverfish::guest_weapon_profiles::firearms)
                 if (candidate.kind == kind) next.item = &candidate;

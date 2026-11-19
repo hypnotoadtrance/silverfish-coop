@@ -892,7 +892,8 @@ class Bridge:
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
-                elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary"):
+                elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
+                                    "native-guest-melee-aim-fixture"):
                     parsed = parse_guest_melee(fields)
                     if parsed:
                         key, row = parsed

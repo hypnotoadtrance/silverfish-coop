@@ -54,7 +54,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
-                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT,
+                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -1449,6 +1449,8 @@ class Host:
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
+            if self.native_guest_controls and native_guest_melee.is_equipped(equipped, self.last_game["map"], equipped.get("guid")):
+                gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
             if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
                     and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=DEAD_BRIDGE, quest=native_turret_photo.QUEST_ID)
@@ -1522,6 +1524,10 @@ class Host:
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
+            elif action == native_guest_melee.SWING:
+                guid = native_guest_melee.current_guid(target, self.zone_epoch)
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await native_guest_melee.perform(self, bridge, action, character, guid, request["operation_id"])
             elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action in native_guest_consumable.RESULT:
@@ -2328,7 +2334,8 @@ class Host:
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()
                     result = await native_guest_armor.perform(self, bridge, character, request.get("operation_id") or path.stem,
                                                               action, guid, seed_kind=request.get("kind"))
-                elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY, native_guest_melee.DAMAGE) and self.fixtures:
+                elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY, native_guest_melee.DAMAGE,
+                                 native_guest_melee.AIM_FIXTURE) and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_melee.perform(self, bridge, action, character, request.get("item_guid"),
                                                               request.get("operation_id") or path.stem)
@@ -3630,6 +3637,8 @@ class Client:
             raise RuntimeError("game_connection_unavailable")
         if action == native_authored_pickup.ACTION:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
+        elif action == native_guest_melee.SWING:
+            target = native_guest_melee.request_target(target, self.zone_epoch)
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained
@@ -3663,12 +3672,13 @@ class Client:
         equipment = self.gameplay.get("native_equipped_weapon", {})
         area, host_pawn, guid, kind = (equipment.get(key) for key in ("map", "pawn", "guid", "kind"))
         camera = kind == "camera" and area == DEAD_BRIDGE and equipment.get("quest") == native_turret_photo.QUEST_ID
+        melee = native_guest_melee.is_equipped(equipment, area, guid)
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         # Cooked authority and autonomous pawns have independent object names.
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and (camera or kind in native_guest_weapon.FIRE_CLASSES))
+                    and native_gold.valid_guid(guid) and (camera or melee or kind in native_guest_weapon.FIRE_CLASSES))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
             try:
@@ -3692,8 +3702,12 @@ class Client:
             if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
                 continue
             operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
-            action = native_turret_photo.SHUTTER if event_kind == "camera" else "native-guest-weapon-fire"
-            event = "native_guest_camera_shutter" if event_kind == "camera" else "native_guest_primary_input"
+            if event_kind == native_guest_melee.KIND:
+                action, event = native_guest_melee.SWING, "native_guest_melee_input"
+            elif event_kind == "camera":
+                action, event = native_turret_photo.SHUTTER, "native_guest_camera_shutter"
+            else:
+                action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
                 result = await self.gameplay_action(action, operation, event_guid)
                 self.control.event(event, operation_id=operation, sequence=sequence, **result)

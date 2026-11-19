@@ -154,6 +154,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-smg-hold-fixture", "native-guest-held-fire-fixture",
         "native-guest-melee-canary-equip", "native-guest-melee-canary", "native-guest-melee-damage-canary",
+        "native-guest-melee-aim-fixture", "native-guest-melee-swing",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-guest-mre", "native-guest-canned-peaches", "native-guest-mre-fixture",
         "native-inventory-view-key-fixture", "native-guest-clock-fixture",

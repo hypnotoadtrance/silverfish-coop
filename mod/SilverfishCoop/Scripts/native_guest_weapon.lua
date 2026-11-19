@@ -6,10 +6,12 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local ammo_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 
 local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
@@ -36,10 +38,12 @@ local function equipped_guid(pawn, save, world)
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
-    if world and class_name == camera_path and held:HasAuthority() and not held:IsActorBeingDestroyed()
+    if world and (class_name == camera_path or class_name == old_pipe_path)
+        and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
-        return guid:find("[^0]") and guid or nil, "camera"
+        if class_name == camera_path then return guid:find("[^0]") and guid or nil, "camera" end
+        if row[ammo_field] == -1 and held.Ammo == -1 then return guid:find("[^0]") and guid or nil, "old-pipe" end
     end
     return guid:find("[^0]") and guid or nil, weapon_profiles.kinds[class_name]
 end

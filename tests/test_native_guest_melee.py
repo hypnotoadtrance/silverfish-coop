@@ -1,9 +1,11 @@
 import time
 import unittest
+import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
+from tools.silverfish.service import Client
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
 
 
@@ -16,7 +18,8 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         state = party.new_party()
         party.add_player(state, "guest")
         state[pickup.STATE_KEY] = {pickup.OLD_PIPE: {"owner": "guest", "guid": GUID}}
-        return SimpleNamespace(native_guest=True, fixtures=True, native_profile=True, stopping=False, transitioning=False,
+        return SimpleNamespace(native_guest=True, fixtures=True, native_profile=True, native_guest_controls=True,
+                               stopping=False, transitioning=False, smg_holds=None,
                                native_checkpoint_unsafe=False, party=state, last_seen=time.monotonic(),
                                last_game={"state": "hosting", "map": CROSSROADS}, checkpoint_native=AsyncMock(),
                                native_recipients=lambda: {"guest": {"connected": True, "pawn": "exact pawn"}})
@@ -109,3 +112,69 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await melee.perform(*args), {key: result})
         bridge.command.assert_awaited_once_with(melee.DAMAGE + "-start", "exact pawn", GUID, timeout=5)
         self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest"})})
+
+    def ordinary_fixture(self, miss):
+        fields = self.damage_fields()
+        fields[0] = melee.SWING
+        if miss:
+            fields[5] = "stock_miss_verified"
+            fields[13:] = ["0", "0", "-1", "-1", "-1"]
+        key, report = melee.parse(fields)
+        snapshot = {"state": "hosting", "map": DEAD_BRIDGE, key: report,
+                    "native_guest_equipped_weapons": {"exact pawn": {"kind": melee.KIND, "guid": GUID}}}
+        host = self.host()
+        host.fixtures = False
+        host.party.pop(pickup.STATE_KEY)
+        host.last_game = snapshot
+        return host, snapshot
+
+    async def test_ordinary_exact_equipment_hit_and_miss_replay_without_fixture(self):
+        for miss in (False, True):
+            with self.subTest(miss=miss):
+                host, snapshot = self.ordinary_fixture(miss)
+                bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+                args = host, bridge, melee.SWING, "guest", GUID, OPERATION
+                self.assertEqual(await melee.perform(*args), {melee.SWING_KEY: snapshot[melee.SWING_KEY]})
+                self.assertEqual(await melee.perform(*args), {melee.SWING_KEY: snapshot[melee.SWING_KEY]})
+                bridge.command.assert_awaited_once_with(melee.SWING + "-start", "exact pawn", GUID, timeout=5)
+                self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest"})})
+                self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_ordinary_refuses_other_equipped_guid_and_open_smg_scope(self):
+        host, snapshot = self.ordinary_fixture(False)
+        bridge = SimpleNamespace(command=AsyncMock())
+        args = host, bridge, melee.SWING, "guest", GUID, OPERATION
+        snapshot["native_guest_equipped_weapons"]["exact pawn"]["guid"] = "F" * 32
+        with self.assertRaisesRegex(party.RuleError, "exact_equipment_required"):
+            await melee.perform(*args)
+        snapshot["native_guest_equipped_weapons"]["exact pawn"]["guid"] = GUID
+        host.smg_holds = SimpleNamespace(strokes={"someone else": True})
+        with self.assertRaisesRegex(party.RuleError, "combat_busy"):
+            await melee.perform(*args)
+        bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
+
+    def test_plain_guid_and_previous_travel_epoch_cannot_be_dispatched(self):
+        epoch, previous = "e" * 32, "d" * 32
+        wire = melee.request_target(GUID, epoch)
+        self.assertEqual(melee.current_guid(wire, epoch), GUID)
+        for rejected in (GUID, melee.request_target(GUID, previous), None):
+            with self.assertRaisesRegex(party.RuleError, "exact_epoch_and_guid_required"):
+                melee.current_guid(rejected, epoch)
+
+    async def test_client_primary_tap_routes_once_to_melee_action_with_scoped_guid(self):
+        scope = (DEAD_BRIDGE, "local pawn", GUID, melee.KIND)
+        pending = [(4, *scope), (4, *scope)]
+        client = SimpleNamespace(guest_primary_input=True, viewer_role="guest", stopping=False, host_session="session",
+                                 zone_epoch="epoch", gameplay_seen=time.monotonic(), invite={"character_id": "member"},
+                                 gameplay={"players": {"guest": {"character_id": "member", "downed": False}},
+                                           "native_equipped_weapon": {"map": DEAD_BRIDGE, "pawn": "host pawn", "guid": GUID,
+                                                                      "kind": melee.KIND}},
+                                 last_game={"map": DEAD_BRIDGE, "pawns": {"local": {"name": scope[1]}}},
+                                 next_primary_renewal=time.monotonic() + 30, primary_scope=scope, last_primary_intent=0,
+                                 bridge=Mock(input_namespace=uuid.uuid4(), native_primary_input_requests=Mock(return_value=pending)),
+                                 control=Mock(), gameplay_action=AsyncMock(return_value={}))
+        await Client.service_primary_input(client, True)
+        operation_id = uuid.uuid5(client.bridge.input_namespace, "session:epoch:local pawn:primary:4").hex
+        client.gameplay_action.assert_awaited_once_with(melee.SWING, operation_id, GUID)
+        client.control.event.assert_called_once_with("native_guest_melee_input", operation_id=operation_id, sequence=4)

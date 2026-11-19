@@ -1,4 +1,4 @@
-"""Verify a stock Old Pipe animation or one exact NPC hit in a headless co-op."""
+"""Scope an authenticated guest's stock Old Pipe tap and diagnostic fixtures."""
 
 import math
 import time
@@ -11,8 +11,13 @@ from .travel import CROSSROADS, DEAD_BRIDGE
 EQUIP = "native-guest-melee-canary-equip"
 CANARY = "native-guest-melee-canary"
 DAMAGE = "native-guest-melee-damage-canary"
+SWING = "native-guest-melee-swing"
+AIM_FIXTURE = "native-guest-melee-aim-fixture"
+KIND = "old-pipe"
 EQUIP_KEY = "native_guest_melee_equip"
 CANARY_KEY = "native_guest_melee_canary"
+SWING_KEY = "native_guest_melee_swing"
+AIM_KEY = "native_guest_melee_aim_fixture"
 TARGET = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 
 
@@ -33,31 +38,65 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
         return None
     if fields[0] == "native-guest-melee-equip" and len(fields) == 6 and fields[4] in ("0", "1"):
         return EQUIP_KEY, dict(zip(("map", "pawn", "guid"), fields[1:4]), ok=fields[4] == "1", status=fields[5])
-    if fields[0] == CANARY and len(fields) in (12, 18) and fields[10] in ("0", "1") and fields[11] in ("0", "1"):
+    if fields[0] == AIM_FIXTURE and len(fields) == 4 and fields[1] == DEAD_BRIDGE and valid_guid(fields[3]):
+        return AIM_KEY, dict(zip(("map", "pawn", "guid"), fields[1:]))
+    ordinary = fields[0] == SWING
+    if (fields[0] in (CANARY, SWING) and len(fields) in ((18,) if ordinary else (12, 18))
+            and fields[10] in ("0", "1") and fields[11] in ("0", "1")):
         proof = dict(zip(("map", "pawn", "guid"), fields[1:4]), serial=int(fields[4]), status=fields[5],
                      presses=int(fields[6]), releases=int(fields[7]), contacts=int(fields[8]),
                      qualified=int(fields[9]), settled=fields[10] == "1", passive_free=fields[11] == "1")
         if len(fields) == 18:
             proof.update(target=fields[12], sweeps=int(fields[13]), damage_calls=int(fields[14]),
                          enemy_health_before=float(fields[15]), enemy_health_after=float(fields[16]), stock_damage=float(fields[17]))
+            miss = ordinary and proof["status"] == "stock_miss_verified"
+            cancelled = ordinary and proof["status"] == "stock_swing_cancelled"
             if (proof["map"] != DEAD_BRIDGE or proof["target"] != TARGET or proof["status"] == "surface_verified"
-                    or proof["settled"] != (proof["status"] == "stock_damage_verified")
+                    or proof["settled"] != (proof["status"] == "stock_damage_verified" or miss)
                     or not 0 <= proof["damage_calls"] <= proof["sweeps"] <= 1
-                    or (proof["settled"] and not verified_damage(proof))):
+                    or ((miss or cancelled) and not verified_miss(proof))
+                    or (proof["settled"] and not miss and not verified_damage(proof))):
                 return None
         elif proof["map"] != CROSSROADS or proof["status"] == "stock_damage_verified":
             return None
-        return CANARY_KEY, proof
+        return SWING_KEY if ordinary else CANARY_KEY, proof
     return None
+
+
+def verified_miss(proof: dict) -> bool:
+    return ((proof.get("map"), proof.get("target")) == (DEAD_BRIDGE, TARGET)
+            and tuple(proof.get(key) for key in ("sweeps", "damage_calls", "enemy_health_before", "enemy_health_after",
+                                                "stock_damage")) == (0, 0, -1, -1, -1))
+
+
+def is_equipped(equipment, area, guid):
+    return (area == DEAD_BRIDGE and valid_guid(guid) and isinstance(equipment, dict)
+            and (equipment.get("kind"), equipment.get("guid")) == (KIND, guid))
+
+
+def request_target(guid: str, epoch: str) -> str:
+    if not valid_guid(guid) or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
+        raise party.RuleError("native_guest_melee_exact_epoch_and_guid_required")
+    return f"{epoch}@{guid}"
+
+
+def current_guid(target: str | None, epoch: str) -> str:
+    observed, delimiter, guid = target.partition("@") if isinstance(target, str) else ("", "", "")
+    if not delimiter or not epoch or observed != epoch or not valid_guid(guid):
+        raise party.RuleError("native_guest_melee_exact_epoch_and_guid_required")
+    return guid
 
 
 async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str) -> dict:
     area = host.last_game.get("map")
-    allowed = {DAMAGE: (DEAD_BRIDGE,), CANARY: (CROSSROADS,), EQUIP: (CROSSROADS, DEAD_BRIDGE)}
-    if (not host.native_guest or not host.fixtures or host.native_profile is None or host.stopping
+    ordinary = action == SWING
+    allowed = {DAMAGE: (DEAD_BRIDGE,), CANARY: (CROSSROADS,), EQUIP: (CROSSROADS, DEAD_BRIDGE),
+               SWING: (DEAD_BRIDGE,), AIM_FIXTURE: (DEAD_BRIDGE,)}
+    if (not host.native_guest or (not ordinary and not host.fixtures) or (ordinary and not host.native_guest_controls)
+            or host.native_profile is None or host.stopping
             or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
             or area not in allowed.get(action, ()) or time.monotonic() - host.last_seen > 3):
-        raise party.RuleError("native_guest_melee_fixture_unavailable")
+        raise party.RuleError("native_guest_melee_swing_unavailable" if ordinary else "native_guest_melee_fixture_unavailable")
     if (not isinstance(character, str) or not valid_guid(guid) or not isinstance(operation_id, str)
             or not party.REQUEST_ID.fullmatch(operation_id)):
         raise party.RuleError("native_guest_melee_exact_guid_required")
@@ -72,12 +111,18 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
     if (not pawn or host.party["wipe"] is not None or character in host.party["pending_spawns"]
             or host.party["players"].get(character, {}).get("downed")):
         raise party.RuleError("native_guest_melee_exact_owner_required")
-    claimed = host.party.get(native_authored_pickup.STATE_KEY, {}).get(native_authored_pickup.OLD_PIPE, {})
-    if (claimed.get("owner"), claimed.get("guid")) != (character, guid):
-        raise party.RuleError("native_guest_melee_exact_authored_claim_required")
-    if area == DEAD_BRIDGE and tuple(claimed.get(key) for key in ("source", "map", "actor", "class_path")) != (
-            native_authored_pickup.OLD_PIPE, *native_authored_pickup.SOURCES[native_authored_pickup.OLD_PIPE]):
-        raise party.RuleError("native_guest_melee_exact_authored_claim_required")
+    if ordinary or action == AIM_FIXTURE:
+        equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
+        if not is_equipped(equipped, area, guid):
+            raise party.RuleError("native_guest_melee_exact_equipment_required")
+        if ordinary and host.smg_holds is not None and host.smg_holds.strokes:
+            raise party.RuleError("native_guest_melee_combat_busy")
+    else:
+        claimed = host.party.get(native_authored_pickup.STATE_KEY, {}).get(native_authored_pickup.OLD_PIPE, {})
+        if ((claimed.get("owner"), claimed.get("guid")) != (character, guid)
+                or area == DEAD_BRIDGE and tuple(claimed.get(key) for key in ("source", "map", "actor", "class_path")) != (
+                    native_authored_pickup.OLD_PIPE, *native_authored_pickup.SOURCES[native_authored_pickup.OLD_PIPE])):
+            raise party.RuleError("native_guest_melee_exact_authored_claim_required")
 
     def exact(snapshot: dict, key: str) -> dict:
         proof = snapshot.get(key, {})
@@ -86,7 +131,14 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
             return proof
         return {}
 
-    key = EQUIP_KEY if action == EQUIP else CANARY_KEY
+    if action == AIM_FIXTURE:
+        snapshot = await bridge.command(action, pawn, guid, timeout=5)
+        proof = exact(snapshot, AIM_KEY)
+        if not proof:
+            raise RuntimeError("The staged stock Old Pipe aim directive did not match the guest")
+        return {AIM_KEY: proof}
+
+    key = SWING_KEY if ordinary else EQUIP_KEY if action == EQUIP else CANARY_KEY
     await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
@@ -123,10 +175,15 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
             if action == DAMAGE and proof.get("status") == "stock_damage_aim_fenced":
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError("native_guest_melee_stock_damage_contact_aim_changed")
-            expected = "stock_damage_verified" if action == DAMAGE else "surface_verified"
+            if ordinary and proof.get("status") == "stock_swing_cancelled" and verified_miss(proof):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError("native_guest_melee_swing_cancelled")
+            miss = ordinary and proof.get("status") == "stock_miss_verified"
+            expected = "stock_miss_verified" if miss else "stock_damage_verified" if ordinary or action == DAMAGE else "surface_verified"
             if (proof.get("status"), proof.get("presses"), proof.get("releases"), proof.get("contacts"),
                     proof.get("qualified"), proof.get("settled"), proof.get("passive_free")) != (
-                    expected, 1, 1, 1, 1, True, True) or (action == DAMAGE and not verified_damage(proof)):
+                    expected, 1, 1, 1, 1, True, True) or (miss and not verified_miss(proof)) or (
+                    (ordinary or action == DAMAGE) and not miss and not verified_damage(proof)):
                 raise RuntimeError(proof.get("status") or "The fenced stock animation did not settle")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: proof}

@@ -536,13 +536,14 @@ namespace
             ? camera : nullptr;
     }
 
-    Unreal::UClass* qualified_old_pipe(Unreal::UObject* item_class, const Context& context)
+    Unreal::UClass* qualified_old_pipe(Unreal::UObject* item_class, const Context& context, bool fixture = false)
     {
-        if (!env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") ||
-            !env("SILVERFISH_COOP_HEADLESS") || !live(context.world)) return nullptr;
+        if (!env("SILVERFISH_COOP_NATIVE_ZONE") || !live(context.world)) return nullptr;
+        if (fixture && (!env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") ||
+                        !env("SILVERFISH_COOP_HEADLESS"))) return nullptr;
         const auto world = context.world->GetPathName();
-        if (world != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P") &&
-            world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P")) return nullptr;
+        if (world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P") &&
+            !(fixture && world == STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"))) return nullptr;
         auto* pipe = find<Unreal::UClass>(old_pipe_path);
         auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
         if (!pipe || item_class != pipe || !base || !pipe->IsChildOf(base)) return nullptr;
@@ -815,13 +816,17 @@ namespace
     {
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
+        const bool old_pipe = context.weapon == find<Unreal::UClass>(old_pipe_path);
+        if (old_pipe && stored != -1) return proof(lua, false, "stock_guest_old_pipe_row_unqualified");
         if (camera && !camera_stock_ammo(stored)) return proof(lua, false, "guest_camera_row_unqualified");
         const auto* magazine_profile = camera ? nullptr : stock_magazine(context.weapon);
         if (!ordinary_magazine_payload(magazine_profile, context, inventory))
             return proof(lua, false, "guest_weapon_payload_unqualified");
-        if (inventory.backpack_index >= 0) return proof(lua, true, camera ? "camera_backpack" : "backpack", -1, stored);
+        if (inventory.backpack_index >= 0)
+            return proof(lua, true, old_pipe ? "old_pipe_backpack" : camera ? "camera_backpack" : "backpack", -1, stored);
         auto* actor = equipped(context, inventory);
-        if (!actor) return proof(lua, true, camera ? "camera_stored_equipment" : "stored_equipment", -1, stored);
+        if (!actor)
+            return proof(lua, true, old_pipe ? "old_pipe_stored_equipment" : camera ? "camera_stored_equipment" : "stored_equipment", -1, stored);
         if (!ordinary_magazine_payload(magazine_profile, context, inventory, actor))
             return proof(lua, false, "guest_weapon_payload_unqualified");
         auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
@@ -829,7 +834,8 @@ namespace
         const auto observed = ammo->GetPropertyValueInContainer(actor);
         if (camera && (observed != stored || !camera_capture_ready(actor)))
             return proof(lua, false, "stock_guest_camera_capture_unavailable");
-        return proof(lua, true, camera ? "camera_equipped" : "equipped", observed, stored);
+        if (old_pipe && observed != stored) return proof(lua, false, "stock_guest_old_pipe_row_unqualified");
+        return proof(lua, true, old_pipe ? "old_pipe_equipped" : camera ? "camera_equipped" : "equipped", observed, stored);
     }
 
     Unreal::UClass* stock_projectile(Unreal::UObject* actor, int expected_count = 1)
@@ -1769,12 +1775,15 @@ namespace
         auto* row_class = inventory.row_class(inventory.item);
         if constexpr (operation == Operation::EquipOldPipe)
         {
-            context.weapon = qualified_old_pipe(row_class, context);
+            context.weapon = qualified_old_pipe(row_class, context, true);
             return context.weapon ? equip(lua, context, inventory) : fail("stock_guest_old_pipe_class_unqualified");
         }
         context.weapon = qualified_weapon(row_class);
         if constexpr (operation == Operation::Equip || operation == Operation::Inspect)
+        {
             if (!context.weapon) context.weapon = qualified_camera(row_class);
+            if (!context.weapon) context.weapon = qualified_old_pipe(row_class, context);
+        }
         if (!context.weapon) return fail("guest_weapon_class_unqualified");
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
         if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);

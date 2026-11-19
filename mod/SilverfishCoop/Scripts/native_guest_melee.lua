@@ -6,27 +6,32 @@ local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local npc_path = dead_bridge .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
 local npc_name = "NPC_State_Infantry_CQC_C " .. npc_path
 local damage_start = "native-guest-melee-damage-canary-start"
+local swing_start = "native-guest-melee-swing-start"
+local fixture_aim = "native-guest-melee-aim-fixture"
 local actions = {
     ["native-guest-melee-canary-equip"] = true,
     ["native-guest-melee-canary-start"] = true,
     [damage_start] = true,
+    [swing_start] = true,
+    [fixture_aim] = true,
     ["native-guest-melee-canary-observe"] = true,
     ["native-guest-melee-canary-abort"] = true,
 }
-local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
-    and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
+local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local latest, equipment
+local latest, equipment, staged_aim
 
-local function qualified_host(state, phase)
+local function qualified_host(state, phase, testing)
     return enabled and phase == "hosting" and state.listening and state.server == false
-        and (state.map == crossroads or state.map == dead_bridge)
-        and type(SilverfishStartNativeGuestMeleeCanary) == "function"
+        and (state.map == dead_bridge or testing and state.map == crossroads)
+        and (testing and fixtures and type(SilverfishStartNativeGuestMeleeCanary) == "function"
+            and type(SilverfishEquipNativeGuestOldPipe) == "function"
+            or not testing and type(SilverfishStartNativeGuestOldPipeSwing) == "function")
         and type(SilverfishReadNativeGuestMeleeCanary) == "function"
         and type(SilverfishAbortNativeGuestMeleeCanary) == "function"
-        and type(SilverfishEquipNativeGuestOldPipe) == "function"
 end
 
 local function exact_guest(state, phase, name, standing)
@@ -41,25 +46,28 @@ local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
 
-local function observation(damage, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
+local function observation(damage, ordinary, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
                            sweeps, calls, before, after, total)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_melee_") ~= nil
     local settled_status = damage and "stock_damage_verified" or "surface_verified"
+    local miss = ordinary and status == "stock_miss_verified"
+    local cancelled = ordinary and status == "stock_swing_cancelled"
     if (ok ~= true and not dirty) or (dirty and ok ~= false)
         or math.type(serial) ~= "integer" or serial < 1 or serial >= 2 ^ 53
         or presses ~= 1 or (releases ~= 0 and releases ~= 1)
         or math.type(contacts) ~= "integer" or contacts < 0 or contacts > 64
         or (qualified ~= 0 and qualified ~= 1) or qualified > contacts
         or type(settled) ~= "boolean" or type(passives) ~= "boolean"
-        or settled ~= (status == settled_status)
+        or settled ~= (status == settled_status or miss)
         or (settled and (releases ~= 1 or contacts ~= 1 or qualified ~= 1 or not passives))
         or (not dirty and status ~= "pending" and status ~= settled_status and status ~= "aborted_contact_fenced"
-            and not (damage and status == "stock_damage_aim_fenced")) then
+            and not (damage and status == "stock_damage_aim_fenced") and not miss and not cancelled) then
         error("mutation_unverified_guest_melee_abi", 0)
     end
     if damage and ((sweeps ~= 0 and sweeps ~= 1) or (calls ~= 0 and calls ~= 1) or calls > sweeps
         or not finite(before) or not finite(after) or not finite(total)
-        or (settled and (sweeps ~= 1 or calls ~= 1 or before < 100 or before > 160 or after <= 0 or total <= 0
+        or ((miss or cancelled) and (sweeps ~= 0 or calls ~= 0 or before ~= -1 or after ~= -1 or total ~= -1))
+        or (settled and not miss and (sweeps ~= 1 or calls ~= 1 or before < 100 or before > 160 or after <= 0 or total <= 0
             or total > 90 or math.abs(before - after - total) > 1e-6))) then
         error("mutation_unverified_guest_melee_damage_abi", 0)
     end
@@ -214,7 +222,7 @@ end
 
 local function read(scope, abort)
     local native = abort and SilverfishAbortNativeGuestMeleeCanary or SilverfishReadNativeGuestMeleeCanary
-    local checked, proof = pcall(function() return observation(scope.damage, native(scope.proof.serial)) end)
+    local checked, proof = pcall(function() return observation(scope.damage, scope.ordinary, native(scope.proof.serial)) end)
     if not checked then
         if scope.pose then
             pcall(SilverfishAbortNativeGuestMeleeCanary, scope.proof.serial)
@@ -234,11 +242,12 @@ end
 function melee.command(fields, state, phase, standing)
     local action = fields[2]
     if not actions[action] then return end
-    if not qualified_host(state, phase) then error("native_guest_melee_fixture_unavailable", 0) end
-    local damage = action == damage_start
-    if damage or action == "native-guest-melee-canary-start" or action == "native-guest-melee-canary-equip" then
+    local ordinary = action == swing_start
+    if not qualified_host(state, phase, not ordinary) then error("native_guest_melee_fixture_unavailable", 0) end
+    local damage = action == damage_start or ordinary
+    if damage or action == fixture_aim or action == "native-guest-melee-canary-start" or action == "native-guest-melee-canary-equip" then
         if (damage and state.map ~= dead_bridge) or (action == "native-guest-melee-canary-start" and state.map ~= crossroads)
-            or (damage and type(SilverfishStartNativeGuestMeleeDamageCanary) ~= "function") then
+            or (action == damage_start and type(SilverfishStartNativeGuestMeleeDamageCanary) ~= "function") then
             error("native_guest_melee_fixture_unavailable", 0)
         end
         local name, guid = fields[3], fields[4]
@@ -247,6 +256,13 @@ function melee.command(fields, state, phase, standing)
         end
         local pawn, save = exact_guest(state, phase, name, standing)
         if not pawn then error("native_guest_melee_exact_owner_required", 0) end
+        if action == fixture_aim then
+            if state.map ~= dead_bridge or type(SilverfishCheckNativeGuestMeleeDamagePose) ~= "function" then
+                error("native_guest_melee_fixture_unavailable", 0)
+            end
+            staged_aim = {map = state.map, pawn = name, address = pawn:GetAddress(), guid = guid, expires = os.time() + 10}
+            return "stock Old Pipe aim fixture armed"
+        end
         if action == "native-guest-melee-canary-equip" then
             if latest and latest.proof.status == "pending" then error("native_guest_melee_canary_pending", 0) end
             local ok, status = SilverfishEquipNativeGuestOldPipe(pawn:GetAddress(), save:GetAddress(), guid)
@@ -256,8 +272,12 @@ function melee.command(fields, state, phase, standing)
             equipment = {map = state.map, pawn = name, guid = guid, ok = ok, status = status}
             return "stock guest Old Pipe equip observed"
         end
-        local pose = damage and damage_pose(state, pawn)
-        local invoke = damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
+        local fixture_bound = ordinary and staged_aim and staged_aim.map == state.map and staged_aim.pawn == name
+            and staged_aim.address == pawn:GetAddress() and staged_aim.guid == guid and os.time() <= staged_aim.expires
+        if fixture_bound then staged_aim = nil end
+        local pose = (action == damage_start or fixture_bound) and damage_pose(state, pawn)
+        local invoke = ordinary and SilverfishStartNativeGuestOldPipeSwing
+            or damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
         local called, result = pcall(function() return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid)) end)
         if not called then
             restore_pose(pose)
@@ -268,7 +288,7 @@ function melee.command(fields, state, phase, standing)
             restore_pose(pose)
             error(status, 0)
         end
-        local checked, proof = pcall(observation, damage, table.unpack(result, 1, result.n))
+        local checked, proof = pcall(observation, damage, ordinary, table.unpack(result, 1, result.n))
         if not checked then
             if pose and math.type(serial) == "integer" and serial > 0 then
                 pcall(SilverfishAbortNativeGuestMeleeCanary, serial)
@@ -276,7 +296,8 @@ function melee.command(fields, state, phase, standing)
             restore_pose(pose)
             error(proof, 0)
         end
-        latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage, pose = pose, proof = proof}
+        latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage,
+            ordinary = ordinary, pose = pose, proof = proof}
         if latest.proof.status ~= "pending" and latest.pose then
             restore_pose(latest.pose)
             latest.pose = nil
@@ -292,8 +313,14 @@ function melee.command(fields, state, phase, standing)
 end
 
 function melee.rows(state, phase, status_row, standing)
-    if not qualified_host(state, phase) then return {} end
     local rows = {}
+    if staged_aim then
+        if staged_aim.map ~= state.map or os.time() > staged_aim.expires then staged_aim = nil
+        elseif qualified_host(state, phase, true) then
+            rows[#rows + 1] = status_row(fixture_aim, state.map, staged_aim.pawn, staged_aim.guid)
+        end
+    end
+    if not qualified_host(state, phase, false) and not qualified_host(state, phase, true) then return rows end
     if equipment and equipment.map == state.map then
         rows[#rows + 1] = status_row("native-guest-melee-equip", state.map, equipment.pawn, equipment.guid,
             equipment.ok and 1 or 0, equipment.status)
@@ -303,7 +330,8 @@ function melee.rows(state, phase, status_row, standing)
     local invalid = not pawn or pawn:GetAddress() ~= latest.address
     read(latest, invalid and latest.proof.status == "pending")
     local proof = latest.proof
-    local fields = {"native-guest-melee-canary", state.map, latest.pawn, latest.guid, proof.serial, proof.status,
+    local fields = {latest.ordinary and "native-guest-melee-swing" or "native-guest-melee-canary", state.map,
+        latest.pawn, latest.guid, proof.serial, proof.status,
         proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0}
     if latest.damage then
         fields[13], fields[14], fields[15] = npc_name, proof.sweeps, proof.calls
