@@ -6,6 +6,7 @@ local enabled = bridge and bridge ~= "" and os.getenv("SILVERFISH_COOP_NATIVE_ZO
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local headless_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observatory = native_bed.profile(map)
 local actor_name = observatory.actor_full_name
 local max_hours = 10
@@ -421,6 +422,62 @@ function rest.insomnia_fixture(state, phase, pawn_name)
         error(failure, 0)
     end
     return "verified stock neutral Insomnia sleep selection"
+end
+
+function rest.dead_bridge_fixture(state, phase, pawn_name, requested_actor, mode)
+    local profile = native_bed.profile(dead_bridge)
+    local menu_guard = SilverfishSetNativeStockRestTestMenuGuard
+    local read_scope = SilverfishReadNativeStockRestStatus
+    if not headless_fixture or state.map ~= dead_bridge or not profile or profile.faction ~= 4 or profile.min_safe_rep ~= 300
+        or not stock_scope or type(menu_guard) ~= "function" or type(read_scope) ~= "function"
+        or (mode ~= "eligible" and mode ~= "hostile") then
+        error("native_rest_dead_bridge_fixture_unavailable", 0)
+    end
+    local report, context = inspect_bed(state, phase, pawn_name, requested_actor)
+    local hostile = mode == "hostile"
+    local expected_before, expected_after = hostile and 300 or -600, hostile and -600 or 300
+    local stack = context.controller.MenuStack
+    local installed, armed, fresh = read_scope()
+    local clock = StaticFindObject(math_path)
+    local trait = FName("IntensePersonality", EFindName.FNAME_Find)
+    if trait:GetComparisonIndex() == 0 or trait:ToString() ~= "IntensePersonality" then
+        error("native_rest_dead_bridge_fixture_trait_unavailable", 0)
+    end
+    local passive = {}
+    context.instance:FindPassiveEffect(trait, false, passive, passive)
+    if report.points ~= expected_before or passive.EffectActive ~= false
+        or not installed or not armed or not fresh or not same(stock_scope.bed, context.actor)
+        or not stack or stack:GetArrayNum() ~= 0 or not valid(clock)
+        or type(context.pawn.bHidden) ~= "boolean"
+        or (hostile and not report.eligible) or (hostile and not menu_guard(true)) then
+        error("native_rest_dead_bridge_fixture_baseline_unavailable", 0)
+    end
+    local completed, proof = pcall(function()
+        context.instance:AddPlayerRep(context.actor.Faction, expected_after - expected_before)
+        local current = inspect_bed(state, phase, pawn_name, requested_actor)
+        if not host_unchanged(context) or current.points ~= expected_after then
+            error("stock_reputation_readback", 0)
+        end
+        if hostile then
+            if current.reason ~= "reputation_too_low" or current.distance >= current.range then
+                error("stock_reputation_gate_not_reached", 0)
+            end
+            local before_time, hidden = time_seconds(clock, context.save), context.pawn.bHidden
+            context.actor:SendInteractionToActor(context.pawn, context.actor.Box)
+            local _, still_armed, _, decision = read_scope()
+            if not still_armed or decision == "selected" or stack:GetArrayNum() ~= 0
+                or context.pawn.bHidden ~= hidden or time_seconds(clock, context.save) ~= before_time
+                or not host_unchanged(context) then
+                error("stock_hostile_bed_callback_was_not_refused", 0)
+            end
+        end
+        return current
+    end)
+    if hostile then menu_guard(false) end
+    if not completed then
+        error("mutation_unverified_native_rest_dead_bridge_fixture:" .. tostring(proof):gsub("[%c]", " "):sub(1, 128), 0)
+    end
+    return proof
 end
 
 function rest.guest_fixture(state, phase, pawn_name)

@@ -2710,6 +2710,19 @@ class Host:
                     proof = await native_rest.checked(self, bridge, "native-rest-inspect")
                     snapshot = await bridge.command(action, proof["pawn"], timeout=6)
                     result = {"native_rest_hook": snapshot.get("native_rest_hook", {})}
+                elif action == "native-rest-dead-bridge-rep-fixture" and self.fixtures:
+                    mode = request.get("target")
+                    if (mode not in ("eligible", "hostile") or self.last_game.get("map") != DEAD_BRIDGE
+                            or self.stopping or self.transitioning or self.native_checkpoint_unsafe
+                            or self.party["players"]["host"]["downed"] or self.party["wipe"]):
+                        raise ValueError("Choose a stock Dead Bridge reputation fixture state on an active standing host")
+                    try:
+                        proof = await native_rest.checked(self, bridge, action, mode)
+                    except RuntimeError as error:
+                        if str(error).startswith("mutation_unverified_native_rest_dead_bridge_fixture"):
+                            self.native_checkpoint_unsafe = self.stopping = True
+                        raise
+                    result = {"native_rest": proof, "stock_hostile_callback_verified": mode == "hostile"}
                 elif action == "native-rest-guest-interaction-fixture" and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     owner = self.native_recipients().get(character)

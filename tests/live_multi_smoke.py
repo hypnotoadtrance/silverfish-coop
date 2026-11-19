@@ -13,6 +13,7 @@ import uuid
 
 
 CROSSROADS = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 
 
@@ -26,8 +27,12 @@ def saved_hashes(root: Path) -> dict[str, str]:
 
 
 async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False, rest_ui: bool = False,
-                   rest_guest_denial: bool = False, guest_count: int = 2, downed_markers: bool = False) -> None:
+                   rest_guest_denial: bool = False, guest_count: int = 2, downed_markers: bool = False,
+                   dead_bridge_rest: bool = False) -> None:
     campaign = "party-" + uuid.uuid4().hex[:8]
+    rest_map = DEAD_BRIDGE if dead_bridge_rest else OBSERVATORY
+    rest_bed = "SavePoint_BP_C_1-DeadBridge_P-" if dead_bridge_rest else "SavePoint_BP_C_3-Observitory_P-"
+    entrance = "DB_CR" if dead_bridge_rest else "Obsv_Etr"
     guest_roles = ("guest", *(f"guest{index}" for index in range(2, guest_count + 1)))
     profiles = [f"{campaign}-{index}" for index in range(1, guest_count + 1)]
     run = work / "campaigns" / campaign / "run"
@@ -37,14 +42,14 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
     baseline = saved_hashes(vanilla_saved) if vanilla_saved else None
     evidence = {}
 
-    async def command(*arguments):
+    async def command(*arguments, expected=True):
         process = await asyncio.create_subprocess_exec(*base, *arguments, stdout=asyncio.subprocess.PIPE,
                                                        stderr=asyncio.subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
         output, error = await asyncio.wait_for(process.communicate(), 45)
-        if process.returncode:
+        if not output or (process.returncode == 0) != expected:
             raise RuntimeError(f"{arguments}: {output.decode(errors='replace')} {error.decode(errors='replace')}")
         reply = json.loads(output)
-        if reply.get("ok") is False:
+        if reply.get("ok", True) is not expected:
             raise RuntimeError(f"{arguments}: {reply}")
         return reply
 
@@ -170,7 +175,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
 
         async def position(role, where):
             return await command("action", "--campaign", campaign, "native-exit-position",
-                                 "--target", role, "--exit-position", where, "--entrance", "Obsv_Etr")
+                                 "--target", role, "--exit-position", where, "--entrance", entrance)
 
         for role in guest_roles[:-1]:
             await position(role, "near")
@@ -184,18 +189,18 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
             math.dist(native_body(status, exact_pawns["host"])["location"], native_body(status, exact_pawns[role])["location"]) <= 1500
             for role in guest_roles))
         await position("host", "inside")
-        arrived = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == OBSERVATORY
+        arrived = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == rest_map
                               and not status.get("awaiting_zone_guest"))
         for client in clients:
-            await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == OBSERVATORY)
+            await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == rest_map)
         assert arrived["zone_epoch"] != before["zone_epoch"] and all(
             players(arrived)[role]["character_id"] == character for role, character in zip(guest_roles, identities)
         ), arrived
-        evidence["all_guests_required_and_travelled"] = {"map": OBSERVATORY, "identities": identities}
+        evidence["all_guests_required_and_travelled"] = {"map": rest_map, "identities": identities}
 
         await command("action", "--campaign", campaign, "checkpoint")
         saved = await wait(run, lambda status: all(
-            entry["state"].get("native_guest_save", {}).get("map") == OBSERVATORY
+            entry["state"].get("native_guest_save", {}).get("map") == rest_map
             for entry in status.get("campaign", {}).get("characters", [])))
         characters = saved["campaign"]["characters"]
         frames = {entry["character_id"]: entry["state"]["native_guest_save"] for entry in characters}
@@ -224,6 +229,28 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
             assert all(event["event"] != "native_rest_checkpoint" for event in events), events
             evidence["stock_rest_guest_interaction_denied"] = denied
         if rest_wipe:
+            if dead_bridge_rest:
+                rest_owner = ("action", "--campaign", campaign)
+                fixture = (*rest_owner, "native-rest-dead-bridge-rep-fixture", "--target")
+                await wait(run, lambda status: status.get("game", {}).get("native_rest_hook", {}).get("fresh") is True)
+                initial_rest = (await command(*rest_owner, "native-rest-approach"))["native_rest"]
+                assert (initial_rest["bed"], initial_rest["points"], initial_rest["eligible"]) == (rest_bed, -600, False)
+                fallback = (await wait(run, lambda status: status.get("game", {}).get("native_blue_arrival", {})
+                                       .get("placement") == "alternate"))["game"]["native_blue_arrival"]
+                assert fallback["bed"] == rest_bed and fallback["actor"].endswith(".SavePoint_BP_C_1"), fallback
+                raised = (await command(*fixture, "eligible"))["native_rest"]
+                assert raised["points"] == 300, raised
+                near = (await command(*rest_owner, "native-rest-approach"))["native_rest"]
+                assert near["eligible"] and near["distance"] < near["range"], near
+                hostile = await command(*fixture, "hostile")
+                refusal = hostile["native_rest"]
+                assert hostile["stock_hostile_callback_verified"] and refusal["reason"] == "reputation_too_low"
+                assert refusal["points"] == -600 and refusal["distance"] < refusal["range"], refusal
+                denied = await command(*rest_owner, "native-rest", "--amount", "1", expected=False)
+                assert denied["error"] == "reputation_too_low", denied
+                ready = (await command(*fixture, "eligible"))["native_rest"]
+                assert ready["eligible"] and ready["points"] == 300, ready
+                evidence["stock_faction_bed_gate"] = {"alternate": fallback, "hostile": refusal, "eligible": ready}
             approach = await command("action", "--campaign", campaign, "native-rest-approach")
             assert approach["native_rest"]["eligible"], approach
             if rest_ui:
@@ -231,7 +258,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
                 confirmation = await command("action", "--campaign", campaign, "native-rest-ui-fixture", "--amount", "1")
                 assert confirmation["native_rest_hook"]["status"] == "selected", confirmation
                 await wait(run, lambda status: status.get("campaign", {}).get("world", {}).get("native_rest", {})
-                           .get("bed") == "SavePoint_BP_C_3-Observitory_P-")
+                           .get("bed") == rest_bed)
                 sleeps = [event for event in (await command("events", "--campaign", campaign, "--tail", "100"))["events"]
                           if event["event"] == "native_rest_checkpoint"]
                 assert len(sleeps) == 1, sleeps
@@ -242,7 +269,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
                              "--operation-id", uuid.uuid4().hex)
                 slept = (await command(*rest_args))["native_rest"]
                 assert (await command(*rest_args))["native_rest"] == slept
-            assert slept["bed"] == "SavePoint_BP_C_3-Observitory_P-" and math.isclose(
+            assert slept["bed"] == rest_bed and math.isclose(
                 slept["after"] - slept["before"], 3600, abs_tol=0.05), slept
             for role in ("host", *guest_roles):
                 await position(role, "near")
@@ -253,16 +280,18 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
                 await command("action", "--campaign", campaign, "native-guest-damage", "--target", role)
                 await wait(run, lambda status: players(status).get(role, {}).get("downed"))
             await command("action", "--campaign", campaign, "native-host-damage", "--target", "host")
-            returned = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == OBSERVATORY
+            returned = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == rest_map
                                   and not status["gameplay"].get("wipe") and not status["gameplay"].get("pending_spawns")
                                   and all(native_body(status, pawn).get("health") == 250.0
                                           for pawn in status["gameplay"]["native_pawns"].values()), timeout=85)
             for client in clients:
-                await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == OBSERVATORY)
+                await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == rest_map)
             uses_rest = returned["game"].get("native_blue_arrival") or next(
                 row for row in (await command("events", "--campaign", campaign, "--tail", "100"))["events"]
                 if row["event"] == "party_respawn_committed")
             assert math.dist(uses_rest["location"], slept["location"]) < 400, uses_rest
+            if dead_bridge_rest:
+                assert (uses_rest["bed"], uses_rest["placement"], uses_rest["points"]) == (rest_bed, "arrow", 300), uses_rest
             assert all(players(returned)[role]["character_id"] == character
                        for role, character in zip(guest_roles, identities)), returned
             evidence["stock_rest_and_native_wipe"] = {"rest": slept, "respawn": uses_rest, "max_health": 250}
@@ -299,13 +328,16 @@ if __name__ == "__main__":
                          help="number of separate loopback guest processes")
     options.add_argument("--native-rest-wipe", action="store_true", help="rest, leave, and wipe back to the exact stock bed")
     options.add_argument("--native-rest-ui", action="store_true", help="use the stock sleep screen during the rest-wipe check")
+    options.add_argument("--native-rest-dead-bridge", action="store_true",
+                         help="verify hostile and reputation-eligible Dead Bridge stock sleep and party respawn")
     options.add_argument("--native-rest-guest-denial", action="store_true",
                          help="verify authority and client stock interaction denial for each guest")
     options.add_argument("--native-downed-markers", action="store_true",
                          help="verify exact same-map markers for every observer and cleanup on revival")
     args = options.parse_args()
-    if args.native_rest_ui and not args.native_rest_wipe:
+    if args.native_rest_ui and not (args.native_rest_wipe or args.native_rest_dead_bridge):
         options.error("--native-rest-ui requires --native-rest-wipe")
-    asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe,
-                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial, guest_count=args.guests,
-                         downed_markers=args.native_downed_markers))
+    asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe or args.native_rest_dead_bridge,
+                         rest_ui=args.native_rest_ui or args.native_rest_dead_bridge,
+                         rest_guest_denial=args.native_rest_guest_denial, guest_count=args.guests,
+                         downed_markers=args.native_downed_markers, dead_bridge_rest=args.native_rest_dead_bridge))

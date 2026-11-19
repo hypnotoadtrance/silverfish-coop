@@ -728,6 +728,12 @@ local function run_command(fields, state, current_phase)
             error("Stock Insomnia fixture requires the exact host", 0)
         end
         return native_rest.insomnia_fixture(state, current_phase, argument)
+    elseif command == "native-rest-dead-bridge-rep-fixture" then
+        if #fields ~= 5 or role ~= "host" or current_phase ~= "hosting" then
+            error("Stock Dead Bridge rest fixture requires the exact host and bed", 0)
+        end
+        last_rest = native_rest.dead_bridge_fixture(state, current_phase, argument, fields[4], fields[5])
+        return "verified stock Dead Bridge reputation and rest gate"
     elseif command == "native-rest-guest-interaction-fixture" then
         if #fields ~= 3 or (current_phase ~= "hosting" and current_phase ~= "connected") then
             error("Stock rest denial requires the exact enrolled guest", 0)

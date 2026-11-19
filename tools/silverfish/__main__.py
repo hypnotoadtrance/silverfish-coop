@@ -163,6 +163,7 @@ def parser() -> argparse.ArgumentParser:
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
         "native-inventory-view-fixture",
         "native-rest-inspect", "native-rest", "native-rest-approach", "native-rest-ui-fixture", "native-rest-insomnia-fixture",
+        "native-rest-dead-bridge-rep-fixture",
         "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
         "native-bag-projection-fixture",
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
