@@ -437,11 +437,17 @@ function pickup.rows(state, phase, status_row)
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
     local detail = state.local_pawn
-    if state.map == dead_drop.map and state.listening and (host or client) and detail and valid(detail.pawn)
-        and type(SilverfishObserveNativeCrossroadsDeadDrop) == "function" then
-        local shown, epoch = SilverfishObserveNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), host)
-        if shown then
-            rows[1] = status_row("native-dead-drop", shown, state.map, dead_drop.name .. " " .. dead_drop.path, detail.name, epoch)
+    if state.map == dead_drop.map and state.listening and (host or client) and detail and valid(detail.pawn) then
+        local observe = SilverfishObserveNativeCrossroadsDeadDrop
+        if type(observe) ~= "function" then
+            rows[1] = status_row("native-dead-drop-diagnostic", state.map, "native_observer_unavailable")
+        else
+            local shown, epoch, fault = observe(detail.pawn:GetAddress(), host)
+            if shown == "diagnostic" then
+                rows[1] = status_row("native-dead-drop-diagnostic", state.map, fault)
+            elseif shown then
+                rows[1] = status_row("native-dead-drop", shown, state.map, dead_drop.name .. " " .. dead_drop.path, detail.name, epoch)
+            end
         end
     end
     local qualified = pickup.update(state, phase)

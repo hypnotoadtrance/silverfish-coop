@@ -482,37 +482,53 @@ namespace
             value == object(actor, STR("RootComponent")) ? value : nullptr;
     }
 
-    bool placed_dead_drop(U::UObject* actor, U::UObject* world)
+    const char* placed_drop_fault(U::UObject* actor, U::UObject* world)
     {
         const auto& profile = dead_drop_profile;
-        if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
-            !live(world) || world->GetPathName() != profile.world || !actor->HasAnyFlags(U::RF_WasLoaded) ||
-            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return false;
+        if (!live(actor)) return "actor_not_live";
+        if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor) return "actor_identity";
+        if (!actor->HasAnyFlags(U::RF_WasLoaded)) return "actor_not_loaded";
+        if (!boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "actor_being_destroyed";
+        if (!live(world) || world->GetPathName() != profile.world) return "world_identity";
         auto* item = static_cast<U::AActor*>(actor);
-        return item->GetWorld() == world && item->GetLevel() == object(world, STR("PersistentLevel"));
+        if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel"))) return "persistent_level";
+        return nullptr;
+    }
+
+    bool placed_dead_drop(U::UObject* actor, U::UObject* world)
+    {
+        return placed_drop_fault(actor, world) == nullptr;
+    }
+
+    const char* drop_identity_fault(U::UObject* actor, U::UObject* world)
+    {
+        if (const auto* fault = placed_drop_fault(actor, world)) return fault;
+        if (!boolean(actor, STR("bReplicates"), false)) return "replication";
+        if (!boolean(actor, STR("Stacks"), false)) return "stacking";
+        if (!source_box(actor)) return "root_box";
+        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
+        const U::FName key{STR("DeadDrop_CrossRoads"), U::FNAME_Find};
+        if (!quest || key.IsNone() || quest->GetPropertyValueInContainer(actor) != key) return "quest_id";
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        if (!mode || mode->GetPropertyValueInContainer(actor) != 0) return "respawn_mode";
+        if (!boolean(actor, STR("DespawnIfPlayerOwns"), true)) return "owned_despawn";
+        if (!boolean(actor, STR("Physics"), false)) return "physics";
+        auto facing = static_cast<U::AActor*>(actor)->K2_GetActorRotation();
+        if (!(std::abs(std::remainder(facing.GetPitch(), 360.0)) <= 0.5 &&
+              std::abs(std::remainder(facing.GetYaw() + 90.0, 360.0)) <= 0.5 &&
+              std::abs(std::remainder(facing.GetRoll(), 360.0)) <= 0.5)) return "rotation";
+        return nullptr;
     }
 
     bool dead_drop_identity(U::UObject* actor, U::UObject* world)
     {
-        if (!placed_dead_drop(actor, world) || !boolean(actor, STR("bReplicates"), false) ||
-            !boolean(actor, STR("Stacks"), false)) return false;
-        auto* item = static_cast<U::AActor*>(actor);
-        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
-        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
-        const U::FName key{STR("DeadDrop_CrossRoads"), U::FNAME_Find};
-        auto facing = item->K2_GetActorRotation();
-        return source_box(actor) && quest && !key.IsNone() && quest->GetPropertyValueInContainer(actor) == key &&
-            mode && mode->GetPropertyValueInContainer(actor) == 0 && boolean(actor, STR("DespawnIfPlayerOwns"), true) &&
-            boolean(actor, STR("Physics"), false) &&
-            std::abs(std::remainder(facing.GetPitch(), 360.0)) <= 0.5 &&
-            std::abs(std::remainder(facing.GetYaw() + 90.0, 360.0)) <= 0.5 &&
-            std::abs(std::remainder(facing.GetRoll(), 360.0)) <= 0.5;
+        return drop_identity_fault(actor, world) == nullptr;
     }
 
     bool hidden_drop(U::AActor* actor)
     {
         auto point = actor->K2_GetActorLocation();
-        return boolean(actor, STR("bHidden"), true) && actor->GetActorEnableCollision() &&
+        return boolean(actor, STR("bHidden"), true) &&
             std::abs(point.GetX()) <= 1.0 && std::abs(point.GetY()) <= 1.0 && std::abs(point.GetZ() - 9999.0) <= 1.0;
     }
 
@@ -1513,21 +1529,44 @@ namespace
         return local_scope(candidate) ? candidate : Scope{};
     }
 
+    int drop_diagnostic(const Lua& lua, std::string_view reason, U::AActor* actor = nullptr)
+    {
+        lua.set_string("diagnostic");
+        lua.set_string("-");
+        if (!live(actor))
+        {
+            lua.set_string(reason);
+        }
+        else
+        {
+            auto point = actor->K2_GetActorLocation();
+            auto facing = actor->K2_GetActorRotation();
+            auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+            const int mode_value = mode ? mode->GetPropertyValueInContainer(actor) : -1;
+            lua.set_string(std::format("{}:position={:.2f},{:.2f},{:.2f}:rotation={:.2f},{:.2f},{:.2f}:hidden={}:collision={}:mode={}",
+                reason, point.GetX(), point.GetY(), point.GetZ(), facing.GetPitch(), facing.GetYaw(), facing.GetRoll(),
+                boolean(actor, STR("bHidden"), true), actor->GetActorEnableCollision(), mode_value));
+        }
+        return 3;
+    }
+
     int observe_drop(const Lua& lua)
     {
         if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer() || !lua.is_bool(2)) return 0;
         const auto address_value = static_cast<Address>(lua.get_integer());
         const bool host = lua.get_bool();
         auto state = dead_drop_seat(address_value, host);
-        if (!state.profile) return 0;
+        if (!state.profile) return drop_diagnostic(lua, "local_seat");
         const auto now = Clock::now();
         auto* actor = static_cast<U::AActor*>(state.actor.Get());
         if (!host && drop_projection.scope.profile &&
-            (!drop_gate(state) || !present_drop(state)) && !settle_drop_projection()) return 0;
+            (!drop_gate(state) || !present_drop(state)) && !settle_drop_projection())
+            return drop_diagnostic(lua, "projection_retirement", actor);
         std::string_view shown;
         std::string_view epoch = "-";
+        const auto* fault = actor ? drop_identity_fault(actor, state.world.Get()) : nullptr;
         if (!actor) shown = "absent";
-        else if (!dead_drop_identity(actor, state.world.Get())) return 0;
+        else if (fault) return drop_diagnostic(lua, fault, actor);
         else if (hidden_drop(actor)) shown = "hidden";
         else if (host)
         {
@@ -1546,7 +1585,7 @@ namespace
             shown = "projected";
             epoch = drop_projection.epoch;
         }
-        if (shown.empty()) return 0;
+        if (shown.empty()) return drop_diagnostic(lua, host ? "stock_pose_or_quest_inactive" : "client_stock_pose", actor);
         lua.set_string(shown);
         lua.set_string(epoch);
         return 2;
@@ -1574,7 +1613,7 @@ namespace
             drop_projection.expires = now + drop_lease;
             return result(lua, true, "renewed");
         }
-        if (!settle_drop_projection() || !hidden_drop(actor))
+        if (!settle_drop_projection() || !hidden_drop(actor) || !actor->GetActorEnableCollision())
             return result(lua, false, "dead_drop_projection_stock_pose_unavailable");
         const auto& source = dead_drop_profile;
         U::FHitResult ignored{};
