@@ -323,10 +323,13 @@ local function host_command(fields, state, phase)
     host_report = nil
     local action, name = fields[2], fields[3]
     local commit = action == "native-dialogue-commit"
-    local shop_open = action == "native-dialogue-shopkeep-open" or action == "native-dialogue-mama-open"
+    local mama_open = action == "native-dialogue-mama-open"
+    local shop_open = action == "native-dialogue-shopkeep-open" or mama_open
     local shop_cash = action == "native-dialogue-shopkeep-cash"
     local mama_trade = action == "native-dialogue-mama-trade"
-    if #fields ~= (commit and 12 or shop_open and 7 or (shop_cash or mama_trade) and 6 or 3) then reject("arguments_unqualified") end
+    if #fields ~= (commit and 12 or mama_open and 8 or shop_open and 7 or (shop_cash or mama_trade) and 6 or 3) then
+        reject("arguments_unqualified")
+    end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
     if (action == "native-dialogue-shopkeep-open" or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
     if (action == "native-dialogue-mama-open" or mama_trade) and profile ~= mama then reject("mama_scope_unavailable") end
@@ -360,7 +363,9 @@ local function host_command(fields, state, phase)
         rows, effect_name = updated, effect.effect
     elseif shop_open then
         if identity ~= fields[4] or tostring(progress.meet) ~= fields[5] or tostring(progress.cash) ~= fields[6]
-            or tostring(progress.xp) ~= fields[7] then reject(profile.id .. "_open_scope_changed") end
+            or tostring(progress.xp) ~= fields[7] or mama_open and tostring(progress.rev_orders) ~= fields[8] then
+            reject(profile.id .. "_open_scope_changed")
+        end
         progress, effect_name = profile.open(context, progress)
     elseif shop_cash or mama_trade then
         local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))

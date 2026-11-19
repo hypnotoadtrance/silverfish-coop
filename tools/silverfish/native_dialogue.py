@@ -47,6 +47,7 @@ MAMA_ROWS = {MAMA_FIRST: (2, {3: MAMA_QUESTIONS}), MAMA_QUESTIONS: (1, {1: MAMA_
              MAMA_ROOT: (1, {1: None, 3: MAMA_QUESTIONS, 5: None})}
 MAMA_OPEN, MAMA_TRADE = "native-dialogue-mama-open", "native-dialogue-mama-trade"
 MEET_PROFILES = {SHOPKEEP_PROFILE: (SHOPKEEP_OPEN, SHOPKEEP_FIRST), MAMA: (MAMA_OPEN, MAMA_FIRST)}
+MAMA_PROGRESS = (*SHOPKEEP_PROGRESS, "rev_orders")
 PROGRESS_KEYS = ("topic_eather_drill", "topic_drill_data", "stone_maze_readings", "quest_step", "cash", "xp")
 EFFECTS = {(QUESTIONS, 3): "topic_eather_drill", (QUESTIONS, 5): "topic_drill_data", (OFFER, 2): "stone_maze_issued"}
 ORDINALS = tuple(str(index) for index in sorted({
@@ -83,6 +84,8 @@ def valid_token(value) -> bool:
 
 def available_ordinals(profile, row: str, progress: dict) -> tuple[int, ...]:
     ordinals = tuple(profile.rows[row][1])
+    if profile.id == MAMA and row == MAMA_FIRST and progress["rev_orders"] >= 1:
+        return ()
     if profile.id != MOSBY or row != QUESTIONS:
         return ordinals
     return tuple(ordinal for ordinal in ordinals if (ordinal != 5 or progress["topic_eather_drill"] >= 1)
@@ -101,11 +104,13 @@ def parse_progress(fields, pawn: str) -> dict:
 
 def parse_meet_progress(fields, pawn: str, profile: Profile) -> dict:
     grant = "cash-granted" if profile.id == SHOPKEEP_PROFILE else "trade-granted"
-    if (not fields or len(fields) != 7 or tuple(fields[1:3]) != (profile.map, pawn)
+    keys = MAMA_PROGRESS if profile.id == MAMA else SHOPKEEP_PROGRESS
+    if (not fields or len(fields) != 4 + len(keys) or tuple(fields[1:3]) != (profile.map, pawn)
             or fields[-1] not in ("read", "opened-first", "opened-repeat", grant)):
         raise ValueError("Invalid stock first-meeting progress frame")
-    result = dict(zip(SHOPKEEP_PROGRESS, map(int, fields[3:6])))
-    if (any(not 0 <= value < 2**31 for value in result.values())
+    result = dict(zip(keys, map(int, fields[3:-1])))
+    if (any(not 0 <= result[k] < 2**31 for k in SHOPKEEP_PROGRESS)
+            or not -(2**31) <= result.get("rev_orders", 0) < 2**31
             or fields[-1] == "opened-first" and result["meet"] != 1
             or fields[-1] == "opened-repeat" and result["meet"] < 1):
         raise ValueError("Invalid stock first-meeting state")
@@ -295,6 +300,9 @@ class DialogueSessions:
         first = before["meet"] == 0
         marker = "opened-first" if first else "opened-repeat"
         command, first_row = MEET_PROFILES[profile.id]
+        keys = MAMA_PROGRESS if profile.id == MAMA else SHOPKEEP_PROGRESS
+        if first and profile.id == MAMA and not available_ordinals(profile, MAMA_FIRST, before):
+            raise party.RuleError("native_dialogue_mama_intro_questions_hidden")
         host.transitioning = True
         try:
             await host.checkpoint_native(bridge)
@@ -305,7 +313,7 @@ class DialogueSessions:
             host.native_checkpoint_unsafe = True
             try:
                 observed = await self._read(host, bridge, profile, scope[3], command=command,
-                                            arguments=(scope[4], *(str(before[key]) for key in SHOPKEEP_PROGRESS)))
+                                            arguments=(scope[4], *(str(before[key]) for key in keys)))
             except RuntimeError as error:
                 if str(error).startswith("native_dialogue_"):
                     host.native_checkpoint_unsafe = False
@@ -385,7 +393,8 @@ class DialogueSessions:
         if profile.id == MOSBY:
             report["progress"] = {key: stock["progress"][key] for key in PROGRESS_KEYS}
         elif profile.id in MEET_PROFILES:
-            report["progress"] = {key: stock["progress"][key] for key in SHOPKEEP_PROGRESS}
+            keys = MAMA_PROGRESS if profile.id == MAMA else SHOPKEEP_PROGRESS
+            report["progress"] = {key: stock["progress"][key] for key in keys}
         if effect:
             report.update(effect=effect, revision=revision)
         expires = now + SESSION_SECONDS

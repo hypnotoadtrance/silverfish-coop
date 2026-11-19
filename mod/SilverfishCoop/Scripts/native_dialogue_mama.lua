@@ -19,7 +19,7 @@ local profile = {
         [questions] = {lines = 1, count = 2, choices = {1}, next = {[1] = root}},
         [root] = {lines = 1, count = 5, choices = {1, 3, 5}, next = {[1] = false, [3] = questions, [5] = false}},
     },
-    effects = {[root] = {[5] = {ping = ping}}},
+    effects = {[first] = {[3] = {hide_flag = "Rev_Orders"}}, [root] = {[5] = {ping = ping}}},
     fixture_offsets = {{92, -65}, {-90, 65}, {100, 70}, {-105, -70}, {0, 115}, {0, -115}},
 }
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -58,7 +58,12 @@ local function read(context)
         refuse("canonical_save_unavailable")
     end
     return {meet = wire.stock_flag(context.instance, profile.first_flag),
-        cash = wire.stock_flag(context.instance, "Player_Cash"), xp = wire.stock_flag(context.instance, "Player_Xp")}
+        cash = wire.stock_flag(context.instance, "Player_Cash"), xp = wire.stock_flag(context.instance, "Player_Xp"),
+        rev_orders = wire.stock_flag(context.instance, "Rev_Orders")}
+end
+
+function profile.available(effect, progress)
+    return not effect.hide_flag or progress.rev_orders < 1
 end
 
 function profile.progress(state)
@@ -76,6 +81,7 @@ function profile.progress(state)
 end
 
 function profile.open(context, before)
+    if before.meet == 0 and before.rev_orders >= 1 then refuse("intro_questions_hidden") end
     local key = FName(profile.first_flag, EFindName.FNAME_Find)
     if key:GetComparisonIndex() == 0 or key:ToString() ~= profile.first_flag or not math.tointeger(before.meet)
         or before.meet < 0 or before.meet > 2147483647 then refuse("meet_flag_unqualified") end
@@ -83,7 +89,8 @@ function profile.open(context, before)
         context.instance:Add_PointTo_SaveFlag(key, 1, true, false)
         return read(context)
     end)
-    if not checked or after.meet ~= math.max(before.meet, 1) or after.cash ~= before.cash or after.xp ~= before.xp then
+    if not checked or after.meet ~= math.max(before.meet, 1) or after.cash ~= before.cash or after.xp ~= before.xp
+        or after.rev_orders ~= before.rev_orders then
         error("mutation_unverified_native_dialogue_mama_meet_flag", 0)
     end
     return after, before.meet == 0 and "opened-first" or "opened-repeat"
@@ -118,7 +125,7 @@ function profile.authorized_trade(state, phase, pawn)
 end
 
 function profile.progress_row(name, state, effect, status_row)
-    return status_row("native-dialogue-progress", map, name, state.meet, state.cash, state.xp, effect)
+    return status_row("native-dialogue-progress", map, name, state.meet, state.cash, state.xp, state.rev_orders, effect)
 end
 
 return profile

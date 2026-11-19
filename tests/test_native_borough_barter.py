@@ -85,7 +85,7 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
             zone_epoch="visit", native_zones=True, native_guest=True, native_profile=True, transitioning=False, stopping=False,
             native_checkpoint_unsafe=False, last_game=game, last_seen=time.monotonic(), checkpoint_native=AsyncMock(return_value=5),
         )
-        meet, commands = 0, []
+        meet, rev_orders, commands = 0, 0, []
         connection = "TestConnection@1"
 
         async def invoke(command, pawn, *arguments, timeout):
@@ -93,7 +93,7 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
             commands.append(command)
             effect = "read"
             if command == dialogue.MAMA_OPEN:
-                self.assertEqual(arguments, (connection, str(meet), "60", "0"))
+                self.assertEqual(arguments, (connection, str(meet), "60", "0", str(rev_orders)))
                 effect = "opened-repeat" if meet else "opened-first"
                 meet = 1
             if command == dialogue.MAMA_TRADE:
@@ -101,17 +101,26 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
                 effect = "trade-granted"
             return {**game, "native_dialogue_stock": {"map": profile.map, "npc": profile.npc, "controller": profile.controller,
                     "pawn": pawn, "connection": connection, "rows": rows,
-                    "progress": {"meet": meet, "cash": 60, "xp": 0, "effect": effect}}}
+                    "progress": {"meet": meet, "cash": 60, "xp": 0, "rev_orders": rev_orders, "effect": effect}}}
 
         sessions = dialogue.DialogueSessions(mama=True)
         bridge = SimpleNamespace(command=invoke)
         async def reply(command, goal, operation):
             return (await sessions.act(host, bridge, "guest", command, goal, operation * 32))["native_dialogue"]
 
+        rev_orders = 1
+        with self.assertRaisesRegex(party.RuleError, "intro_questions_hidden"):
+            await reply(dialogue.OPEN, dialogue.MAMA, "1")
+        self.assertEqual(meet, 0)
+        rev_orders = 0
         opened = await reply(dialogue.OPEN, dialogue.MAMA, "1")
         self.assertEqual((opened["row"], opened["effect"]), (dialogue.MAMA_FIRST, "opened-first"))
         with self.assertRaisesRegex(party.RuleError, "choice_unavailable"):
             await reply(dialogue.CHOOSE, opened["token"] + "@5", "2")
+        rev_orders = 1
+        with self.assertRaisesRegex(party.RuleError, "choice_unavailable"):
+            await reply(dialogue.CHOOSE, opened["token"] + "@3", "3")
+        rev_orders = 0
         questions = await reply(dialogue.CHOOSE, opened["token"] + "@3", "3")
         self.assertEqual(questions["row"], dialogue.MAMA_QUESTIONS)
         root = await reply(dialogue.CHOOSE, questions["token"] + "@1", "4")
