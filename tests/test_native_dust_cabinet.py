@@ -92,3 +92,48 @@ class NativeDustCabinetTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "native_authored_pickup_molasses_cabinet_closed"):
             await native_authored_pickup.claim(host, bridge, "host", native_authored_pickup.MOLASSES, "12" * 16)
         bridge.command.assert_not_awaited()
+
+    async def test_stock_guest_approach_requires_exact_enrollment(self):
+        remote = PAWN[:-1] + "2"
+        host = host_stub(snapshot("hosting", "closed"))
+        host.native_guest = True
+        host.party.update(wipe=None, pending_spawns={})
+        host.roles = lambda: {"host": "host", "guest": "collector"}
+        member = {"pawn": remote, "connected": False}
+        host.native_recipients = lambda: {"collector": member}
+        approached = snapshot("hosting", "closed")
+        approached["pawns"]["guest"] = {"name": remote, "location": [20, 30, 40]}
+        approached["ack"] = {"message": "stock guest cabinet approach verified"}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=approached))
+        with self.assertRaisesRegex(ValueError, "exact enrolled standing guest"):
+            await cabinet.approach_guest(host, bridge, cabinet.DUST.guest_approach, "guest")
+        bridge.command.assert_not_awaited()
+        member["connected"] = True
+        result = await cabinet.approach_guest(host, bridge, cabinet.DUST.guest_approach, "guest")
+        bridge.command.assert_awaited_once_with(cabinet.DUST.guest_approach, remote, timeout=5)
+        self.assertEqual(result[cabinet.GUEST_APPROACH_KEY], {
+            "map": RAIL_YARD, "actor": cabinet.ACTOR, "pawn": remote, "location": [20, 30, 40],
+        })
+
+    async def test_stock_guest_veto_requires_consumed_input_and_closed_readback(self):
+        before = snapshot("connected", "closed")
+        after = dict(before, ack={"message": "stock_started"})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=after))
+        client = SimpleNamespace(last_game=before, zone_epoch=EPOCH, host_session="host-session", stopping=False,
+                                 needs_travel=False, server_transitioning=False, gameplay_seen=time.monotonic(),
+                                 gameplay={"test_fixtures": False}, invite={"native_loot_input": True},
+                                 transport=SimpleNamespace(game_access=True), control=SimpleNamespace(event=Mock()),
+                                 bridge=bridge)
+        with self.assertRaisesRegex(ValueError, "authenticated closed"):
+            await cabinet.check_guest_veto(client, cabinet.DUST.guest_fixture)
+        bridge.command.assert_not_awaited()
+        client.gameplay["test_fixtures"] = True
+        with self.assertRaisesRegex(RuntimeError, "quiet veto"):
+            await cabinet.check_guest_veto(client, cabinet.DUST.guest_fixture)
+        client.control.event.assert_not_called()
+        after["ack"]["message"] = "stock_started_consumed"
+        proof = (await cabinet.check_guest_veto(client, cabinet.DUST.guest_fixture))[cabinet.GUEST_VETO_KEY]
+        self.assertEqual((proof["map"], proof["actor"], proof["pawn"], proof["state"], proof["entry"], proof["epoch"]),
+                         (RAIL_YARD, cabinet.ACTOR, PAWN, "closed", "stock_started_consumed", EPOCH))
+        bridge.command.assert_awaited_with(cabinet.DUST.guest_fixture, PAWN, timeout=5)
+        client.control.event.assert_called_once_with("stock_guest_cabinet_veto", **proof)

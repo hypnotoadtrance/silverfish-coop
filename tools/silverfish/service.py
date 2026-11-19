@@ -2117,6 +2117,8 @@ class Host:
                                                                request.get("operation_id") or path.stem)
                 elif action in native_dust_cabinet.FIXTURES and self.fixtures:
                     result = await native_dust_cabinet.open_fixture(self, bridge, action)
+                elif action in native_dust_cabinet.GUEST_APPROACHES and self.fixtures:
+                    result = await native_dust_cabinet.approach_guest(self, bridge, action, request.get("target"))
                 elif action == native_savlo_locker.FIXTURE and self.fixtures:
                     result = await native_savlo_locker.press_fixture(self, bridge)
                 elif action in native_authored_pickup.FIXTURE_ENTRIES and self.fixtures:
@@ -4065,6 +4067,8 @@ class Client:
                     source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
                     self.last_game = await self.bridge.command(action, source, timeout=5)
                     result = native_authored_pickup.fixture_proof(self.last_game, source, native_authored_pickup.FIXTURE_ENTRIES[action])
+                elif action in native_dust_cabinet.GUEST_FIXTURES:
+                    result = await native_dust_cabinet.check_guest_veto(self, action)
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)

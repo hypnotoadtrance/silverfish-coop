@@ -361,6 +361,35 @@ function input.open_cabinet(state, phase, pawn, actor, box, source)
     return receipt
 end
 
+function input.approach_cabinet_guest(state, phase, pawn, actor, box, source)
+    local label = cabinet_labels[source]
+    if not label or not approach_scope(state, phase, pawn, actor, sources[source])
+        or same(pawn, state.local_pawn.pawn) or not owned(box, actor, "BoxComponent")
+        or not owned(pawn.Camera, pawn, "CameraComponent") then
+        error("authored_cabinet_guest_approach_scope_unavailable", 0)
+    end
+    approach_clear_sight(state, pawn, actor, box, label .. "_guest_approach",
+        precise_distances[source], approach_front[source], source == molasses)
+end
+
+function input.check_cabinet_guest_press(state, phase, pawn, actor, box, source)
+    local label, press = cabinet_labels[source], SilverfishProbeNativeInteractInput
+    if not headless or not label or phase ~= "connected" or state.server ~= true or not state.listening
+        or sources[source] ~= state.map or not same(pawn, state.local_pawn.pawn)
+        or not same(pawn:GetWorld(), state.world) or not same(actor:GetWorld(), state.world) or pawn.Dead ~= false
+        or not owned(box, actor, "BoxComponent") or not owned(pawn.Camera, pawn, "CameraComponent")
+        or type(press) ~= "function" then
+        error("authored_cabinet_guest_stock_scope_unavailable", 0)
+    end
+    return press_stock(state, pawn, box, true, label .. "_guest_stock_input", function()
+        local delivered, why, sequence = press(pawn:GetAddress(), true)
+        if delivered ~= true or why ~= "stock_started_consumed" or sequence ~= 0 then
+            error("mutation_unverified_" .. label .. "_guest_stock_input:" .. tostring(why), 0)
+        end
+        return why
+    end)
+end
+
 function input.press(state, phase, profile)
     local host = phase == "hosting" and state.server == false
     local guest = phase == "connected" and state.server == true

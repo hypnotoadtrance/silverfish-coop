@@ -1,5 +1,6 @@
 local cabinet = {}
 local stock_input = require("native_authored_pickup_input_fixture")
+local guest_save = require("guest_save")
 
 local maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/RailYard_P"] = {
@@ -145,7 +146,11 @@ function cabinet.command(fields, state, phase)
     local kind = type(command) == "string" and command:match("^native%-(%l+)%-cabinet%-")
     if kind ~= "dust" and kind ~= "molasses" then return end
     local fixture = command == "native-" .. kind .. "-cabinet-stock-fixture"
-    if not fixture and command ~= "native-" .. kind .. "-cabinet-project" then return end
+    local guest_approach = command == "native-" .. kind .. "-cabinet-guest-approach"
+    local guest_fixture = command == "native-" .. kind .. "-cabinet-guest-stock-fixture"
+    if not fixture and not guest_approach and not guest_fixture and command ~= "native-" .. kind .. "-cabinet-project" then
+        return
+    end
     local profile = maps[state.map]
     if not profile or profile.kind ~= kind then error("stock_cabinet_exact_map_required", 0) end
     local scene, reason = inspect(state, phase)
@@ -156,6 +161,31 @@ function cabinet.command(fields, state, phase)
         end
         stock_input.open_cabinet(state, phase, scene.pawn, scene.actor, scene.box, profile.source)
         return "stock host cabinet Interact dispatched"
+    end
+    if guest_approach then
+        if #fields ~= 3 or not host_fixture or not scene or not scene.host or not scene.closed then
+            error(profile.error .. "_guest_approach_requires_exact_closed_host_cabinet:" .. (reason or "scope"), 0)
+        end
+        local pawn = guest_save.exact_item_context(state, phase, fields[3])
+        if not valid(pawn) or pawn:GetFullName() ~= fields[3] or same(pawn, scene.pawn) then
+            error(profile.error .. "_guest_approach_requires_exact_enrolled_pawn", 0)
+        end
+        stock_input.approach_cabinet_guest(state, phase, pawn, scene.actor, scene.box, profile.source)
+        return "stock guest cabinet approach verified"
+    end
+    if guest_fixture then
+        if #fields ~= 3 or not headless or not scene or scene.host or not scene.closed
+            or scene.pawn:GetFullName() ~= fields[3] then
+            error(profile.error .. "_guest_fixture_requires_exact_closed_client_cabinet:" .. (reason or "scope"), 0)
+        end
+        local consumed = stock_input.check_cabinet_guest_press(
+            state, phase, scene.pawn, scene.actor, scene.box, profile.source)
+        local after = inspect(state, phase)
+        if not after or not after.closed or after.looted or not same(after.actor, scene.actor)
+            or not same(after.pawn, scene.pawn) or not same(after.box, scene.box) then
+            error("mutation_unverified_" .. profile.error .. "_guest_veto", 0)
+        end
+        return consumed
     end
 
     local epoch = fields[3]

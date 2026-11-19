@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 
-from live_ai_smoke import wait
+from live_ai_smoke import status as read_status, wait
 from live_computer_board_smoke import stock_flags
 from live_multi_smoke import saved_hashes
 
@@ -297,13 +297,21 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                     await wait(directory, lambda s: stock_cabinet.observed(s.get("game", {}), "closed"))
                 blocked = await action(guest, "native-authored-pickup-claim", "--target", source, accepted=False)
                 assert blocked["error"] == f"native_authored_pickup_{profile.kind}_cabinet_closed", blocked
+                approach = (await action(host, profile.guest_approach, "--target", "guest"))[stock_cabinet.GUEST_APPROACH_KEY]
+                closed = await wait(client_run, lambda s: stock_cabinet.observed(s.get("game", {}), "closed")
+                                    and math.dist(s["game"]["pawns"]["local"]["location"], approach["location"]) <= 25)
+                veto = (await action(guest, profile.guest_fixture))[stock_cabinet.GUEST_VETO_KEY]
+                assert (veto["map"], veto["actor"], veto["pawn"], veto["state"], veto["epoch"], veto["entry"]) == (
+                    pickup_map, profile.actor, closed["game"][profile.key]["pawn"], "closed", current["zone_epoch"],
+                    "stock_started_consumed"), veto
+                assert stock_cabinet.observed(read_status(run).get("game", {}), "closed"), veto
                 opened = (await action(host, profile.fixture))[profile.key]
                 assert (opened["state"], opened["actor"], opened["map"]) == ("opened", profile.actor, pickup_map), opened
                 clear = await wait(client_run, lambda s: stock_cabinet.observed(
                     s.get("game", {}), "projected").get("epoch") == current["zone_epoch"])
                 replica = clear["game"][profile.key]
                 assert opened["doors"] == replica["doors"] == "open", (opened, replica)
-                evidence["stock_pickup_cabinet"] = {"authority": opened, "replica": replica}
+                evidence["stock_pickup_cabinet"] = {"guest_stock_veto": veto, "authority": opened, "replica": replica}
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
             if profile or plan.savlo_locker:
                 def near(state, role, point, radius):

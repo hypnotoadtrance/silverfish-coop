@@ -1,6 +1,7 @@
 """Observe and project the exact stock cabinets shielding authored pickups."""
 
 from dataclasses import dataclass
+import math
 import re
 import time
 
@@ -27,6 +28,14 @@ class Cabinet:
     def fixture(self):
         return self.tag + "-stock-fixture"
 
+    @property
+    def guest_approach(self):
+        return self.tag + "-guest-approach"
+
+    @property
+    def guest_fixture(self):
+        return self.tag + "-guest-stock-fixture"
+
 
 DUST = Cabinet(RAIL_YARD, "dust", "railyard-dust-filter",
                f"LootCabnet_Small_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.LootCabnet_Small_BP_C_36",
@@ -36,6 +45,10 @@ MOLASSES = Cabinet(NORTHEAST_RAIL, "molasses", "northeast-rail-molasses",
                    (-16087.482436, 5321.048926, 982.455042))
 PROFILES = {profile.area: profile for profile in (DUST, MOLASSES)}
 FIXTURES = frozenset(profile.fixture for profile in PROFILES.values())
+GUEST_APPROACHES = frozenset(profile.guest_approach for profile in PROFILES.values())
+GUEST_FIXTURES = frozenset(profile.guest_fixture for profile in PROFILES.values())
+GUEST_APPROACH_KEY = "native_cabinet_guest_approach"
+GUEST_VETO_KEY = "native_cabinet_guest_veto"
 SOURCES = {profile.source: profile for profile in PROFILES.values()}
 STATUS_KEYS = {profile.tag: profile.key for profile in PROFILES.values()}
 ACTOR, KEY, FIXTURE, PROJECT = DUST.actor, DUST.key, DUST.fixture, DUST.tag + "-project"
@@ -109,6 +122,52 @@ async def open_fixture(host, bridge, action=FIXTURE) -> dict:
     proof = observed(snapshot, "opened")
     host.control.event(f"stock_{profile.kind}_cabinet_opened", **proof)
     return {profile.key: proof}
+
+
+async def approach_guest(host, bridge, action, alias) -> dict:
+    game = host.last_game
+    area = game.get("map")
+    profile = PROFILES.get(area)
+    character = host.roles().get(alias or "guest") if alias is None or isinstance(alias, str) else None
+    member = host.native_recipients().get(character, {}) if character and character != "host" else {}
+    pawn = member.get("pawn")
+    if (not host.fixtures or not host.native_guest or not host.native_zones or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or time.monotonic() - host.last_seen >= 2.5
+            or game.get("state") != "hosting" or not profile or action != profile.guest_approach
+            or not observed(game, "closed") or member.get("connected") is not True or not isinstance(pawn, str)
+            or _PAWNS[area].fullmatch(pawn) is None or host.party["wipe"] is not None
+            or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
+        raise ValueError("The stock cabinet approach requires an exact enrolled standing guest and a closed cabinet")
+    snapshot = await bridge.command(action, pawn, timeout=5)
+    players = [row for row in snapshot.get("pawns", {}).values() if row.get("name") == pawn]
+    point = players[0].get("location") if len(players) == 1 else None
+    if (snapshot.get("state") != "hosting" or snapshot.get("map") != area or not observed(snapshot, "closed")
+            or snapshot.get("ack", {}).get("message") != "stock guest cabinet approach verified"
+            or not isinstance(point, list) or len(point) != 3
+            or any(type(axis) not in (int, float) or not math.isfinite(axis) for axis in point)):
+        raise RuntimeError("The stock cabinet approach did not verify the exact authority pawn")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    return {GUEST_APPROACH_KEY: {"map": area, "actor": profile.actor, "pawn": pawn, "location": point}}
+
+
+async def check_guest_veto(client, action) -> dict:
+    game = client.last_game
+    area = game.get("map")
+    profile = PROFILES.get(area)
+    initial = observed(game, "closed")
+    if (not client.invite.get("native_loot_input") or not client.transport.game_access or client.stopping
+            or client.needs_travel or client.server_transitioning or not client.host_session or not valid_epoch(client.zone_epoch)
+            or client.gameplay.get("test_fixtures") is not True or time.monotonic() - client.gameplay_seen >= 2.5
+            or game.get("state") != "connected" or not profile or action != profile.guest_fixture or not initial):
+        raise ValueError("The headless guest requires an authenticated closed stock cabinet")
+    snapshot = await client.bridge.command(action, initial["pawn"], timeout=5)
+    if (snapshot.get("state") != "connected" or snapshot.get("map") != area or observed(snapshot, "closed") != initial
+            or snapshot.get("ack", {}).get("message") != "stock_started_consumed"):
+        raise RuntimeError("The guest's exact stock cabinet press did not verify a quiet veto")
+    client.last_game = snapshot
+    proof = dict(initial, epoch=client.zone_epoch, entry="stock_started_consumed")
+    client.control.event("stock_guest_cabinet_veto", **proof)
+    return {GUEST_VETO_KEY: proof}
 
 
 async def project_client(client) -> None:

@@ -9,7 +9,7 @@ import subprocess
 import sys
 import uuid
 
-from live_ai_smoke import wait
+from live_ai_smoke import status as read_status, wait
 from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -140,13 +140,21 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             await wait(client_run, lambda state: cabinet.observed(state.get("game", {}), "closed") != {})
             blocked = await act(client, pickup.ACTION, "--target", pickup.DUST_FILTER, success=False)
             assert blocked["error"] == "native_authored_pickup_dust_cabinet_closed", blocked
+            approach = (await act(host, cabinet.DUST.guest_approach, "--target", "guest"))[cabinet.GUEST_APPROACH_KEY]
+            closed = await wait(client_run, lambda state: cabinet.observed(state.get("game", {}), "closed")
+                                and math.dist(state["game"]["pawns"]["local"]["location"], approach["location"]) <= 25)
+            veto = (await act(client, cabinet.DUST.guest_fixture))[cabinet.GUEST_VETO_KEY]
+            assert (veto["map"], veto["actor"], veto["pawn"], veto["state"], veto["epoch"], veto["entry"]) == (
+                area, cabinet.ACTOR, closed["game"][cabinet.KEY]["pawn"], "closed", first["zone_epoch"],
+                "stock_started_consumed"), veto
+            assert cabinet.observed(read_status(run).get("game", {}), "closed"), veto
             opened = (await act(host, cabinet.FIXTURE))[cabinet.KEY]
             assert (opened["state"], opened["actor"], opened["map"]) == ("opened", cabinet.ACTOR, area), opened
             clear = await wait(client_run, lambda state: cabinet.observed(
                 state.get("game", {}), "projected").get("epoch") == first["zone_epoch"])
             replica = clear["game"][cabinet.KEY]
             assert opened["doors"] == replica["doors"] == "open", (opened, replica)
-            evidence["stock_cabinet"] = {"authority": opened, "replica": replica}
+            evidence["stock_cabinet"] = {"guest_stock_veto": veto, "authority": opened, "replica": replica}
             step = await act(host, pickup.APPROACH, "--target", "guest", "--pickup-source", pickup.DUST_FILTER)
             assert step["actor"] == pickup.SOURCES[pickup.DUST_FILTER][1], step
             source_position = (-8423.943, -30074.585, 264.038)
