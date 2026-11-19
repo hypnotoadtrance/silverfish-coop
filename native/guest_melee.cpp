@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -21,6 +23,7 @@
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
+#include <Unreal/Script.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -35,12 +38,20 @@ namespace
     using Guid = std::array<std::uint32_t, 4>;
 
     constexpr auto map_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto damage_map = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
+    constexpr auto damage_target_path = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0");
+    constexpr auto damage_target_class = STR("/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C");
+    constexpr auto npc_class = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
+    constexpr auto effects_class = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C");
+    constexpr auto effects_default = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.Default__FL_GameEffects_C");
+    constexpr auto effects_sweep = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:MeleeSweep");
     constexpr auto pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto master_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C");
     constexpr auto equipment_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto animator_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_AnimBP.MeleeWep_AnimBP_C");
     constexpr auto sequence_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/Melee_Slash_01.Melee_Slash_01");
     constexpr auto attack_path = STR("/Game/Classes/Libraries/Structs/MeleeAttack_Struct.MeleeAttack_Struct");
+    constexpr auto damage_type_path = STR("/Game/Classes/Libraries/Structs/Damage_Struct.Damage_Struct");
     constexpr auto row_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto character_path = STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct");
     constexpr auto item_base = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -55,6 +66,8 @@ namespace
     constexpr auto attack_timeout = std::chrono::milliseconds{2500};
     constexpr int max_rows = 4096;
     constexpr int max_effects = 256;
+    constexpr double sweep_range = 230.0;
+    constexpr float sweep_radius = 65.0f;
 
     bool env(const char* name)
     {
@@ -86,6 +99,11 @@ namespace
         return value ? value->GetObjectPropertyValue(value->ContainerPtrToValuePtr<void>(owner)) : nullptr;
     }
 
+    U::UObject* read_object(U::FObjectProperty* value, const void* owner)
+    {
+        return value && owner ? value->GetObjectPropertyValue(value->ContainerPtrToValuePtr<void>(owner)) : nullptr;
+    }
+
     bool live(U::UObject* object)
     {
         constexpr auto invalid = static_cast<U::EObjectFlags>(U::RF_ClassDefaultObject | U::RF_ArchetypeObject |
@@ -97,6 +115,210 @@ namespace
     {
         auto* value = field<U::FBoolProperty>(owner, name);
         return value && value->GetPropertyValueInContainer(owner) == expected;
+    }
+
+    using Vector = std::array<double, 3>;
+
+    template <class T> T* parameter(U::UFunction* function, const U::TCHAR* name)
+    {
+        auto* prop = field<T>(function, name);
+        return prop && prop->HasAnyPropertyFlags(U::CPF_Parm) && prop->GetOffset_Internal() >= 0 &&
+            prop->GetOffset_Internal() + prop->GetSize() <= function->GetParmsSize() ? prop : nullptr;
+    }
+
+    bool vector_field(U::FStructProperty* value)
+    {
+        return value && value->GetSize() == sizeof(Vector) &&
+            value->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+    }
+
+    std::optional<Vector> read_vector(U::FStructProperty* value, const void* buffer)
+    {
+        if (!buffer || !vector_field(value)) return {};
+        Vector point{};
+        std::memcpy(point.data(), value->ContainerPtrToValuePtr<void>(buffer), sizeof(point));
+        return std::ranges::all_of(point, [](double axis) { return std::isfinite(axis); })
+            ? std::optional{point} : std::nullopt;
+    }
+
+    Vector ahead(const Vector& origin, const Vector& direction, double distance)
+    {
+        return {origin[0] + distance * direction[0], origin[1] + distance * direction[1],
+                origin[2] + distance * direction[2]};
+    }
+
+    std::optional<Vector> component_vector(U::UObject* component, const U::TCHAR* path)
+    {
+        auto* fn = find<U::UFunction>(path);
+        auto* value = fn ? U::CastField<U::FStructProperty>(fn->GetReturnProperty()) : nullptr;
+        if (!vector_field(value) || fn->GetNumParms() != 1 || fn->GetParmsSize() != sizeof(Vector) ||
+            value->GetOffset_Internal() != 0 || !fn->HasAnyFunctionFlags(U::FUNC_Native)) return {};
+        Vector returned{};
+        component->ProcessEvent(fn, returned.data());
+        return read_vector(value, returned.data());
+    }
+
+    struct TraceBuffer
+    {
+        alignas(16) std::array<std::byte, 512> values{};
+        std::array<U::FProperty*, 3> constructed{};
+        std::size_t count{};
+
+        void initialize(U::FProperty* property)
+        {
+            property->InitializeValue_InContainer(values.data());
+            constructed[count++] = property;
+        }
+
+        ~TraceBuffer()
+        {
+            while (count) constructed[--count]->DestroyValue_InContainer(values.data());
+        }
+    };
+
+    struct TraceCall
+    {
+        U::UObject* library{};
+        U::UFunction* fn{};
+        U::FStructProperty *start{}, *end{};
+        U::FArrayProperty* ignore{};
+        U::FObjectProperty *context{}, *ignored_actor{};
+        U::FBoolProperty* returned{};
+        U::FBoolProperty *ignore_self{}, *complex{};
+
+        bool bind(const U::TCHAR* path, int count)
+        {
+            library = find<U::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
+            fn = find<U::UFunction>(path);
+            if (!library || !fn || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+                fn->GetOuterPrivate() != library->GetClassPrivate() || !fn->HasAnyFunctionFlags(U::FUNC_Native) ||
+                fn->GetNumParms() != count || fn->GetParmsSize() > sizeof(TraceBuffer::values)) return false;
+            context = parameter<U::FObjectProperty>(fn, STR("WorldContextObject"));
+            start = parameter<U::FStructProperty>(fn, STR("Start"));
+            end = parameter<U::FStructProperty>(fn, STR("End"));
+            ignore = parameter<U::FArrayProperty>(fn, STR("ActorsToIgnore"));
+            ignored_actor = ignore ? U::CastField<U::FObjectProperty>(ignore->GetInner()) : nullptr;
+            returned = parameter<U::FBoolProperty>(fn, STR("ReturnValue"));
+            ignore_self = parameter<U::FBoolProperty>(fn, STR("bIgnoreSelf"));
+            complex = parameter<U::FBoolProperty>(fn, STR("bTraceComplex"));
+            return context && vector_field(start) && vector_field(end) && ignored_actor &&
+                ignored_actor->GetPropertyClass().Get() == find<U::UClass>(STR("/Script/Engine.Actor")) &&
+                ignored_actor->GetOffset_Internal() == 0 && complex && ignore_self && returned &&
+                returned == fn->GetReturnProperty();
+        }
+
+        void inputs(TraceBuffer& args, U::UObject* pipe, U::UObject* pawn, const Vector& origin, const Vector& destination,
+                    bool trace_complex) const
+        {
+            auto* data = args.values.data();
+            context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), pipe);
+            std::memcpy(start->ContainerPtrToValuePtr<void>(data), origin.data(), sizeof(origin));
+            std::memcpy(end->ContainerPtrToValuePtr<void>(data), destination.data(), sizeof(destination));
+            complex->SetPropertyValueInContainer(data, trace_complex);
+            ignore_self->SetPropertyValueInContainer(data, true);
+            args.initialize(ignore);
+            U::FScriptArrayHelper list(ignore, ignore->ContainerPtrToValuePtr<void>(data));
+            ignored_actor->SetObjectPropertyValue(list.GetRawPtr(list.AddValue()), nullptr);
+            ignored_actor->SetObjectPropertyValue(list.GetRawPtr(list.AddValue()), pawn);
+        }
+    };
+
+    struct SweepHit
+    {
+        U::UScriptStruct* type = find<U::UScriptStruct>(STR("/Script/Engine.HitResult"));
+        U::FWeakObjectProperty* component = field<U::FWeakObjectProperty>(type, STR("Component"));
+        U::FStructProperty* impact = field<U::FStructProperty>(type, STR("ImpactPoint"));
+        U::FBoolProperty* blocking = field<U::FBoolProperty>(type, STR("bBlockingHit"));
+        U::FBoolProperty* penetrating = field<U::FBoolProperty>(type, STR("bStartPenetrating"));
+        U::FFloatProperty* time = field<U::FFloatProperty>(type, STR("Time"));
+        U::FFloatProperty* distance = field<U::FFloatProperty>(type, STR("Distance"));
+        U::FFloatProperty* depth = field<U::FFloatProperty>(type, STR("PenetrationDepth"));
+
+        bool bound() const
+        {
+            return type && component && vector_field(impact) && blocking && penetrating && time && distance && depth;
+        }
+
+        U::UObject* owned_component(const void* row, U::UObject* enemy) const
+        {
+            if (!row || penetrating->GetPropertyValueInContainer(row)) return nullptr;
+            const float reached = distance->GetPropertyValueInContainer(row);
+            const float fraction = time->GetPropertyValueInContainer(row);
+            if (!std::isfinite(reached) || reached <= 1 || reached > sweep_range || !std::isfinite(fraction) ||
+                fraction <= 0 || fraction > 1 || depth->GetPropertyValueInContainer(row) != 0.0f) return nullptr;
+            auto* value = component->GetPropertyValueInContainer(row).Get();
+            return live(value) && value->GetOuterPrivate() == enemy ? value : nullptr;
+        }
+    };
+
+    struct TraceProof
+    {
+        Vector origin{}, direction{};
+        U::UObject* first{};
+    };
+
+    std::optional<TraceProof> stock_trace(U::UObject* pipe, U::UObject* pawn, U::UObject* enemy)
+    {
+        auto* camera = object(pawn, STR("Camera"));
+        if (!live(camera) || camera->GetOuterPrivate() != pawn ||
+            camera->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.CameraComponent"))) return {};
+        const auto origin = component_vector(camera, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
+        const auto direction = component_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
+        if (!origin || !direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
+            return {};
+        const SweepHit hit;
+        TraceCall line, sphere;
+        if (!hit.bound() || !line.bind(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingleForObjects"), 13) ||
+            !sphere.bind(STR("/Script/Engine.KismetSystemLibrary:SphereTraceMulti"), 14)) return {};
+        auto* objects = parameter<U::FArrayProperty>(line.fn, STR("ObjectTypes"));
+        auto* kind = objects ? U::CastField<U::FByteProperty>(objects->GetInner()) : nullptr;
+        auto* line_hit = parameter<U::FStructProperty>(line.fn, STR("OutHit"));
+        auto* radius = parameter<U::FFloatProperty>(sphere.fn, STR("Radius"));
+        auto* channel = parameter<U::FByteProperty>(sphere.fn, STR("TraceChannel"));
+        auto* hits = parameter<U::FArrayProperty>(sphere.fn, STR("OutHits"));
+        auto* hit_entry = hits ? U::CastField<U::FStructProperty>(hits->GetInner()) : nullptr;
+        if (!kind || kind->GetOffset_Internal() != 0 || !line_hit || line_hit->GetStruct().Get() != hit.type ||
+            !line_hit->HasAnyPropertyFlags(U::CPF_OutParm) || !radius || !channel || !hit_entry ||
+            hit_entry->GetStruct().Get() != hit.type || !hits->HasAnyPropertyFlags(U::CPF_OutParm)) return {};
+
+        TraceBuffer single;
+        const auto destination = ahead(*origin, *direction, sweep_range);
+        line.inputs(single, pipe, pawn, *origin, destination, true);
+        single.initialize(objects);
+        single.initialize(line_hit);
+        auto* data = single.values.data();
+        U::FScriptArrayHelper types(objects, objects->ContainerPtrToValuePtr<void>(data));
+        kind->SetPropertyValue(types.GetRawPtr(types.AddValue()), 0);
+        kind->SetPropertyValue(types.GetRawPtr(types.AddValue()), 4);
+        line.library->ProcessEvent(line.fn, data);
+        Vector contact = destination;
+        if (line.returned->GetPropertyValueInContainer(data))
+        {
+            const auto* row = line_hit->ContainerPtrToValuePtr<void>(data);
+            const auto impact = read_vector(hit.impact, row);
+            if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.owned_component(row, enemy)) return {};
+            contact = *impact;
+        }
+        if (std::hypot(contact[0] - (*origin)[0], contact[1] - (*origin)[1], contact[2] - (*origin)[2]) <= sweep_radius)
+            return {};
+
+        TraceBuffer area;
+        sphere.inputs(area, pipe, pawn, *origin, ahead(contact, *direction, -sweep_radius), false);
+        area.initialize(hits);
+        data = area.values.data();
+        radius->SetPropertyValueInContainer(data, sweep_radius);
+        channel->SetPropertyValueInContainer(data, 6);
+        sphere.library->ProcessEvent(sphere.fn, data);
+        U::FScriptArrayHelper contacted(hits, hits->ContainerPtrToValuePtr<void>(data));
+        if (contacted.Num() < 1 || contacted.Num() > 16) return {};
+        U::UObject* first{};
+        for (int index = 0; index < contacted.Num(); ++index)
+        {
+            auto* component = hit.owned_component(contacted.GetRawPtr(index), enemy);
+            if (!component) return {};
+            if (!first) first = component;
+        }
+        return TraceProof{*origin, *direction, first};
     }
 
     bool guid_from(std::string_view text, Guid& guid)
@@ -268,11 +490,20 @@ namespace
         int presses{}, releases{}, contacts{}, qualified{};
         double host_health{}, guest_health{};
         bool pending{}, settled{}, passive_free{};
+        struct Damage
+        {
+            U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
+            U::FFrame *contact_frame{}, *sweep_frame{}, *deal_frame{};
+            Vector origin{}, direction{};
+            int sweeps{}, calls{};
+            double before{-1}, after{-1}, total{-1};
+            bool requested{};
+        } damage;
     };
 
     Swing swing;
     std::int64_t serial{};
-    std::array callbacks{H::ERROR_ID, H::ERROR_ID};
+    std::array callbacks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
     bool owner_current(const Swing& expected)
     {
@@ -305,6 +536,40 @@ namespace
         return value ? value->GetPropertyValueInContainer(save) : -1.0;
     }
 
+    double enemy_health(U::UObject* actor)
+    {
+        auto* value = field<U::FDoubleProperty>(actor, STR("Health"));
+        return value ? value->GetPropertyValueInContainer(actor) : -1.0;
+    }
+
+    U::UObject* placed_enemy(U::UWorld* world)
+    {
+        auto* actor = find<U::AActor>(damage_target_path);
+        auto* role = field<U::FByteProperty>(actor, STR("Role"));
+        auto* faction = field<U::FByteProperty>(actor, STR("Faction"));
+        auto* maximum = field<U::FDoubleProperty>(actor, STR("Max_Health"));
+        if (!live(world) || world->GetPathName() != damage_map || !live(actor) || actor->GetWorld() != world ||
+            actor->GetClassPrivate() != find<U::UClass>(damage_target_class) || !actor->HasAnyFlags(U::RF_WasLoaded) ||
+            actor->GetLevel() != object(world, STR("PersistentLevel")) || !role || role->GetPropertyValueInContainer(actor) != 3 ||
+            !faction || faction->GetPropertyValueInContainer(actor) != 4 || !maximum ||
+            maximum->GetPropertyValueInContainer(actor) != 160.0 || !boolean(actor, STR("Alive"), true) ||
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return nullptr;
+        return actor;
+    }
+
+    void* output(U::FFrame& frame, U::FProperty* property)
+    {
+        auto* current = frame.OutParms();
+        void* value{};
+        for (int remaining = frame.Node()->GetNumParms(); current && remaining > 0; current = current->NextOutParm, --remaining)
+        {
+            if (current->Property != property) continue;
+            if (value) return nullptr;
+            value = current->PropAddr;
+        }
+        return current ? nullptr : value;
+    }
+
     bool stock_attack(const Swing& current, void* contact_args = nullptr)
     {
         auto* weapon = current.pipe.Get();
@@ -328,13 +593,13 @@ namespace
         auto* radius = field<U::FDoubleProperty>(type, radius_name);
         auto* breach = field<U::FBoolProperty>(type, breach_name);
         auto* damage = field<U::FStructProperty>(type, damage_name);
-        auto* damage_type = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/Damage_Struct.Damage_Struct"));
+        auto* damage_type = find<U::UScriptStruct>(damage_type_path);
         auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
         auto* first = rows.GetRawPtr(0);
         auto* sequence = name ? name->GetObjectPropertyValue(name->ContainerPtrToValuePtr<void>(first)) : nullptr;
         return live(sequence) && sequence == find<U::UObject>(sequence_path) && range && radius && breach && damage &&
             damage_type && damage->GetStruct().Get() == damage_type && blunt &&
-            range->GetPropertyValueInContainer(first) == 230.0 && radius->GetPropertyValueInContainer(first) == 65.0 &&
+            range->GetPropertyValueInContainer(first) == sweep_range && radius->GetPropertyValueInContainer(first) == sweep_radius &&
             !breach->GetPropertyValueInContainer(first) &&
             blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(first)) == 30.0 &&
             (!contact_args || (attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first) &&
@@ -357,20 +622,27 @@ namespace
         swing.status = status;
     }
 
+    bool passives_unchanged(const Swing& current)
+    {
+        Passives passives;
+        std::vector<U::FName> cache;
+        return passives.canonical(current.game.Get(), cache) && cache == current.cache &&
+            passives.character(current.save.Get()) && selected_pipe(current.save.Get(), current.guid, passives);
+    }
+
     void tick()
     {
         if (!swing.pending) return;
         if (!owner_current(swing)) return finish("mutation_unverified_guest_melee_owner");
         if (Clock::now() >= swing.deadline) return finish("mutation_unverified_guest_melee_timeout");
         if (swing.contacts != 1 || swing.qualified != 1 || !idle(swing)) return;
-        Passives passives;
-        std::vector<U::FName> cache;
-        swing.passive_free = passives.canonical(swing.game.Get(), cache) && cache == swing.cache &&
-            passives.character(swing.save.Get()) && selected_pipe(swing.save.Get(), swing.guid, passives);
+        swing.passive_free = passives_unchanged(swing);
         if (!swing.passive_free) return finish("mutation_unverified_guest_melee_passive_readback");
         if (health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)
             return finish("mutation_unverified_guest_melee_health_readback");
-        finish("surface_verified", true);
+        if (swing.damage.requested && (swing.damage.sweeps != 1 || swing.damage.calls != 1 || swing.damage.total <= 0))
+            return finish("mutation_unverified_guest_melee_stock_damage_missing");
+        finish(swing.damage.requested ? "stock_damage_verified" : "surface_verified", true);
     }
 
     void fence_contact(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
@@ -379,32 +651,150 @@ namespace
         // Retain the weak receiver fence after every terminal outcome. An animation
         // can notify after loss of ownership, timeout, or an explicit abort.
         const bool already_vetoed = call.OriginalFunctionCallPrevented();
-        if (!already_vetoed) call.PreventOriginalFunctionCall();
         ++swing.contacts;
+        const auto refuse = [&](std::string_view why) {
+            if (!call.OriginalFunctionCallPrevented()) call.PreventOriginalFunctionCall();
+            finish(why);
+        };
         auto* graph = frame.PreviousFrame();
         auto* notify = graph ? graph->PreviousFrame() : nullptr;
         if (!swing.pending || already_vetoed || Clock::now() >= swing.deadline || swing.contacts != 1)
-            return finish("mutation_unverified_guest_melee_unexpected_contact");
+            return refuse("mutation_unverified_guest_melee_unexpected_contact");
         if (frame.Object() != receiver || !graph || graph->Node() != swing.graph.Get() ||
             graph->Object() != swing.animation.Get() || !notify || notify->Node() != swing.hit.Get() ||
             notify->Object() != swing.animation.Get())
-            return finish("mutation_unverified_guest_melee_contact_path");
-        if (!owner_current(swing)) return finish("mutation_unverified_guest_melee_contact_owner");
+            return refuse("mutation_unverified_guest_melee_contact_path");
+        if (!owner_current(swing)) return refuse("mutation_unverified_guest_melee_contact_owner");
         if (!frame.Locals() || !stock_attack(swing, frame.Locals()))
-            return finish("mutation_unverified_guest_melee_contact_attack");
+            return refuse("mutation_unverified_guest_melee_contact_attack");
+        if (!swing.damage.requested)
+        {
+            call.PreventOriginalFunctionCall();
+            ++swing.qualified;
+            return;
+        }
+        auto* enemy = swing.damage.target.Get();
+        const auto hp = enemy_health(enemy);
+        if (!enemy || enemy != placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) ||
+            !std::isfinite(hp) || hp < 100.0 || hp > 160.0 ||
+            health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health ||
+            !passives_unchanged(swing))
+            return refuse("mutation_unverified_guest_melee_damage_scope");
+        const auto trace = stock_trace(receiver, swing.pawn.Get(), enemy);
+        if (!trace) return refuse("stock_damage_aim_fenced");
+        swing.damage.contact_frame = &frame;
+        swing.damage.component = trace->first;
+        swing.damage.origin = trace->origin;
+        swing.damage.direction = trace->direction;
         ++swing.qualified;
+    }
+
+    void observe_pre(Iteration& call, U::UObject* receiver, U::FFrame& frame, void* result)
+    {
+        if (!U::IsInGameThreadRaw() || !frame.Node()) return;
+        if (receiver && receiver == swing.pipe.Get() && frame.Node() == swing.contact.Get())
+            return fence_contact(call, receiver, frame, result);
+        auto& proof = swing.damage;
+        if (!proof.contact_frame) return;
+        const auto refuse = [&](std::string_view status) {
+            if (!call.OriginalFunctionCallPrevented()) call.PreventOriginalFunctionCall();
+            finish(status);
+        };
+        if (frame.Node() == proof.sweep.Get())
+        {
+            auto* graph = frame.PreviousFrame();
+            auto* fn = frame.Node();
+            auto* attack = parameter<U::FStructProperty>(fn, STR("Attack"));
+            auto* contact_attack = parameter<U::FStructProperty>(static_cast<U::UFunction*>(swing.contact.Get()), STR("Attack"));
+            auto* args = frame.Locals();
+            if (call.OriginalFunctionCallPrevented() || !swing.pending || proof.sweeps || receiver != proof.library.Get() ||
+                !graph || graph->Node() != proof.graph.Get() || graph->Object() != swing.pipe.Get() ||
+                graph->PreviousFrame() != proof.contact_frame || !args || !attack || !contact_attack ||
+                attack->GetStruct().Get() != contact_attack->GetStruct().Get() ||
+                !attack->Identical(attack->ContainerPtrToValuePtr<void>(args),
+                    contact_attack->ContainerPtrToValuePtr<void>(proof.contact_frame->Locals())) ||
+                read_object(parameter<U::FObjectProperty>(fn, STR("Instigator")), args) != swing.pawn.Get() ||
+                read_object(parameter<U::FObjectProperty>(fn, STR("__WorldContext")), args) != swing.pipe.Get() ||
+                read_vector(parameter<U::FStructProperty>(fn, STR("Origin")), args) != std::optional{proof.origin} ||
+                read_vector(parameter<U::FStructProperty>(fn, STR("Direction")), args) != std::optional{proof.direction})
+                return refuse("mutation_unverified_guest_melee_stock_sweep_path");
+            proof.sweep_frame = &frame;
+            ++proof.sweeps;
+            return;
+        }
+        static const U::FName deal_name{STR("DealDamage")};
+        if (!proof.sweep_frame || frame.Node()->GetFName() != deal_name) return;
+        auto* ancestor = frame.PreviousFrame();
+        for (int remaining = 8; ancestor && ancestor != proof.sweep_frame && remaining > 0; --remaining)
+            ancestor = ancestor->PreviousFrame();
+        if (ancestor != proof.sweep_frame) return;
+        auto* fn = frame.Node();
+        auto* args = frame.Locals();
+        const SweepHit hit;
+        auto* hit_value = parameter<U::FStructProperty>(fn, STR("Hit"));
+        auto* damage = parameter<U::FStructProperty>(fn, STR("Damage"));
+        auto* damage_type = find<U::UScriptStruct>(damage_type_path);
+        auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
+        if (call.OriginalFunctionCallPrevented() || !swing.pending || proof.calls ||
+            frame.PreviousFrame() != proof.sweep_frame || receiver != proof.target.Get() ||
+            receiver != placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) || fn != proof.deal.Get() || !args ||
+            !hit.bound() || !hit_value || hit_value->GetStruct().Get() != hit.type ||
+            hit.owned_component(hit_value->ContainerPtrToValuePtr<void>(args), receiver) != proof.component.Get() ||
+            !damage || !damage_type || damage->GetStruct().Get() != damage_type || !blunt ||
+            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(args)) != 30.0 ||
+            read_object(parameter<U::FObjectProperty>(fn, STR("Instigator")), args) != swing.pawn.Get())
+            return refuse("mutation_unverified_guest_melee_stock_damage_path");
+        proof.before = enemy_health(receiver);
+        if (!std::isfinite(proof.before) || proof.before < 100.0 || proof.before > 160.0)
+            return refuse("mutation_unverified_guest_melee_stock_damage_health");
+        proof.deal_frame = &frame;
+        ++proof.calls;
+    }
+
+    void observe_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
+    {
+        if (!U::IsInGameThreadRaw()) return;
+        auto& proof = swing.damage;
+        if (proof.deal_frame == &frame)
+        {
+            proof.deal_frame = nullptr;
+            auto* total = parameter<U::FDoubleProperty>(frame.Node(), STR("TotalDamage"));
+            auto* lethal = parameter<U::FBoolProperty>(frame.Node(), STR("IsLethal"));
+            auto* amount = total ? output(frame, total) : nullptr;
+            auto* dead = lethal ? output(frame, lethal) : nullptr;
+            proof.after = enemy_health(receiver);
+            if (call.OriginalFunctionCallPrevented() || !amount || !dead || lethal->GetPropertyValue(dead) ||
+                receiver != proof.target.Get() || !boolean(receiver, STR("Alive"), true) ||
+                object(receiver, STR("LastDamagedMe")) != swing.pawn.Get() || !std::isfinite(proof.after) ||
+                proof.after <= 0.0 || proof.after >= proof.before)
+                return finish("mutation_unverified_guest_melee_stock_damage_readback");
+            proof.total = total->GetPropertyValue(amount);
+            if (!std::isfinite(proof.total) || proof.total <= 0.0 || proof.total > 90.0 ||
+                std::abs((proof.before - proof.after) - proof.total) > 1e-6)
+                return finish("mutation_unverified_guest_melee_stock_damage_amount");
+        }
+        if (proof.sweep_frame == &frame) proof.sweep_frame = nullptr;
+        if (proof.contact_frame == &frame)
+        {
+            proof.contact_frame = nullptr;
+            if (swing.pending && (proof.sweeps != 1 || proof.calls != 1 || proof.total <= 0.0))
+                finish("mutation_unverified_guest_melee_stock_damage_missing");
+        }
     }
 
     bool hooks()
     {
-        if (callbacks[0] != H::ERROR_ID && callbacks[1] != H::ERROR_ID) return true;
+        const auto ready = [] { return std::ranges::none_of(callbacks, [](auto item) { return item == H::ERROR_ID; }); };
+        if (ready()) return true;
         constexpr auto owner = STR("SilverfishCoopNative");
         callbacks[0] = H::RegisterProcessLocalScriptFunctionPreCallback(
-            fence_contact, {false, false, owner, STR("Fence the one Old Pipe animation contact before its sweep")});
+            observe_pre, {false, false, owner, STR("Qualify one exact Old Pipe animation contact")});
         callbacks[1] = H::RegisterEngineTickPreCallback(
             [](Iteration&, U::UEngine*, float, bool) { if (U::IsInGameThreadRaw()) tick(); },
             {false, false, owner, STR("Bound the isolated guest Old Pipe animation receipt")});
-        if (callbacks[0] != H::ERROR_ID && callbacks[1] != H::ERROR_ID) return true;
+        callbacks[2] = H::RegisterProcessLocalScriptFunctionPostCallback(
+            observe_post, {false, false, owner, STR("Read back the exact Dead Bridge stock damage")});
+        if (ready()) return true;
         silverfish::native_guest_melee::uninstall_hooks();
         return false;
     }
@@ -420,6 +810,16 @@ namespace
         lua.set_integer(current ? current->qualified : 0);
         lua.set_bool(current && current->settled);
         lua.set_bool(current && current->passive_free);
+        if (current && current->damage.requested)
+        {
+            const auto& hit = current->damage;
+            lua.set_integer(hit.sweeps);
+            lua.set_integer(hit.calls);
+            lua.set_number(hit.before);
+            lua.set_number(hit.after);
+            lua.set_number(hit.total);
+            return 14;
+        }
         return 9;
     }
 
@@ -428,7 +828,41 @@ namespace
         return proof(lua, !swing.status.starts_with("mutation_unverified_"), swing.status, &swing);
     }
 
-    int start(const Lua& lua)
+    U::UObject* pawn_at(std::int64_t address)
+    {
+        U::UObject* pawn{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* object, int, int) {
+            if (reinterpret_cast<std::uintptr_t>(object) != static_cast<std::uintptr_t>(address))
+                return RC::LoopAction::Continue;
+            if (live(object) && object->GetClassPrivate() ==
+                find<U::UClass>(STR("/Game/Classes/Player/Player_FP.Player_FP_C"))) pawn = object;
+            return RC::LoopAction::Break;
+        });
+        return pawn;
+    }
+
+    int damage_pose(const Lua& lua)
+    {
+        bool clear = false;
+        if (enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_integer())
+        {
+            auto* pawn = pawn_at(lua.get_integer());
+            auto* save = object(pawn, STR("Save"));
+            auto* canonical = object(object(pawn, STR("As Game Instance FP")), STR("SaveSlot_Ref"));
+            auto* pipe = object(pawn, STR("EquipedItem"));
+            auto* world = find<U::UWorld>(damage_map);
+            auto* target = placed_enemy(world);
+            clear = target && pawn && static_cast<U::AActor*>(pawn)->GetWorld() == world &&
+                silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical) &&
+                live(pipe) && pipe->GetClassPrivate() == find<U::UClass>(pipe_path) &&
+                object(pipe, STR("Player_Ref")) == pawn && object(pipe, STR("Owner")) == pawn &&
+                stock_trace(pipe, pawn, target).has_value();
+        }
+        lua.set_bool(clear);
+        return 1;
+    }
+
+    template <bool damage> int start(const Lua& lua)
     {
         if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_string(3)) return proof(lua, false, "native_guest_melee_arguments_unqualified");
@@ -440,18 +874,12 @@ namespace
         Swing candidate;
         if (pawn_address <= 0 || save_address <= 0 || !guid_from(guid, candidate.guid))
             return proof(lua, false, "native_guest_melee_arguments_unqualified");
-        U::UObject* pawn{};
-        U::UObjectGlobals::ForEachUObject([&](U::UObject* object, int, int) {
-            if (reinterpret_cast<std::uintptr_t>(object) != static_cast<std::uintptr_t>(pawn_address))
-                return RC::LoopAction::Continue;
-            pawn = object;
-            return RC::LoopAction::Break;
-        });
+        auto* pawn = pawn_at(pawn_address);
         auto* save = object(pawn, STR("Save"));
         auto* game = object(pawn, STR("As Game Instance FP"));
         auto* canonical = object(game, STR("SaveSlot_Ref"));
-        auto* world = find<U::UWorld>(map_path);
-        if (reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(save_address) ||
+        auto* world = find<U::UWorld>(damage ? damage_map : map_path);
+        if (!pawn || reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(save_address) ||
             !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical) || !live(world) ||
             static_cast<U::AActor*>(pawn)->GetWorld() != world)
             return proof(lua, false, "native_guest_melee_exact_owner_unqualified");
@@ -507,6 +935,28 @@ namespace
         candidate.passive_free = passives.canonical(game, candidate.cache) && passives.character(save) &&
             selected_pipe(save, candidate.guid, passives);
         if (!candidate.passive_free) return proof(lua, false, "native_guest_melee_guid_or_passives_unqualified");
+        if constexpr (damage)
+        {
+            auto* enemy = placed_enemy(world);
+            auto* sweep = find<U::UFunction>(effects_sweep);
+            auto* library = find<U::UObject>(effects_default);
+            auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
+            auto* contact_graph = local_function(pipe, master, STR("ExecuteUbergraph_MeleeWep_Master_BP"), 1);
+            const auto hp = enemy_health(enemy);
+            if (!enemy || !std::isfinite(hp) || hp < 100.0 || hp > 160.0 || !deal || !contact_graph ||
+                !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+                library->GetClassPrivate() != find<U::UClass>(effects_class) || !sweep ||
+                sweep->GetOuterPrivate() != library->GetClassPrivate() || sweep->GetNumParms() != 7 ||
+                sweep->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || sweep->GetReturnProperty() ||
+                !stock_trace(pipe, pawn, enemy))
+                return proof(lua, false, "native_guest_melee_stock_damage_scope_unqualified");
+            candidate.damage.requested = true;
+            candidate.damage.target = enemy;
+            candidate.damage.sweep = sweep;
+            candidate.damage.deal = deal;
+            candidate.damage.library = library;
+            candidate.damage.graph = contact_graph;
+        }
         if (!hooks() || serial >= (std::int64_t{1} << 53) - 1)
             return proof(lua, false, "native_guest_melee_hook_unavailable");
 
@@ -554,7 +1004,9 @@ namespace
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStartNativeGuestMeleeCanary", start);
+    lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<false>);
+    lua.register_function("SilverfishStartNativeGuestMeleeDamageCanary", start<true>);
+    lua.register_function("SilverfishCheckNativeGuestMeleeDamagePose", damage_pose);
     lua.register_function("SilverfishReadNativeGuestMeleeCanary", observe<false>);
     lua.register_function("SilverfishAbortNativeGuestMeleeCanary", observe<true>);
 }

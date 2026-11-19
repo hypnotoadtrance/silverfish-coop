@@ -539,8 +539,10 @@ namespace
     Unreal::UClass* qualified_old_pipe(Unreal::UObject* item_class, const Context& context)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") ||
-            !env("SILVERFISH_COOP_HEADLESS") || !live(context.world) ||
-            context.world->GetPathName() != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")) return nullptr;
+            !env("SILVERFISH_COOP_HEADLESS") || !live(context.world)) return nullptr;
+        const auto world = context.world->GetPathName();
+        if (world != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P") &&
+            world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P")) return nullptr;
         auto* pipe = find<Unreal::UClass>(old_pipe_path);
         auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
         if (!pipe || item_class != pipe || !base || !pipe->IsChildOf(base)) return nullptr;

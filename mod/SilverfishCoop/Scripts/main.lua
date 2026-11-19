@@ -76,6 +76,7 @@ local native_guest_reload_input = require("native_guest_reload_input")
 local native_guest_primary_input = require("native_guest_primary_input")
 local native_guest_clock = require("native_guest_clock")
 local native_host_camera = require("native_host_camera")
+local native_host_landmine = require("native_host_landmine")
 local native_guest_consumable = require("native_guest_consumable")
 local native_guest_mre = require("native_guest_mre")
 local native_guest_regen = require("native_guest_regen")
@@ -838,6 +839,7 @@ local function run_command(fields, state, current_phase)
         or native_guest_primary_input.command(fields, state, current_phase)
         or native_guest_clock.command(fields, state, current_phase)
         or native_host_camera.command(fields, state, current_phase)
+        or native_host_landmine.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -983,6 +985,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_primary_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_clock.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_landmine.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_mre.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
 
 
 GUID = "AB" * 16
@@ -75,3 +75,37 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(melee.parse(fields), (melee.CANARY_KEY, self.swing("surface_verified")[melee.CANARY_KEY]))
         self.assertEqual(pickup.select_source(CROSSROADS, None), pickup.POCKET_WATCH)
         self.assertEqual(pickup.select_source(CROSSROADS, pickup.OLD_PIPE), pickup.OLD_PIPE)
+
+    def damage_fields(self):
+        return [melee.CANARY, DEAD_BRIDGE, "exact pawn", GUID, "4", "stock_damage_verified", "1", "1", "1", "1", "1", "1",
+                melee.TARGET, "1", "1", "160", "137.5", "22.5"]
+
+    def test_damage_receipt_requires_exact_live_target_and_stock_health_delta(self):
+        fields = self.damage_fields()
+        key, result = melee.parse(fields)
+        self.assertEqual(key, melee.CANARY_KEY)
+        self.assertTrue(melee.verified_damage(result))
+        for index, wrong in ((1, CROSSROADS), (12, "other actor"), (13, "2"), (14, "0"), (15, "nan"),
+                             (16, "0"), (17, "25")):
+            self.assertIsNone(melee.parse([*fields[:index], wrong, *fields[index+1:]]))
+        self.assertIsNone(melee.parse(fields[:12]))
+
+    async def test_damage_action_is_fixed_to_authentic_crossroads_claim_in_dead_bridge(self):
+        host = self.host()
+        key, result = melee.parse(self.damage_fields())
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"state": "hosting", "map": DEAD_BRIDGE, key: result}))
+        args = host, bridge, melee.DAMAGE, "guest", GUID, OPERATION
+        with self.assertRaisesRegex(party.RuleError, "fixture_unavailable"):
+            await melee.perform(*args)
+
+        host.last_game["map"] = DEAD_BRIDGE
+        with self.assertRaisesRegex(party.RuleError, "exact_authored_claim"):
+            await melee.perform(*args)
+        bridge.command.assert_not_awaited()
+        claimed = host.party[pickup.STATE_KEY][pickup.OLD_PIPE]
+        area, actor, class_path = pickup.SOURCES[pickup.OLD_PIPE]
+        claimed.update(source=pickup.OLD_PIPE, map=area, actor=actor, class_path=class_path)
+        self.assertEqual(await melee.perform(*args), {key: result})
+        self.assertEqual(await melee.perform(*args), {key: result})
+        bridge.command.assert_awaited_once_with(melee.DAMAGE + "-start", "exact pawn", GUID, timeout=5)
+        self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest"})})

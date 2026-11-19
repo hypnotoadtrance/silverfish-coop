@@ -1,10 +1,15 @@
 local melee = {}
 local guest_save = require("guest_save")
 
-local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local npc_path = dead_bridge .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
+local npc_name = "NPC_State_Infantry_CQC_C " .. npc_path
+local damage_start = "native-guest-melee-damage-canary-start"
 local actions = {
     ["native-guest-melee-canary-equip"] = true,
     ["native-guest-melee-canary-start"] = true,
+    [damage_start] = true,
     ["native-guest-melee-canary-observe"] = true,
     ["native-guest-melee-canary-abort"] = true,
 }
@@ -16,7 +21,8 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
 local latest, equipment
 
 local function qualified_host(state, phase)
-    return enabled and phase == "hosting" and state.listening and not state.server and state.map == map
+    return enabled and phase == "hosting" and state.listening and state.server == false
+        and (state.map == crossroads or state.map == dead_bridge)
         and type(SilverfishStartNativeGuestMeleeCanary) == "function"
         and type(SilverfishReadNativeGuestMeleeCanary) == "function"
         and type(SilverfishAbortNativeGuestMeleeCanary) == "function"
@@ -31,35 +37,194 @@ local function exact_guest(state, phase, name, standing)
     if projected and ready == true and pawn:GetFullName() == name then return pawn, save end
 end
 
-local function observation(ok, status, serial, presses, releases, contacts, qualified, settled, passives)
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function observation(damage, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
+                           sweeps, calls, before, after, total)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_melee_") ~= nil
+    local settled_status = damage and "stock_damage_verified" or "surface_verified"
     if (ok ~= true and not dirty) or (dirty and ok ~= false)
         or math.type(serial) ~= "integer" or serial < 1 or serial >= 2 ^ 53
         or presses ~= 1 or (releases ~= 0 and releases ~= 1)
         or math.type(contacts) ~= "integer" or contacts < 0 or contacts > 64
         or (qualified ~= 0 and qualified ~= 1) or qualified > contacts
         or type(settled) ~= "boolean" or type(passives) ~= "boolean"
-        or settled ~= (status == "surface_verified")
+        or settled ~= (status == settled_status)
         or (settled and (releases ~= 1 or contacts ~= 1 or qualified ~= 1 or not passives))
-        or (not dirty and status ~= "pending" and status ~= "surface_verified" and status ~= "aborted_contact_fenced") then
+        or (not dirty and status ~= "pending" and status ~= settled_status and status ~= "aborted_contact_fenced"
+            and not (damage and status == "stock_damage_aim_fenced")) then
         error("mutation_unverified_guest_melee_abi", 0)
     end
+    if damage and ((sweeps ~= 0 and sweeps ~= 1) or (calls ~= 0 and calls ~= 1) or calls > sweeps
+        or not finite(before) or not finite(after) or not finite(total)
+        or (settled and (sweeps ~= 1 or calls ~= 1 or before < 100 or before > 160 or after <= 0 or total <= 0
+            or total > 90 or math.abs(before - after - total) > 1e-6))) then
+        error("mutation_unverified_guest_melee_damage_abi", 0)
+    end
     return {status = status, serial = serial, presses = presses, releases = releases,
-        contacts = contacts, qualified = qualified, settled = settled, passives = passives}
+        contacts = contacts, qualified = qualified, settled = settled, passives = passives,
+        sweeps = sweeps, calls = calls, before = before, after = after, total = total}
+end
+
+local function valid(value)
+    return value and value:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function point(value)
+    if value and finite(value.X) and finite(value.Y) and finite(value.Z) then
+        return {X = value.X, Y = value.Y, Z = value.Z}
+    end
+end
+
+local function rotation(value)
+    if value and finite(value.Pitch) and finite(value.Yaw) and finite(value.Roll) then
+        return {Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll}
+    end
+end
+
+local function distance(first, second)
+    return math.sqrt((first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2)
+end
+
+local function near_rotation(actual, expected)
+    if not actual then return false end
+    for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+        if math.abs((actual[axis] - expected[axis] + 180) % 360 - 180) > 0.15 then return false end
+    end
+    return true
+end
+
+local function restore_pose(pose)
+    if not pose then return end
+    local pawn, controller, camera = pose.pawn, pose.controller, pose.camera
+    if not valid(pawn) or not valid(camera) or not same(pawn.Controller, controller)
+        or not same(pawn.Camera, camera) or not same(pawn:GetWorld(), pose.world)
+        or not pawn:K2_TeleportTo(pose.origin, pose.facing) then
+        error("mutation_unverified_guest_melee_damage_pose_restore", 0)
+    end
+    controller:SetControlRotation(pose.control)
+    camera:K2_SetRelativeRotation(pose.camera_rotation, false, {}, true)
+    pawn:ForceNetUpdate()
+    local origin = point(pawn:K2_GetActorLocation())
+    if not origin or distance(origin, pose.origin) > 18
+        or not near_rotation(rotation(pawn:K2_GetActorRotation()), pose.facing)
+        or not near_rotation(rotation(controller:GetControlRotation()), pose.control)
+        or not near_rotation(rotation(camera.RelativeRotation), pose.camera_rotation) then
+        error("mutation_unverified_guest_melee_damage_pose_readback", 0)
+    end
+end
+
+local function damage_pose(state, pawn)
+    local enemy = StaticFindObject(npc_path)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local host = state.local_pawn and state.local_pawn.pawn
+    local camera, capsule, controller = pawn.Camera, pawn.CapsuleComponent, pawn.Controller
+    local check = SilverfishCheckNativeGuestMeleeDamagePose
+    if type(check) ~= "function" or not valid(enemy) or enemy:GetFullName() ~= npc_name
+        or not enemy:HasAuthority() or not same(enemy:GetWorld(), state.world) or enemy.Alive ~= true
+        or not valid(host) or not same(host:GetWorld(), state.world)
+        or not valid(camera) or not same(camera:GetOwner(), pawn)
+        or not valid(capsule) or not same(capsule:GetOwner(), pawn) or not valid(controller)
+        or not same(controller.Pawn, pawn) or not valid(trace) then
+        error("native_guest_melee_stock_damage_placement_unqualified", 0)
+    end
+    local original = {pawn = pawn, world = state.world, camera = camera, controller = controller,
+        origin = point(pawn:K2_GetActorLocation()), facing = rotation(pawn:K2_GetActorRotation()),
+        control = rotation(controller:GetControlRotation()), camera_rotation = rotation(camera.RelativeRotation)}
+    local anchor, host_position = point(enemy:K2_GetActorLocation()), point(host:K2_GetActorLocation())
+    local half = capsule:GetScaledCapsuleHalfHeight()
+    local forward = point(enemy:GetActorForwardVector())
+    if not original.origin or not original.facing or not original.control or not original.camera_rotation
+        or not anchor or not forward or not host_position or distance(host_position, anchor) < 2500
+        or not finite(half) or half < 25 or half > 150 then
+        error("native_guest_melee_stock_damage_distance_unqualified", 0)
+    end
+    local tint = {R = 0, G = 0, B = 0, A = 0}
+    local bearing = math.atan(forward.Y, forward.X) + math.pi
+    local moved = false
+    local ran, clear = pcall(function()
+        for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 180}) do
+            local heading = bearing + math.rad(offset)
+            for _, range in ipairs({155, 125, 185}) do
+                local x, y = anchor.X + range * math.cos(heading), anchor.Y + range * math.sin(heading)
+                local hit = {}
+                local floor = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = anchor.Z + 275},
+                    {X = x, Y = y, Z = anchor.Z - 245}, 0, false, {pawn}, 0, hit, true, tint, tint, 0)
+                hit = hit.OutHit or hit
+                local base, normal = floor == true and point(hit.ImpactPoint), point(hit.ImpactNormal)
+                local component = hit.Component and hit.Component:Get()
+                if base and normal and normal.Z >= 0.75 and finite(hit.Time) and hit.Time > 0 and hit.Time <= 1
+                    and finite(hit.Distance) and hit.Distance > 1 and hit.PenetrationDepth == 0
+                    and valid(component) and component:GetCollisionObjectType() == 0 then
+                    local position = {X = x, Y = y, Z = base.Z + half + 3}
+                    local yaw = math.deg(math.atan(anchor.Y - y, anchor.X - x))
+                    if math.abs(position.Z - anchor.Z) <= 75
+                        and pawn:K2_TeleportTo(position, {Pitch = 0, Yaw = yaw, Roll = 0}) then
+                        moved = true
+                        local actual, eye = point(pawn:K2_GetActorLocation()), point(camera:K2_GetComponentLocation())
+                        if actual and eye and distance(actual, position) <= 18 and distance(eye, actual) <= 150 then
+                            for _, height in ipairs({10, 25, -5}) do
+                                local pitch = math.deg(math.atan(anchor.Z + height - eye.Z,
+                                    math.sqrt((anchor.X - eye.X)^2 + (anchor.Y - eye.Y)^2)))
+                                local aim = {Pitch = pitch,
+                                    Yaw = math.deg(math.atan(anchor.Y - eye.Y, anchor.X - eye.X)), Roll = 0}
+                                if math.abs(aim.Pitch) <= 35 then
+                                    controller:SetControlRotation(aim)
+                                    camera:K2_SetWorldRotation(aim, false, {}, true)
+                                    if check(pawn:GetAddress()) == true then
+                                        pawn:ForceNetUpdate()
+                                        return true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    if ran and clear then return original end
+    if moved then restore_pose(original) end
+    if not ran then error(clear, 0) end
+    error("native_guest_melee_stock_damage_sight_unavailable", 0)
 end
 
 local function read(scope, abort)
     local native = abort and SilverfishAbortNativeGuestMeleeCanary or SilverfishReadNativeGuestMeleeCanary
-    local proof = observation(native(scope.proof.serial))
+    local checked, proof = pcall(function() return observation(scope.damage, native(scope.proof.serial)) end)
+    if not checked then
+        if scope.pose then
+            pcall(SilverfishAbortNativeGuestMeleeCanary, scope.proof.serial)
+            restore_pose(scope.pose)
+            scope.pose = nil
+        end
+        error(proof, 0)
+    end
     if proof.serial ~= scope.proof.serial then error("mutation_unverified_guest_melee_owner", 0) end
     scope.proof = proof
+    if proof.status ~= "pending" and scope.pose then
+        restore_pose(scope.pose)
+        scope.pose = nil
+    end
 end
 
 function melee.command(fields, state, phase, standing)
     local action = fields[2]
     if not actions[action] then return end
     if not qualified_host(state, phase) then error("native_guest_melee_fixture_unavailable", 0) end
-    if action == "native-guest-melee-canary-start" or action == "native-guest-melee-canary-equip" then
+    local damage = action == damage_start
+    if damage or action == "native-guest-melee-canary-start" or action == "native-guest-melee-canary-equip" then
+        if (damage and state.map ~= dead_bridge) or (action == "native-guest-melee-canary-start" and state.map ~= crossroads)
+            or (damage and type(SilverfishStartNativeGuestMeleeDamageCanary) ~= "function") then
+            error("native_guest_melee_fixture_unavailable", 0)
+        end
         local name, guid = fields[3], fields[4]
         if #fields ~= 4 or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]") then
             error("native_guest_melee_exact_guid_required", 0)
@@ -72,19 +237,37 @@ function melee.command(fields, state, phase, standing)
             if type(ok) ~= "boolean" or type(status) ~= "string" or (ok and status ~= "old_pipe_equipped") then
                 error("mutation_unverified_guest_melee_equip_abi", 0)
             end
-            equipment = {pawn = name, guid = guid, ok = ok, status = status}
+            equipment = {map = state.map, pawn = name, guid = guid, ok = ok, status = status}
             return "stock guest Old Pipe equip observed"
         end
-        local ok, status, serial, presses, releases, contacts, qualified, settled, passives =
-            SilverfishStartNativeGuestMeleeCanary(pawn:GetAddress(), save:GetAddress(), guid)
+        local pose = damage and damage_pose(state, pawn)
+        local invoke = damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
+        local called, result = pcall(function() return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid)) end)
+        if not called then
+            restore_pose(pose)
+            error("mutation_unverified_guest_melee_start", 0)
+        end
+        local ok, status, serial = table.unpack(result, 1, 3)
         if ok == false and serial == 0 and type(status) == "string" and status:match("^native_guest_melee_") then
+            restore_pose(pose)
             error(status, 0)
         end
-        latest = {pawn = name, guid = guid, address = pawn:GetAddress(),
-            proof = observation(ok, status, serial, presses, releases, contacts, qualified, settled, passives)}
+        local checked, proof = pcall(observation, damage, table.unpack(result, 1, result.n))
+        if not checked then
+            if pose and math.type(serial) == "integer" and serial > 0 then
+                pcall(SilverfishAbortNativeGuestMeleeCanary, serial)
+            end
+            restore_pose(pose)
+            error(proof, 0)
+        end
+        latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage, pose = pose, proof = proof}
+        if latest.proof.status ~= "pending" and latest.pose then
+            restore_pose(latest.pose)
+            latest.pose = nil
+        end
     else
         local serial = math.tointeger(fields[3])
-        if #fields ~= 3 or not latest or serial ~= latest.proof.serial then
+        if #fields ~= 3 or not latest or latest.map ~= state.map or serial ~= latest.proof.serial then
             error("native_guest_melee_exact_serial_required", 0)
         end
         read(latest, action == "native-guest-melee-canary-abort")
@@ -95,17 +278,22 @@ end
 function melee.rows(state, phase, status_row, standing)
     if not qualified_host(state, phase) then return {} end
     local rows = {}
-    if equipment then
-        rows[#rows + 1] = status_row("native-guest-melee-equip", map, equipment.pawn, equipment.guid,
+    if equipment and equipment.map == state.map then
+        rows[#rows + 1] = status_row("native-guest-melee-equip", state.map, equipment.pawn, equipment.guid,
             equipment.ok and 1 or 0, equipment.status)
     end
-    if not latest then return rows end
+    if not latest or latest.map ~= state.map then return rows end
     local pawn = exact_guest(state, phase, latest.pawn, standing)
     local invalid = not pawn or pawn:GetAddress() ~= latest.address
     read(latest, invalid and latest.proof.status == "pending")
     local proof = latest.proof
-    rows[#rows + 1] = status_row("native-guest-melee-canary", map, latest.pawn, latest.guid, proof.serial, proof.status,
-        proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0)
+    local fields = {"native-guest-melee-canary", state.map, latest.pawn, latest.guid, proof.serial, proof.status,
+        proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0}
+    if latest.damage then
+        fields[13], fields[14], fields[15] = npc_name, proof.sweeps, proof.calls
+        fields[16], fields[17], fields[18] = proof.before, proof.after, proof.total
+    end
+    rows[#rows + 1] = status_row(table.unpack(fields))
     return rows
 end
 

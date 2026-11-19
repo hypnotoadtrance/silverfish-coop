@@ -26,6 +26,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_melee
+from . import native_host_landmine
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
@@ -2317,7 +2318,7 @@ class Host:
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()
                     result = await native_guest_armor.perform(self, bridge, character, request.get("operation_id") or path.stem,
                                                               action, guid, seed_kind=request.get("kind"))
-                elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY) and self.fixtures:
+                elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY, native_guest_melee.DAMAGE) and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_melee.perform(self, bridge, action, character, request.get("item_guid"),
                                                               request.get("operation_id") or path.stem)
@@ -2416,6 +2417,9 @@ class Host:
                     ) or not 0 < proof.get("sequence", 0) < 2**53:
                         raise RuntimeError("The host stock shutter input did not verify")
                     result = {"native_host_camera_fixture": proof}
+                elif action in native_host_landmine.ACTIONS and self.fixtures:
+                    result = await native_host_landmine.perform(self, bridge, action, request.get("target"),
+                                                                 request.get("operation_id") or path.stem)
                 elif action == native_turret_photo.BOARD_LIST:
                     result = await native_turret_photo.offers(self, bridge, "host", request.get("target"))
                 elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:

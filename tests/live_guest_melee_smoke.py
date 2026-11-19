@@ -1,4 +1,4 @@
-"""Verify real Old Pipe pickup, equip, and one fenced stock animated guest swing."""
+"""Verify real Old Pipe pickup and a fenced stock swing or exact Dead Bridge hit."""
 
 import argparse
 import asyncio
@@ -16,12 +16,12 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.native_authored_pickup import ACTION, APPROACH, OLD_PIPE, SOURCES, SOURCES_KEY
 from tools.silverfish.native_gold import valid_guid
-from tools.silverfish.native_guest_melee import CANARY, CANARY_KEY, EQUIP, EQUIP_KEY
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish.native_guest_melee import CANARY, CANARY_KEY, DAMAGE, EQUIP, EQUIP_KEY, verified_damage
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
 
 
-async def verify(work: Path, vanilla_saved: Path | None) -> None:
-    name = "stock-old-pipe-" + uuid.uuid4().hex[:8]
+async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False) -> None:
+    name = ("stock-old-pipe-damage-" if stock_damage else "stock-old-pipe-") + uuid.uuid4().hex[:8]
     host, guest = ("--campaign", name), ("--profile", name)
     host_run, guest_run = work / "campaigns" / name / "run", work / "clients" / name / "run"
     host_run.mkdir(parents=True)
@@ -81,8 +81,8 @@ async def verify(work: Path, vanilla_saved: Path | None) -> None:
         character = invitation["character_id"]
         await wait(guest_run, lambda state: state.get("state") == "connected"
                    and state.get("character_id") == character and state.get("game", {}).get("map") == CROSSROADS)
-        await wait(host_run, lambda state: state.get("state") == "hosting" and available(state)
-                   and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+        coupled = await wait(host_run, lambda state: state.get("state") == "hosting" and available(state)
+                             and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
 
         await action(host, APPROACH, "--target", "guest", "--pickup-source", OLD_PIPE)
         claim = (await action(guest, ACTION, "--target", OLD_PIPE))["native_authored_pickup_claim"]
@@ -95,9 +95,30 @@ async def verify(work: Path, vanilla_saved: Path | None) -> None:
         assert before and before["source"] == "backpack" and before["class_path"] == SOURCES[OLD_PIPE][2], before
         proof.update(claim=claim, backpack=before)
 
+        area = CROSSROADS
+        if stock_damage:
+            denied = await action(host, DAMAGE, "--target", "guest", "--item-guid", guid, expected=False)
+            assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
+            for role, where in (("host", "near"), ("guest", "near"), ("host", "inside")):
+                await action(host, "native-exit-position", "--target", role, "--exit-position", where, "--entrance", "DB_CR")
+            bound = await wait(host_run, lambda state: state.get("state") == "hosting"
+                               and state.get("generation") == coupled["generation"]
+                               and state.get("zone_epoch") != coupled["zone_epoch"] and not state.get("awaiting_zone_guest")
+                               and state.get("game", {}).get("map") == DEAD_BRIDGE
+                               and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=80)
+            await wait(guest_run, lambda state: (state.get("state"), state.get("host_session"), state.get("zone_epoch"),
+                       state.get("character_id"), state.get("game", {}).get("map")) == (
+                       "connected", bound["generation"], bound["zone_epoch"], character, DEAD_BRIDGE), timeout=80)
+            assert await inventory_item(character, guid) == before
+            area = DEAD_BRIDGE
+            proof["stock_route"] = {"source": CROSSROADS, "destination": area, "entrance": "DB_CR",
+                                    "source_epoch": coupled["zone_epoch"], "destination_epoch": bound["zone_epoch"]}
+            denied = await action(host, CANARY, "--target", "guest", "--item-guid", guid, expected=False)
+            assert denied["error"] == "native_guest_melee_fixture_unavailable", denied
+
         equipped = (await action(host, EQUIP, "--target", "guest", "--item-guid", guid))[EQUIP_KEY]
         assert (equipped["map"], equipped["guid"], equipped["status"], equipped["ok"]) == (
-            CROSSROADS, guid, "old_pipe_equipped", True
+            area, guid, "old_pipe_equipped", True
         ), equipped
         held = await inventory_item(character, guid)
         assert held and held["source"] == "equipment" and held["class_path"] == before["class_path"], held
@@ -105,12 +126,16 @@ async def verify(work: Path, vanilla_saved: Path | None) -> None:
 
         operation = uuid.uuid4().hex
         args = ("--target", "guest", "--item-guid", guid, "--operation-id", operation)
-        observed = (await action(host, CANARY, *args))[CANARY_KEY]
+        verb = DAMAGE if stock_damage else CANARY
+        observed = (await action(host, verb, *args))[CANARY_KEY]
         assert tuple(observed[key] for key in ("map", "pawn", "guid", "status", "presses", "releases", "contacts",
                                                "qualified", "settled", "passive_free")) == (
-            CROSSROADS, equipped["pawn"], guid, "surface_verified", 1, 1, 1, 1, True, True
+            area, equipped["pawn"], guid, "stock_damage_verified" if stock_damage else "surface_verified",
+            1, 1, 1, 1, True, True
         ), observed
-        assert (await action(host, CANARY, *args))[CANARY_KEY] == observed
+        if stock_damage:
+            assert verified_damage(observed), observed
+        assert (await action(host, verb, *args))[CANARY_KEY] == observed
         after = await inventory_item(character, guid)
         assert after == held, (held, after)
         proof.update(stock_animation=observed, operation_replayed=True, unchanged_equipment=after, verified=True)
@@ -129,7 +154,8 @@ async def verify(work: Path, vanilla_saved: Path | None) -> None:
                         await process.wait()
         if originals is not None:
             proof["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        (host_run / "live-old-pipe-verification.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+        report = "live-old-pipe-damage-verification.json" if stock_damage else "live-old-pipe-verification.json"
+        (host_run / report).write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(proof), flush=True)
         if originals is not None:
             assert proof["original_saves_verified"], "The original single-player saves changed"
@@ -139,5 +165,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path)
+    parser.add_argument("--stock-damage", action="store_true", help="take the actual DB_CR exit and verify one stock NPC hit")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None))
+    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None,
+                       stock_damage=options.stock_damage))

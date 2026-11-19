@@ -31,6 +31,7 @@ from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_melee import parse as parse_guest_melee
+from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
@@ -1348,6 +1349,10 @@ class Bridge:
                                                           "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
                 elif fields[0] == "native-host-camera-equip-fixture" and len(fields) == 5 and valid_guid(fields[3]):
                     data["native_host_camera_equip_fixture"] = dict(zip(("map", "pawn", "guid", "state"), fields[1:]))
+                elif fields[0] == "native-host-landmine":
+                    report = parse_host_landmine(fields)
+                    if report:
+                        data["native_host_landmine"] = report
                 elif fields[0] == "native-guest-bandage" and len(fields) == 13 and fields[12] in ("0", "1"):
                     data["native_guest_bandage"] = {"state": fields[1], "map": fields[2], "pawn": fields[3], "guid": fields[4],
                                                    "quantity_before": int(fields[5]), "quantity_after": int(fields[6]),
