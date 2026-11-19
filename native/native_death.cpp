@@ -31,6 +31,7 @@
 #include "host_dig.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
+#include "guest_stack_drop.hpp"
 #include "inventory_view.hpp"
 #include "bag_projection.hpp"
 #include "finite_shop.hpp"
@@ -1233,6 +1234,7 @@ namespace
             silverfish::native_guest_npc::uninstall_hooks();
             silverfish::native_guest_reload_input::uninstall_hooks();
             silverfish::native_inventory_view::uninstall_hooks();
+            silverfish::native_guest_stack_drop::uninstall_hooks();
             silverfish::native_bag_projection::uninstall_hooks();
             silverfish::native_interaction_input::uninstall_hooks();
             silverfish::native_authored_pickup::uninstall_hooks();
@@ -1355,6 +1357,7 @@ namespace
             silverfish::loot_escrow::register_lua(lua);
             silverfish::inventory_census::register_lua(lua);
             silverfish::inventory_wipe::register_lua(lua);
+            silverfish::native_guest_stack_drop::register_lua(lua);
             silverfish::finite_shop::register_lua(lua);
             silverfish::native_guest_npc::register_lua(lua);
             silverfish::native_guest_reload_input::register_lua(lua);

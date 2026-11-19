@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
-               native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc,
+               native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
@@ -2342,6 +2342,10 @@ class Host:
                     character = self.roles().get(request.get("target") or "host")
                     offset = request.get("amount")
                     result = await native_inventory.inspect(self, bridge, character, 0 if offset is None else offset)
+                elif action == native_guest_stack_drop.ACTION:
+                    character = self.roles().get(request.get("target") or "guest")
+                    result = await native_guest_stack_drop.perform(self, bridge, character, request.get("item_guid"),
+                                                                   request.get("amount"))
                 elif action == "native-wipe-inventory-fixture":
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_inventory_death.probe(self, bridge, character, request.get("item_guid"))

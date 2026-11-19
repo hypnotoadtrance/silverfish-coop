@@ -1,4 +1,4 @@
-"""Verify a native guest ammo split, stock inventory controls, and durable replay."""
+"""Verify stock guest inventory split, sort, or isolated ammo-drop spawning."""
 
 import argparse
 import asyncio
@@ -14,13 +14,15 @@ from live_multi_smoke import saved_hashes
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
+from tools.silverfish import native_guest_stack_drop as stack_drop
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 
 
-async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
-    name = ("inventory-sort-" if sort_backpack else "inventory-split-") + uuid.uuid4().hex[:8]
+async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False):
+    mode = "stock-stack-drop" if stock_drop_probe else "inventory-sort" if sort_backpack else "inventory-split"
+    name = mode + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     guest = ("--profile", name)
     run = work / "campaigns" / name / "run"
@@ -62,7 +64,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
         return await wait(run, lambda state: state.get("state") == "hosting"
                           and state.get("game", {}).get("map") == OBSERVATORY
                           and state["game"].get("native_guest_save", {}).get("state") == "bound"
-                          and state["game"].get("native_inventory_split_capability") == 1)
+                          and state["game"].get(stack_drop.CAPABILITY if stock_drop_probe
+                                                else "native_inventory_split_capability") == 1)
 
     async def page(owner, expected_owner):
         inventory = (await ask("action", *owner, "native-inventory-list"))["native_inventory"]
@@ -94,6 +97,29 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
         assert seeded["native_guest_weapon"]["guid"] == source, seeded
         rows = await page(guest, character)
         quantities(rows, {source: 9})
+        if stock_drop_probe:
+            arguments = (stack_drop.ACTION, "--target", "guest", "--item-guid", source, "--amount")
+            denied = await ask("action", *guest, *arguments, "9", success=False)
+            stale = await ask("action", *host, *arguments, "8", success=False)
+            evidence.update(guest_request_refused=denied["error"], stale_quantity_refused=stale["error"])
+            assert stale["error"] == "native_guest_stack_drop_stock_9mm_row_unqualified", stale
+            assert await page(guest, character) == rows and await page(host, "host") == host_before
+
+            receipt = (await ask("action", *host, *arguments, "9"))[stack_drop.KEY]
+            evidence["native_stock_spawn"] = receipt
+            assert (receipt["owner"], receipt["map"], receipt["guid"], receipt["quantity"], receipt["ok"], receipt["status"]) == (
+                character, OBSERVATORY, source, 9, True, stack_drop.SUCCESS), receipt
+            assert receipt["new_guid"] != source and all(row["guid"] != receipt["new_guid"] for row in rows), receipt
+            assert await page(guest, character) == rows and await page(host, "host") == host_before
+            resumed = await ask("action", *guest, "drop-link")
+            assert resumed.get("link_connected") is False, resumed
+            resumed = await ask("action", *guest, "reconnect")
+            assert resumed.get("resumed") is True, resumed
+            await enrolled()
+            assert await page(guest, character) == rows and await page(host, "host") == host_before
+            evidence.update(unchanged_guest_inventory=rows, unchanged_host_inventory=host_before,
+                            resumed_exact_inventory=True, verified=True)
+            return
         if sort_backpack:
             assert [row["guid"] for row in rows] == [weapon, source], rows
             sort_request = ("action", *guest, "native-inventory-sort", "--operation-id", uuid.uuid4().hex)
@@ -182,7 +208,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False):
                         process.terminate()
                         await process.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        (run / "live-inventory-split-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        report = "live-stock-stack-drop-verification.json" if stock_drop_probe else "live-inventory-split-verification.json"
+        (run / report).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         assert evidence["original_saves_verified"], "Original single-player saves changed during the test"
 
 
@@ -190,6 +217,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--sort-backpack", action="store_true", help="verify stock sort on a mixed backpack before splitting")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--sort-backpack", action="store_true", help="verify stock sort on a mixed backpack before splitting")
+    modes.add_argument("--stock-drop-probe", action="store_true", help="verify one stock 9mm actor born and retired in the same tick")
     settings = parser.parse_args()
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack))
+    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack, settings.stock_drop_probe))

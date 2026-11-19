@@ -21,6 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
+from . import native_guest_stack_drop
 from . import native_black_box
 from . import native_subway_valve
 from . import native_kill_volume
@@ -1500,6 +1501,13 @@ class Bridge:
                                                     "total": int(fields[6]), "count": int(fields[7])}
                 elif fields == ["native-inventory-sort-capability", "1"]:
                     data["native_inventory_sort_capability"] = 1
+                elif fields == [native_guest_stack_drop.ACTION + "-capability", "1"]:
+                    if data.get("state") == "hosting" and data.get("map") == native_guest_stack_drop.OBSERVATORY:
+                        data[native_guest_stack_drop.CAPABILITY] = 1
+                elif fields[0] == native_guest_stack_drop.ACTION:
+                    if native_guest_stack_drop.KEY in data:
+                        raise ValueError("Duplicate isolated stack drop report")
+                    data[native_guest_stack_drop.KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-inventory-sort" and len(fields) == 5:
                     data["native_inventory_sort"] = {"map": fields[1], "pawn": fields[2], "state": fields[3],
                                                      "count": int(fields[4])}
