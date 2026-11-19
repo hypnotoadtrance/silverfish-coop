@@ -1,5 +1,6 @@
 """Verify one stock host-deployed LandMine in an isolated campaign."""
 
+import asyncio
 import json
 import math
 import time
@@ -92,10 +93,18 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
         return last
 
     async def request_phase(verb, phase, timeout, last=None):
-        try:
-            return await bridge.command(verb, pawn, timeout=timeout)
-        except TimeoutError as error:
-            raise phase_error(phase, "ack_timeout", last or {}) from error
+        pending = {f"stock_host_landmine_{phase}_context_{detail}" for detail in ("roster_sample", "guest_lease")}
+        for attempt in range(2):
+            try:
+                return await bridge.command(verb, pawn, timeout=timeout)
+            except TimeoutError as error:
+                raise phase_error(phase, "ack_timeout", last or {}) from error
+            except RuntimeError as error:
+                # Retry only an explicit, pre-mutation native context refusal.
+                if attempt == 0 and str(error) in pending:
+                    await asyncio.sleep(.15)
+                    continue
+                raise phase_error(phase, "refused", {"error": str(error), "last": last or {}}) from error
 
     if action == INSPECT:
         snapshot = await bridge.command(INSPECT, pawn, timeout=5)
@@ -138,7 +147,7 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
             if proof.get("state") not in ("pressed", "primed") or proof.get("presses") != 1:
                 raise RuntimeError("The stock LandMine primary press did not verify")
             if proof["state"] != "primed":
-                await wait_phase("priming", "primed", proof, 1.75)
+                proof = await wait_phase("priming", "primed", proof, 1.75)
             snapshot = await request_phase("native-host-landmine-release-fixture", "release", 3, proof)
             release = frame(snapshot)
             if release.get("state") not in ("released", "placed") or release.get("releases") != 1 or release.get("projectile") == "-":

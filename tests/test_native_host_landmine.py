@@ -131,6 +131,48 @@ class NativeHostLandmineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.checkpoint_native.await_count, 3)
         self.assertTrue(host.stopping)
 
+    async def test_exact_pre_mutation_phase_refusal_can_retry_once(self):
+        host = self.host()
+        bridge = self.bridge(host)
+        original = bridge.command.side_effect
+        release = "native-host-landmine-release-fixture"
+        calls = 0
+
+        async def command(action, pawn, *, timeout):
+            nonlocal calls
+            if action == release:
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("stock_host_landmine_release_context_guest_lease")
+            return await original(action, pawn, timeout=timeout)
+
+        bridge.command.side_effect = command
+        await mine.perform(host, bridge, mine.PREPARE, None, PREPARE)
+        result = await mine.perform(host, bridge, mine.DEPLOY, GUID, DEPLOY)
+        self.assertEqual(result[mine.KEY]["state"], "persisted")
+        self.assertEqual(calls, 2)
+        self.assertEqual(result[mine.KEY]["releases"], 1)
+        self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_uncertain_release_is_never_repeated_and_retains_phase_proof(self):
+        host = self.host()
+        bridge = self.bridge(host)
+        original = bridge.command.side_effect
+        release = "native-host-landmine-release-fixture"
+
+        async def command(action, pawn, *, timeout):
+            if action == release:
+                raise RuntimeError("mutation_unverified_stock_host_landmine_stock_projectile_readback")
+            return await original(action, pawn, timeout=timeout)
+
+        bridge.command.side_effect = command
+        await mine.perform(host, bridge, mine.PREPARE, None, PREPARE)
+        with self.assertRaisesRegex(RuntimeError, "stock_host_landmine_release_refused:.*projectile_readback.*primed"):
+            await mine.perform(host, bridge, mine.DEPLOY, GUID, DEPLOY)
+        self.assertEqual([call.args[0] for call in bridge.command.await_args_list].count(release), 1)
+        self.assertEqual([receipt["id"] for receipt in host.party["receipts"]["host"]], [PREPARE])
+        self.assertTrue(host.stopping)
+
     def test_tsv_decodes_distinct_placed_actor_and_saved_location(self):
         frame = mine.parse(("native-host-landmine", OBSERVATORY, PAWN, "persisted", GUID, "stock mine", "stock projectile",
                             "1", "1", "1", "1", "0", "0", "1", "5", "6", "7"))

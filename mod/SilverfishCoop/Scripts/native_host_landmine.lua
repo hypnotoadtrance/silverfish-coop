@@ -51,33 +51,46 @@ end
 local function context(state, phase, name)
     local host = state.local_pawn
     local pawn, controller, world = host and host.pawn, state.controller, state.world
-    if not enabled or phase ~= "hosting" or state.map ~= map or state.listening ~= true or state.server ~= false
-        or state.clients ~= 1 or #state.pawns ~= 2 or not valid(world) or world:GetFullName() ~= "World " .. world_path
-        or not host or (name and host.name ~= name)
+    if not enabled then return nil, "fixture_disabled" end
+    if phase ~= "hosting" or state.map ~= map or state.listening ~= true or state.server ~= false
+        or not valid(world) or world:GetFullName() ~= "World " .. world_path then return nil, "listen_world" end
+    if state.clients ~= 1 or #state.pawns ~= 2 then return nil, "roster_sample" end
+    if not host or (name and host.name ~= name)
         or not exact(pawn, "/Game/Classes/Player/Player_FP.Player_FP_C") or pawn:GetFullName() ~= host.name
         or not exact(controller, "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")
         or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller)
         or not same(controller:GetWorld(), world) or not same(pawn:GetWorld(), world)
-        or not controller:HasAuthority() or not controller:IsLocalController() or not pawn:HasAuthority()
-        or pawn.Dead ~= false or controller.Loading ~= false then return end
+        or not controller:HasAuthority() or not controller:IsLocalController() or not pawn:HasAuthority() then
+        return nil, "exact_host"
+    end
+    if pawn.Dead ~= false or controller.Loading ~= false then return nil, "host_state" end
     local driver = world.NetDriver
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local instance = valid(statics) and statics:GetGameInstance(pawn)
     local save = valid(instance) and instance.SaveSlot_Ref
-    if not valid(driver) or valid(driver.ServerConnection) or not same(driver.World, world)
-        or not exact(instance, "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")
+    if not valid(driver) or valid(driver.ServerConnection) or not same(driver.World, world) then
+        return nil, "listen_driver"
+    end
+    if not exact(instance, "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")
         or not exact(save, "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
-        or not same(save, pawn.Save) or not same(instance["As Player FP"], pawn) then return end
+        or not same(save, pawn.Save) or not same(instance["As Player FP"], pawn) then return nil, "canonical_save" end
     for _, info in ipairs(state.pawns) do
         if info.kind == "guest" then
             local ok, guest, detached = pcall(guest_save.exact_item_context, state, phase, info.name)
+            if ok and not guest and run and same(info.pawn, run.guest) and same(info.pawn.Save, run.detached)
+                and guest_save.matches(info.pawn) then return nil, "guest_lease" end
             if not ok or not valid(guest) or not guest:HasAuthority() or not same(guest:GetWorld(), world)
-                or not valid(detached) or same(detached, save) or not same(guest.Save, detached)
-                or guest.Dead ~= false or not finite(detached.PlayerHealth) or detached.PlayerHealth <= 1 then return end
+                or not valid(detached) or same(detached, save) or not same(guest.Save, detached) then
+                return nil, "exact_guest"
+            end
+            if guest.Dead ~= false or not finite(detached.PlayerHealth) or detached.PlayerHealth <= 1 then
+                return nil, "guest_state"
+            end
             return { pawn = pawn, controller = controller, world = world, statics = statics, instance = instance,
                 save = save, name = host.name, guest = guest, detached = detached }
         end
     end
+    return nil, "roster_sample"
 end
 
 local function guid(row)
@@ -396,7 +409,9 @@ end
 function mine.command(fields, state, phase)
     local action = actions[fields[2]]
     if not action then return end
-    local ctx = require_value(#fields == 3 and context(state, phase, fields[3]), "exact_headless_host_required")
+    require_value(#fields == 3, action .. "_context_arguments")
+    local ctx, reason = context(state, phase, fields[3])
+    require_value(ctx, action .. "_context_" .. (reason or "unavailable"))
     observation = nil
     if action == "inspect" then observation = inspect(ctx, "inspected")
     elseif action == "prepare" then prepare(ctx)
