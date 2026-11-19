@@ -42,6 +42,12 @@ namespace
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_21");
     constexpr auto binding_path =
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:EnhancedInputActionDelegateBinding_0");
+    constexpr auto borough_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough");
+    constexpr auto wire_board_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.BountyBoard_BP_C_3");
+    constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
+    constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
+    constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
+    constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
@@ -124,13 +130,23 @@ namespace
         Clock::time_point expires{};
     };
 
+    struct WireBoard
+    {
+        Unreal::FWeakObjectPtr actor{}, box{}, pawn{};
+        bool accepting{};
+        Clock::time_point expires{};
+        Receipt pending{};
+    };
+
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
+    WireBoard wire_board;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
+    std::uint64_t wire_sequence{};
     bool event_source_matches{}, event_consumed{};
 
     bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
@@ -289,6 +305,88 @@ namespace
         return installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw();
     }
 
+    std::string_view qualify_wire_board(Unreal::UObject* actor, Unreal::UObject* box)
+    {
+        auto* world = scope.world.Get();
+        if (!live(world) || world->GetPathName() != borough_path) return "native_wire_board_world";
+        if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(wire_board_class) ||
+            actor->GetPathName() != wire_board_path) return "native_wire_board_actor";
+        auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        if (!destroying || destroying->GetPropertyValueInContainer(actor) ||
+            static_cast<Unreal::AActor*>(actor)->GetWorld() != world ||
+            (scope.host && !live_actor(actor, world, 3))) return "native_wire_board_actor_world";
+        if (!live(box) || box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")) ||
+            box->GetOuterPrivate() != actor || object_field(actor, STR("Box")) != box) return "native_wire_board_box";
+        auto* id = field<Unreal::FByteProperty>(actor, STR("TurnIn_ID"));
+        const auto equals = [&](const Unreal::TCHAR* name, bool expected) {
+            auto* value = field<Unreal::FBoolProperty>(actor, name);
+            return value && value->GetPropertyValueInContainer(actor) == expected;
+        };
+        return id && id->GetPropertyValueInContainer(actor) == 5 &&
+            equals(STR("BountyBoard_RedeemableHere"), true) && equals(STR("AcceptAllGlobalContracts"), true) &&
+            equals(STR("Display_GlobalContracts"), false) && equals(STR("ShowAllContracts"), false)
+                ? std::string_view{} : "native_wire_board_configuration";
+    }
+
+    bool wire_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* box)
+    {
+        auto* range = field<Unreal::FDoubleProperty>(pawn, STR("InteractionRange"));
+        auto* getter = find<Unreal::UFunction>(STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
+        auto* output = field<Unreal::FStructProperty>(getter, STR("ReturnValue"));
+        auto* vector = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+        std::array<double, 3> point{};
+        if (!range || !output || !vector || output != getter->GetReturnProperty() || getter->GetNumParms() != 1 ||
+            output->GetStruct().Get() != vector || output->GetOffset_Internal() != 0 ||
+            getter->GetParmsSize() != sizeof(point) || !getter->HasAnyFunctionFlags(Unreal::FUNC_Native)) return false;
+        const double reach = range->GetPropertyValueInContainer(pawn);
+        if (!std::isfinite(reach) || reach <= 0 || reach > 1000) return false;
+        box->ProcessEvent(getter, point.data());
+        auto player = static_cast<Unreal::AActor*>(pawn)->K2_GetActorLocation();
+        auto board = static_cast<Unreal::AActor*>(actor)->K2_GetActorLocation();
+        const auto near = [&](double x, double y, double z) {
+            const double dx = player.GetX() - x, dy = player.GetY() - y, dz = player.GetZ() - z;
+            const double square = dx * dx + dy * dy + dz * dz;
+            return std::isfinite(square) && square <= reach * reach;
+        };
+        return near(point[0], point[1], point[2]) && near(board.GetX(), board.GetY(), board.GetZ());
+    }
+
+    void intercept_wire_board(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        if (!actor || !function || !parameters || actor != wire_board.actor.Get() ||
+            iteration.OriginalFunctionCallPrevented() || !live_scope(scope) ||
+            Clock::now() >= wire_board.expires) return;
+        static const Unreal::FName interaction{STR("SendInteractionToActor")};
+        static const Unreal::FName script{STR("ExecuteUbergraph_BountyBoard_BP")};
+        const auto name = function->GetFName();
+        if (name != interaction && name != script) return;
+        auto* box = wire_board.box.Get();
+        if (!qualify_wire_board(actor, box).empty() || function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        if (name == script)
+        {
+            auto* entry = input<Unreal::FIntProperty>(function, STR("EntryPoint"), 0);
+            if (function == find<Unreal::UFunction>(wire_script_path) && entry && function->GetNumParms() == 1 &&
+                function->GetParmsSize() == sizeof(std::int32_t) && entry->GetPropertyValueInContainer(parameters) == wire_menu_entry)
+                iteration.PreventOriginalFunctionCall();
+            return;
+        }
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        auto* component = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        if (function != find<Unreal::UFunction>(wire_interaction_path) || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != 2 * sizeof(void*) || !player || !component ||
+            player->GetPropertyClass().Get() != find<Unreal::UClass>(pawn_path) ||
+            component->GetPropertyClass().Get() != find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"))) return;
+        auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
+        auto* hit = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented() || !pawn || pawn != wire_board.pawn.Get() || hit != box ||
+            object_field(pawn, STR("InteractionTarget_Component")) != box ||
+            !silverfish::native_interaction_input::consume_current_press(pawn) || !wire_board.accepting ||
+            wire_sequence == max_sequence || !wire_in_reach(pawn, actor, box)) return;
+        wire_board.pending = {++wire_sequence, Clock::now() + receipt_lifetime};
+    }
+
     bool exact_dispatch(Unreal::UObject* pawn, Unreal::UFunction* function)
     {
         return pawn && function && pawn == scope.pawn.Get() && function == scope.started.function.Get();
@@ -310,9 +408,14 @@ namespace
         ++count;
     }
 
-    void event_pre(Iteration&, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
+    void event_pre(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
     {
-        if (!available() || !exact_dispatch(pawn, function)) return;
+        if (!available()) return;
+        if (!exact_dispatch(pawn, function))
+        {
+            intercept_wire_board(iteration, pawn, function, parameters);
+            return;
+        }
         if (event_depth++ == 0)
         {
             event_consumed = false;
@@ -333,8 +436,12 @@ namespace
     {
         // ProcessEvent owns its whole synchronous dispatch, including the VM.
         // Script-to-script invocations can reach the wrapper without ProcessEvent.
-        if (available() && !event_depth && exact_dispatch(pawn, frame.Node()) && frame.Object() == pawn)
-            record(iteration, pawn, frame.Locals());
+        if (!available() || frame.Object() != pawn) return;
+        if (exact_dispatch(pawn, frame.Node()))
+        {
+            if (!event_depth) record(iteration, pawn, frame.Locals());
+        }
+        else intercept_wire_board(iteration, pawn, frame.Node(), frame.Locals());
     }
 
     int report(const Lua& lua, bool ok, std::string_view status)
@@ -385,6 +492,50 @@ namespace
     int lua_clear(const Lua&)
     {
         silverfish::native_interaction_input::clear_scope();
+        return 0;
+    }
+
+    int set_wire_board(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_bool(3))
+            return report(lua, false, "native_wire_board_arguments");
+        const auto requested = lua.get_integer();
+        const bool host = lua.get_bool();
+        const bool accepting = lua.get_bool();
+        auto* pawn = scope.pawn.Get();
+        auto* actor = find<Unreal::AActor>(wire_board_path);
+        auto* box = object_field(actor, STR("Box"));
+        const auto now = Clock::now();
+        if (!pawn || address(pawn) != requested || host != scope.host || now >= scope.expires || !live_scope(scope))
+            return report(lua, false, "native_wire_board_local_input");
+        if (const auto reason = qualify_wire_board(actor, box); !reason.empty()) return report(lua, false, reason);
+        if (actor != wire_board.actor.Get() || box != wire_board.box.Get() || pawn != wire_board.pawn.Get() ||
+            !accepting || wire_board.expires <= now) wire_board.pending = {};
+        wire_board.actor = actor;
+        wire_board.box = box;
+        wire_board.pawn = pawn;
+        wire_board.accepting = accepting;
+        wire_board.expires = now + lease;
+        return report(lua, true, "ready");
+    }
+
+    int take_wire_board_press(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto requested = lua.get_integer();
+        auto* pawn = wire_board.pawn.Get();
+        const auto now = Clock::now();
+        if (!pawn || address(pawn) != requested || pawn != scope.pawn.Get() || !wire_board.accepting ||
+            now >= wire_board.expires || !wire_board.pending.sequence || now >= wire_board.pending.expires ||
+            !live_scope(scope) || !standing(pawn)) return 0;
+        lua.set_integer(static_cast<std::int64_t>(wire_board.pending.sequence));
+        wire_board.pending = {};
+        return 1;
+    }
+
+    int clear_wire_board(const Lua&)
+    {
+        if (Unreal::IsInGameThreadRaw()) wire_board = {};
         return 0;
     }
 
@@ -544,6 +695,9 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeInteractScope", set_scope);
         lua.register_function("SilverfishTakeNativeInteractPress", take_press);
         lua.register_function("SilverfishClearNativeInteractScope", lua_clear);
+        lua.register_function("SilverfishSetNativeWireBoardScope", set_wire_board);
+        lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
+        lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 
@@ -552,6 +706,7 @@ namespace silverfish::native_interaction_input
         generation.fetch_add(1, std::memory_order_acq_rel);
         if (!Unreal::IsInGameThreadRaw()) return;
         scope = {};
+        wire_board = {};
         first = count = event_depth = 0;
         event_source_matches = event_consumed = false;
     }

@@ -14,6 +14,7 @@
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
@@ -44,6 +45,9 @@ namespace
     constexpr auto projectile_path =
         STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto lease = std::chrono::milliseconds(1500);
+    constexpr int max_effects = 256;
+    constexpr int max_cache_effects = 1024;
+    constexpr int max_inventory = 4096;
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -134,6 +138,189 @@ namespace
         U::FNameProperty* effect{};
     };
 
+    struct BountyCounts
+    {
+        int permanent{}, timed{}, gear{};
+        int total() const { return permanent + timed + gear; }
+    };
+
+    struct BountyState
+    {
+        U::FName name{};
+        BountyCounts counts{};
+        std::array<U::FName, max_cache_effects> cache{};
+        int cache_size{-1};
+        int cache_bounty{};
+    };
+
+    U::FNameProperty* name_entries(U::FArrayProperty* property)
+    {
+        auto* name = property ? U::CastField<U::FNameProperty>(property->GetInner()) : nullptr;
+        return name && name->GetArrayDim() == 1 && name->GetOffset_Internal() == 0 ? name : nullptr;
+    }
+
+    U::FArrayProperty* permanent_effects(U::UObject* save, void*& data)
+    {
+        auto* character = field<U::FStructProperty>(save, STR("Character"));
+        auto* type = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct"));
+        auto* effects = field<U::FArrayProperty>(type, STR("PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"));
+        if (!type || !character || character->GetStruct().Get() != type || !name_entries(effects)) return nullptr;
+        data = effects->ContainerPtrToValuePtr<void>(character->ContainerPtrToValuePtr<void>(save));
+        return effects;
+    }
+
+    bool count_owned_effects(U::UObject* save, const U::FName& sought, BountyCounts& counts)
+    {
+        void* data{};
+        auto* effects = permanent_effects(save, data);
+        if (!effects || sought.IsNone()) return false;
+        auto* names = name_entries(effects);
+        U::FScriptArrayHelper permanent(effects, data);
+        if (permanent.Num() < 0 || permanent.Num() > max_effects) return false;
+        for (int index = 0; index < permanent.Num(); ++index)
+            counts.permanent += names->GetPropertyValue(permanent.GetRawPtr(index)) == sought;
+
+        auto* temporary = field<U::FMapProperty>(save, STR("PlayerTempEffects"));
+        auto* key = temporary ? U::CastField<U::FNameProperty>(temporary->GetKeyProp()) : nullptr;
+        auto* value = temporary ? U::CastField<U::FStructProperty>(temporary->GetValueProp()) : nullptr;
+        auto* timespan = find<U::UScriptStruct>(STR("/Script/CoreUObject.Timespan"));
+        if (!key || key->GetSize() != sizeof(U::FName) || key->GetOffset_Internal() != 0 ||
+            !value || !timespan || value->GetStruct().Get() != timespan) return false;
+        const auto layout = U::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
+        if (value->GetOffset_Internal() != layout.ValueOffset) return false;
+        const auto* map = temporary->ContainerPtrToValuePtr<U::FScriptMap>(save);
+        const auto count = map->Num();
+        const auto extent = map->GetMaxIndex();
+        if (count < 0 || count > extent || extent > max_effects) return false;
+        int seen = 0;
+        for (int index = 0; index < extent; ++index)
+        {
+            if (!map->IsValidIndex(index)) continue;
+            const auto* entry = map->GetData(index, layout);
+            if (!entry) return false;
+            counts.timed += key->GetPropertyValue(entry) == sought;
+            ++seen;
+        }
+        // Compile_PassiveEffects takes each currently present map key once.
+        return seen == count && counts.timed <= 1;
+    }
+
+    bool count_inventory_effects(U::UObject* save, const U::FName& sought, BountyCounts& counts)
+    {
+        auto* type = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct"));
+        auto* item = find<U::UClass>(item_path);
+        auto* item_class = field<U::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
+        auto* guid = field<U::FStructProperty>(type, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
+        auto* guid_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
+        if (!type || !item || !item_class || item_class->GetMetaClass().Get() != item ||
+            !guid || !guid_type || guid->GetStruct().Get() != guid_type || guid->GetSize() != 16) return false;
+        constexpr std::array names{STR("A"), STR("B"), STR("C"), STR("D")};
+        std::array<U::FIntProperty*, names.size()> words{};
+        for (std::size_t index = 0; index < names.size(); ++index)
+        {
+            words[index] = field<U::FIntProperty>(guid_type, names[index]);
+            if (!words[index] || words[index]->GetOffset_Internal() != static_cast<int>(index * sizeof(std::int32_t)))
+                return false;
+        }
+
+        const auto visit = [&](const void* row, bool backpack, const U::TCHAR* worn_type = nullptr) {
+            auto* object_class = item_class->GetObjectPropertyValue(item_class->ContainerPtrToValuePtr<void>(row));
+            if (!object_class) return true;
+            auto* klass = U::Cast<U::UClass>(object_class);
+            if (!live(klass) || !klass->IsChildOf(item)) return false;
+            if (!backpack)
+            {
+                const auto* data = guid->ContainerPtrToValuePtr<void>(row);
+                bool identified = false;
+                for (auto* word : words) identified |= word->GetPropertyValueInContainer(data) != 0;
+                if (!identified) return true;
+                if (worn_type)
+                {
+                    auto* subtype = find<U::UClass>(worn_type);
+                    if (!subtype) return false;
+                    if (!klass->IsChildOf(subtype)) return true;
+                }
+            }
+            auto* defaults = klass->GetClassDefaultObject().Get();
+            if (!defaults || defaults->GetClassPrivate() != klass ||
+                !defaults->HasAnyFlags(U::RF_ClassDefaultObject)) return false;
+            if (backpack)
+            {
+                auto* category = field<U::FByteProperty>(defaults, STR("ItemType"));
+                auto* forced = field<U::FBoolProperty>(defaults, STR("ForcePassives_InBackPack"));
+                if (!category || !forced) return false;
+                if (category->GetPropertyValueInContainer(defaults) != 0 &&
+                    !forced->GetPropertyValueInContainer(defaults)) return true;
+            }
+            auto* passives = field<U::FArrayProperty>(defaults, STR("PassiveEffects"));
+            auto* text = passives ? U::CastField<U::FStrProperty>(passives->GetInner()) : nullptr;
+            if (!text || text->GetArrayDim() != 1 || text->GetOffset_Internal() != 0) return false;
+            U::FScriptArrayHelper effects(passives, passives->ContainerPtrToValuePtr<void>(defaults));
+            if (effects.Num() < 0 || effects.Num() > max_effects) return false;
+            for (int index = 0; index < effects.Num(); ++index)
+            {
+                const auto& authored = text->GetPropertyValue(effects.GetRawPtr(index));
+                if (authored.Len() < 0 || authored.Len() > 256) return false;
+                if (!authored.IsEmpty()) counts.gear += U::FName{*authored, U::FNAME_Find} == sought;
+            }
+            return true;
+        };
+
+        const auto exact = [&](U::FStructProperty* prop) { return prop && prop->GetStruct().Get() == type; };
+        constexpr std::array stores{std::pair{STR("PlayerBackpack"), true}, std::pair{STR("PlayerEquipment"), false}};
+        for (const auto& [store, backpack] : stores)
+        {
+            auto* property = field<U::FArrayProperty>(save, store);
+            if (!property || !exact(U::CastField<U::FStructProperty>(property->GetInner()))) return false;
+            U::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(save));
+            if (rows.Num() < 0 || rows.Num() > max_inventory) return false;
+            for (int index = 0; index < rows.Num(); ++index)
+                if (!visit(rows.GetRawPtr(index), backpack)) return false;
+        }
+        auto* armor = field<U::FStructProperty>(save, STR("PlayerArmor"));
+        auto* helmet = field<U::FStructProperty>(save, STR("PlayerHelmet"));
+        return exact(armor) && exact(helmet) &&
+            visit(armor->ContainerPtrToValuePtr<void>(save), false,
+                  STR("/Game/Classes/Armor_Items/Item_ArmorMaster_BP.Item_ArmorMaster_BP_C")) &&
+            visit(helmet->ContainerPtrToValuePtr<void>(save), false,
+                  STR("/Game/Classes/Armor_Items/Item_HelmetMaster_BP.Item_HelmetMaster_BP_C"));
+    }
+
+    bool count_bounty(U::UObject* save, const U::FName& name, BountyCounts& counts)
+    {
+        return count_owned_effects(save, name, counts) && count_inventory_effects(save, name, counts) &&
+            counts.total() <= max_cache_effects;
+    }
+
+    bool cache_snapshot(U::UObject* instance, BountyState& state, bool compare)
+    {
+        auto* property = field<U::FArrayProperty>(instance, STR("PassiveEffects"));
+        auto* names = name_entries(property);
+        if (!names || state.name.IsNone()) return false;
+        U::FScriptArrayHelper cache(property, property->ContainerPtrToValuePtr<void>(instance));
+        const int size = cache.Num();
+        if (size < 0 || size > max_cache_effects || (compare && size != state.cache_size)) return false;
+        if (!compare)
+        {
+            state.cache_size = size;
+            state.cache_bounty = 0;
+        }
+        for (int index = 0; index < size; ++index)
+        {
+            const auto name = names->GetPropertyValue(cache.GetRawPtr(index));
+            auto& previous = state.cache[static_cast<std::size_t>(index)];
+            if (compare && previous != name) return false;
+            if (!compare)
+            {
+                state.cache_bounty += name == state.name;
+                previous = name;
+            }
+        }
+        return true;
+    }
+
+
     struct Hit
     {
         U::FFrame* frame{};
@@ -147,7 +334,9 @@ namespace
     {
         std::string_view status{"watching"};
         int hits{}, loot_calls{}, bounty_calls{}, bounty_instances{}, ammo_count{};
-        bool bounty_active{};
+        bool bounty_active{}, original_bounty_active{}, cache_unchanged{};
+        int original_bounty_instances{}, bounty_overrides{};
+        std::string_view bounty_source{"pending"};
         U::FWeakObjectPtr killer{};
         std::string_view role{"-"};
         std::string killer_name, projectile, ammo_actor, ammo_class;
@@ -161,6 +350,7 @@ namespace
         Schema schema{};
         Hit hit{};
         Proof proof{};
+        BountyState bounty{};
         U::FFrame* loot_frame{};
         Clock::time_point until{};
         std::uint64_t generation{};
@@ -264,6 +454,7 @@ namespace
         return actor && item && master && npc->IsA(master) && schema.bullet && schema.ammo && schema.ammo->IsChildOf(item) &&
             schema.deal && npc->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) == schema.deal &&
             schema.feedback && schema.die && schema.script && schema.loot && schema.calc && schema.passive &&
+            schema.passive->GetParmsSize() == 16 &&
             schema.chance && schema.chance->GetOuterPrivate() == master && schema.chance->GetNumParms() == 2 &&
             U::CastField<U::FBoolProperty>(schema.chance->GetReturnProperty()) &&
             schema.health && schema.instigator && schema.instigator->GetPropertyClass().Get() == actor &&
@@ -321,6 +512,7 @@ namespace
             !set_participant(next.host, home, controller, store, local) ||
             !set_participant(next.guest, peer, controller, store, connection) || !current(next))
             return "stock_enemy_loot_authority_or_roster_unavailable";
+        next.bounty.name = U::FName{STR("Bounty"), U::FNAME_Find};
         return bind_schema(next) ? std::string_view{} : "stock_enemy_loot_blueprint_schema_unavailable";
     }
 
@@ -358,6 +550,33 @@ namespace
         scope.hit = {&frame, U::FWeakObjectPtr{killer}, RC::to_utf8_string(actor->GetFullName()), health, false};
     }
 
+    void prepare_bounty(U::UObject* killer)
+    {
+        auto& bounty = scope.bounty;
+        auto& proof = scope.proof;
+        bounty.counts = {};
+        bounty.cache_size = -1;
+        if (!cache_snapshot(scope.instance.Get(), bounty, false))
+        {
+            proof.bounty_source = "unqualified";
+            return;
+        }
+        if (killer == scope.host.pawn.Get())
+        {
+            proof.bounty_source = "stock_host";
+            return;
+        }
+        BountyCounts counts;
+        if (killer != scope.guest.pawn.Get() || !count_bounty(scope.guest.save.Get(), bounty.name, counts))
+        {
+            proof.bounty_source = "unqualified";
+            return;
+        }
+        bounty.counts = counts;
+        proof.bounty_source = "guest_detached";
+    }
+
+
     void pre(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
     {
         if (!available() || object_receiver != scope.npc.Get() || frame.Object() != object_receiver ||
@@ -386,6 +605,7 @@ namespace
                 scope.proof.status = "stock_loot_killer_changed";
                 return;
             }
+            prepare_bounty(scope.proof.killer.Get());
             scope.loot_frame = &frame;
             ++scope.proof.loot_calls;
         }
@@ -424,24 +644,63 @@ namespace
     {
         auto* caller = frame.PreviousFrame();
         const auto& schema = scope.schema;
-        if (iteration.OriginalFunctionCallPrevented() || instance != scope.instance.Get() || !frame.Locals() ||
-            !caller || caller->Node() != schema.chance || caller->Object() != scope.npc.Get() ||
+        auto& proof = scope.proof;
+        auto& bounty = scope.bounty;
+        if (iteration.OriginalFunctionCallPrevented() || instance != scope.instance.Get() || frame.Object() != instance ||
+            !frame.Locals() || !caller || caller->Node() != schema.chance || caller->Object() != scope.npc.Get() ||
             caller->PreviousFrame() != scope.loot_frame ||
-            schema.effect->GetPropertyValueInContainer(frame.Locals()).ToString() != STR("Bounty") ||
+            schema.effect->GetPropertyValueInContainer(frame.Locals()) != bounty.name ||
             !schema.count->GetPropertyValueInContainer(frame.Locals())) return;
         auto* active = output(frame, schema.bounty);
         auto* instances = output(frame, schema.instances);
-        if (!active || !instances || reinterpret_cast<Address>(instances) % alignof(std::int32_t) != 0) return;
-        const auto count = schema.instances->GetPropertyValue(instances);
-        if (count < 0) return;
-        const auto value = schema.bounty->GetPropertyValue(active);
-        if (scope.proof.bounty_calls && (scope.proof.bounty_active != value || scope.proof.bounty_instances != count))
+        if (!active || !instances || active == instances || reinterpret_cast<Address>(instances) % alignof(std::int32_t) != 0)
         {
-            scope.proof.status = "stock_bounty_cache_changed_during_loot";
+            proof.bounty_source = "unqualified";
+            return;
         }
-        ++scope.proof.bounty_calls;
-        scope.proof.bounty_active = value;
-        scope.proof.bounty_instances = count;
+        const auto stock_count = schema.instances->GetPropertyValue(instances);
+        const auto stock_active = schema.bounty->GetPropertyValue(active);
+        if (stock_count < 0 || stock_active != (stock_count > 0))
+        {
+            proof.bounty_source = "unqualified";
+            return;
+        }
+        if (proof.bounty_calls && (proof.original_bounty_active != stock_active || proof.original_bounty_instances != stock_count))
+        {
+            proof.status = "stock_bounty_cache_changed_during_loot";
+            proof.bounty_source = "unqualified";
+        }
+        ++proof.bounty_calls;
+        proof.original_bounty_active = stock_active;
+        proof.original_bounty_instances = stock_count;
+        if (proof.bounty_source == "guest_detached")
+        {
+            if (!current(scope) || proof.killer.Get() != scope.guest.pawn.Get() ||
+                object(scope.npc.Get(), STR("LastDamagedMe")) != proof.killer.Get() ||
+                stock_count != bounty.cache_bounty || !cache_snapshot(instance, bounty, true))
+            {
+                proof.bounty_source = "unqualified";
+                proof.status = "stock_bounty_source_changed_during_loot";
+            }
+            else
+            {
+                // This frame's exact out parms refer to the caller's local
+                // result. Never install the guest Save or recompile passives.
+                const auto total = bounty.counts.total();
+                schema.bounty->SetPropertyValue(active, total > 0);
+                schema.instances->SetPropertyValue(instances, total);
+                if (schema.instances->GetPropertyValue(instances) == total &&
+                    schema.bounty->GetPropertyValue(active) == (total > 0))
+                    ++proof.bounty_overrides;
+                else
+                {
+                    proof.bounty_source = "unqualified";
+                    proof.status = "mutation_unverified_stock_bounty_result";
+                }
+            }
+        }
+        proof.bounty_active = schema.bounty->GetPropertyValue(active);
+        proof.bounty_instances = schema.instances->GetPropertyValue(instances);
     }
 
     void finish_loot(Iteration& iteration, U::UObject* npc, U::FFrame& frame)
@@ -449,6 +708,9 @@ namespace
         scope.loot_frame = nullptr;
         if (iteration.OriginalFunctionCallPrevented() || !frame.Locals() || !current(scope) ||
             object(npc, STR("LastDamagedMe")) != scope.proof.killer.Get()) return;
+        scope.proof.cache_unchanged = cache_snapshot(scope.instance.Get(), scope.bounty, true);
+        if (!scope.proof.cache_unchanged && scope.proof.bounty_overrides)
+            scope.proof.status = "stock_bounty_cache_changed_during_loot";
         if (scope.proof.status == "stock_kill_confirmed") scope.proof.status = "stock_loot_observed";
         auto* ammo = scope.schema.ammo_result->GetObjectPropertyValue(
             scope.schema.ammo_result->ContainerPtrToValuePtr<void>(frame.Locals()));
@@ -491,6 +753,40 @@ namespace
         return 2;
     }
 
+    std::string_view seed_bounty_fixture(Scope& next)
+    {
+        auto* guest_save = next.guest.save.Get();
+        auto* instance = next.instance.Get();
+        auto& bounty = next.bounty;
+        BountyCounts before;
+        if (!count_bounty(guest_save, bounty.name, before) || !cache_snapshot(instance, bounty, false) ||
+            bounty.cache_bounty != 0) return "stock_bounty_fixture_requires_clean_host_cache";
+        if (before.total() == 1 && before.permanent == 1) return {};
+        if (before.total() != 0) return "stock_bounty_fixture_requires_unmodified_guest_traits";
+
+        void* data{};
+        auto* property = permanent_effects(guest_save, data);
+        auto* names = name_entries(property);
+        if (!property || !names) return "stock_bounty_fixture_permanent_effects_unavailable";
+        U::FScriptArrayHelper permanent(property, data);
+        const auto size = permanent.Num();
+        if (size < 0 || size >= max_effects) return "stock_bounty_fixture_permanent_effects_full";
+        const auto index = permanent.AddValue();
+        if (index != size || permanent.Num() != size + 1) return "mutation_unverified_stock_bounty_append";
+        names->SetPropertyValue(permanent.GetRawPtr(index), bounty.name);
+        BountyCounts after;
+        if (current(next) && cache_snapshot(instance, bounty, true) &&
+            count_bounty(guest_save, bounty.name, after) && after.permanent == 1 && after.total() == 1)
+            return {};
+
+        permanent.RemoveValues(index);
+        BountyCounts restored;
+        return current(next) && permanent.Num() == size && cache_snapshot(instance, bounty, true) &&
+            count_bounty(guest_save, bounty.name, restored) && restored.total() == before.total()
+            ? "stock_bounty_fixture_refused_after_rollback" : "mutation_unverified_stock_bounty_fixture";
+    }
+
+
     int set_scope(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
@@ -511,6 +807,10 @@ namespace
         Scope next;
         if (const auto error = bind(next, static_cast<Address>(host), static_cast<Address>(guest), static_cast<Address>(actor));
             !error.empty()) return answer(lua, false, error);
+        if (env("SILVERFISH_COOP_NATIVE_ENEMY_BOUNTY_FIXTURE"))
+        {
+            if (const auto error = seed_bounty_fixture(next); !error.empty()) return answer(lua, false, error);
+        }
         next.until = Clock::now() + lease;
         scope = std::move(next);
         return answer(lua, true, scope.proof.status);
@@ -538,7 +838,15 @@ namespace
         lua.set_string(report.ammo_actor);
         lua.set_string(report.ammo_class);
         lua.set_integer(report.ammo_count);
-        return 15;
+        lua.set_string(report.bounty_source);
+        lua.set_integer(report.bounty_overrides);
+        lua.set_bool(report.original_bounty_active);
+        lua.set_integer(report.original_bounty_instances);
+        lua.set_integer(scope.bounty.counts.permanent);
+        lua.set_integer(scope.bounty.counts.timed);
+        lua.set_integer(scope.bounty.counts.gear);
+        lua.set_bool(report.cache_unchanged);
+        return 23;
     }
 
     int clear(const Lua&)

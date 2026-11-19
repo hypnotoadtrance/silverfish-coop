@@ -43,17 +43,25 @@ async def wait(directory: Path, predicate, *, timeout=42) -> dict:
 
 
 async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: bool, require_movement: bool,
-                   require_damage: bool, enemy_loot: bool, original_save: Path | None) -> dict:
+                   require_damage: bool, enemy_loot: bool, original_save: Path | None,
+                   enemy_bounty: bool = False) -> dict:
     profile = f"bandit-{subject}-{uuid.uuid4().hex[:8]}"
     run = work / "campaigns" / profile / "run"
     guest_run = work / "clients" / profile / "run"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     environment = dict(os.environ, SILVERFISH_COOP_NATIVE_NPC_TEST="1")
     environment.pop("SILVERFISH_COOP_NATIVE_NPC_HOSTILE", None)
+    environment.pop("SILVERFISH_COOP_NATIVE_ENEMY_BOUNTY_FIXTURE", None)
+    if enemy_bounty:
+        environment["SILVERFISH_COOP_NATIVE_ENEMY_BOUNTY_FIXTURE"] = "1"
     if hostile:
         environment["SILVERFISH_COOP_NATIVE_NPC_HOSTILE"] = "1"
     if enemy_loot:
         environment["SILVERFISH_COOP_NATIVE_ENEMY_LOOT"] = "1"
+    if enemy_loot:
+        if str(REPO) not in sys.path:
+            sys.path.insert(0, str(REPO))
+        from tools.silverfish.control import submit
     original = saved_hashes(original_save) if original_save else None
     processes = []
     print(run, flush=True)
@@ -69,6 +77,15 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise RuntimeError(f"{arguments}: {reply}")
         return reply
 
+    async def combat_action(directory: Path, action: str, target: str | None = None) -> dict:
+        return await submit(directory, action, target=target)
+
+    def accepted(action, reply):
+        if reply.get("ok") is not True:
+            raise RuntimeError(f"{action}: {reply.get('error', 'control request failed')}")
+        return reply
+
+
     async def start(log_name, controller, *arguments):
         run.mkdir(parents=True, exist_ok=True)
         with (run / log_name).open("wb") as stream:
@@ -78,7 +95,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
 
     host = ("--campaign", profile)
     client = ("--profile", profile)
-    evidence = {"subject": subject, "hostile": hostile}
+    evidence = {"subject": subject, "hostile": hostile, "bounty_fixture": enemy_bounty}
     try:
         await start("host.txt", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--start-zone", MAP)
@@ -99,10 +116,25 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         assert denied["spawner_denials"] > 0 and denied["authority_count"] == denied["simulated_count"] == 0, denied
         evidence["stock_client_spawn_denied"] = denied
 
+        weapon_guid, remaining = None, None
+        if enemy_loot:
+            await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            seeded = accepted("seed stock pistol", await combat_action(run, "native-guest-weapon-seed-light-pistol"))
+            weapon_guid = seeded["native_guest_weapon"]["guid"]
+            equipped = accepted("equip stock pistol", await combat_action(guest_run, "native-guest-weapon-equip", weapon_guid))
+            proof = equipped["native_guest_weapon"]
+            assert proof["status"] == "equipped" and proof["pawn"] == exact_pawn and proof["guid"] == weapon_guid, proof
+            remaining = proof["stored_ammo"]
+            accepted("seed stock reserve", await combat_action(run, "native-guest-weapon-seed-ammo"))
+
         await command("action", *host, "native-bandit-position", "--target", subject)
         await command("action", *host, "native-bandit-spawn")
         server_spawn = bandit(await wait(run, lambda state: bandit(state).get("status") == "stock_bandit_authority"
                                              and bandit(state).get("initialized")))
+        target = server_spawn["npc"]
+        if enemy_loot:
+            armed = accepted("watch stock Bandit", await combat_action(run, "native-enemy-loot-watch", target))["native_enemy_loot"]
+            assert armed["state"] == "watching" and armed["bandit"] == target, armed
         replica_spawn = bandit(await wait(guest_run, lambda state: bandit(state).get("status") == "stock_bandit_replica"
                                               and bandit(state).get("replica_ai_denials", 0) > 0))
         assert server_spawn["role"] == 3 and server_spawn["authority_count"] == 1 and server_spawn["simulated_count"] == 0, server_spawn
@@ -151,35 +183,94 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         if require_damage and not (damage and damage["other_player_untouched"]):
             raise AssertionError("The Bandit did not damage the exposed pawn independently of the other pawn")
         if enemy_loot:
-            target = server_spawn["npc"]
-            armed = (await command("action", *host, "native-enemy-loot-watch", "--target", target))["native_enemy_loot"]
-            assert armed["state"] == "watching" and armed["bandit"] == target, armed
-            seeded = (await command("action", *host, "native-guest-weapon-seed-light-pistol"))["native_guest_weapon"]
-            guid = seeded["guid"]
-            await command("action", *client, "native-guest-weapon-equip", "--target", guid)
-            await command("action", *host, "native-guest-weapon-seed-ammo")
-            remaining = seeded["stored_ammo"]
-            shots, observed = [], {}
-            for _ in range(12):
-                if remaining < 2:
-                    loaded = (await command("action", *client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
-                    remaining = loaded["after"]
-                aim = await command("action", *host, "native-bandit-aim-fixture", "--target", target)
-                fired = (await command("action", *client, "native-guest-weapon-fire", "--target", guid))["native_guest_weapon"]
-                remaining = fired["after"]
-                shots.append({"aim": aim.get("native_bandit_aim"), "shot": fired})
-                await asyncio.sleep(.4)
-                observed = status(run).get("game", {}).get("native_enemy_loot", {})
-                if observed.get("state") in ("stock_kill_confirmed", "stock_loot_observed"):
-                    break
+            def read_observer(current):
+                return current.get("game", {}).get("native_enemy_loot", {})
+
+            def killed(current):
+                return read_observer(current).get("state") in {"stock_kill_confirmed", "stock_loot_observed"}
+
+            def guest_downed(current):
+                return current.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed") is True
+
+            shots, revivals = [], []
             evidence["stock_projectile_proofs"] = shots
-            evidence["enemy_loot_last"] = observed
-            observed = (await wait(run, lambda state: state.get("game", {}).get("native_enemy_loot", {}).get("state")
-                                   == "stock_loot_observed", timeout=12))["game"]["native_enemy_loot"]
-            assert observed["killer_role"] == "guest" and observed["killer_pawn"] == exact_pawn, observed
-            assert observed["hits"] > 0 and observed["loot_calls"] == 1 and observed["bounty_calls"] > 0, observed
+            evidence["ordinary_guest_revivals"] = revivals
+            for _ in range(20):
+                current = status(run)
+                evidence["enemy_loot_last"] = read_observer(current)
+                if killed(current) or len(shots) >= 12:
+                    break
+                if guest_downed(current):
+                    if len(revivals) >= 4:
+                        raise AssertionError("The guest reached four ordinary revives before a stock kill")
+                    if current["gameplay"]["players"]["host"]["downed"]:
+                        raise AssertionError("Both stock players were downed in the Bandit fixture")
+                    prepared = await wait(run, lambda state: killed(state) or (
+                        guest_downed(state)
+                        and state.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
+                    ), timeout=4)
+                    if killed(prepared):
+                        break
+                    approach = await combat_action(run, "native-bandit-aim-fixture", target)
+                    if killed(status(run)):
+                        break
+                    accepted("stage host inside ordinary revive range", approach)
+                    reply = accepted("revive exact guest", await combat_action(run, "interact", invitation["character_id"]))
+                    assert reply["effect"] == "revive" and reply["target"] == invitation["character_id"], reply
+                    standing = await wait(run, lambda state: killed(state) or (
+                        not guest_downed(state)
+                        and state.get("game", {}).get("native_guest_revivals", {}).get(exact_pawn)
+                    ), timeout=7)
+                    if killed(standing):
+                        break
+                    restored = standing["game"]["native_guest_revivals"][exact_pawn]
+                    assert restored["owner"] == invitation["character_id"] and math.isclose(
+                        restored["health"], restored["maximum"] * .10, abs_tol=.01
+                    ), restored
+                    revivals.append({"interaction": reply, "native": restored})
+
+                if remaining < 2:
+                    loaded = await combat_action(guest_run, "native-guest-weapon-reload", weapon_guid)
+                    if loaded.get("error") == "downed":
+                        await wait(run, lambda state: killed(state) or guest_downed(state), timeout=4)
+                        continue
+                    remaining = accepted("reload stock pistol", loaded)["native_guest_weapon"]["after"]
+                fire = await combat_action(run, "native-bandit-shot-fixture", f"{target}|{weapon_guid}")
+                if not fire["ok"]:
+                    if killed(status(run)):
+                        break
+                    if fire.get("error") in {"downed", "guest_weapon_primary_ineligible",
+                                              "The verified standing guest, stock equipped weapon or living Bandit is unavailable"}:
+                        await wait(run, lambda state: killed(state) or guest_downed(state), timeout=4)
+                        continue
+                    if fire.get("error") == "No exact stock Bandit line of fire from the qualified staging points":
+                        continue
+                    accepted("aim and fire the stock pistol", fire)
+                aim = fire["native_bandit_aim"]
+                assert (aim["bandit"], aim["pawn"]) == (target, exact_pawn), aim
+                fired = fire["native_guest_weapon"]
+                assert (fired["pawn"], fired["guid"], fired["before"], fired["after"], fired["projectiles"]) == (
+                    exact_pawn, weapon_guid, remaining, remaining - 1, 1
+                ), fired
+                remaining = fired["after"]
+                shots.append({"aim": aim, "shot": fired})
+            resolved = await wait(run, lambda state: read_observer(state).get("state") == "stock_loot_observed",
+                                  timeout=12)
+            observed = resolved["game"]["native_enemy_loot"]
+            assert observed["bandit"] == target and observed["killer_role"] == "guest" and observed["killer_pawn"] == exact_pawn, observed
+            assert shots and observed["hits"] > 0 and observed["loot_calls"] == 1 and observed["bounty_calls"] > 0, observed
             assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"] != "-", observed
             evidence["enemy_loot_from_exact_guest_projectile"] = observed
+            bounty = resolved["game"].get("native_enemy_bounty")
+            if bounty is not None:
+                evidence["stock_enemy_bounty_scope"] = bounty
+            if enemy_bounty:
+                assert observed["bounty_active"] is True and observed["bounty_instances"] == 1, observed
+                assert bounty and (bounty["map"], bounty["bandit"], bounty["source"]) == (MAP, target, "guest_detached"), bounty
+                assert (bounty["override_count"], bounty["original_active"], bounty["original_instances"],
+                        bounty["permanent_count"], bounty["timed_count"], bounty["gear_count"], bounty["cache_unchanged"]) == (
+                    observed["bounty_calls"], False, 0, 1, 0, 0, True
+                ), bounty
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:
@@ -204,7 +295,7 @@ async def main(args) -> None:
     for subject in subjects:
         await exercise(args.work.resolve(), subject, hostile=args.hostile, require_combat=args.require_combat,
                        require_movement=args.require_movement, require_damage=args.require_damage,
-                       enemy_loot=args.enemy_loot, original_save=args.vanilla_saved)
+                       enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty)
 
 
 if __name__ == "__main__":
@@ -216,8 +307,10 @@ if __name__ == "__main__":
     parser.add_argument("--require-movement", action="store_true")
     parser.add_argument("--require-damage", action="store_true")
     parser.add_argument("--enemy-loot", action="store_true", help="verify stock enemy loot attribution to the guest")
+    parser.add_argument("--enemy-bounty", action="store_true", help="verify a detached Bounty perk against an empty host cache")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
+    args.enemy_loot = args.enemy_loot or args.enemy_bounty
     if args.enemy_loot and (args.subject != "guest" or args.hostile):
         parser.error("The stock shot and loot fixture uses a nonaggressive Bandit and --subject guest")
     if args.require_damage and not args.hostile:

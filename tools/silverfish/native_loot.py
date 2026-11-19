@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import uuid
 
 from . import native_host_save, party
 from .native_gold import valid_guid
@@ -45,6 +46,92 @@ async def project_opened(bridge, game: dict, roll: dict | None) -> dict:
     if (proof.get("map"), proof.get("crate"), proof.get("state")) != (CROSSROADS, CRATE, "exhausted"):
         raise RuntimeError("The stock crate did not reflect its committed roll")
     return snapshot
+
+
+class LootView:
+    def __init__(self, bridge, control):
+        self.bridge = bridge
+        self.control = control
+        self.event_offset = 0
+        self.last_sequence = 0
+        self.pending_event = []
+        self.scope = None
+        self.next_lease = 0.0
+        self.claimed = set()
+        self.previous_items = None
+
+    def read_claim(self) -> list[str]:
+        try:
+            with (self.bridge.directory / "native-loot-view-events").open("rb") as stream:
+                stream.seek(self.event_offset)
+                data = stream.read(4096)
+        except OSError:
+            return []
+        end = data.rfind(b"\n") + 1
+        if not end:
+            if len(data) == 4096:
+                self.event_offset += len(data)
+            return []
+        self.event_offset += end
+        return data[:end].splitlines()[-1].decode("utf-8", errors="replace").split("\t")
+
+    async def fixture(self, action: str, target: str | None) -> dict:
+        if not self.scope or target not in ("close", "previous", "next", "take"):
+            raise ValueError("Select an input for the active staged crate view")
+        return await self.bridge.command(action, *self.scope, target, timeout=4)
+
+    async def sync(self, game: dict, roll: dict | None, claim) -> dict:
+        event = self.read_claim() or self.pending_event
+        view = game.get("native_loot_view", {})
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        if (not roll or game.get("map") != CROSSROADS or roll.get("map") != CROSSROADS or roll.get("crate") != CRATE
+                or not pawn or view.get("pawn") != pawn or not party.REQUEST_ID.fullmatch(str(roll.get("id", "")))):
+            self.scope = self.previous_items = None
+            self.next_lease = 0.0
+            self.claimed.clear()
+            self.pending_event = []
+            return game
+        scope = roll["id"], pawn
+        if scope != self.scope:
+            self.scope = scope
+            self.previous_items = None
+            self.next_lease = 0.0
+            self.claimed.clear()
+        rows = {row["guid"]: row for row in roll["items"] if not row.get("claimed_by")}
+        self.pending_event = []
+        valid_event = (len(event) == 5 and event[0] == "crate-view" and tuple(event[2:4]) == scope
+                       and event[1].isascii() and event[1].isdigit() and len(event[1]) <= 16
+                       and self.last_sequence < (sequence := int(event[1]))
+                       and (guid := event[4]) in rows and guid not in self.claimed)
+        if valid_event and (view.get("id"), view.get("state"), view.get("sequence"), view.get("guid")) != (
+                scope[0], "claiming", sequence, guid):
+            self.pending_event = event
+        elif valid_event:
+            self.last_sequence = sequence
+            operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{scope}:{sequence}").hex
+            try:
+                result = await claim(operation, guid)
+                if result["native_loot_claim"]["guid"] != guid:
+                    raise RuntimeError("The crate response did not match the selected item")
+                self.claimed.add(guid)
+                self.control.event("native_stock_crate_item_taken", operation_id=operation, **result)
+            except (KeyError, OSError, ValueError, RuntimeError) as error:
+                self.control.event("native_stock_crate_item_rejected", operation_id=operation, reason=str(error))
+                try:
+                    game = await self.bridge.command("native-loot-view-result", *scope, "refresh", timeout=2)
+                except (OSError, TimeoutError, RuntimeError):
+                    pass
+        fields = tuple(f"{guid}|{row['class_path']}" for guid, row in rows.items() if guid not in self.claimed)
+        now = time.monotonic()
+        if (fields or self.previous_items) and (now >= self.next_lease or fields != self.previous_items):
+            self.next_lease = now + .75
+            self.previous_items = fields
+            try:
+                return await self.bridge.command("native-loot-view-render", *scope, *fields, timeout=2)
+            except (OSError, TimeoutError, RuntimeError) as error:
+                if str(error) != "stock_crate_view_scope_unavailable":
+                    self.control.event("native_stock_crate_view_error", reason=str(error))
+        return game
 
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,

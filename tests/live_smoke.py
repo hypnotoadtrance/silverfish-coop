@@ -74,6 +74,7 @@ options.add_argument("--native-reload-input", action="store_true", help="dispatc
 options.add_argument("--native-loot", action="store_true", help="roll the qualified stock crate using an exact guest trait")
 options.add_argument("--native-loot-input", action="store_true", help="open the stock crate using its actual interaction binding")
 options.add_argument("--native-loot-nonempty", action="store_true", help="use a deterministic stock crate test draw")
+options.add_argument("--native-loot-view", action="store_true", help="claim a stock crate item through the guest overlay")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
 options.add_argument("--native-broker", action="store_true", help="exercise the stock Manifest quest and Broker redemption")
@@ -138,6 +139,8 @@ if args.native_loot and not (args.native_guest and args.native_roster and args.a
     options.error("--native-loot requires --native-guest, --native-roster and --authored-zone")
 if args.native_loot_nonempty and not args.native_loot:
     options.error("--native-loot-nonempty requires --native-loot")
+if args.native_loot_view and not (args.native_loot_nonempty and args.native_zones):
+    options.error("--native-loot-view requires --native-zones and a deterministic native loot draw")
 if args.native_shop and not (args.native_guest and args.native_quest_flow):
     options.error("--native-shop requires --native-guest and --native-quest-flow")
 if args.native_broker and (not args.native_zones or any((args.authored_zone, args.native_door, args.observatory_zone,
@@ -1665,8 +1668,23 @@ async def smoke():
                 claim_crate = None
                 if loot_roll["items"]:
                     loot_guid = loot_roll["items"][0]["guid"]
+                    operation = uuid.uuid4().hex
+                    if args.native_loot_view:
+                        panel = (await wait(client_run, lambda state: state.get("game", {}).get(
+                            "native_loot_view", {}).get("state") == "ready"))["game"]["native_loot_view"]
+                        assert panel["id"] == loot_roll["id"] and panel["guid"] == loot_guid, panel
+                        select = ("action", "--profile", profile, "native-loot-view-fixture", "--target", "take")
+                        assert (await command(*select))["native_loot_view"]["state"] == "confirming"
+                        assert (await command(*select))["native_loot_view"]["state"] == "claiming"
+                        await wait(client_run, lambda state: state.get("gameplay", {}).get(
+                            "native_loot_rolls", {}).get(NATIVE_LOOT_CRATE, {}).get("items", [{}])[0].get("claimed_by") == chosen)
+                        events = (await command("events", "--profile", profile, "--tail", "100"))["events"]
+                        accepted, = [event for event in events if event["event"] == "native_stock_crate_item_taken"]
+                        assert accepted["native_loot_claim"]["guid"] == loot_guid, accepted
+                        operation = accepted["operation_id"]
+                        note("stock_crate_overlay_selects_confirms_and_claims_the_exact_row", accepted)
                     claim_crate = ("action", "--profile", profile, "native-loot-claim", "--target", loot_guid,
-                                   "--operation-id", uuid.uuid4().hex)
+                                   "--operation-id", operation)
                     claim = (await command(*claim_crate))["native_loot_claim"]
                     assert claim["guid"] == loot_guid and claim["claimed_by"] == chosen, claim
                     assert (await command(*claim_crate))["native_loot_claim"] == claim

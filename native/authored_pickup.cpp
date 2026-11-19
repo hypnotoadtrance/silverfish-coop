@@ -33,9 +33,28 @@ namespace
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
 
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
-    constexpr auto source_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Item_CompBoard_C_2");
-    constexpr auto source_class = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
+    struct Profile
+    {
+        const U::TCHAR* world;
+        const U::TCHAR* actor;
+        const U::TCHAR* item_class;
+        double x, y, z;
+    };
+
+    constexpr std::array profiles{
+        Profile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.Item_CompBoard_C_2"),
+            STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"),
+            -5680.476689, -849.040347, 128.496287,
+        },
+        Profile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CopperWire_C_3"),
+            STR("/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
+            1299.7165908306, 3418.79597614179, 1239.49197257439,
+        },
+    };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -118,6 +137,7 @@ namespace
     struct Scope
     {
         U::FWeakObjectPtr world, pawn, actor, box, controller, driver;
+        const Profile* profile{};
         bool host{}, claimed{}, original_collision{}, original_hidden{};
     } scope;
 
@@ -153,7 +173,8 @@ namespace
         auto* pawn = state.pawn.Get();
         auto* controller = state.controller.Get();
         auto* driver = state.driver.Get();
-        if (!live(world) || !exact(pawn, pawn_path) || !exact(controller, controller_path) || !live(driver) ||
+        if (!live(world) || !state.profile || world->GetPathName() != state.profile->world ||
+            !exact(pawn, pawn_path) || !exact(controller, controller_path) || !live(driver) ||
             object(world, STR("NetDriver")) != driver || object(driver, STR("World")) != world ||
             !exact(object(world, STR("OwningGameInstance")), instance_path) ||
             static_cast<U::AActor*>(pawn)->GetWorld() != world || static_cast<U::AActor*>(controller)->GetWorld() != world ||
@@ -164,9 +185,17 @@ namespace
         return server_prop && (state.host ? !server && role(controller) == 3 : connection(driver, server));
     }
 
-    bool exact_source(U::UObject* actor, U::UObject* world)
+    const Profile* profile_for(U::UWorld* world)
     {
-        if (!exact(actor, source_class) || actor->GetPathName() != source_path ||
+        if (!live(world)) return nullptr;
+        const auto path = world->GetPathName();
+        const auto match = std::ranges::find_if(profiles, [&path](const auto& profile) { return path == profile.world; });
+        return match != profiles.end() ? &*match : nullptr;
+    }
+
+    bool exact_source(U::UObject* actor, U::UObject* world, const Profile& profile)
+    {
+        if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !boolean(actor, STR("Physics"), false) ||
             !boolean(actor, STR("Stacks"), false)) return false;
         auto* item = static_cast<U::AActor*>(actor);
@@ -174,9 +203,9 @@ namespace
         if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel")) ||
             !category || category->GetPropertyValueInContainer(actor) != 11) return false;
         auto position = item->K2_GetActorLocation();
-        const auto dx = position.GetX() - (-5680.476689);
-        const auto dy = position.GetY() - (-849.040347);
-        const auto dz = position.GetZ() - 128.496287;
+        const auto dx = position.GetX() - profile.x;
+        const auto dy = position.GetY() - profile.y;
+        const auto dz = position.GetZ() - profile.z;
         const auto squared = dx * dx + dy * dy + dz * dz;
         return std::isfinite(squared) && squared <= 25.0;
     }
@@ -215,7 +244,7 @@ namespace
     bool available()
     {
         auto* actor = scope.actor.Get();
-        return !scope.claimed && local_scope(scope) && exact_source(actor, scope.world.Get()) &&
+        return !scope.claimed && local_scope(scope) && exact_source(actor, scope.world.Get(), *scope.profile) &&
             source_box(actor) == scope.box.Get() && static_cast<U::AActor*>(actor)->GetActorEnableCollision() &&
             boolean(actor, STR("bHidden"), false);
     }
@@ -223,7 +252,7 @@ namespace
     bool set_visibility(bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (!local_scope(scope) || !exact_source(actor, scope.world.Get())) return false;
+        if (!local_scope(scope) || !exact_source(actor, scope.world.Get(), *scope.profile)) return false;
         const bool hidden = claimed || scope.original_hidden;
         const bool collision = !claimed && scope.original_collision;
         actor->SetActorHiddenInGame(hidden);
@@ -356,9 +385,9 @@ namespace
             return result;
         }
 
-        bool authored(const void* value) const
+        bool authored(const void* value, U::UClass* item_class) const
         {
-            return read(klass, value) == find<U::UClass>(source_class) && identity(value) != Guid{};
+            return item_class && read(klass, value) == item_class && identity(value) != Guid{};
         }
 
         template<class T>
@@ -372,7 +401,7 @@ namespace
         bool matches_actor(const void* value, U::UObject* actor) const
         {
             auto* actor_payload = field<U::FStructProperty>(actor, STR("DataStruct"));
-            return authored(value) && actor_payload && actor_payload->GetStruct().Get() == payload->GetStruct().Get() &&
+            return authored(value, actor->GetClassPrivate()) && actor_payload && actor_payload->GetStruct().Get() == payload->GetStruct().Get() &&
                 matches<U::FIntProperty>(value, actor, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"), STR("Ammo")) &&
                 matches<U::FDoubleProperty>(value, actor, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"), STR("Weight")) &&
                 matches<U::FIntProperty>(value, actor, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"), STR("Value")) &&
@@ -455,15 +484,16 @@ namespace
         if (address(scope.pawn.Get()) == ptr && host == scope.host && local_scope(scope))
             return result(lua, true, "authored_pickup_scope_bound");
         clear();
-        auto* world = find<U::UWorld>(world_path);
         auto* pawn = live_address(ptr, find<U::UClass>(pawn_path));
-        auto* actor = find<U::AActor>(source_path);
+        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        const auto* profile = profile_for(world);
+        auto* actor = profile ? find<U::AActor>(profile->actor) : nullptr;
         auto* box = source_box(actor);
-        if (!live(world) || !box || !exact_source(actor, world) || !interaction() ||
+        if (!profile || !box || !exact_source(actor, world, *profile) || !interaction() ||
             !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
             return result(lua, false, "authored_pickup_stock_actor_unavailable");
         Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
-            host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
+            profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
         if (!local_scope(next)) return result(lua, false, "authored_pickup_local_controller_unavailable");
         scope = next;
         return result(lua, true, "authored_pickup_scope_bound");
@@ -489,7 +519,7 @@ namespace
 
     int status(const Lua& lua)
     {
-        const bool active = ready() && local_scope(scope) && exact_source(scope.actor.Get(), scope.world.Get());
+        const bool active = ready() && local_scope(scope) && exact_source(scope.actor.Get(), scope.world.Get(), *scope.profile);
         const bool emitted = active && Clock::now() < observed.expires;
         lua.set_bool(active);
         lua.set_bool(active && scope.claimed);
@@ -532,14 +562,16 @@ namespace
         const auto initial = static_cast<Address>(lua.get_integer());
         const auto reloaded = static_cast<Address>(lua.get_integer());
         RowSchema rows;
-        if (initial == reloaded || !rows.bind()) return result(lua, false, "authored_pickup_verify_schema_unavailable");
+        if (initial == reloaded || !available() || !scope.host || !rows.bind())
+            return result(lua, false, "authored_pickup_verify_schema_unavailable");
+        auto* item_class = find<U::UClass>(scope.profile->item_class);
         auto* first = isolated(initial, rows);
         auto* second = isolated(reloaded, rows);
         if (!first || !second) return result(lua, false, "authored_pickup_isolated_escrow_required");
         U::FScriptArrayHelper a(rows.array, rows.array->ContainerPtrToValuePtr<void>(first));
         U::FScriptArrayHelper b(rows.array, rows.array->ContainerPtrToValuePtr<void>(second));
         const bool ok = a.Num() == 1 && b.Num() == 1 && a.GetRawPtr(0) != b.GetRawPtr(0) &&
-            rows.authored(a.GetRawPtr(0)) && rows.identical(a.GetRawPtr(0), b.GetRawPtr(0));
+            rows.authored(a.GetRawPtr(0), item_class) && rows.identical(a.GetRawPtr(0), b.GetRawPtr(0));
         return result(lua, ok, ok ? "identical" : "authored_pickup_escrow_payload_changed");
     }
 
@@ -575,11 +607,11 @@ namespace silverfish::native_authored_pickup
         callbacks[0] = Hook::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* context, U::UFunction* fn, void* parms) {
                 intercept(call, context, fn, parms, nullptr);
-            }, {false, false, STR("SilverfishCoopNative"), STR("Qualify Observatory loose pickup event")});
+            }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup event")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
                 intercept(call, context, frame.Node(), frame.Locals(), &frame);
-            }, {false, false, STR("SilverfishCoopNative"), STR("Qualify Observatory loose pickup script")});
+            }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup script")});
         const bool ok = std::ranges::all_of(callbacks, [](auto id) { return id != Hook::ERROR_ID; });
         if (!ok) uninstall_hooks();
         installed.store(ok, std::memory_order_release);

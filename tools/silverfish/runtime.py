@@ -408,6 +408,7 @@ class Bridge:
         self.primary_input_offset = 0
         self.shop_view_offset = 0
         self.broker_input_offset = 0
+        self.wire_board_offset = 0
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -526,6 +527,25 @@ class Bridge:
                     and len(fields[1]) <= 16 and 0 < (sequence := int(fields[1])) < 2**53
                     and len(fields[2]) <= 256 and all(len(value) <= 512 for value in fields[3:])):
                 events.append((sequence, *fields[2:]))
+        return events
+
+    def native_wire_board_requests(self) -> list[tuple[int, int, str, str, str, str, str]]:
+        try:
+            with (self.directory / "native-wire-board-events").open("rb") as stream:
+                stream.seek(self.wire_board_offset)
+                batch = stream.read(8192)
+        except OSError:
+            return []
+        end = batch.rfind(b"\n") + 1
+        self.wire_board_offset += end if end else len(batch) if len(batch) == 8192 else 0
+        events = []
+        for line in batch[:end].splitlines():
+            fields = line.decode("utf-8", errors="replace").split("\t")
+            if (len(fields) == 8 and fields[0] == "wire-board" and fields[3] in ("view", "start", "turnin")
+                    and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
+                            for value in fields[1:3])
+                    and all(0 < len(value) <= 512 for value in fields[4:])):
+                events.append((int(fields[1]), int(fields[2]), *fields[3:]))
         return events
 
     def native_deaths(self) -> list[tuple[str, str, str | None]]:
@@ -782,6 +802,9 @@ class Bridge:
                 elif fields[0] == "native-broker-input" and len(fields) == 6:
                     data["native_broker_input"] = {"map": fields[1], "pawn": fields[2], "station": fields[3],
                                                    "state": fields[4], "sequence": int(fields[5])}
+                elif fields[0] == "native-wire-board" and len(fields) == 8:
+                    data["native_wire_board"] = dict(zip(("map", "pawn", "board", "quest", "state"), fields[1:6]),
+                                                     sequence=int(fields[6]), open=int(fields[7]))
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
                 elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
@@ -797,6 +820,13 @@ class Bridge:
                                                  "loot_calls": int(fields[11]), "bounty_calls": int(fields[12]), "bounty_active": fields[13] == "1",
                                                  "bounty_instances": int(fields[14]), "ammo_actor": fields[15], "ammo_class": fields[16],
                                                  "ammo_quantity": int(fields[17])}
+                elif fields[0] == "native-enemy-bounty" and len(fields) == 11:
+                    data["native_enemy_bounty"] = {
+                        "map": fields[1], "bandit": fields[2], "source": fields[3], "override_count": int(fields[4]),
+                        "original_active": fields[5] == "1", "original_instances": int(fields[6]),
+                        "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
+                        "cache_unchanged": fields[10] == "1",
+                    }
                 elif fields[0] == "native-campaign-npc" and len(fields) == 10:
                     data["native_campaign_npc"] = {
                         "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
@@ -807,8 +837,23 @@ class Bridge:
                     metrics = ("natural_calls", "authority", "simulated", "other", "simulated_controllers",
                                "ai_denials", "antfarm")
                     data["native_campaign_npc"].update(zip(metrics, map(int, fields[3:])))
+                elif fields[0] == "native-campaign-npc-network" and len(fields) == 10 and "native_campaign_npc" in data:
+                    npc = data["native_campaign_npc"]
+                    counts = tuple(map(int, fields[3:7]))
+                    if fields[1:3] != [npc["map"], npc["viewer"]] or any(count < 0 for count in counts):
+                        raise ValueError("Invalid native campaign NPC network report")
+                    npc["network"] = {
+                        **dict(zip(("authority_network_ready", "local_authority_begins", "local_authority_initializes",
+                                    "early_spawn_denials"), counts)),
+                        **dict(zip(("last_actor", "last_caller", "last_script"), fields[7:])),
+                    }
                 elif fields[0] == "native-campaign-npc-member" and len(fields) == 4 and "native_campaign_npc" in data:
                     data["native_campaign_npc"]["members"].append(fields[3])
+                elif fields[0] == "native-campaign-npc-saved-squads" and len(fields) == 8:
+                    data["native_campaign_npc_saved_squads"] = {
+                        "map": fields[1], "viewer": fields[2], "observed_calls": int(fields[3]), "denials": int(fields[4]),
+                        "qualification": fields[5], "spawner": fields[6], "data": fields[7],
+                    }
                 elif fields[0] == "native-campaign-npc-approach" and len(fields) == 7:
                     data["native_campaign_npc_approach"] = {"map": fields[1], "member": fields[2], "host_pawn": fields[3],
                                                            "guest_pawn": fields[4], "host_distance": _finite(fields[5]),
@@ -855,6 +900,9 @@ class Bridge:
                 elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
                     data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
                                                             "sequence": int(fields[4]), "entry": fields[5]}
+                elif fields[0] == "native-loot-view" and len(fields) == 6:
+                    data["native_loot_view"] = {"pawn": fields[1], "id": fields[2], "state": fields[3],
+                                                "sequence": None if fields[4] == "-" else int(fields[4]), "guid": fields[5]}
                 elif fields[0] == "native-guest-reload-fixture" and len(fields) == 5:
                     data["native_guest_reload_fixture"] = {"map": fields[1], "pawn": fields[2],
                                                            "sequence": int(fields[3]), "stock_wrappers": int(fields[4])}
@@ -1068,6 +1116,13 @@ class Bridge:
                         data["native_guest_save_frame"] = frame
                     else:
                         data.setdefault("native_guest_save_member_frames", {})[frame["pawn"]] = frame
+                elif fields == ["native-roster-spawn-capability", "1"]:
+                    data["native_roster_spawn_ready"] = True
+                elif fields[0] == "native-roster-spawn" and len(fields) == 9 and fields[1] == "restarted":
+                    data["native_roster_spawn"] = {
+                        "map": fields[2], "connection": fields[3], "controller": fields[4], "pawn": fields[5],
+                        "location": [_finite(axis) for axis in fields[6:]],
+                    }
                 elif fields[0] == "native-roster-state" and len(fields) == 5:
                     roster = data.setdefault("native_roster", {"connections": []})
                     roster.update(state=fields[1], driver=fields[2], count=int(fields[3]), reason=fields[4])
@@ -1105,6 +1160,23 @@ class Bridge:
                                 "menu_guard_armed", "guarded_ping", "guarded_menu", "guarded_gameplay"),
                                 fields[15:], strict=True)
                         })
+                elif fields[0] == "native-wire-quest" and len(fields) == 18:
+                    data["native_wire_quest"] = dict(zip(("operation", "map", "pawn", "board", "id", "state"), fields[1:7]))
+                    data["native_wire_quest"].update(
+                        step=None if fields[7] == "-" else int(fields[7]), final_step=int(fields[8]),
+                        cash_reward=int(fields[9]), xp_reward=int(fields[10]), commune_base_reward=int(fields[11]),
+                        changed=fields[12] == "1", native_cash=int(fields[13]), native_xp=int(fields[14]),
+                        native_commune_rep=int(fields[15]), objective_guid=fields[16], objective_owner=fields[17],
+                    )
+                elif fields[0] == "native-wire-quest-redemption" and len(fields) == 13:
+                    data["native_wire_quest_redemption"] = dict(zip(("map", "pawn", "board", "id", "weapon_guid"), fields[1:6]))
+                    data["native_wire_quest_redemption"].update(zip(
+                        ("ammo_units", "native_cash", "native_xp", "rep_before", "rep_after"), map(int, fields[6:11])))
+                    data["native_wire_quest_redemption"].update(objective_guid=fields[11], objective_owner=fields[12])
+                elif fields[0] == "native-wire-reward" and len(fields) == 9:
+                    data["native_wire_quest_reward"] = dict(zip(
+                        ("state", "map", "pawn", "slot", "weapon_guid", "ammo_guid"), fields[1:7]))
+                    data["native_wire_quest_reward"].update(weapon_mag=int(fields[7]), ammo_units=int(fields[8]))
                 elif fields[0] == "native-broker-position" and len(fields) == 8:
                     data["native_broker_position"] = {"map": fields[1], "pawn": fields[2], "target": fields[3],
                                                      "point": fields[4], "location": [_finite(axis) for axis in fields[5:]]}

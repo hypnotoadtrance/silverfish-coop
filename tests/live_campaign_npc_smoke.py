@@ -67,6 +67,27 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         counters = ("natural_calls", "authority", "simulated", "other", "simulated_controllers", "ai_denials",
                     "antfarm_initialized")
         result.update(zip(counters, map(int, census[3:]), strict=True))
+        network = [row for row in rows if row[0] == "native-campaign-npc-network"]
+        if network:
+            net, = network
+            if len(net) != 10 or net[1:3] != [MAP, viewer]:
+                return None
+            counts = tuple(map(int, net[3:7]))
+            if (any(count < 0 for count in counts) or counts[0] > result["authority"]
+                    or counts[3] > result["spawn_denials"]):
+                return None
+            result["network"] = {
+                **dict(zip(("authority_network_ready", "local_authority_begins", "local_authority_initializes",
+                            "early_spawn_denials"), counts)),
+                **dict(zip(("last_actor", "last_caller", "last_script"), net[7:])),
+            }
+        saved_squads = [row for row in rows if row[0] == "native-campaign-npc-saved-squads"]
+        if saved_squads:
+            saved, = saved_squads
+            if len(saved) != 8 or saved[1:3] != [MAP, viewer]:
+                return None
+            result["saved_squads"] = {"calls": int(saved[3]), "denials": int(saved[4]), "stage": saved[5],
+                                      "spawner": saved[6], "data": saved[7]}
         approach = [row for row in rows if row[0] == "native-campaign-npc-approach"]
         if approach and viewer == "host":
             move, = approach
@@ -94,7 +115,8 @@ def stock_cohort(report: dict | None, replicate: bool) -> bool:
                 and all(name.startswith("NPC_Zomb_01_C " + LEVEL) for name in members)
                 and report["authority"] >= report["cohort"]
                 and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0
-                and report["replicated"] == (report["cohort"] if replicate else 0))
+                and report["replicated"] == (report["cohort"] if replicate else 0)
+                and (not replicate or report.get("network", {}).get("authority_network_ready", 0) >= report["cohort"]))
 
 
 def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bool:
@@ -102,6 +124,8 @@ def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bo
                 and report["cohort"] == 0 and not report["members"]
                 and report["simulated"] >= cohort > 0
                 and report["authority"] == report["other"] == report["simulated_controllers"] == 0
+                and report.get("network", {}).get("local_authority_begins") == 0
+                and report["network"]["local_authority_initializes"] == 0
                 and (report["spawn_denials"] > 0 or not require_denial))
 
 
@@ -126,6 +150,33 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
     evidence = {"map": MAP, "mode": "replicated" if replicate else "observed", "approach_requested": approach}
+    last_frames = {"host": None, "guest": None}
+    client_history = {"frames": 0, "network_frames": 0, "max_local_authority": 0,
+                      "max_local_begins": 0, "max_local_initializations": 0,
+                      "max_spawn_denials": 0, "max_early_denials": 0}
+    evidence["client_history"] = client_history
+
+    def frames():
+        current = {"host": read_npcs(host, "host"), "guest": read_npcs(guest, "client")}
+        for viewer, frame in current.items():
+            if frame is None or (last_frames[viewer] and frame["sequence"] <= last_frames[viewer]["sequence"]):
+                continue
+            last_frames[viewer] = frame
+            if viewer != "guest":
+                continue
+            client_history["frames"] += 1
+            client_history["max_local_authority"] = max(client_history["max_local_authority"], frame["authority"])
+            client_history["max_spawn_denials"] = max(client_history["max_spawn_denials"], frame["spawn_denials"])
+            if network := frame.get("network"):
+                client_history["network_frames"] += 1
+                for maximum, key in (("max_local_begins", "local_authority_begins"),
+                                     ("max_local_initializations", "local_authority_initializes"),
+                                     ("max_early_denials", "early_spawn_denials")):
+                    client_history[maximum] = max(client_history[maximum], network[key])
+            if (client_history["max_local_authority"] or client_history["max_local_begins"]
+                    or client_history["max_local_initializations"]):
+                evidence.setdefault("first_client_local_birth_frame", frame)
+        return current
 
     async def command(*arguments):
         process = await asyncio.create_subprocess_exec(
@@ -160,7 +211,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         while time.monotonic() < end:
             server, client = status(host), status(guest)
             snapshot = {"host_state": server.get("state"), "guest_state": client.get("state"),
-                        "host": read_npcs(host, "host"), "guest": read_npcs(guest, "client")}
+                        **frames()}
             if predicate(server, client, snapshot):
                 return server, client, snapshot
             if (any(process.returncode is not None for process, _ in launched)
@@ -181,7 +232,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if not paired(server, client) or not stock_cohort(host_npcs, replicate) or not guest_npcs:
             return False
         if replicate:
-            return client_replica(guest_npcs, host_npcs["cohort"], require_client_denial)
+            return (client_replica(guest_npcs, host_npcs["cohort"], require_client_denial)
+                    and "first_client_local_birth_frame" not in evidence)
         return guest_npcs["replicated"] == guest_npcs["spawn_denials"] == guest_npcs["ai_denials"] == 0
 
     def approach_pair(server):
@@ -252,7 +304,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     except BaseException as failure:
         evidence["verified"] = False
         evidence["failure"] = str(failure)
-        evidence["failure_frames"] = {"host": read_npcs(host, "host"), "guest": read_npcs(guest, "client")}
+        frames()
+        evidence["failure_frames"] = last_frames
         raise
     finally:
         for process, target in reversed(launched):

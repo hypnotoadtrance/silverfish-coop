@@ -34,6 +34,7 @@ class EnrollmentResult:
     reason: str
     reservation: Reservation | None = None
     assignment: Assignment | None = None
+    joining: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -253,7 +254,8 @@ class RosterEnrollment:
                 return self._abort("new_connection_changed")
         if connection.controller is None or connection.pawn is None:
             pending.candidate = key, connection
-            return EnrollmentResult("pending", "awaiting_new_pawn", reservation)
+            joining = (connection.name, connection.controller) if connection.controller else None
+            return EnrollmentResult("pending", "awaiting_new_pawn", reservation, joining=joining)
 
         binding = Assignment(reservation.guest_id, reservation.character_id, current.driver, key,
                              connection.name, connection.controller, connection.pawn)

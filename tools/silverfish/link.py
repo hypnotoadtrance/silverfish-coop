@@ -554,6 +554,21 @@ class HostLink:
         )
         return transport
 
+    async def refresh_guest_game_route(self, guest_id: str) -> None:
+        """Replace one authorized Unreal relay socket without interrupting QUIC."""
+        async with self._lock:
+            if self._closed or not self.connected(guest_id) or not self._native_route_permitted(guest_id):
+                raise LinkError("the guest's Unreal relay route is unavailable")
+            prior = self._guest_sockets.get(guest_id)
+            if prior is None:
+                raise LinkError("the guest has no Unreal relay route")
+            route = await self._create_game_route(guest_id)
+            if self._closed or not self.connected(guest_id) or not self._native_route_permitted(guest_id):
+                route.close()
+                raise LinkError("the guest's Unreal relay route changed")
+            self._guest_sockets[guest_id] = route
+            prior.close()
+
     async def refresh_game_routes(self) -> None:
         """Rebuild Unreal relay routes after hard travel without closing the QUIC link.
 
@@ -893,6 +908,8 @@ class ClientLink:
         self._context = None
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
+        self.game_packets_sent = 0
+        self.game_packets_received = 0
 
     @property
     def address(self) -> Address:
@@ -987,14 +1004,39 @@ class ClientLink:
                 self._game_endpoint = address
             if self._game_endpoint == address:
                 protocol.forward_game_packet(data)
+                self.game_packets_sent += 1
 
     def reset_game_endpoint(self) -> None:
         """Accept a new local Unreal socket on the next deliberate game join."""
         self._game_endpoint = None
+        self.game_packets_sent = self.game_packets_received = 0
+
+    async def _open_game_socket(self, local_host: str, local_port: int) -> asyncio.DatagramTransport:
+        transport = None
+
+        def receive(data: bytes, address: Address) -> None:
+            if self._transport is transport:
+                self._from_game(data, address)
+
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _LocalUdp(receive), local_addr=(local_host, local_port),
+        )
+        return transport
+
+    async def renew_game_endpoint(self) -> None:
+        """Isolate a deliberate Unreal rejoin from late packets on the old port."""
+        async with self._lock:
+            if self._closed or self._transport is None:
+                raise LinkError("client link has no local Unreal endpoint")
+            prior = self._transport
+            self._transport = await self._open_game_socket(self.address[0], 0)
+            self.reset_game_endpoint()
+            prior.close()
 
     def _to_game(self, data: bytes) -> None:
         if self._transport is not None and self._game_endpoint is not None and not self._closed:
             self._transport.sendto(data, self._game_endpoint)
+            self.game_packets_received += 1
 
     async def _disconnect_locked(self) -> None:
         if self._keepalive is not None:
@@ -1028,7 +1070,5 @@ async def start_client(
     if not catalog_only:
         if not _is_loopback(local_host):
             raise ValueError("client Unreal endpoint must be a loopback address")
-        client._transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
-            lambda: _LocalUdp(client._from_game), local_addr=(local_host, local_port),
-        )
+        client._transport = await client._open_game_socket(local_host, local_port)
     return client

@@ -71,6 +71,7 @@ AUTHORED_EXITS = {
     (SCAV_BAR, SLUMS): "Bar_Slums",
     (SHOPKEEP, NORTHEAST_RAIL): "ShopKeep",
     (BOROUGH, CITY): "City_Borough",
+    (CITY, BOROUGH): "City_Borough",
     (BLACK_MARKET, LAKE): "BlackMarket",
     (LAKE, CROSSROADS): "Lake_Cave",
     (SCIENTIST_SHOP, RUIN_FIELDS): "Market_Flood",

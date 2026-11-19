@@ -234,8 +234,8 @@ local function verify(instance, save, planned, strict)
     local loadout = preserved_inventory(save)
     if strict then
         local maths = StaticFindObject(maths_path)
-        require_exact(valid(maths) and timespan_is(maths, save.GameTime, 1, 6, 45)
-            and timespan_is(maths, track[storm_time], 2, 15, 0), "time_readback_failed")
+        require_exact(valid(maths) and timespan_is(maths, save.GameTime, 1, 6, 45), "game_time_readback_failed")
+        require_exact(timespan_is(maths, track[storm_time], 2, 15, 0), "storm_time_readback_failed")
     end
     return loadout
 end
@@ -247,22 +247,26 @@ local function starting_weather()
         "starting_storm_asset_unqualified")
     require_exact(named(storm.Storm, storm_class_path) and authored_curve(storm.Curve), "starting_storm_defaults_changed")
     require_exact(storm.Min_PlayRate == 0.75 and storm.Max_PlayRate == 1.1, "starting_storm_rate_changed")
-    return maths, storm.Storm, storm.Curve
+    return storm.Storm, storm.Curve
 end
 
-local function start_clock(save, planned, maths, authored_storm, authored_storm_curve)
+local function start_clock(controller, save, planned, authored_storm, authored_storm_curve)
     -- Character_Editor_Widget:Finilize_SaveSettings also initializes campaign time and this storm track.
     save.WeatherOffset = planned.weather
-    save.GameTime = maths:MakeTimespan(1, 6, 45, 0, 0)
     save.CombineStashes = false
     save.BarterOnly = false
     local track = save.StormTrack
     track[storm_class] = authored_storm
     track[storm_curve] = authored_storm_curve
     track[storm_seed] = planned.storm_seed
-    track[storm_time] = maths:MakeTimespan(2, 15, 0, 0, 0)
     track[storm_rate] = planned.rate
     track[storm_active] = false
+    local called, result, before, after, old_storm, next_storm =
+        pcall(SilverfishSetNativeFreshClock, controller:GetAddress(), save:GetAddress())
+    if not called or type(result) ~= "string" then error("native_fresh_clock_call_failed", 0) end
+    if result ~= "applied" and result:match("^[a-z_]+$") then error("native_fresh_clock_" .. result, 0) end
+    require_exact(result == "applied" and math.type(before) == "integer" and after == 1107000000000
+        and math.type(old_storm) == "integer" and next_storm == 2268000000000, "clock_receipt_unqualified")
 end
 
 function fresh.prepare(state, phase, name, slot, seed_text)
@@ -283,7 +287,8 @@ function fresh.prepare(state, phase, name, slot, seed_text)
     require_exact(matches_map(instance.FactionAdvantage_Defaults, faction_advantage, 5), "faction_defaults_changed")
     local library = asset(character_library_path)
     require_exact(valid(library), "faction_library_unqualified")
-    local maths, authored_storm, authored_storm_curve = starting_weather()
+    local authored_storm, authored_storm_curve = starting_weather()
+    require_exact(type(SilverfishSetNativeFreshClock) == "function", "clock_addon_unavailable")
     local planned = starter(seed, slot)
     local ok, prepared = pcall(function()
         -- NewSave allocates in memory and sets CurrentSaveSlot. No save writer or stock travel is invoked here.
@@ -305,7 +310,7 @@ function fresh.prepare(state, phase, name, slot, seed_text)
         save.InstanceSeed = seed
         instance:Add_PointTo_SaveFlag(FName("Static_WorldSeed"), planned.world_seed, true, true)
         instance:Add_PointTo_SaveFlag(FName("ArtifactSeed"), planned.artifact_seed, true, true)
-        start_clock(save, planned, maths, authored_storm, authored_storm_curve)
+        start_clock(state.controller, save, planned, authored_storm, authored_storm_curve)
         for faction, points in pairs(faction_advantage) do
             local out = {}
             instance:Add_Faction_Advantage(faction, points)

@@ -7,10 +7,24 @@ local statics_path = "/Script/Engine.Default__GameplayStatics"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 
-pickup.map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-pickup.source = "observatory-comp-board"
-pickup.actor = "Item_CompBoard_C " .. pickup.map .. ".Observitory_P:PersistentLevel.Item_CompBoard_C_2"
-pickup.class = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local profiles = {
+    [observatory] = {
+        source = "observatory-comp-board",
+        path = observatory .. ".Observitory_P:PersistentLevel.Item_CompBoard_C_2",
+        class = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C",
+        name = "Item_CompBoard_C",
+        approach = { { -115, 0 }, { 115, 0 } },
+    },
+    [city] = {
+        source = "city-copper-wire",
+        path = city .. ".City_01_P:PersistentLevel.Item_CopperWire_C_3",
+        class = "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C",
+        name = "Item_CopperWire_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+}
 
 local binding, report
 
@@ -39,7 +53,8 @@ function pickup.update(state, phase)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
     local host = phase == "hosting" and state.server == false
-    if not enabled or state.map ~= pickup.map or not state.listening or not valid(pawn)
+    local profile = profiles[state.map]
+    if not enabled or not profile or not state.listening or not valid(pawn)
         or (not host and (phase ~= "connected" or state.server ~= true))
         or type(SilverfishSetNativeAuthoredPickupScope) ~= "function" then
         if binding then pickup.clear() end
@@ -50,8 +65,8 @@ function pickup.update(state, phase)
         if binding then pickup.clear() end
         return false, reason
     end
-    if not binding or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
-        binding = { pawn = pawn, world = state.world }
+    if not binding or binding.profile ~= profile or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
+        binding = { pawn = pawn, world = state.world, profile = profile }
         report = nil
     end
     return true
@@ -122,21 +137,24 @@ function pickup.command(fields, state, phase)
     if action == "native-authored-pickup-claim" then return claim(fields, state, phase) end
     if action == "native-authored-pickup-approach" then
         if #fields ~= 3 or phase ~= "hosting" or not fixtures or not host_fixtures then
-            error("The Observatory pickup positioning fixture is unavailable", 0)
+            error("The stock loose pickup positioning fixture is unavailable", 0)
         end
         local pawn = owner(state, phase, fields[3])
-        local actor = StaticFindObject(pickup.actor:match("^%S+ (.+)$"))
-        if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= pickup.actor or not same(actor:GetWorld(), state.world) then
-            error("The Observatory pickup fixture did not match its placed actor", 0)
+        local profile = binding.profile
+        local actor = StaticFindObject(profile.path)
+        if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= profile.name .. " " .. profile.path
+            or not same(actor:GetWorld(), state.world) then
+            error("The stock loose pickup fixture did not match its placed actor", 0)
         end
         local point = actor:K2_GetActorLocation()
-        for _, x in ipairs({ -115, 115 }) do
-            if pawn:K2_TeleportTo({ X = point.X + x, Y = point.Y, Z = point.Z + 75 }, pawn:K2_GetActorRotation()) then
+        for _, offset in ipairs(profile.approach) do
+            local candidate = { X = point.X + offset[1], Y = point.Y + offset[2], Z = point.Z + 75 }
+            if pawn:K2_TeleportTo(candidate, pawn:K2_GetActorRotation()) then
                 pawn:ForceNetUpdate()
                 return "exact stock loose pickup approached"
             end
         end
-        error("The Observatory pickup fixture did not find safe ground", 0)
+        error("The stock loose pickup fixture did not find safe ground", 0)
     end
     if action == "native-authored-pickup-project" then
         local state_word = fields[3]
@@ -155,7 +173,7 @@ end
 
 function pickup.focused_target(pawn)
     if binding and same(pawn, binding.pawn) and type(SilverfishFocusedNativeAuthoredPickup) == "function"
-        and SilverfishFocusedNativeAuthoredPickup(pawn:GetAddress()) then return pickup.source end
+        and SilverfishFocusedNativeAuthoredPickup(pawn:GetAddress()) then return binding.profile.source end
 end
 
 function pickup.rows(state, phase, status_row)
@@ -163,14 +181,15 @@ function pickup.rows(state, phase, status_row)
     if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return {} end
     local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup()
     if not active then return {} end
-    local rows = { status_row("native-authored-pickup", pickup.source, pickup.map, pickup.actor, pickup.class,
-        claimed and "claimed" or "available") }
+    local profile = binding.profile
+    local rows = { status_row("native-authored-pickup", profile.source, state.map, profile.name .. " " .. profile.path,
+        profile.class, claimed and "claimed" or "available") }
     if sequence > 0 then
-        rows[#rows + 1] = status_row("native-authored-pickup-interaction", pickup.source, pickup.map,
+        rows[#rows + 1] = status_row("native-authored-pickup-interaction", profile.source, state.map,
             state.local_pawn.name, sequence, fixture and "fixture" or "stock")
     end
     if report and phase == "hosting" then
-        rows[#rows + 1] = status_row("native-authored-pickup-claim", pickup.source, pickup.map, report.pawn,
+        rows[#rows + 1] = status_row("native-authored-pickup-claim", profile.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
     end
     return rows

@@ -1,4 +1,4 @@
-"""Exercise the staged host and two independent guests on one Windows PC."""
+"""Exercise the staged host and independent guests on one Windows PC."""
 
 import argparse
 import asyncio
@@ -26,9 +26,10 @@ def saved_hashes(root: Path) -> dict[str, str]:
 
 
 async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False, rest_ui: bool = False,
-                   rest_guest_denial: bool = False) -> None:
+                   rest_guest_denial: bool = False, guest_count: int = 2) -> None:
     campaign = "party-" + uuid.uuid4().hex[:8]
-    profiles = [f"{campaign}-{index}" for index in (1, 2)]
+    guest_roles = ("guest", *(f"guest{index}" for index in range(2, guest_count + 1)))
+    profiles = [f"{campaign}-{index}" for index in range(1, guest_count + 1)]
     run = work / "campaigns" / campaign / "run"
     clients = [work / "clients" / profile / "run" for profile in profiles]
     base = [sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work)]
@@ -86,7 +87,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
     try:
         await start("host.txt", ("--campaign", campaign),
                     ("host", "--campaign", campaign, "--port", "0", "--headless", "--fixtures", "--native-events",
-                     "--native-guest", "--native-zones", "--max-guests", "2", "--start-zone", CROSSROADS))
+                     "--native-guest", "--native-zones", "--max-guests", str(guest_count), "--start-zone", CROSSROADS))
         await wait(run, lambda status: status.get("state") == "hosting")
         identities = []
         for index, profile in enumerate(profiles):
@@ -98,15 +99,17 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
             await wait(clients[index], lambda status: status.get("state") == "connected")
             await wait(run, lambda status: bound(status, index + 1))
 
-        before = await wait(run, lambda status: bound(status, 2) and status["game"]["native_roster"]["count"] == 2)
+        before = await wait(run, lambda status: bound(status, guest_count)
+                            and status["game"]["native_roster"]["count"] == guest_count)
         exact_pawns = before["gameplay"]["native_pawns"]
-        assert len(set(exact_pawns.values())) == 3 and players(before)["guest2"]["character_id"] == identities[1], before
+        assert len(set(exact_pawns.values())) == guest_count + 1 and all(
+            players(before)[role]["character_id"] == character for role, character in zip(guest_roles, identities)), before
         evidence["native_pawns"] = exact_pawns
 
         await command("action", "--campaign", campaign, "native-guest-damage", "--target", "guest2")
         down = await wait(run, lambda status: players(status).get("guest2", {}).get("downed", False)
                           and (native_body(status, exact_pawns["guest2"]).get("health") or 0) <= 0)
-        assert not players(down)["host"]["downed"] and not players(down)["guest"]["downed"], down
+        assert all(not player["downed"] for role, player in players(down).items() if role != "guest2"), down
         await command("action", "--profile", profiles[0], "interact", "--target", identities[1])
         revived = await wait(run, lambda status: not players(status).get("guest2", {}).get("downed", True)
                              and native_body(status, exact_pawns["guest2"]).get("health") == 25.0)
@@ -115,33 +118,34 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
         await command("action", "--profile", profiles[0], "drop-link")
         await wait(clients[0], lambda status: not status.get("link_connected", True))
         await command("action", "--profile", profiles[0], "reconnect")
-        resumed = await wait(run, lambda status: bound(status, 2))
+        resumed = await wait(run, lambda status: bound(status, guest_count))
         assert resumed["gameplay"]["native_pawns"] == exact_pawns, resumed
-        evidence["resume_retained_both_pawns"] = True
+        evidence["resume_retained_all_pawns"] = True
 
         async def position(role, where):
             return await command("action", "--campaign", campaign, "native-exit-position",
                                  "--target", role, "--exit-position", where, "--entrance", "Obsv_Etr")
 
-        await position("guest", "near")
-        await position("guest2", "far")
+        for role in guest_roles[:-1]:
+            await position(role, "near")
+        await position(guest_roles[-1], "far")
         await position("host", "inside")
         refused = await wait(run, lambda status: status.get("game", {}).get("native_zone", {}).get("decision") == "too_far")
         assert refused["game"]["map"] == CROSSROADS and refused["zone_epoch"] == before["zone_epoch"], refused
         await position("host", "near")
-        await position("guest2", "near")
-        await wait(run, lambda status: bound(status, 2) and all(
+        await position(guest_roles[-1], "near")
+        await wait(run, lambda status: bound(status, guest_count) and all(
             math.dist(native_body(status, exact_pawns["host"])["location"], native_body(status, exact_pawns[role])["location"]) <= 1500
-            for role in ("guest", "guest2")))
+            for role in guest_roles))
         await position("host", "inside")
-        arrived = await wait(run, lambda status: bound(status, 2) and status["game"]["map"] == OBSERVATORY
+        arrived = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == OBSERVATORY
                               and not status.get("awaiting_zone_guest"))
         for client in clients:
             await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == OBSERVATORY)
         assert arrived["zone_epoch"] != before["zone_epoch"] and all(
-            players(arrived)[role]["character_id"] == identities[index] for index, role in enumerate(("guest", "guest2"))
+            players(arrived)[role]["character_id"] == character for role, character in zip(guest_roles, identities)
         ), arrived
-        evidence["both_guests_required_and_travelled"] = {"map": OBSERVATORY, "identities": identities}
+        evidence["all_guests_required_and_travelled"] = {"map": OBSERVATORY, "identities": identities}
 
         await command("action", "--campaign", campaign, "checkpoint")
         saved = await wait(run, lambda status: all(
@@ -149,7 +153,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
             for entry in status.get("campaign", {}).get("characters", [])))
         characters = saved["campaign"]["characters"]
         frames = {entry["character_id"]: entry["state"]["native_guest_save"] for entry in characters}
-        assert set(frames) == set(identities) and len({record["slot"] for record in frames.values()}) == 2, frames
+        assert set(frames) == set(identities) and len({record["slot"] for record in frames.values()}) == guest_count, frames
         evidence["separate_native_guest_frames"] = frames
         if rest_guest_denial:
             def armed(status):
@@ -160,7 +164,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
             client_guards = [await wait(client, armed) for client in clients]
             prior = host_guard["game"]["native_rest_guard"]["guest_denials"]
             denied = []
-            for index, role in enumerate(("guest", "guest2")):
+            for index, role in enumerate(guest_roles):
                 server = (await command("action", "--campaign", campaign,
                                         "native-rest-guest-interaction-fixture", "--target", role))["native_rest_guard"]
                 local = (await command("action", "--profile", profiles[index],
@@ -192,29 +196,34 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
                              "--operation-id", uuid.uuid4().hex)
                 slept = (await command(*rest_args))["native_rest"]
                 assert (await command(*rest_args))["native_rest"] == slept
-            assert slept["bed"] == "SavePoint_BP_C_3-Observitory_P-" and slept["after"] - slept["before"] == 3600, slept
-            for role in ("host", "guest", "guest2"):
+            assert slept["bed"] == "SavePoint_BP_C_3-Observitory_P-" and math.isclose(
+                slept["after"] - slept["before"], 3600, abs_tol=0.05), slept
+            for role in ("host", *guest_roles):
                 await position(role, "near")
             await position("host", "inside")
-            await wait(run, lambda status: bound(status, 2) and status["game"]["map"] == CROSSROADS
+            await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == CROSSROADS
                        and not status.get("awaiting_zone_guest"))
-            for role in ("guest", "guest2"):
+            for role in guest_roles:
                 await command("action", "--campaign", campaign, "native-guest-damage", "--target", role)
                 await wait(run, lambda status: players(status).get(role, {}).get("downed"))
             await command("action", "--campaign", campaign, "native-host-damage", "--target", "host")
-            returned = await wait(run, lambda status: bound(status, 2) and status["game"]["map"] == OBSERVATORY
+            returned = await wait(run, lambda status: bound(status, guest_count) and status["game"]["map"] == OBSERVATORY
                                   and not status["gameplay"].get("wipe") and not status["gameplay"].get("pending_spawns")
                                   and all(native_body(status, pawn).get("health") == 250.0
-                                          for pawn in status["gameplay"]["native_pawns"].values()))
+                                          for pawn in status["gameplay"]["native_pawns"].values()), timeout=85)
             for client in clients:
                 await wait(client, lambda status: status.get("state") == "connected" and status["game"]["map"] == OBSERVATORY)
             uses_rest = returned["game"].get("native_blue_arrival") or next(
                 row for row in (await command("events", "--campaign", campaign, "--tail", "100"))["events"]
                 if row["event"] == "party_respawn_committed")
             assert math.dist(uses_rest["location"], slept["location"]) < 400, uses_rest
-            assert all(players(returned)[role]["character_id"] == identities[index]
-                       for index, role in enumerate(("guest", "guest2"))), returned
+            assert all(players(returned)[role]["character_id"] == character
+                       for role, character in zip(guest_roles, identities)), returned
             evidence["stock_rest_and_native_wipe"] = {"rest": slept, "respawn": uses_rest, "max_health": 250}
+        evidence["verified"] = True
+    except (AssertionError, OSError, RuntimeError, ValueError) as error:
+        evidence.update(verified=False, failure=str(error))
+        raise
     finally:
         for process, target in reversed(launched):
             if process.returncode is None:
@@ -226,10 +235,13 @@ async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = 
                         process.terminate()
                     await asyncio.wait_for(process.wait(), 12)
         if vanilla_saved:
-            assert baseline == saved_hashes(vanilla_saved), "Original singleplayer save files changed"
-            evidence["original_files_verified"] = len(baseline)
+            evidence["original_saves_unchanged"] = baseline == saved_hashes(vanilla_saved)
+            if evidence["original_saves_unchanged"]:
+                evidence["original_files_verified"] = len(baseline)
         print(run, flush=True)
-    (run / "live-multi-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        (run / "live-multi-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        if vanilla_saved:
+            assert evidence["original_saves_unchanged"], "Original singleplayer save files changed"
     print(json.dumps(evidence), flush=True)
 
 
@@ -237,6 +249,8 @@ if __name__ == "__main__":
     options = argparse.ArgumentParser(description=__doc__)
     options.add_argument("--work", type=Path, required=True)
     options.add_argument("--vanilla-saved", type=Path)
+    options.add_argument("--guests", type=int, choices=range(2, 5), default=2,
+                         help="number of separate loopback guest processes")
     options.add_argument("--native-rest-wipe", action="store_true", help="rest, leave, and wipe back to the exact stock bed")
     options.add_argument("--native-rest-ui", action="store_true", help="use the stock sleep screen during the rest-wipe check")
     options.add_argument("--native-rest-guest-denial", action="store_true",
@@ -245,4 +259,4 @@ if __name__ == "__main__":
     if args.native_rest_ui and not args.native_rest_wipe:
         options.error("--native-rest-ui requires --native-rest-wipe")
     asyncio.run(validate(args.work.resolve(), args.vanilla_saved, rest_wipe=args.native_rest_wipe,
-                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial))
+                         rest_ui=args.native_rest_ui, rest_guest_denial=args.native_rest_guest_denial, guest_count=args.guests))

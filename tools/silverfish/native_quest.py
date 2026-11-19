@@ -1,6 +1,6 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
-from . import native_broker, native_rewards, party
+from . import native_broker, native_wire_quest, native_rewards, party
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -41,6 +41,10 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
+    if target == native_wire_quest.QUEST_ID and verb == "native-quest-start":
+        return await native_wire_quest.start(host, bridge, actor)
+    if target == native_wire_quest.QUEST_ID and verb == "native-quest-turnin":
+        return await native_wire_quest.turn_in(host, bridge, actor)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
     roles = host.roles()

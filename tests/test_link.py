@@ -428,6 +428,46 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.connect_guest())["accepted"])
         await self.exchange(1200)
 
+    async def test_native_return_retry_refreshes_only_the_selected_guest(self):
+        first = self.request["guest_id"]
+        second_request = self.guest_request("second")
+        second = second_request["guest_id"]
+        await self.host_for_guests(self.request, second_request)
+        second_client = await start_client()
+        self.addAsyncCleanup(second_client.close)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertTrue((await self.connect_guest(second_request, client=second_client))["accepted"])
+        await self.exchange(1200)
+        prior_host = self.host.guest_endpoint(first)
+        prior_local = self.client.address
+        untouched_host = self.host.guest_endpoint(second)
+
+        self.host.restrict_game_routes({second})
+        with self.assertRaises(LinkError):
+            await self.host.refresh_guest_game_route(first)
+        self.assertEqual(self.host.guest_endpoint(first), prior_host)
+        self.host.restrict_game_routes({first, second})
+        await self.host.refresh_guest_game_route(first)
+        await self.client.renew_game_endpoint()
+        self.assertNotEqual(self.host.guest_endpoint(first), prior_host)
+        self.assertNotEqual(self.client.address, prior_local)
+        self.assertEqual(self.host.guest_endpoint(second), untouched_host)
+        self.assertEqual((self.client.game_packets_sent, self.client.game_packets_received), (0, 0))
+
+        self.game_client.sendto(b"stale client packet", prior_local)
+        self.game_host.sendto(b"stale server packet", prior_host)
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.host_inbox.next(), 0.1)
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.client_inbox.next(), 0.1)
+        await self.exchange(1200)
+        self.assertEqual((self.client.game_packets_sent, self.client.game_packets_received), (1, 1))
+        self.assertEqual(await self.client.request({"guest_id": second}), {
+            "authenticated_guest": first, "claimed_guest": second,
+        })
+        self.assertTrue(second_client.connected)
+        self.assertTrue(self.disconnected.empty())
+
     async def test_catalog_only_admission_opens_no_game_endpoint_and_serves_requests(self):
         async def on_catalog(guest_id, payload):
             return {"guest": guest_id, "action": payload["action"]}

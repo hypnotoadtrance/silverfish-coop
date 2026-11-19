@@ -7,6 +7,8 @@ import re
 import uuid
 
 from .campaign import CampaignFormatError
+from .native_gold import valid_guid
+from .travel import BOROUGH
 
 
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
@@ -89,7 +91,7 @@ def references(checkpoint: dict) -> list[dict]:
     host = [world["native_host_save"]] if world.get("native_host_save") else []
     guest = [record["state"]["native_guest_save"] for record in checkpoint["characters"].values()
              if record["state"].get("native_guest_save")]
-    return host + guest + _loot_escrows(world) + list(_wipe_frames(world).values())
+    return host + guest + _escrow_frames(checkpoint) + list(_wipe_frames(world).values())
 
 
 def _wipe_frames(world: dict) -> dict:
@@ -98,8 +100,8 @@ def _wipe_frames(world: dict) -> dict:
     return {} if draft is None else draft["frames"]
 
 
-def _loot_escrows(world: dict) -> list[dict]:
-    party = world.get("party") or {}
+def _escrow_frames(checkpoint: dict) -> list[dict]:
+    party = checkpoint["world"].get("party") or {}
     if type(party) is not dict:
         raise CampaignFormatError("The campaign's native party records are invalid")
     rolls = party.get("native_loot_rolls", {})
@@ -108,8 +110,23 @@ def _loot_escrows(world: dict) -> list[dict]:
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
+    wire_quest = party.get("native_wire_quest_reward")
+    if wire_quest is not None:
+        if (type(wire_quest) is not dict or type(wire_quest.get("escrow")) is not dict
+                or wire_quest["escrow"].get("map") != BOROUGH or not valid_guid(wire_quest.get("weapon"))
+                or not valid_guid(wire_quest.get("ammo")) or wire_quest["weapon"] == wire_quest["ammo"]
+                or type(wire_quest.get("weapon_mag")) is not int or not 0 <= wire_quest["weapon_mag"] <= 256
+                or type(wire_quest.get("pending")) is not dict or not wire_quest["pending"]):
+            raise CampaignFormatError("The campaign's stock Copper Wire reward record is invalid")
+        used = {wire_quest["weapon"], wire_quest["ammo"]}
+        for character, items in wire_quest["pending"].items():
+            if (character not in checkpoint["characters"] or type(items) is not list or len(items) != 2
+                    or any(not valid_guid(item) or item in used for item in items) or items[0] == items[1]):
+                raise CampaignFormatError("The campaign's pending Copper Wire recipient or reward identity is invalid")
+            used.update(items)
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
-            + [bag["escrow"] for bag in bags.values() if "escrow" in bag])
+            + [bag["escrow"] for bag in bags.values() if "escrow" in bag]
+            + ([wire_quest["escrow"]] if wire_quest else []))
 
 
 def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
@@ -123,10 +140,10 @@ def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
         if frame["slot"] in slots:
             raise CampaignFormatError("Two campaign owners reference the same Unreal save generation")
         slots.add(frame["slot"])
-    for frame in _loot_escrows(checkpoint["world"]):
+    for frame in _escrow_frames(checkpoint):
         verify_record(profile, frame)
         if frame["slot"] in slots:
-            raise CampaignFormatError("The loot escrow shares another Unreal save generation")
+            raise CampaignFormatError("A stock escrow shares another Unreal save generation")
         slots.add(frame["slot"])
     for character, frame in _wipe_frames(checkpoint["world"]).items():
         if character == "host":

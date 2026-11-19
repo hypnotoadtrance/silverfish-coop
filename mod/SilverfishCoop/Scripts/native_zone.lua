@@ -498,15 +498,17 @@ function zone.command(fields, state, phase)
             error("The authored exit ground reference is unavailable", 0)
         end
         local marker_location = marker.Arrow:K2_GetComponentLocation()
-        height = marker_location.Z
-        local forward = exit:GetActorForwardVector()
+        local forward = route.probe_right_axis and exit:GetActorRightVector() or exit:GetActorForwardVector()
+        height = route.probe_right_axis and center.Z or marker_location.Z
         local tangent_x, tangent_y = -forward.Y, forward.X
         local lane = (marker_location.X - center.X) * tangent_x + (marker_location.Y - center.Y) * tangent_y
-        local clearance = math.max(0, exit.Box:GetScaledBoxExtent().Y - 250)
+        local extent = exit.Box:GetScaledBoxExtent()
+        local clearance = math.max(0, (route.probe_right_axis and extent.X or extent.Y) - 250)
         lane = math.max(-clearance, math.min(lane, clearance))
         center.X, center.Y = center.X + lane * tangent_x, center.Y + lane * tangent_y
         if position ~= "inside" then
-            local distance = (position == "near" and 350 or 2250) * route.probe_approach
+            local near = route.probe_right_axis and math.max(350, extent.Y + 150) or 350
+            local distance = (position == "near" and near or 2250) * route.probe_approach
             local x, y = distance * forward.X, distance * forward.Y
             local separation = 0
             if details.kind == "guest" and position == "near" then

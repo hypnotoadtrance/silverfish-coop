@@ -1,5 +1,6 @@
 """Apply independent authenticated guest leases to the staged game host."""
 
+import asyncio
 import contextlib
 import math
 import time
@@ -10,6 +11,9 @@ from .service import Host, POSITION_MAX_AGE, PROTOCOL, _pawn, guest_arrival_posi
 from .travel import SLATE
 
 
+RETURN_HANDSHAKE_TIMEOUT = 35.0
+
+
 class MultiHost(Host):
     def __init__(self, *args, max_guests: int, **kwargs):
         super().__init__(*args, **kwargs)
@@ -18,14 +22,36 @@ class MultiHost(Host):
         self.members = PartyMembers(self.store, max_guests=max_guests, enrollment=self.enrollment)
         self.relay = None
         self.returning_guests: list[str] = []
+        self.return_handshake: tuple[int, float] | None = None
+        self.return_census_floor: int | None = None
+        self.return_waiting: int | None = None
+        self.return_retried: set[str] = set()
+        self.return_retry_request: tuple[int, int, asyncio.Future] | None = None
         self.retirement_processed: set[str] = set()
+
+    def _return_blocked(self) -> bool:
+        # The new listener can open before the durable wipe and host respawn are complete.
+        if self.transitioning or self.returning_guests and (
+            self.party["wipe"] is not None or "host" in self.party["pending_spawns"]
+        ):
+            return True
+        if self.return_census_floor is not None:
+            return self.last_game.get("sequence", 0) <= self.return_census_floor
+        return False
 
     def _update_native_relay(self) -> None:
         if self.relay is None:
             return
         allowed = set(self.enrollment.assignments)
-        if pending := self.enrollment.pending:
+        pending = self.enrollment.pending
+        if pending and not self._return_blocked():
             allowed.add(pending.guest_id)
+            if pending.guest_id not in self.returning_guests:
+                self.return_handshake = None
+            elif self.return_handshake is None or self.return_handshake[0] != pending.id:
+                self.return_handshake = (pending.id, time.monotonic() + RETURN_HANDSHAKE_TIMEOUT)
+        else:
+            self.return_handshake = None
         self.relay.restrict_game_routes(allowed)
 
     def admit(self, request: dict) -> dict:
@@ -33,7 +59,7 @@ class MultiHost(Host):
             return super().admit(request)
         if self.stopping or self.last_game.get("state") != "hosting":
             return {"accepted": False, "reason": "host_unavailable"}
-        if self.transitioning:
+        if self._return_blocked():
             return {"accepted": False, "reason": "travel_in_progress"}
         if request["protocol_version"] != PROTOCOL or request["game_build"] != self.game_build:
             return {"accepted": False, "reason": "incompatible_game_or_protocol"}
@@ -73,8 +99,34 @@ class MultiHost(Host):
         result = super().snapshot_for_guest(guest_id, role)
         if guest_id in self.returning_guests:
             pending = self.enrollment.pending
-            result["travel_in_progress"] = not pending or pending.guest_id != guest_id
+            result["travel_in_progress"] = self._return_blocked() or not pending or pending.guest_id != guest_id
+            if not result["travel_in_progress"]:
+                result["native_return_reservation"] = pending.id
+                result["native_return_retry_allowed"] = self.return_waiting == pending.id
         return result
+
+    def guest_request(self, guest_id: str, request: dict):
+        if request.get("action") == "retry-native-return":
+            return self._request_return_retry(guest_id, request)
+        return super().guest_request(guest_id, request)
+
+    async def _request_return_retry(self, guest_id: str, request: dict) -> dict:
+        pending = self.enrollment.pending
+        if (set(request) != {"action", "zone_epoch", "reservation"} or request["zone_epoch"] != self.zone_epoch
+                or type(request["reservation"]) is not int or not pending or pending.guest_id != guest_id
+                or pending.id != request["reservation"] or not self.authenticated_guest(guest_id)
+                or self.return_waiting != pending.id or self._return_blocked() or self.return_retry_request):
+            return {"ok": False, "error": "native_return_retry_unavailable"}
+        future = asyncio.get_running_loop().create_future()
+        queued = (pending.id, self.last_game["sequence"], future)
+        self.return_retry_request = queued
+        try:
+            return await asyncio.wait_for(future, timeout=5)
+        except TimeoutError:
+            return {"ok": False, "error": "native_return_retry_census_timeout"}
+        finally:
+            if self.return_retry_request is queued:
+                self.return_retry_request = None
 
     def roles(self) -> dict[str, str]:
         return self.members.roles()
@@ -124,6 +176,10 @@ class MultiHost(Host):
 
     def begin_zone_guests(self, transport) -> None:
         self.members.begin_travel()
+        self.return_handshake = None
+        self.return_census_floor = None
+        self.return_waiting = None
+        self.return_retried.clear()
         if transport:
             transport.restrict_game_routes(set())
 
@@ -149,15 +205,66 @@ class MultiHost(Host):
     def _reserve_next_return(self) -> None:
         self.returning_guests = [identifier for identifier in self.returning_guests
                                 if (member := self.members.get(identifier)) is not None and not member.ready]
-        if not self.enrollment.pending:
+        if not self.enrollment.pending and not self._return_blocked():
+            self.return_census_floor = None
             for identifier in self.returning_guests:
                 member = self.members.get(identifier)
                 if member.disconnected_at is None and member.binding is None:
-                    self.members.reserve_returning(identifier, self.last_game)
+                    result = self.members.reserve_returning(identifier, self.last_game)
+                    if result.state == "reserved" and result.reservation and identifier not in self.return_retried:
+                        self.return_waiting = result.reservation.id
                     break
         first = self.members.get(self.returning_guests[0]) if self.returning_guests else None
         self.awaiting_zone_guest = first.character_id if first else None
         self._update_native_relay()
+
+    async def _expire_return_handshake(self, result, transport) -> None:
+        # Retire the route only when the qualified census still shows no new connection.
+        # A visible native connection must finish or depart before another guest can enroll.
+        reservation, deadline = result.reservation, self.return_handshake
+        if (result.state != "pending" or result.reason != "awaiting_new_connection" or not reservation
+                or reservation.guest_id not in self.returning_guests
+                or deadline is None or deadline[0] != reservation.id or time.monotonic() < deadline[1]):
+            return
+        identifier = reservation.guest_id
+        self.enrollment.cancel(reservation.id)
+        self.return_census_floor = self.last_game["sequence"]
+        self.returning_guests.remove(identifier)
+        self.returning_guests.append(identifier)
+        self._update_native_relay()
+        self.control.event("native_guest_return_timed_out", guest_id=identifier, driver=reservation.driver)
+        await transport.abort_guest_route(identifier)
+
+    async def _refresh_pending_return(self, result, transport) -> None:
+        reservation = result.reservation
+        self.return_waiting = None
+        if (result.state == "pending" and result.reason == "awaiting_new_connection" and reservation
+                and reservation.guest_id in self.returning_guests and reservation.guest_id not in self.return_retried
+                and not self._return_blocked() and not self.stopping
+                and time.monotonic() - self.last_seen <= POSITION_MAX_AGE):
+            self.return_waiting = reservation.id
+        queued = self.return_retry_request
+        if not queued:
+            return
+        identifier, prior_sequence, future = queued
+        if future.done():
+            return
+        if self.return_waiting != identifier:
+            future.set_result({"ok": False, "error": "native_return_retry_unavailable"})
+        elif self.last_game["sequence"] > prior_sequence:
+            assert reservation is not None
+            try:
+                await transport.refresh_guest_game_route(reservation.guest_id)
+            except OSError:
+                if not future.done():
+                    future.set_result({"ok": False, "error": "native_return_retry_route_unavailable"})
+                return
+            self.return_retried.add(reservation.guest_id)
+            self.return_waiting = None
+            self.control.event("native_guest_return_route_refreshed", guest_id=reservation.guest_id,
+                               driver=reservation.driver, reservation=identifier, zone_epoch=self.zone_epoch)
+            if not future.done():
+                future.set_result({"ok": True})
 
     def should_keep_native_scope(self) -> bool:
         return True
@@ -212,6 +319,15 @@ class MultiHost(Host):
             raise RuntimeError("The host has no safe guest arrival position")
         if math.dist(lead["location"], observation.pawn["location"]) <= party.INTERACT_RANGE:
             return self.last_game
+        recovery = self.last_game.get("native_roster_spawn", {})
+        arrived = recovery.get("location", [])
+        binding = observation.binding
+        if (tuple(recovery.get(field) for field in ("map", "connection", "controller", "pawn"))
+                == (area, binding.connection, binding.controller, binding.pawn)
+                and len(arrived) == 3 and None not in arrived
+                and math.dist(arrived, observation.pawn["location"]) <= 120
+                and math.dist(lead["location"], observation.pawn["location"]) <= 1200):
+            return self.last_game
         first = int(member.role.removeprefix("guest") or "1") - 1
         failure = "no placement acknowledgment"
         for candidate in guest_arrival_positions(lead["location"], first):
@@ -256,6 +372,10 @@ class MultiHost(Host):
             self.last_game, self.last_seen = snapshot, time.monotonic()
         party.add_player(self.party, "host")
         result = self.members.observe(self.last_game)
+        if await self.recover_joining_pawn(bridge, transport, result):
+            result = self.members.observe(self.last_game)
+        await self._refresh_pending_return(result, transport)
+        await self._expire_return_handshake(result, transport)
         if result.state == "bound":
             binding = result.assignment
             self.control.event("native_guest_enrolled", guest_id=binding.guest_id, driver=binding.driver,

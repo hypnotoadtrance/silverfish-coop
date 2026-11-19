@@ -13,6 +13,9 @@ local native_finite_shop = require("native_finite_shop")
 local native_matrix = require("native_matrix")
 local native_quest_catalog = require("native_quest_catalog")
 local native_broker_quest = require("native_broker_quest")
+local native_wire_quest = require("native_wire_quest")
+local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
+local native_wire_board = require("native_wire_board")
 local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
 local native_green_cube = require("native_cubes").new("green")
@@ -28,6 +31,7 @@ local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_loot_actions = require("native_loot_actions")
 local native_loot_crate_input = require("native_loot_crate_input")
+local native_loot_view = require("native_loot_view")
 local native_enemy_loot = require("native_enemy_loot")
 local native_broker_input = require("native_broker_input")
 local native_wipe_view = require("native_wipe_view")
@@ -37,6 +41,7 @@ local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
 local purple_arrival = require("native_purple_arrival")
 local native_roster = require("native_roster")
+local native_roster_spawn = require("native_roster_spawn")
 local native_shop = require("native_shop")
 local native_shop_view = require("native_shop_view")
 local native_campaign_npc = require("native_campaign_npc")
@@ -382,7 +387,9 @@ local function run_command(fields, state, current_phase)
         native_campaign_npc.clear()
         native_guest_primary_input.reset()
         native_loot_crate_input.clear()
+        native_loot_view.clear()
         native_broker_input.clear()
+        native_wire_board.clear()
         native_wipe_view.clear()
     end
     if command == "native-fresh-campaign-prepare" then
@@ -709,7 +716,7 @@ local function run_command(fields, state, current_phase)
         end
         guest_save.clear()
         vitals.reset()
-        if state.map ~= main_menu or state.listening then
+        if state.map ~= main_menu or state.listening or role == "client" then
             open_level(state.controller, main_menu, "")
             leaving = true
         else
@@ -763,6 +770,11 @@ local function run_command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_loot_actions.command(fields, state, current_phase)
         or native_loot_crate_input.command(fields, state, current_phase)
+        or native_loot_view.command(fields, state, current_phase)
+        or native_wire_quest.command(fields, state, current_phase)
+        or native_wire_quest_turn_in.command(fields, state, current_phase)
+        or native_wire_board.command(fields, state, current_phase)
+        or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
         or native_broker_input.command(fields, state, current_phase)
         or native_wipe_view.command(fields, state, current_phase)
@@ -880,6 +892,10 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -912,6 +928,7 @@ local function write_status(state, current_phase, failure)
                 proof.x, proof.y, proof.z)
         end
         for _, row in ipairs(native_roster.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_roster_spawn.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dream.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_matrix.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1029,6 +1046,7 @@ local function tick()
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)
+    native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
     native_enemy_loot.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)
@@ -1074,6 +1092,8 @@ local function tick()
             or fields[2] == "native-broker-position-fixture" or fields[2] == "native-authored-arrival"
             or fields[2] == "native-loot-approach" or fields[2] == "native-dream-stone-position"
             or fields[2] == "native-campaign-npc-approach"
+            or fields[2] == "native-roster-restart-player"
+            or fields[2] == "native-wire-quest-approach"
             or fields[2] == "native-dream-nothing-position"
             or fields[2] == "restore" or fields[2] == "restore-exact" then
             state, current_phase = observe_session()
@@ -1089,6 +1109,7 @@ local function tick()
     local projected, failure = pcall(function()
         vitals.sync(state, current_phase)
         players.sync(state, current_phase)
+        native_wire_board.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
         return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
     end)
@@ -1102,8 +1123,10 @@ end
 players.start(bridge)
 native_inventory_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
+native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
 native_broker_input.start(bridge, players.is_downed)
+native_wire_board.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)

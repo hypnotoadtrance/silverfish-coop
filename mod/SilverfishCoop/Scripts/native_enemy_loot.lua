@@ -40,7 +40,7 @@ end
 
 local function read(host)
     local result = table.pack(SilverfishReadNativeEnemyLoot(host:GetAddress()))
-    if result.n ~= 15 then return end
+    if result.n ~= 15 and result.n ~= 23 then return end
     for index = 1, result.n do
         if result[index] == "" then result[index] = "-" end
         if type(result[index]) == "boolean" then result[index] = result[index] and 1 or 0 end
@@ -101,7 +101,11 @@ end
 
 function enemy_loot.rows(state, phase, status_row)
     if watch and watch.proof and phase == "hosting" and state.map == map and same(state.world, watch.world) then
-        return {status_row("native-enemy-loot", map, watch.name, table.unpack(watch.proof, 1, watch.proof.n))}
+        local rows = {status_row("native-enemy-loot", map, watch.name, table.unpack(watch.proof, 1, 15))}
+        if watch.proof.n == 23 then
+            rows[#rows + 1] = status_row("native-enemy-bounty", map, watch.name, table.unpack(watch.proof, 16, 23))
+        end
+        return rows
     end
     return {}
 end

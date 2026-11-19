@@ -11,7 +11,7 @@ endif()
 
 add_library(SilverfishCoopNative SHARED
     native_death.cpp authored_pickup.cpp bag_projection.cpp black_stone.cpp broker_input.cpp broker_menu.cpp
-    campaign_npc.cpp enemy_loot.cpp finite_shop.cpp
+    campaign_npc.cpp enemy_loot.cpp finite_shop.cpp fresh_clock.cpp quest_rewards.cpp
     guest_consumable.cpp guest_item.cpp guest_npc.cpp guest_primary_input.cpp guest_regen.cpp guest_reload_input.cpp
     interaction_input.cpp inventory_census.cpp inventory_wipe.cpp
     inventory_view.cpp item_roundtrip.cpp loot_crate_input.cpp loot_escrow.cpp

@@ -106,7 +106,7 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
         if process.returncode or not output:
             raise RuntimeError(f"{args[0]} failed: {output.decode(errors='replace')} {error.decode(errors='replace')}")
         reply = json.loads(output)
-        if reply.get("ok") is not True:
+        if reply.get("ok") is not True and not (args[0] == "events" and isinstance(reply.get("events"), list)):
             raise RuntimeError(f"{args[0]} returned {reply}")
         return reply
 

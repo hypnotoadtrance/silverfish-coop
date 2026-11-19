@@ -134,6 +134,10 @@ local maps = {
         fixture = "Level_Exit_BP_C_1", destination = rail_yard, entrance = "Rail_City",
         door_arrivals = { Subway = "Dungeon_TransitionDoor_BP_C_2" },
         other_arrivals = { City_Borough = "LevelExit_Spawn_BP_C_388", Metro_Dock = "LevelExit_Spawn_BP_C_391" },
+        secondary = {
+            fixture = "Level_Exit_BP_C_388", destination = borough, entrance = "City_Borough",
+            probe_arrival = "LevelExit_Spawn_BP_C_388", probe_approach = -1,
+        },
     },
     [scav_bar] = {
         entrance = "Bar_Slums",
@@ -145,6 +149,7 @@ local maps = {
     },
     [borough] = {
         fixture = "Level_Exit_BP_C_1", destination = city, entrance = "City_Borough",
+        probe_arrival = "LevelExit_Spawn_BP_C_1", probe_approach = 1,
     },
     [black_market] = {
         entrance = "BlackMarket",
@@ -156,6 +161,7 @@ local maps = {
     },
     [forest] = {
         fixture = "Level_Exit_BP_C_1", destination = crossroads, entrance = "CR_Forest",
+        probe_arrival = "LevelExit_Spawn_BP_C_1", probe_approach = 1, probe_right_axis = true,
     },
     [lake] = {
         fixture = "Level_Exit_BP_C_2", destination = crossroads, entrance = "Lake_Cave",

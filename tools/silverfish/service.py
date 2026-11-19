@@ -15,9 +15,9 @@ from cryptography.hazmat.primitives import serialization
 
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_dream, native_finite_shop,
                native_gold, native_green, native_guest_consumable, native_guest_npc,
-               native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix,
+               native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards,
-               native_wipe_view, party, wipe)
+               native_wipe_view, native_wire_board, party, wipe)
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
@@ -25,7 +25,7 @@ from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment
-from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, CISTERN, CROSSROADS, GOLD_NEXUS,
+from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
@@ -35,7 +35,7 @@ PROTOCOL = 2
 POSITION_MAX_AGE = 3.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
-                        native_broker.INTERACT,
+                        native_broker.INTERACT, native_wire_quest.PREFLIGHT,
                         "native-inventory-list", "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -124,7 +124,7 @@ class Host:
                  verify_native_roster: bool = False, persist_native_guest: bool = False, matrix_supported: bool = False,
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
-                 broker_input: bool = False, wipe_view_enabled: bool = False):
+                 broker_input: bool = False, wipe_view_enabled: bool = False, wire_board_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -154,6 +154,7 @@ class Host:
         self.guest_regen = guest_regen
         self.broker_input = broker_input
         self.wipe_view_enabled = wipe_view_enabled
+        self.wire_board_enabled = wire_board_enabled
         self.wipe_view = None
         self.last_crate_intent = 0
         if authored_zones and expanded_zones:
@@ -186,6 +187,8 @@ class Host:
         self.transitioning = False
         self.awaiting_zone_guest = None
         self.expired_characters: set[str] = set()
+        self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
+        self.native_restart_attempted = 0
 
     def admit(self, request: dict) -> dict:
         if self.transitioning:
@@ -1286,6 +1289,10 @@ class Host:
                 result = {"native_quest_page": native_quest_catalog.page(await self.read_quest_catalog(bridge), target)}
             elif action == native_broker.INTERACT:
                 result = await native_broker.interact(self, bridge, character, target)
+            elif action == native_wire_quest.PREFLIGHT:
+                if target is not None:
+                    raise party.RuleError("native_wire_quest_has_fixed_board")
+                result = await native_wire_quest.preflight(self, bridge, character)
             elif action == "native-wipe-items":
                 result = native_inventory_death.items(self, character, target)
             elif action == "native-wipe-recover":
@@ -1325,6 +1332,7 @@ class Host:
                 if snapshot is not self.last_game:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_rewards.settle(self, bridge)
+            await native_wire_quest.settle(self, bridge)
             if not self.fixtures:
                 return
             await native_quest.project(self, bridge)
@@ -1523,6 +1531,7 @@ class Host:
             "native_loot_input": self.native_loot_input,
             "native_broker_input": self.broker_input,
             "native_wipe_view": self.wipe_view_enabled,
+            "native_wire_board": self.wire_board_enabled,
         })
         self.control.event("invite_created", guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -1554,13 +1563,48 @@ class Host:
                 continue
         self.control.event("safe_spawn_unavailable", character_id=self.guest["character_id"])
 
-    async def enrolled_pawn(self, pawn: dict | None, transport) -> dict | None:
+    async def recover_joining_pawn(self, bridge, transport, result) -> bool:
+        reservation, joining = result.reservation, result.joining
+        if (not self.native_zones or not self.native_guest or self.transitioning or self.stopping
+                or self.party["wipe"] or not self.last_game.get("native_roster_spawn_ready")
+                or not reservation or not joining or not transport.connected(reservation.guest_id)):
+            self.native_restart_candidate = None
+            return False
+        if self.native_restart_attempted == reservation.id:
+            return False
+        key = reservation.id, joining
+        candidate = self.native_restart_candidate
+        now = time.monotonic()
+        if candidate is None or candidate[:2] != key:
+            self.native_restart_candidate = (*key, now)
+            return False
+        if now - candidate[2] < 2:
+            return False
+        self.native_restart_attempted = reservation.id
+        source = self.last_game.get("map")
+        try:
+            snapshot = await bridge.command("native-roster-restart-player", *joining, timeout=4)
+            proof = snapshot.get("native_roster_spawn", {})
+            if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("connection"),
+                proof.get("controller")) != ("hosting", source, source, *joining) or not proof.get("pawn"):
+                raise RuntimeError("The stock restart did not verify the exact joining pawn")
+            self.last_game, self.last_seen = snapshot, time.monotonic()
+            self.control.event("native_joining_pawn_restarted", reservation_id=reservation.id, **proof)
+            return True
+        except (OSError, TimeoutError, RuntimeError) as error:
+            self.control.event("native_joining_pawn_restart_refused", reservation_id=reservation.id, reason=str(error))
+            return False
+
+    async def enrolled_pawn(self, bridge, pawn: dict | None, transport) -> dict | None:
         if self.enrollment is None:
             return pawn
         if self.guest is None:
             return None
         guest_id = self.guest["guest_id"]
         result = self.enrollment.observe(self.last_game)
+        if await self.recover_joining_pawn(bridge, transport, result):
+            result = self.enrollment.observe(self.last_game)
+            pawn = self.last_game.get("pawns", {}).get("guest")
         if result.state == "bound":
             binding = result.assignment
             self.control.event("native_guest_enrolled", guest_id=binding.guest_id, driver=binding.driver,
@@ -1587,7 +1631,7 @@ class Host:
                 self.last_seen = time.monotonic()
             self.last_game = state
         party.add_player(self.party, "host")
-        pawn = await self.enrolled_pawn(self.last_game.get("pawns", {}).get("guest"), transport)
+        pawn = await self.enrolled_pawn(bridge, self.last_game.get("pawns", {}).get("guest"), transport)
         if not pawn and "guest" in self.last_game.get("pawns", {}) and self.enrollment:
             self.last_game["pawns"].pop("guest")
         bound_pawn = self.last_game.get("native_guest_save", {}).get("pawn")
@@ -1710,14 +1754,16 @@ class Host:
                 elif action == "native-authored-pickup-fixture" and self.fixtures:
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_authored_pickup_interaction": self.last_game.get("native_authored_pickup_interaction", {})}
-                elif action == "native-authored-pickup-approach" and self.fixtures and self.last_game.get("map") == OBSERVATORY:
+                elif (action == "native-authored-pickup-approach" and self.fixtures
+                      and self.last_game.get("map") in native_authored_pickup.MAP_SOURCES):
                     character = self.roles().get(request.get("target") or "guest")
                     pawn = native_inventory_death.owner_pawns(self).get(character)
                     if not pawn:
-                        raise ValueError("Choose an enrolled Observatory pickup fixture participant")
+                        raise ValueError("Choose an enrolled participant for the placed pickup fixture")
+                    source = native_authored_pickup.MAP_SOURCES[self.last_game["map"]]
                     self.last_game = await bridge.command(action, pawn, timeout=5)
                     self.last_seen = time.monotonic()
-                    result = {"pawn": pawn, "actor": native_authored_pickup.ACTOR}
+                    result = {"pawn": pawn, "actor": native_authored_pickup.SOURCES[source][1]}
                 elif action == "native-interaction-fixture":
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
@@ -1771,6 +1817,15 @@ class Host:
                     result = {"native_enemy_loot": self.last_game.get("native_enemy_loot", {})}
                     if action == "native-bandit-aim-fixture":
                         result["native_bandit_aim"] = self.last_game.get("native_bandit_aim", {})
+                elif action == "native-bandit-shot-fixture" and self.native_guest and self.fixtures:
+                    target = request.get("target")
+                    bandit, separator, guid = target.rpartition("|") if isinstance(target, str) else ("", "", "")
+                    watched = self.last_game.get("native_enemy_loot", {})
+                    character = self.roles().get("guest")
+                    if not separator or not character or watched.get("bandit") != bandit:
+                        raise ValueError("Choose the watched staged Bandit and exact guest weapon")
+                    result = await native_guest_weapon.perform(self, bridge, character, request.get("operation_id") or path.stem,
+                                                               "native-guest-weapon-fire", guid, bandit_fixture=bandit)
                 elif action == "native-shop-approach" and self.native_guest and self.fixtures:
                     target = request.get("target")
                     shop = next((entry for entry in self.last_game.get("native_shops", [])
@@ -1843,6 +1898,16 @@ class Host:
                         "native_quest_page": native_quest_catalog.page(catalog, request.get("target"))}
                 elif action in ("native-quest-start", "native-quest-objective", "native-quest-turnin"):
                     result = await native_quest.action(self, bridge, "host", action, request.get("target"))
+                elif action == native_wire_quest.PREFLIGHT:
+                    if request.get("target") is not None:
+                        raise party.RuleError("native_wire_quest_has_fixed_board")
+                    result = await native_wire_quest.preflight(self, bridge, "host")
+                elif action == native_wire_quest.APPROACH:
+                    actor = self.roles().get(request.get("target") or "host")
+                    result = await native_wire_quest.approach(self, bridge, actor)
+                elif action == native_wire_board.FIXTURE and self.wire_board_enabled and self.fixtures:
+                    self.last_game = await bridge.command(native_wire_board.FIXTURE, timeout=4)
+                    result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action in ("native-broker-issue-fixture", "native-broker-drill-issue-fixture") and self.fixtures:
                     quest_id = native_broker.DRILL_ID if action == "native-broker-drill-issue-fixture" else native_broker.QUEST_ID
                     result = await native_broker.action(self, bridge, request.get("target") or "host",
@@ -2236,10 +2301,14 @@ class Host:
             now = time.monotonic()
             if game and game.get("sequence") != sequence:
                 sequence, seen = game.get("sequence"), now
-            if (game and game.get("state") == "hosting" and now - seen < 1.5
-                    and self.should_keep_native_scope()):
-                with contextlib.suppress(OSError):
-                    write_text(bridge.directory / "native-events-heartbeat", f"{int(time.time())}\n")
+            if game and game.get("state") == "hosting" and now - seen < 1.5:
+                stamp = f"{int(time.time())}\n"
+                if self.should_keep_native_scope():
+                    with contextlib.suppress(OSError):
+                        write_text(bridge.directory / "native-events-heartbeat", stamp)
+                if self.wire_board_enabled and game.get("map") == BOROUGH:
+                    with contextlib.suppress(OSError):
+                        write_text(bridge.directory / native_wire_board.HEARTBEAT, stamp)
             await asyncio.sleep(.4)
 
     async def run(self, bridge: Bridge, transport) -> None:
@@ -2255,11 +2324,22 @@ class Host:
                     await heartbeat
 
     async def run_session(self, bridge: Bridge, transport) -> None:
+        loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
+        wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
+
+        async def claim_crate(operation, guid):
+            return await native_loot.perform(self, bridge, "host", "claim", guid, operation)
+
         async def frozen_items(offset):
             return native_inventory_death.items(self, "host", offset)
 
         async def retain(operation, choices):
             return self.act("host", operation, "keep", None, retained=choices)
+
+        async def wire_action(action, _operation, target):
+            if action == native_wire_quest.PREFLIGHT:
+                return await native_wire_quest.preflight(self, bridge, "host")
+            return await native_quest.action(self, bridge, "host", action, target)
 
         while not self.stopping:
             if bridge.process.poll() is not None:
@@ -2278,6 +2358,11 @@ class Host:
                     await self.advance_dream(bridge, transport)
             if not self.stopping:
                 await self.service_guest_native_requests(bridge)
+                if wire_board:
+                    snapshot = await wire_board.sync(self.last_game, self.zone_epoch,
+                                                     not self.transitioning and not self.party["wipe"], wire_action)
+                    if snapshot is not self.last_game:
+                        self.last_game, self.last_seen = snapshot, time.monotonic()
                 if self.native_loot_input and (sequence := native_loot.interaction_sequence(self.last_game, self.last_crate_intent)):
                     self.last_crate_intent = sequence
                     operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}").hex
@@ -2288,7 +2373,7 @@ class Host:
                         self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, reason=str(error))
             for operation_id, target in bridge.interactions():
                 try:
-                    if target == native_authored_pickup.SOURCE:
+                    if target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
                     elif target:
                         await native_inventory_death.recover(self, bridge, "host", target, operation_id)
@@ -2311,6 +2396,11 @@ class Host:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
                 await self.apply_pending_spawns(bridge)
                 await self.project_gameplay(bridge)
+                if loot_view and not self.stopping:
+                    roll = self.party.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE)
+                    snapshot = await loot_view.sync(self.last_game, roll, claim_crate)
+                    if snapshot is not self.last_game:
+                        self.last_game, self.last_seen = snapshot, time.monotonic()
             now = time.monotonic()
             if not self.stopping and now >= self.next_save:
                 self.next_save = now + 5
@@ -2345,6 +2435,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
     wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
+    wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if native_events and native_backend != "cpp":
@@ -2490,6 +2581,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               expanded_zones=expanded_zones,
                               native_shop_view=native_shop_view, native_loot_input=native_loot_input,
                               guest_regen=guest_regen, broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
+                              wire_board_enabled=wire_board_enabled,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -2575,7 +2667,7 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "expanded_zones", "native_shop_view", "native_loot_input",
-            "native_broker_input", "native_wipe_view")
+            "native_broker_input", "native_wipe_view", "native_wire_board")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     return invite
@@ -2644,12 +2736,16 @@ class Client:
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.server_transitioning = False
+        self.native_return_reservation: int | None = None
+        self.native_return_retry_allowed = False
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.last_primary_intent = 0
         self.last_crate_intent = 0
         self.last_broker_intent = 0
+        self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
+        self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
         self.primary_scope = None
         self.next_primary_renewal = 0.0
         self.bag_projection_key = None
@@ -2685,6 +2781,9 @@ class Client:
         self.zone_epoch = result["zone_epoch"]
         self.expected_zone = result["zone"]
         self.host_session = session
+        self.native_return_reservation = None
+        self.native_return_retry_allowed = False
+        self.next_snapshot = 0.0
         self.control.event("client_link_authenticated", character_id=request["character_id"],
                            resumed=bool(result.get("resumed")))
         return result
@@ -2693,14 +2792,34 @@ class Client:
         self.control.status(active=True, role="client", state="waiting_for_host", wait_reason=reason,
                             character_id=self.invite["character_id"])
 
-    async def open_game_link(self) -> None:
-        self.transport.reset_game_endpoint()
+    async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
+        if renew_endpoint:
+            await self.transport.renew_game_endpoint()
+            self.endpoint = f"127.0.0.1:{self.transport.address[1]}"
+        else:
+            self.transport.reset_game_endpoint()
         self.needs_travel = True
-        await self.bridge.command("join", self.endpoint)
-        self.last_game = await self.bridge.wait_for(
-            lambda state: state["state"] == "connected" and state["map"] == self.expected_zone, timeout=18,
-        )
+        self.last_game = await self.bridge.command("join", self.endpoint)
+        await self.wait_game_link(timeout)
+
+    async def wait_game_link(self, timeout: float) -> None:
+        try:
+            self.last_game = await self.bridge.wait_for(
+                lambda state: state["state"] == "connected" and state["map"] == self.expected_zone, timeout=timeout,
+            )
+        except TimeoutError:
+            self.last_game = self.bridge.snapshot() or self.last_game
+            self.control.event("native_game_join_timeout", zone_epoch=self.zone_epoch,
+                               phase=self.last_game.get("state"), map=self.last_game.get("map"),
+                               sent=self.transport.game_packets_sent, received=self.transport.game_packets_received)
+            raise
         self.needs_travel = False
+
+    async def leave_for_rejoin(self, state: dict) -> None:
+        if state.get("state") != "ready":
+            left = await self.bridge.command("leave")
+            self.last_game = await self.bridge.wait_for(lambda snapshot: snapshot["state"] == "ready"
+                                                        and snapshot["sequence"] > left["sequence"], timeout=15)
 
     async def reconcile_game(self) -> None:
         state = self.bridge.snapshot()
@@ -2709,10 +2828,31 @@ class Client:
         self.last_game = state
         if not self.needs_travel and state.get("state") not in {"disconnected", "ready"}:
             return
-        if state.get("state") != "ready":
-            await self.bridge.command("leave")
-            await self.bridge.wait_for(lambda snapshot: snapshot["state"] == "ready", timeout=15)
-        await self.open_game_link()
+        await self.leave_for_rejoin(state)
+        reservation, epoch = self.native_return_reservation, self.zone_epoch
+        early_retry = reservation is not None and self.native_return_retry_allowed
+        try:
+            await self.open_game_link(timeout=10 if early_retry else 18, renew_endpoint=reservation is not None)
+        except TimeoutError:
+            if not early_retry:
+                raise
+            await self.refresh_gameplay()
+            if (self.native_return_reservation != reservation or self.zone_epoch != epoch
+                    or not self.native_return_retry_allowed):
+                # A visible stock connection may still be waiting for its exact pawn.
+                await self.wait_game_link(8)
+                return
+            current = self.bridge.snapshot() or self.last_game
+            if current.get("state") == "connected" and current.get("map") == self.expected_zone:
+                self.last_game, self.needs_travel = current, False
+                return
+            await self.leave_for_rejoin(current)
+            reply = await self.transport.request({"action": "retry-native-return", "zone_epoch": epoch,
+                                                  "reservation": reservation}, timeout=6)
+            self.native_return_retry_allowed = False
+            if reply.get("ok") is not True:
+                raise RuntimeError("The host could not refresh this native return route")
+            await self.open_game_link(timeout=12, renew_endpoint=True)
 
     async def recover(self) -> dict:
         result = await self.connect(timeout=4) if not self.transport.connected else {"resumed": False}
@@ -2728,8 +2868,12 @@ class Client:
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
             request["retained"] = retained
-        timeout = 15 if action in (*native_finite_shop.ACTIONS, native_guest_consumable.ACTION, native_broker.INTERACT,
-                                   "native-quest-list") else 7 if action in GUEST_NATIVE_ACTIONS else 4
+        timeout = 7 if action in GUEST_NATIVE_ACTIONS else 4
+        if action in (*native_finite_shop.ACTIONS, native_guest_consumable.ACTION, native_broker.INTERACT,
+                      "native-quest-list"):
+            timeout = 15
+        if action == "native-quest-turnin" and target == native_wire_quest.QUEST_ID:
+            timeout = 22
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
@@ -2894,6 +3038,7 @@ class Client:
         features = (
             (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
+            (self.wire_board is not None, (BOROUGH,), native_wire_board.HEARTBEAT),
         )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
@@ -2968,6 +3113,9 @@ class Client:
                         self.viewer_role = viewer
                     self.gameplay_seen = time.monotonic()
                     self.server_transitioning = bool(reply.get("travel_in_progress"))
+                    reservation = reply.get("native_return_reservation")
+                    self.native_return_reservation = reservation if type(reservation) is int else None
+                    self.native_return_retry_allowed = reply.get("native_return_retry_allowed") is True
                     epoch = reply["zone_epoch"]
                     if self.zone_epoch and epoch != self.zone_epoch:
                         self.needs_travel = True
@@ -3060,6 +3208,9 @@ class Client:
                     result = await probe_transport(self.bridge, request.get("target"))
                 elif action == native_guest_npc.CLIENT_ACTION:
                     result = await native_guest_npc.client_fixture(self, action)
+                elif action == native_wire_board.FIXTURE and self.wire_board:
+                    self.last_game = await self.bridge.command(native_wire_board.FIXTURE, timeout=4)
+                    result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action == "native-guest-reload-input-fixture":
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     if not pawn or self.last_game.get("state") != "connected":
@@ -3098,6 +3249,9 @@ class Client:
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
+                elif action == "native-loot-view-fixture" and self.loot_view:
+                    self.last_game = await self.loot_view.fixture(action, request.get("target"))
+                    result = {"native_loot_view": self.last_game.get("native_loot_view", {})}
                 elif action == "native-broker-input-fixture" and self.invite.get("native_broker_input"):
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     if not pawn or self.last_game.get("state") != "connected":
@@ -3130,6 +3284,9 @@ class Client:
                 self.control.respond(path, False, error=str(error))
 
     async def run(self) -> None:
+        async def claim_crate(operation, guid):
+            return await self.gameplay_action("native-loot-claim", operation, guid)
+
         async def frozen_items(offset):
             return await self.gameplay_action("native-wipe-items", uuid.uuid4().hex, offset)
 
@@ -3160,7 +3317,16 @@ class Client:
             await self.service_reload_input(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
+            if self.loot_view:
+                roll = (self.gameplay.get(native_loot.STATE_KEY, {}).get(native_loot.CRATE)
+                        if active and time.monotonic() - self.gameplay_seen < 2 else None)
+                self.last_game = await self.loot_view.sync(self.last_game, roll, claim_crate)
             await self.service_broker_input(active)
+            if self.wire_board:
+                current = (active and not self.stopping and self.host_session and self.zone_epoch
+                           and time.monotonic() - self.gameplay_seen < 2)
+                epoch = f"{self.host_session}:{self.zone_epoch}"
+                self.last_game = await self.wire_board.sync(self.last_game, epoch, current, self.gameplay_action)
             if self.wipe_view:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
@@ -3171,7 +3337,7 @@ class Client:
             if active and not self.stopping:
                 for operation_id, target in interactions:
                     try:
-                        action = (native_authored_pickup.ACTION if target == native_authored_pickup.SOURCE
+                        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
                                   else "native-wipe-recover" if target else "interact")
                         result = await self.gameplay_action(action, operation_id, target)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
@@ -3206,6 +3372,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for stock wipe item selection")
     if broker_input and not staged_script(work, "native_broker_input.lua"):
         raise ValueError("Restage the native client for stock Broker station interaction")
+    if invite.get("native_wire_board") and not staged_script(work, "native_wire_board.lua"):
+        raise ValueError("Restage the native client for stock Copper Stop interaction")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):
@@ -3240,8 +3408,13 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             client = Client(control, transport, invite, bridge, allowed_maps=maps, guest_primary_input=guest_primary_input)
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
-            await client.open_game_link()
-            if invite.get("native_shop_view") or broker_input:
+            try:
+                await client.open_game_link()
+            except TimeoutError:
+                if process.poll() is not None:
+                    raise
+                control.event("client_initial_game_join_retry", character_id=invite["character_id"])
+            if invite.get("native_shop_view") or broker_input or client.wire_board:
                 heartbeat = asyncio.create_task(client.renew_native_interactions())
                 try:
                     await client.run()
