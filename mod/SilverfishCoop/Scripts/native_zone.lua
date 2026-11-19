@@ -345,6 +345,28 @@ local function approach_anchor(state, tag, center, extent)
     return center
 end
 
+local function nexus_fixture_floor(world, world_name)
+    local actor = StaticFindObject(world_name .. ":PersistentLevel.StaticMeshActor_0")
+    local component = valid(actor) and actor.StaticMeshComponent
+    local mesh = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_Environment/SM_Env_Ground_Mound_Large_01.SM_Env_Ground_Mound_Large_01")
+    local trace = StaticFindObject("/Script/Engine.PrimitiveComponent:K2_LineTraceComponent")
+    if not valid(actor) or not same(actor:GetClass(), StaticFindObject("/Script/Engine.StaticMeshActor"))
+        or not same(actor:GetWorld(), world) or not actor:HasAuthority() or actor:IsActorBeingDestroyed()
+        or not actor:GetActorEnableCollision() or not valid(component) or not same(component, actor.RootComponent)
+        or not same(component:GetOwner(), actor) or component:GetFullName() ~= "StaticMeshComponent "
+            .. world_name .. ":PersistentLevel.StaticMeshActor_0.StaticMeshComponent0"
+        or not same(component:GetClass(), StaticFindObject("/Script/Engine.StaticMeshComponent"))
+        or not same(component.StaticMesh, mesh) or not valid(trace) then
+        error("The exact stock Gold Nexus fixture floor is unavailable", 0)
+    end
+    local collision = component:GetCollisionEnabled()
+    if (collision ~= 1 and collision ~= 3) or component:GetCollisionObjectType() ~= 0
+        or component:GetCollisionResponseToChannel(2) ~= 2 then
+        error("The stock Gold Nexus fixture floor does not block player capsules", 0)
+    end
+    return component
+end
+
 local function place_expanded_overlap(state, details, route, position)
     local pawn = details.pawn
     local exit = placed_actor("Level_Exit_BP_C", route.actor, state.world)
@@ -384,6 +406,14 @@ local function place_expanded_overlap(state, details, route, position)
     local normal, tangent, width, length = first, second, extent.X, extent.Y
     if extent.Y < extent.X then normal, tangent, width, length = second, first, extent.Y, extent.X end
     local anchor = approach_anchor(state, route.entrance, center, extent)
+    local floor
+    if state.map == "/Game/Classes/Maps/Dreams/GoldNexus_P" then
+        floor = nexus_fixture_floor(state.world, world_name)
+        anchor = floor:K2_GetComponentLocation()
+        if not vector(anchor) or math.abs(side_of(anchor, center, normal)) < 600 then
+            error("The stock Gold Nexus pad does not face its authored floor", 0)
+        end
+    end
     local sign = side_of(anchor, center, normal) < 0 and -1 or 1
     local lane_limit = math.max(0, length - radius - 35)
     local lane = math.max(-lane_limit, math.min(lane_limit, side_of(anchor, center, tangent)))
@@ -397,29 +427,61 @@ local function place_expanded_overlap(state, details, route, position)
     for _, detail in ipairs(state.pawns) do
         if valid(detail.pawn) then ignored[#ignored + 1] = detail.pawn end
     end
-    local moved = false
-    for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do
+    local candidates = {}
+    local function add_point(distance, offset)
         local side = math.max(-lane_limit, math.min(lane_limit, lane + offset))
-        local x = center.X + depth * sign * normal.X + side * tangent.X
-        local y = center.Y + depth * sign * normal.Y + side * tangent.Y
+        candidates[#candidates + 1] = {center.X + distance * sign * normal.X + side * tangent.X,
+            center.Y + distance * sign * normal.Y + side * tangent.Y}
+    end
+    if floor and position == "far" then
+        local marker = player_start(routes[state.map], state.world)
+        local start = valid(marker) and marker:K2_GetActorLocation()
+        if vector(start) and marker:GetFullName() == "PlayerStart " .. world_name .. ":PersistentLevel.PlayerStart_1"
+            and (start.X - center.X)^2 + (start.Y - center.Y)^2 > 1700^2 then
+            candidates[1] = {start.X + assigned, start.Y}
+        end
+        -- The cooked mound extends beyond the court wall. Use the outward side of the selected pad.
+        for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(-depth, offset) end
+    elseif floor then
+        local distance = inside and 0 or depth + index * 105
+        for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(distance, offset) end
+        if not inside then
+            for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(distance + 75, offset) end
+        end
+    else
+        for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do add_point(depth, offset) end
+    end
+    local moved, hits, qualified = false, 0, 0
+    for _, candidate in ipairs(candidates) do
+        local x, y = candidate[1], candidate[2]
+        local above, below = {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom}
         local hit = {}
-        local found = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = top}, {X = x, Y = y, Z = bottom},
-            0, false, ignored, 0, hit, true, color, color, 0)
+        local found
+        if floor then
+            -- The authored BodySetup uses complex static collision for the walkable surface.
+            found = floor:K2_LineTraceComponent(above, below, true, false, false, hit, hit, hit, hit)
+        else
+            found = trace:LineTraceSingle(pawn, above, below, 0, false, ignored, 0, hit, true, color, color, 0)
+        end
         hit = hit.OutHit or hit
         local surface = hit.Component and hit.Component:Get()
         if found == true and vector(hit.ImpactPoint) and vector(hit.ImpactNormal) and hit.ImpactNormal.Z >= .7
             and hit.ImpactPoint.Z < top - 1 and hit.ImpactPoint.Z >= bottom and valid(surface)
-            and surface:GetCollisionObjectType() == 0 then
+            and (not floor or same(surface, floor)) and surface:GetCollisionObjectType() == 0 then
+            hits = hits + 1
             local point = {X = x, Y = y, Z = hit.ImpactPoint.Z + height + 3}
             local in_box = math.abs(side_of(point, center, first)) <= extent.X
                 and math.abs(side_of(point, center, second)) <= extent.Y and math.abs(side_of(point, center, up)) <= extent.Z
-            if in_box == inside and pawn:K2_TeleportTo(point, facing) then
-                moved = true
-                local actual = pawn:K2_GetActorLocation()
-                if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= 70^2
-                    and box:IsOverlappingActor(pawn) == inside then
-                    pawn:ForceNetUpdate()
-                    return "positioned authoritative pawn " .. position .. " the stock " .. route.actor
+            if in_box == inside then
+                qualified = qualified + 1
+                if pawn:K2_TeleportTo(point, facing) then
+                    moved = true
+                    local actual = pawn:K2_GetActorLocation()
+                    if vector(actual) and (actual.X - x)^2 + (actual.Y - y)^2 + (actual.Z - point.Z)^2 <= 70^2
+                        and box:IsOverlappingActor(pawn) == inside then
+                        pawn:ForceNetUpdate()
+                        return "positioned authoritative pawn " .. position .. " the stock " .. route.actor
+                    end
                 end
             end
         end
@@ -431,6 +493,10 @@ local function place_expanded_overlap(state, details, route, position)
             error("The expanded exit fixture could not verify the restored pawn", 0)
         end
         pawn:ForceNetUpdate()
+    end
+    if floor then
+        error(string.format("No verified stock Gold Nexus floor at %s %s (%d probes, %d floor hits, %d qualified points)",
+            route.actor, position, #candidates, hits, qualified), 0)
     end
     error("No verified stock floor at the requested expanded overlap position", 0)
 end
