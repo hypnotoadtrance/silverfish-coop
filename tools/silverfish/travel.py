@@ -16,6 +16,21 @@ CISTERN = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 GOLD_NEXUS = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 EXCHANGE = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
+LAB_E206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
+EAST_WING = "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"
+OLD_PIPES = "/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P"
+SCI_TUNNEL = "/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P"
+SLUMS_TUNNEL = "/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P"
+SUBWAY = "/Game/Classes/Maps/Maps_Dungeons/Subway_01_P"
+UTILITY_TUNNELS = "/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P"
+TRASH_PIT = "/Game/Classes/Maps/Maps_OverWorld/TrashPit_P"
+RAIL_YARD = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
+RUIN_FIELDS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
+NORTHEAST_RAIL = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
+SLUMS = "/Game/Classes/Maps/Maps_OverWorld/Slums_P"
+CITY = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+RED_DESTINATIONS = (CISTERN, LAB_E206, EAST_WING, OLD_PIPES, SLUMS_TUNNEL, SCI_TUNNEL, SUBWAY,
+                    UTILITY_TUNNELS, TRASH_PIT)
 AUTHORED_EXITS = {
     (CROSSROADS, DEAD_BRIDGE): "DB_CR",
     (DEAD_BRIDGE, CROSSROADS): "DB_CR",
@@ -24,8 +39,21 @@ AUTHORED_EXITS = {
     (GOLD_NEXUS, CROSSROADS): "Nexus_CrossRoads",
     (CROSSROADS, OBSERVATORY): "Obsv_Etr",
     (OBSERVATORY, CROSSROADS): "Obsv_Etr",
+    (LAB_E206, RAIL_YARD): "RY_Lab206",
+    (EAST_WING, RUIN_FIELDS): "RgEast_Flood",
+    (OLD_PIPES, NORTHEAST_RAIL): "NE_Pipe",
+    (SCI_TUNNEL, CISTERN): "Cistern_Sci",
+    (SLUMS_TUNNEL, SLUMS): "Slums_GreenLine",
+    (SUBWAY, CITY): "Subway",
+    (UTILITY_TUNNELS, RAIL_YARD): "Rail_Utility",
+    (TRASH_PIT, NORTHEAST_RAIL): "M35_Maw",
+    (RAIL_YARD, CROSSROADS): "Depot_Cross_Rail",
+    (RUIN_FIELDS, CROSSROADS): "CR_RF",
+    (NORTHEAST_RAIL, CROSSROADS): "Cross_NE",
+    (SLUMS, RAIL_YARD): "Slum_Depot",
+    (CITY, RAIL_YARD): "Rail_City",
 }
-AUTHORED_MAPS = frozenset({CROSSROADS, DEAD_BRIDGE, CISTERN, GOLD_NEXUS, OBSERVATORY, EXCHANGE})
+AUTHORED_MAPS = frozenset({EXCHANGE} | {map_name for pair in AUTHORED_EXITS for map_name in pair})
 TRAVEL_RADIUS_UU = 1500
 
 

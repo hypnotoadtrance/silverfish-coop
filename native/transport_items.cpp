@@ -70,33 +70,33 @@ namespace
         Artifact{STR("/Game/Classes/Items/Artifacts/Art_Tesseract_Gold.Art_Tesseract_Gold_C"), "gold"},
     };
     constexpr const auto& blue = artifacts[2];
+    constexpr const auto& red = artifacts[3];
     constexpr const auto& gold = artifacts.back();
     constexpr const auto& stardust = artifacts.front();
 
-    enum class TransportKind { Gold, Blue, Stardust };
+    enum class TransportKind { Gold, Blue, Stardust, Red };
+    constexpr std::array transport_artifacts{&gold, &blue, &stardust, &red};
 
     [[nodiscard]] constexpr const Artifact& transport_artifact(TransportKind kind)
     {
-        if (kind == TransportKind::Stardust)
-        {
-            return stardust;
-        }
-        return kind == TransportKind::Gold ? gold : blue;
+        return *transport_artifacts[static_cast<std::size_t>(kind)];
     }
 
     [[nodiscard]] constexpr std::string_view transport_status(TransportKind kind, std::string_view gold_status,
-                                                               std::string_view blue_status, std::string_view stardust_status)
+                                                               std::string_view blue_status, std::string_view stardust_status,
+                                                               std::string_view red_status)
     {
-        if (kind == TransportKind::Stardust)
-        {
-            return stardust_status;
-        }
-        return kind == TransportKind::Gold ? gold_status : blue_status;
+        return std::array{gold_status, blue_status, stardust_status, red_status}[static_cast<std::size_t>(kind)];
     }
 
     [[nodiscard]] constexpr std::string_view queued_status(TransportKind kind)
     {
-        return transport_status(kind, "gold_request_queued", "blue_request_queued", "stardust_request_queued");
+        return transport_status(kind, "gold_request_queued", "blue_request_queued", "stardust_request_queued", "red_request_queued");
+    }
+
+    [[nodiscard]] constexpr std::string_view owned_backpack_required(TransportKind kind)
+    {
+        return kind == TransportKind::Stardust ? "owned_backpack_stardust_required" : "owned_backpack_cube_required";
     }
 
     struct Entries
@@ -617,7 +617,7 @@ namespace
                 "another_transport_request_pending" : "another_cube_request_pending";
         }
         return transport_status(kind, "another_gold_request_pending", "another_blue_request_pending",
-                                "another_stardust_request_pending");
+                                "another_stardust_request_pending", "another_red_request_pending");
     }
 
     [[nodiscard]] std::string_view queue_transport(TransportKind kind, const ItemView& candidate, std::string_view entry,
@@ -649,13 +649,12 @@ namespace
         }
         if (!match.record || match.item != candidate.structure)
         {
-            return transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
-                                    "owned_backpack_stardust_required");
+            return owned_backpack_required(kind);
         }
         if (transport_request && request_current(*transport_request, save))
         {
             return transport_request->kind == kind && transport_request->guid == guid ?
-                transport_status(kind, "gold_request_pending", "blue_request_pending", "stardust_request_pending") :
+                transport_status(kind, "gold_request_pending", "blue_request_pending", "stardust_request_pending", "red_request_pending") :
                 pending_conflict(*transport_request, kind);
         }
         transport_request = TransportRequest{kind, guid, scope.generation, Clock::now() + request_lease, pawn, save, entry};
@@ -669,11 +668,14 @@ namespace
         const std::string_view role = !qualified ? "unverified" : scope.host ? "host" : "guest";
         std::string_view reason = !qualified ? "current_local_owner_unverified" :
             !scope.host ? "host_activation_required" : "coordinated_route_required";
-        if (qualified && scope.host && widget && (&item == &gold || &item == &blue || &item == &stardust))
+        if (qualified && scope.host && widget)
         {
-            const auto kind = &item == &stardust ? TransportKind::Stardust :
-                &item == &gold ? TransportKind::Gold : TransportKind::Blue;
-            reason = queue_transport(kind, candidate, entry, context);
+            const auto found = std::ranges::find(transport_artifacts, &item);
+            if (found != transport_artifacts.end())
+            {
+                const auto kind = static_cast<TransportKind>(found - transport_artifacts.begin());
+                reason = queue_transport(kind, candidate, entry, context);
+            }
         }
         if (receipt.role != role || receipt.item != item.name || receipt.entry != entry || receipt.reason != reason)
         {
@@ -814,14 +816,16 @@ namespace
         }
         if (!transport_request || transport_request->kind != kind)
         {
-            return report_transport_request(lua, false, transport_status(kind, "no_gold_request", "no_blue_request", "no_stardust_request"));
+            return report_transport_request(lua, false, transport_status(kind, "no_gold_request", "no_blue_request",
+                                                                         "no_stardust_request", "no_red_request"));
         }
         const auto request = *transport_request;
         transport_request.reset();
         auto* save = canonical_host_save();
         if (!request_current(request, save))
         {
-            return report_transport_request(lua, false, transport_status(kind, "stale_gold_request", "stale_blue_request", "stale_stardust_request"));
+            return report_transport_request(lua, false, transport_status(kind, "stale_gold_request", "stale_blue_request",
+                                                                         "stale_stardust_request", "stale_red_request"));
         }
         TransportInventory match;
         if (const auto error = locate_transport(save, kind, request.guid, match); !error.empty())
@@ -830,8 +834,7 @@ namespace
         }
         if (!match.record)
         {
-            return report_transport_request(lua, false, transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
-                                                                         "owned_backpack_stardust_required"));
+            return report_transport_request(lua, false, owned_backpack_required(kind));
         }
         const auto guid = format_guid(request.guid);
         return report_transport_request(lua, true, {guid.data(), guid.size()}, request.entry);
@@ -842,11 +845,11 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
         {
             return transport_status(kind, "host_and_gold_guid_required_on_game_thread", "host_and_blue_guid_required_on_game_thread",
-                                    "host_and_stardust_guid_required_on_game_thread");
+                                    "host_and_stardust_guid_required_on_game_thread", "host_and_red_guid_required_on_game_thread");
         }
         if (!parse_guid(lua.get_string(2), guid))
         {
-            return transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid");
+            return transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid", "invalid_red_guid");
         }
         if (!current_host_argument(lua.get_integer(1)))
         {
@@ -1102,12 +1105,13 @@ namespace
         if (!metadata.available())
         {
             return transport_status(kind, "stock_gold_defaults_unavailable", "stock_blue_defaults_unavailable",
-                                    "stock_stardust_defaults_unavailable");
+                                    "stock_stardust_defaults_unavailable", "stock_red_defaults_unavailable");
         }
         StackTotals totals;
         if (!calculate_totals(match, ammo > 0 ? ammo : 1, totals))
         {
-            return transport_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults", "invalid_stock_stardust_defaults");
+            return transport_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults",
+                                    "invalid_stock_stardust_defaults", "invalid_stock_red_defaults");
         }
         auto* instance = scope.instance.Get();
         const Unreal::FName carry_name{STR("Calc_CarryWeight")};
@@ -1138,7 +1142,7 @@ namespace
         if (!fixtures_enabled())
         {
             return probe_result(lua, false, transport_status(kind, "native_gold_fixtures_disabled", "native_blue_fixtures_disabled",
-                                                            "native_stardust_fixtures_disabled"));
+                                                             "native_stardust_fixtures_disabled", "native_red_fixtures_disabled"));
         }
         Guid guid{};
         TransportInventory match;
@@ -1233,12 +1237,14 @@ namespace
         {
             return probe_result(lua, false, transport_status(kind, "gold_probe_fixture_required_on_game_thread",
                                                               "blue_probe_fixture_required_on_game_thread",
-                                                              "stardust_probe_fixture_required_on_game_thread"));
+                                                              "stardust_probe_fixture_required_on_game_thread",
+                                                              "red_probe_fixture_required_on_game_thread"));
         }
         Guid guid{};
         if (!parse_guid(lua.get_string(3), guid))
         {
-            return probe_result(lua, false, transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid"));
+            return probe_result(lua, false, transport_status(kind, "invalid_gold_guid", "invalid_blue_guid",
+                                                             "invalid_stardust_guid", "invalid_red_guid"));
         }
         const auto manager_address = lua.get_integer(2);
         if (manager_address <= 0 || !current_host_argument(lua.get_integer(1)))
@@ -1258,8 +1264,7 @@ namespace
         }
         if (!match.record)
         {
-            return probe_result(lua, false, transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
-                                                             "owned_backpack_stardust_required"));
+            return probe_result(lua, false, owned_backpack_required(kind));
         }
         if (transport_request && request_current(*transport_request, save))
         {
@@ -1299,10 +1304,11 @@ namespace
         {
             transport_request.reset();
             return probe_result(lua, false, intact ? transport_status(kind, "stock_gold_use_did_not_queue", "stock_blue_use_did_not_queue",
-                                                                      "stock_stardust_use_did_not_queue") :
+                                                                      "stock_stardust_use_did_not_queue", "stock_red_use_did_not_queue") :
                                                     "stock_backpack_item_was_changed");
         }
-        return probe_result(lua, true, transport_status(kind, "stock_gold_use_queued", "stock_blue_use_queued", "stock_stardust_use_queued"));
+        return probe_result(lua, true, transport_status(kind, "stock_gold_use_queued", "stock_blue_use_queued",
+                                                        "stock_stardust_use_queued", "stock_red_use_queued"));
     }
 
     int lua_probe_gold_action(const Lua& lua)
@@ -1585,6 +1591,9 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishInspectNativeStardustTransport", lua_inspect_stardust);
         lua.register_function("SilverfishCommitNativeStardustTransport", lua_commit_stardust);
         lua.register_function("SilverfishRestoreNativeStardustTransport", lua_restore_stardust);
+        lua.register_function("SilverfishTakeNativeRedTransportRequest", lua_take_transport_request<TransportKind::Red>);
+        lua.register_function("SilverfishInspectNativeRedTransport", lua_inspect_cube<TransportKind::Red>);
+        lua.register_function("SilverfishCommitNativeRedTransport", lua_commit_cube<TransportKind::Red>);
         if (fixtures_enabled())
         {
             lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_cube<TransportKind::Gold>);
@@ -1594,6 +1603,8 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
             lua.register_function("SilverfishProbeNativeBlueTransport", lua_probe_transport<TransportKind::Blue>);
             lua.register_function("SilverfishSeedNativeStardustTransport", lua_seed_stardust);
             lua.register_function("SilverfishProbeNativeStardustTransport", lua_probe_transport<TransportKind::Stardust>);
+            lua.register_function("SilverfishSeedNativeRedTransport", lua_seed_cube<TransportKind::Red>);
+            lua.register_function("SilverfishProbeNativeRedTransport", lua_probe_transport<TransportKind::Red>);
         }
     }
 }

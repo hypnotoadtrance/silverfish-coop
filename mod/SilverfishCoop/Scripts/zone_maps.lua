@@ -6,6 +6,19 @@ local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local exchange = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
+local lab_e206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
+local lab_east_wing = "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"
+local old_pipes = "/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P"
+local slums_tunnel = "/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P"
+local science_tunnel = "/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P"
+local subway = "/Game/Classes/Maps/Maps_Dungeons/Subway_01_P"
+local utility_tunnels = "/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P"
+local trash_pit = "/Game/Classes/Maps/Maps_OverWorld/TrashPit_P"
+local rail_yard = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
+local ruin_fields = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
+local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
+local slums = "/Game/Classes/Maps/Maps_OverWorld/Slums_P"
+local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 
 return {
     [playtest_1] = { fixture = "Level_Exit_BP_C_0", destination = playtest_2 },
@@ -14,7 +27,12 @@ return {
         fixture = "Level_Exit_BP_C_275", destination = dead_bridge,
         entrance = "DB_CR", arrival = "LevelExit_Spawn_BP_C_275",
         door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = cistern, entrance = "CR_Cstrn" },
-        other_arrivals = { Nexus_CrossRoads = "LevelExit_Spawn_BP_C_278", Obsv_Etr = "LevelExit_Spawn_BP_C_2" },
+        door_arrivals = { CR_Cstrn = "Dungeon_TransitionDoor_BP_C_1" },
+        other_arrivals = {
+            Nexus_CrossRoads = "LevelExit_Spawn_BP_C_278", Obsv_Etr = "LevelExit_Spawn_BP_C_2",
+            Depot_Cross_Rail = "LevelExit_Spawn_BP_C_1", CR_RF = "LevelExit_Spawn_BP_C_273",
+            Cross_NE = "LevelExit_Spawn_BP_C_276",
+        },
         secondary = {
             fixture = "Level_Exit_BP_C_2", destination = observatory, entrance = "Obsv_Etr",
             probe_arrival = "LevelExit_Spawn_BP_C_2", probe_approach = -1,
@@ -27,6 +45,8 @@ return {
     [cistern] = {
         entrance = "CR_Cstrn",
         door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = crossroads, entrance = "CR_Cstrn" },
+        door_arrivals = { CR_Cstrn = "Dungeon_TransitionDoor_BP_C_1", Cistern_Sci = "Dungeon_TransitionDoor_BP_C_2" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_353" },
     },
     [gold_nexus] = {
         fixture = "Level_Exit_BP_C_178", destination = crossroads,
@@ -38,4 +58,65 @@ return {
         probe_arrival = "LevelExit_Spawn_BP_C_1", probe_approach = -1,
     },
     [exchange] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
+    [lab_e206] = {
+        entrance = "RY_Lab206",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = rail_yard, entrance = "RY_Lab206" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_181" },
+    },
+    [lab_east_wing] = {
+        entrance = "RgEast_Flood",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = ruin_fields, entrance = "RgEast_Flood" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_8" },
+    },
+    [old_pipes] = {
+        entrance = "NE_Pipe",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = northeast_rail, entrance = "NE_Pipe" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_5" },
+    },
+    [slums_tunnel] = {
+        entrance = "Slums_GreenLine",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = slums, entrance = "Slums_GreenLine" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_98" },
+    },
+    [science_tunnel] = {
+        entrance = "Cistern_Sci",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = cistern, entrance = "Cistern_Sci" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_5" },
+    },
+    [subway] = {
+        entrance = "Subway",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_1", destination = city, entrance = "Subway" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_202" },
+    },
+    [utility_tunnels] = {
+        entrance = "Rail_Utility",
+        door = { fixture = "Dungeon_TransitionDoor_BP_C_0", destination = rail_yard, entrance = "Rail_Utility" },
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_5" },
+    },
+    [trash_pit] = {
+        fixture = "Level_Exit_BP_C_169", destination = northeast_rail, entrance = "M35_Maw",
+        other_arrivals = { Red_Tes = "LevelExit_Spawn_BP_C_303" },
+    },
+    [rail_yard] = {
+        fixture = "Level_Exit_BP_C_0", destination = crossroads, entrance = "Depot_Cross_Rail",
+        door_arrivals = { RY_Lab206 = "Dungeon_TransitionDoor_BP_C_2", Rail_Utility = "Dungeon_TransitionDoor_BP_C_1" },
+        other_arrivals = { Rail_City = "LevelExit_Spawn_BP_C_220", Slum_Depot = "LevelExit_Spawn_BP_C_611" },
+    },
+    [ruin_fields] = {
+        fixture = "Level_Exit_BP_C_1", destination = crossroads, entrance = "CR_RF",
+        door_arrivals = { RgEast_Flood = "Dungeon_TransitionDoor_BP_C_1" },
+    },
+    [northeast_rail] = {
+        fixture = "Level_Exit_BP_C_269", destination = crossroads, entrance = "Cross_NE",
+        door_arrivals = { NE_Pipe = "Dungeon_TransitionDoor_BP_C_3" },
+        other_arrivals = { M35_Maw = "LevelExit_Spawn_BP_C_704" },
+    },
+    [slums] = {
+        fixture = "Level_Exit_BP_C_0", destination = rail_yard, entrance = "Slum_Depot",
+        door_arrivals = { Slums_GreenLine = "Dungeon_TransitionDoor_BP_C_1" },
+    },
+    [city] = {
+        fixture = "Level_Exit_BP_C_1", destination = rail_yard, entrance = "Rail_City",
+        door_arrivals = { Subway = "Dungeon_TransitionDoor_BP_C_2" },
+    },
 }

@@ -320,7 +320,7 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
-        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0}
+        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0, "red": 0}
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -458,7 +458,7 @@ class Bridge:
                         "state": fields[1], "denied": int(fields[2]), "role": fields[3],
                         "item": fields[4], "entry": fields[5], "reason": fields[6],
                     }
-                elif fields[0] in ("native-gold", "native-blue") and len(fields) == 6:
+                elif fields[0] in ("native-gold", "native-blue", "native-red") and len(fields) == 6:
                     data[fields[0].replace("-", "_")] = {
                         "operation": fields[1], "state": fields[2], "map": fields[3],
                         "pawn": fields[4], "guid": fields[5],
@@ -560,6 +560,15 @@ class Bridge:
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
                         "seed": int(fields[5]), "backpack_count": int(fields[6]), "equipment_count": int(fields[7]),
                     }
+                elif fields[0] == "native-roster-state" and len(fields) == 5:
+                    roster = data.setdefault("native_roster", {"connections": []})
+                    roster.update(state=fields[1], driver=fields[2], count=int(fields[3]), reason=fields[4])
+                elif fields[0] == "native-roster" and len(fields) == 6:
+                    data.setdefault("native_roster", {"connections": []})["connections"].append({
+                        "state": fields[1], "id": fields[2], "connection": fields[3],
+                        "controller": None if fields[4] == "-" else fields[4],
+                        "pawn": None if fields[5] == "-" else fields[5],
+                    })
                 elif fields[0] == "native-rule" and len(fields) == 3:
                     data.setdefault("native_rules", {})[fields[1]] = int(fields[2])
                 elif fields[0] == "native-reputation" and len(fields) == 3:

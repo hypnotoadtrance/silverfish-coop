@@ -40,6 +40,13 @@ namespace
     constexpr auto door_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:SendInteractionToActor");
     constexpr auto door_power_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:Send_PowerSignal");
     constexpr auto exit_power_path = STR("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C:Send_PowerSignal");
+    constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto cistern_world = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P");
+    constexpr auto railway_world = STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P");
+    constexpr auto ruins_world = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P");
+    constexpr auto northeast_world = STR("/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P.NorthEast_Rail_P");
+    constexpr auto slums_world = STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P");
+    constexpr auto city_world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P");
     constexpr auto exchange_world = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P");
     constexpr auto exchange_actor = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P:PersistentLevel.Dream_CountDown_BP_C_1");
     constexpr auto dream_power_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:Send_PowerSignal");
@@ -50,13 +57,20 @@ namespace
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
 
+    struct DoorRoute
+    {
+        RC::StringViewType actor;
+        RC::StringViewType destination;
+        RC::StringViewType entrance;
+    };
+
     struct Route
     {
         RC::StringViewType world;
         RC::StringViewType exit;
         RC::StringViewType destination;
         RC::StringViewType entrance;
-        RC::StringViewType door_destination{};
+        DoorRoute door{};
         std::array<RC::StringViewType, 2> alternate_exits{};
         RC::StringViewType secondary_exit{};
         RC::StringViewType secondary_destination{};
@@ -66,20 +80,40 @@ namespace
     constexpr std::array routes{
         Route{STR("/Game/Classes/Maps/PlaytestMap_01.PlaytestMap_01"), STR("Level_Exit_BP_C_0"), {}, {}},
         Route{STR("/Game/Classes/Maps/PlaytestMap_02.PlaytestMap_02"), STR("Level_Exit_BP_C_0"), {}, {}},
-        Route{STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Level_Exit_BP_C_275"),
+        Route{crossroads_world, STR("Level_Exit_BP_C_275"),
               STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"), STR("DB_CR"),
-              STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"), {}, STR("Level_Exit_BP_C_2"),
+              {STR("Dungeon_TransitionDoor_BP_C_1"), cistern_world, STR("CR_Cstrn")}, {}, STR("Level_Exit_BP_C_2"),
               STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Obsv_Etr")},
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"), STR("Level_Exit_BP_C_3"),
-              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("DB_CR")},
-        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"), {}, {}, {},
-              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")},
+              crossroads_world, STR("DB_CR")},
+        Route{cistern_world, {}, {}, {}, {STR("Dungeon_TransitionDoor_BP_C_1"), crossroads_world, STR("CR_Cstrn")}},
         Route{STR("/Game/Classes/Maps/Dreams/GoldNexus_P.GoldNexus_P"), STR("Level_Exit_BP_C_178"),
-              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Nexus_CrossRoads"), {},
+              crossroads_world, STR("Nexus_CrossRoads"), {},
               {STR("Level_Exit_BP_C_181"), STR("Level_Exit_BP_C_182")}},
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Level_Exit_BP_C_1"),
-              STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Obsv_Etr")},
+              crossroads_world, STR("Obsv_Etr")},
         Route{exchange_world, {}, {}, {}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_1"), railway_world, STR("RY_Lab206")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P.Lab_EastWing_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), ruins_world, STR("RgEast_Flood")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P.OldPipes_01_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), northeast_world, STR("NE_Pipe")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P.Slums_Tunnel_01_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_1"), slums_world, STR("Slums_GreenLine")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P.Sci_Tunnel_01_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), cistern_world, STR("Cistern_Sci")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_1"), city_world, STR("Subway")}},
+        Route{STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P"), {}, {}, {},
+              {STR("Dungeon_TransitionDoor_BP_C_0"), railway_world, STR("Rail_Utility")}},
+        Route{STR("/Game/Classes/Maps/Maps_OverWorld/TrashPit_P.TrashPit_P"), STR("Level_Exit_BP_C_169"),
+              northeast_world, STR("M35_Maw")},
+        Route{railway_world, STR("Level_Exit_BP_C_0"), crossroads_world, STR("Depot_Cross_Rail")},
+        Route{ruins_world, STR("Level_Exit_BP_C_1"), crossroads_world, STR("CR_RF")},
+        Route{northeast_world, STR("Level_Exit_BP_C_269"), crossroads_world, STR("Cross_NE")},
+        Route{slums_world, STR("Level_Exit_BP_C_0"), railway_world, STR("Slum_Depot")},
+        Route{city_world, STR("Level_Exit_BP_C_1"), railway_world, STR("Rail_City")},
     };
 
     std::atomic<std::uint64_t> generation{};
@@ -372,10 +406,9 @@ namespace
 
     Unreal::UObject* matching_door_child(Unreal::UObject* door)
     {
-        constexpr auto tag = STR("CR_Cstrn");
-        const auto target = scope.route->door_destination;
+        const auto& route = scope.route->door;
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
-        if (!door || target.empty() || door->GetName() != STR("Dungeon_TransitionDoor_BP_C_1") ||
+        if (!door || route.actor.empty() || door->GetName() != route.actor ||
             door->GetClassPrivate() != scope.door->GetOuterPrivate() || actor_world(door) != world ||
             !in_persistent_level(door, world)) return nullptr;
 
@@ -384,9 +417,9 @@ namespace
         if (!child || child->GetClassPrivate() != scope.exit_class || actor_world(child) != world ||
             child != read_object(field<Unreal::FObjectProperty>(door, STR("As Level Exit BP")), door)) return nullptr;
         if (!matches_target(door, field<Unreal::FSoftObjectProperty>(door, STR("Next Level")),
-                            field<Unreal::FStrProperty>(door, STR("Entrance Tag")), target, tag) ||
+                            field<Unreal::FStrProperty>(door, STR("Entrance Tag")), route.destination, route.entrance) ||
             !matches_target(child, field<Unreal::FSoftObjectProperty>(child, STR("NextLevel")),
-                            field<Unreal::FStrProperty>(child, STR("Entrance Tag")), target, tag)) return nullptr;
+                            field<Unreal::FStrProperty>(child, STR("Entrance Tag")), route.destination, route.entrance)) return nullptr;
         return child;
     }
 

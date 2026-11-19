@@ -11,7 +11,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, native_blue, native_dream, native_gold, native_host_save, native_quest, party, wipe
+from . import link, native_blue, native_dream, native_gold, native_host_save, native_quest, native_red, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .native_pickup import NativePickup, STAGED_SHOPS
@@ -54,15 +54,11 @@ def _pawn(state: dict, role: str) -> dict:
 
 
 def pending_cube(state: dict) -> tuple[str, dict] | None:
-    gold = native_gold.ledger(state)["pending"]
-    blue = native_blue.ledger(state)["pending"]
-    if gold and blue:
+    pending = [(cube, receipt) for cube, module in (("gold", native_gold), ("blue", native_blue), ("red", native_red))
+               if (receipt := module.ledger(state)["pending"])]
+    if len(pending) > 1:
         raise ValueError("The campaign has two pending item transports")
-    if gold:
-        return "gold", gold
-    if blue:
-        return "blue", blue
-    return None
+    return pending[0] if pending else None
 
 
 def checkpoint_seed(world: dict) -> int | None:
@@ -272,10 +268,10 @@ class Host:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
         view["native_quests"] = self.party.get("native_quests", {})
-        for cube in ("gold", "blue"):
-            if pending := self.party.get(f"{cube}_transport", {}).get("pending"):
-                view["pending_item_travel"] = {"item": cube, "source": pending["source"],
-                                               "destination": pending["destination"]}
+        if pending := pending_cube(self.party):
+            cube, itinerary = pending
+            view["pending_item_travel"] = {"item": cube, "source": itinerary["source"],
+                                           "destination": itinerary["destination"]}
         if dream := native_dream.visit(self.party):
             view["stardust_visit"] = {key: dream[key] for key in ("phase", "destination", "return_map", "deadline")}
             view["stardust_visit"]["return_blockers"] = self.dream_blockers
@@ -351,16 +347,18 @@ class Host:
 
     async def switch_zone(self, bridge: Bridge, transport, destination: str, entrance: str | None,
                           roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None,
-                          dream_plan: dict | None = None) -> dict:
+                          dream_plan: dict | None = None, red_plan: dict | None = None) -> dict:
         current = self.last_game["map"]
         guest = _pawn(self.last_game, "guest")
         self.control.event("zone_travel_requested", source=current, destination=destination)
         if (self.native_profile is not None or self.native_guest and guest.get("health") is not None) and not (
-            gold_guid or blue_plan or dream_plan
+            gold_guid or blue_plan or dream_plan or red_plan
         ):
             await self.checkpoint_native(bridge)
         try:
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
+            if red_plan:
+                authorization = ("red", red_plan["guid"])
             returning = dream_plan and dream_plan["phase"] == "returning"
             if dream_plan:
                 authorization = ("stardust-return",) if returning else ("stardust", dream_plan["guid"])
@@ -401,6 +399,8 @@ class Host:
             candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
             if blue_plan:
                 candidate = native_blue.arrive(self.party, blue_plan["guid"], observed["map"])
+            if red_plan:
+                candidate = native_red.arrive(self.party, red_plan["guid"], observed["map"])
             if dream_plan:
                 candidate = native_dream.finished(self.party) if returning else native_dream.arrived(self.party, time.time())
             revision = await self.checkpoint_native(bridge, candidate)
@@ -571,12 +571,21 @@ class Host:
         return result
 
     async def place_blue_party(self, bridge: Bridge, pending: dict, roles: dict[str, str]) -> dict:
-        self.last_game = await self.blue_arrival(bridge, pending, staying=True)
+        arrival = await self.blue_arrival(bridge, pending, staying=True)
+        await self.place_party_in_zone(bridge, roles, arrival)
+        candidate = native_blue.arrive(self.party, pending["guid"], self.last_game["map"])
+        revision = await self.checkpoint_native(bridge, candidate)
+        self.party = candidate
+        return {"ok": True, "map": self.last_game["map"], "entrance": "Bed", "travel_epoch": self.zone_epoch,
+                "revision": revision, "in_zone": True}
+
+    async def place_party_in_zone(self, bridge: Bridge, roles: dict[str, str], arrival: dict) -> None:
+        self.last_game = arrival
         self.last_seen = time.monotonic()
         if "guest" in roles:
             guest = self.last_game.get("pawns", {}).get("guest", {})
             if not guest or guest.get("name") != self.guest_pawn:
-                raise RuntimeError("The active guest could not be verified for the Blue Cube arrival")
+                raise RuntimeError("The active guest could not be verified for the same-map arrival")
             restored = await self.place_new_guest(bridge, guest)
             if restored:
                 self.last_game = restored
@@ -584,12 +593,70 @@ class Host:
             pawns = self.authoritative_pawns(roles)
             host, peer = pawns.get("host"), pawns.get(roles["guest"])
             if not host or not peer or math.dist(host["location"], peer["location"]) > party.INTERACT_RANGE:
-                raise RuntimeError("The guest could not be placed by the host's verified rest point")
-        candidate = native_blue.arrive(self.party, pending["guid"], self.last_game["map"])
-        revision = await self.checkpoint_native(bridge, candidate)
-        self.party = candidate
-        return {"ok": True, "map": self.last_game["map"], "entrance": "Bed", "travel_epoch": self.zone_epoch,
-                "revision": revision, "in_zone": True}
+                raise RuntimeError("The guest could not be placed by the host's verified arrival")
+
+    async def activate_red(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
+        if (not self.native_zones or self.stopping or self.transitioning or request.source not in native_red.SOURCES
+                or self.last_game.get("map") != request.source or self.last_game.get("state") != "hosting"
+                or request.entry not in native_gold.INVENTORY_ENTRIES or not native_gold.valid_guid(request.guid)
+                or self.last_game.get("pawns", {}).get("local", {}).get("name") != request.pawn):
+            return {"ok": False, "error": "red_scope_unavailable"}
+        if request.guid in native_red.ledger(self.party)["spent"]:
+            return {"ok": False, "error": "red_already_spent"}
+        if pending_cube(self.party) or native_dream.visit(self.party):
+            return {"ok": False, "error": "item_travel_pending"}
+        if self.party["players"]["host"]["downed"]:
+            return {"ok": False, "error": "actor_downed"}
+        self.transitioning = True
+        try:
+            snapshot, item = await self.checked_cube(bridge, "red", "inspect", request.guid)
+            if item["state"] != "present":
+                return {"ok": False, "error": "red_item_unavailable"}
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            # Check the full roster before making the one stock-weighted draw.
+            if refusal := self.travel_refusal(request.source, self.roles(), staying=True):
+                return refusal
+            candidate = native_red.begin(self.party, request.guid, request.source, native_red.draw())
+            await self.checkpoint_native(bridge, candidate)
+            self.party = candidate
+            return await self.resume_red(bridge, transport, recovery=False)
+        finally:
+            self.transitioning = False
+
+    async def resume_red(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
+        pending = native_red.ledger(self.party)["pending"]
+        try:
+            if (not pending or not self.native_zones or self.last_game.get("map") != pending["source"]
+                    or pending["destination"] not in self.allowed_maps):
+                raise RuntimeError("The committed Red Cube draw is out of scope")
+            guid, destination = pending["guid"], pending["destination"]
+            snapshot, item = await self.checked_cube(bridge, "red", "debit", guid)
+            if item["state"] != "removed" and not recovery:
+                raise RuntimeError("The committed Red Cube could not be removed from the active inventory")
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            roles = self.roles()
+            if destination != pending["source"]:
+                result = await self.switch_zone(bridge, transport, destination, native_red.ARRIVAL, roles,
+                                                red_plan=pending)
+            else:
+                arrival = await bridge.command("native-red-arrival", destination, guid, timeout=6)
+                if arrival.get("state") != "hosting" or arrival.get("map") != destination:
+                    raise RuntimeError("The same-map Red Cube arrival belongs to the wrong world")
+                await self.place_party_in_zone(bridge, roles, arrival)
+                candidate = native_red.arrive(self.party, guid, destination)
+                revision = await self.checkpoint_native(bridge, candidate)
+                self.party = candidate
+                result = {"ok": True, "map": destination, "entrance": native_red.ARRIVAL, "revision": revision,
+                          "travel_epoch": self.zone_epoch, "in_zone": True}
+        except (OSError, RuntimeError, ValueError):
+            self.stopping = True
+            raise
+        with contextlib.suppress(OSError):
+            self.control.event("red_travel_recovered" if recovery else "red_travel_completed", guid=guid,
+                               debit=item["state"], **result)
+        return result
 
     @staticmethod
     def dream_isolated(game: dict) -> bool:
@@ -1098,7 +1165,8 @@ class Host:
                     result = await probe_transport(bridge, request.get("target"))
                 elif (action in ("native-gold-seed", "native-gold-inspect", "native-gold-use-probe",
                                  "native-gold-action-probe", "native-blue-seed", "native-blue-inspect",
-                                 "native-blue-use-probe")
+                                 "native-blue-use-probe", "native-red-seed", "native-red-inspect",
+                                 "native-red-use-probe")
                       and self.native_zones and self.fixtures and GOLD_NEXUS in self.allowed_maps):
                     _, cube, operation = action.split("-", 2)
                     _, item = await self.checked_cube(bridge, cube, operation, request.get("target"))
@@ -1199,7 +1267,7 @@ class Host:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
         for cube, activate in (("gold", self.activate_gold), ("blue", self.activate_blue),
-                               ("stardust", self.activate_stardust)):
+                               ("red", self.activate_red), ("stardust", self.activate_stardust)):
             for request in bridge.native_cube_requests(cube):
                 try:
                     result = await activate(bridge, transport, request)
@@ -1372,7 +1440,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 controller.last_game = restored
                 controller.last_seen = time.monotonic()
             if pending:
-                resume = controller.resume_gold if pending[0] == "gold" else controller.resume_blue
+                resume = {"gold": controller.resume_gold, "blue": controller.resume_blue, "red": controller.resume_red}[pending[0]]
                 await resume(bridge, None, recovery=True)
             if dream and dream["phase"] == "departing":
                 await controller.depart_dream(bridge, None, recovery=True)

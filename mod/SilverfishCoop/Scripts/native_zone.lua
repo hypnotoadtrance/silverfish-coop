@@ -197,7 +197,7 @@ local function player_start(route, world)
     if valid(marker) and marker:GetFullName():match("^PlayerStart ") then return marker end
 end
 
-local function arrival_arrow(route, world, tag, name, is_door)
+local function arrival_arrow(world, tag, name, door_name)
     local match
     for _, marker in ipairs(FindAllOf("LevelExit_Spawn_BP_C") or {}) do
         if valid(marker) and same(marker:GetWorld(), world) then
@@ -209,11 +209,11 @@ local function arrival_arrow(route, world, tag, name, is_door)
         end
     end
     local qualified = valid(match) and name and match:GetFullName():match(":PersistentLevel%.([^%.]+)$") == name
-    if is_door then
-        local door = placed_actor("Dungeon_TransitionDoor_BP_C", route.door.fixture, world)
+    if door_name then
+        local door = placed_actor("Dungeon_TransitionDoor_BP_C", door_name, world)
         local component = valid(door) and door.LevelExit_Spawn_BP
         qualified = valid(component) and same(component.ChildActor, match)
-        name = route.door.fixture .. ".LevelExit_Spawn_BP"
+        name = door_name .. ".LevelExit_Spawn_BP"
     end
     if not qualified or not valid(match.Arrow) then
         error("The authored arrival marker is unavailable", 0)
@@ -223,10 +223,10 @@ end
 
 function zone.position_arrival(state, phase, tag)
     local route = routes[state.map]
-    local is_door = route and route.door and route.door.entrance == tag
+    local door_name = route and route.door_arrivals and route.door_arrivals[tag]
     local use_player_start = route and route.player_start and route.player_start == tag
     local name = route and (route.entrance == tag and route.arrival or route.other_arrivals and route.other_arrivals[tag])
-    if not enabled or phase ~= "hosting" or not route or (not is_door and not use_player_start and not name) then
+    if not enabled or phase ~= "hosting" or not route or (not door_name and not use_player_start and not name) then
         error("An authored host arrival for the current zone is required", 0)
     end
     local details = state.local_pawn
@@ -238,15 +238,18 @@ function zone.position_arrival(state, phase, tag)
     end
 
     local world = pawn:GetWorld()
+    if not same(world, state.world) or not same(controller:GetWorld(), world) then
+        error("The authored arrival is in a different world", 0)
+    end
     local target, rotation
     if use_player_start then
         local marker = player_start(route, world)
-        if not valid(marker) then error("The stock Nexus PlayerStart_1 is unavailable", 0) end
+        if not valid(marker) then error("The qualified stock player start is unavailable", 0) end
         name = route.player_start
         target, rotation = marker:K2_GetActorLocation(), marker:K2_GetActorRotation()
     else
         local arrow
-        arrow, name = arrival_arrow(route, world, tag, name, is_door)
+        arrow, name = arrival_arrow(world, tag, name, door_name)
         target, rotation = arrow:K2_GetComponentLocation(), arrow:K2_GetComponentRotation()
     end
     if not pawn:K2_TeleportTo({ X = target.X, Y = target.Y, Z = target.Z },
