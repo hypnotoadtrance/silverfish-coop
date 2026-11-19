@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
 from tools.silverfish.service import Client
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, REFINERY
 
 
 GUID = "AB" * 16
@@ -118,6 +118,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         fields[0] = melee.SWING
         if miss:
             fields[5] = "stock_miss_verified"
+            fields[12] = "-"
             fields[13:] = ["0", "0", "-1", "-1", "-1"]
         key, report = melee.parse(fields)
         snapshot = {"state": "hosting", "map": DEAD_BRIDGE, key: report,
@@ -152,6 +153,38 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "combat_busy"):
             await melee.perform(*args)
         bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
+
+    def test_only_ordinary_actual_contact_accepts_each_registered_actor(self):
+        for area, profile in melee.BY_MAP.items():
+            for target in profile.actors:
+                with self.subTest(target=target):
+                    fields = self.damage_fields()
+                    fields[0], fields[1], fields[12] = melee.SWING, area, target
+                    key, row = melee.parse(fields)
+                    self.assertEqual((key, row["target"]), (melee.SWING_KEY, target))
+                    self.assertTrue(melee.verified_damage(row))
+                    fields[1] = REFINERY if area == DEAD_BRIDGE else DEAD_BRIDGE
+                    self.assertIsNone(melee.parse(fields))
+                    fields[1], fields[12] = area, target[:-1] + "8"
+                    self.assertIsNone(melee.parse(fields))
+        fields = self.damage_fields()
+        fields[12] = melee.BY_MAP[DEAD_BRIDGE].actors[1]
+        self.assertIsNone(melee.parse(fields))
+
+    async def test_headless_aim_can_name_second_registered_actor_but_swing_cannot(self):
+        host, snapshot = self.ordinary_fixture(False)
+        host.fixtures = True
+        target = melee.BY_MAP[DEAD_BRIDGE].actors[1]
+        aim = {"map": DEAD_BRIDGE, "pawn": "exact pawn", "guid": GUID, "target": target}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**snapshot, melee.AIM_KEY: aim}))
+        requested = host, bridge, melee.AIM_FIXTURE, "guest", GUID, OPERATION
+        self.assertEqual(await melee.perform(*requested, fixture_lane=2), {melee.AIM_KEY: aim})
+        bridge.command.assert_awaited_once_with(melee.AIM_FIXTURE, "exact pawn", GUID, target, timeout=5)
+        with self.assertRaisesRegex(party.RuleError, "registry_target_required"):
+            await melee.perform(*requested, fixture_lane=3)
+        with self.assertRaisesRegex(party.RuleError, "registry_target_required"):
+            await melee.perform(host, bridge, melee.SWING, "guest", GUID, OPERATION, fixture_lane=2)
         host.checkpoint_native.assert_not_awaited()
 
     def test_plain_guid_and_previous_travel_epoch_cannot_be_dispatched(self):

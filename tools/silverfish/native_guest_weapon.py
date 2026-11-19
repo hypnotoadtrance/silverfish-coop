@@ -114,7 +114,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         elif old_pipe:
             status = proof["status"]
             if ((operation != "inspect" and (operation != "equip" or status != "old_pipe_equipped"))
-                    or actor != -1 or stored != -1 or source != native_guest_melee.DEAD_BRIDGE):
+                    or actor != -1 or stored != -1 or source not in native_guest_melee.BY_MAP):
                 raise RuntimeError("Native guest stock Old Pipe equipment did not verify")
         elif operation == "seed-ammo":
             if proof.get("status") not in ("seeded", "present"):

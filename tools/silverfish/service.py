@@ -2338,7 +2338,8 @@ class Host:
                                  native_guest_melee.AIM_FIXTURE) and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_melee.perform(self, bridge, action, character, request.get("item_guid"),
-                                                              request.get("operation_id") or path.stem)
+                                                              request.get("operation_id") or path.stem,
+                                                              fixture_lane=request.get("amount"))
                 elif action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo",
                                  "native-guest-weapon-seed-light-pistol") and self.native_guest and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")

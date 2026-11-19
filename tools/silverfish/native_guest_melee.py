@@ -4,6 +4,7 @@ import math
 import time
 
 from . import native_authored_pickup, party
+from .enemy_loot_profiles import BY_ACTOR, BY_MAP
 from .native_gold import valid_guid
 from .travel import CROSSROADS, DEAD_BRIDGE
 
@@ -18,7 +19,12 @@ EQUIP_KEY = "native_guest_melee_equip"
 CANARY_KEY = "native_guest_melee_canary"
 SWING_KEY = "native_guest_melee_swing"
 AIM_KEY = "native_guest_melee_aim_fixture"
-TARGET = f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
+TARGET = BY_MAP[DEAD_BRIDGE].actors[0]
+
+
+def registered_target(area: str, target: str) -> bool:
+    profile = BY_ACTOR.get(target) if isinstance(target, str) else None
+    return profile is not None and profile.map == area
 
 
 def verified_damage(proof: dict) -> bool:
@@ -27,7 +33,7 @@ def verified_damage(proof: dict) -> bool:
         return False
     before, after, amount = values
     counters = proof.get("sweeps"), proof.get("damage_calls")
-    return ((proof.get("map"), proof.get("target")) == (DEAD_BRIDGE, TARGET)
+    return (registered_target(proof.get("map"), proof.get("target"))
             and all(type(counter) is int and counter == 1 for counter in counters)
             and 100 <= before <= 160 and 0 < after < before and 0 < amount <= 90
             and math.isclose(before - after, amount, abs_tol=1e-6))
@@ -38,8 +44,8 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
         return None
     if fields[0] == "native-guest-melee-equip" and len(fields) == 6 and fields[4] in ("0", "1"):
         return EQUIP_KEY, dict(zip(("map", "pawn", "guid"), fields[1:4]), ok=fields[4] == "1", status=fields[5])
-    if fields[0] == AIM_FIXTURE and len(fields) == 4 and fields[1] == DEAD_BRIDGE and valid_guid(fields[3]):
-        return AIM_KEY, dict(zip(("map", "pawn", "guid"), fields[1:]))
+    if fields[0] == AIM_FIXTURE and len(fields) == 5 and registered_target(fields[1], fields[4]) and valid_guid(fields[3]):
+        return AIM_KEY, dict(zip(("map", "pawn", "guid", "target"), fields[1:]))
     ordinary = fields[0] == SWING
     if (fields[0] in (CANARY, SWING) and len(fields) in ((18,) if ordinary else (12, 18))
             and fields[10] in ("0", "1") and fields[11] in ("0", "1")):
@@ -51,7 +57,10 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
                          enemy_health_before=float(fields[15]), enemy_health_after=float(fields[16]), stock_damage=float(fields[17]))
             miss = ordinary and proof["status"] == "stock_miss_verified"
             cancelled = ordinary and proof["status"] == "stock_swing_cancelled"
-            if (proof["map"] != DEAD_BRIDGE or proof["target"] != TARGET or proof["status"] == "surface_verified"
+            target = proof["target"]
+            eligible = (proof["map"] in BY_MAP and (target == "-" or registered_target(proof["map"], target))) if ordinary else (
+                (proof["map"], target) == (DEAD_BRIDGE, TARGET))
+            if (not eligible or proof["status"] == "surface_verified"
                     or proof["settled"] != (proof["status"] == "stock_damage_verified" or miss)
                     or not 0 <= proof["damage_calls"] <= proof["sweeps"] <= 1
                     or ((miss or cancelled) and not verified_miss(proof))
@@ -64,13 +73,13 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
 
 
 def verified_miss(proof: dict) -> bool:
-    return ((proof.get("map"), proof.get("target")) == (DEAD_BRIDGE, TARGET)
+    return (proof.get("map") in BY_MAP and proof.get("target") == "-"
             and tuple(proof.get(key) for key in ("sweeps", "damage_calls", "enemy_health_before", "enemy_health_after",
                                                 "stock_damage")) == (0, 0, -1, -1, -1))
 
 
 def is_equipped(equipment, area, guid):
-    return (area == DEAD_BRIDGE and valid_guid(guid) and isinstance(equipment, dict)
+    return (area in BY_MAP and valid_guid(guid) and isinstance(equipment, dict)
             and (equipment.get("kind"), equipment.get("guid")) == (KIND, guid))
 
 
@@ -87,11 +96,11 @@ def current_guid(target: str | None, epoch: str) -> str:
     return guid
 
 
-async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str) -> dict:
+async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str, *, fixture_lane: int | None = None) -> dict:
     area = host.last_game.get("map")
     ordinary = action == SWING
     allowed = {DAMAGE: (DEAD_BRIDGE,), CANARY: (CROSSROADS,), EQUIP: (CROSSROADS, DEAD_BRIDGE),
-               SWING: (DEAD_BRIDGE,), AIM_FIXTURE: (DEAD_BRIDGE,)}
+               SWING: tuple(BY_MAP), AIM_FIXTURE: tuple(BY_MAP)}
     if (not host.native_guest or (not ordinary and not host.fixtures) or (ordinary and not host.native_guest_controls)
             or host.native_profile is None or host.stopping
             or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
@@ -100,6 +109,9 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
     if (not isinstance(character, str) or not valid_guid(guid) or not isinstance(operation_id, str)
             or not party.REQUEST_ID.fullmatch(operation_id)):
         raise party.RuleError("native_guest_melee_exact_guid_required")
+    if fixture_lane is not None and (action != AIM_FIXTURE or type(fixture_lane) is not int
+                                     or not 1 <= fixture_lane <= len(BY_MAP[area].actors)):
+        raise party.RuleError("native_guest_melee_fixture_registry_target_required")
     fingerprint = [action, guid, None]
     for receipt in host.party["receipts"].get(character, []):
         if receipt["id"] == operation_id:
@@ -132,9 +144,10 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         return {}
 
     if action == AIM_FIXTURE:
-        snapshot = await bridge.command(action, pawn, guid, timeout=5)
+        target = BY_MAP[area].actors[(fixture_lane or 1) - 1]
+        snapshot = await bridge.command(action, pawn, guid, target, timeout=5)
         proof = exact(snapshot, AIM_KEY)
-        if not proof:
+        if not proof or proof.get("target") != target:
             raise RuntimeError("The staged stock Old Pipe aim directive did not match the guest")
         return {AIM_KEY: proof}
 
@@ -183,7 +196,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
             if (proof.get("status"), proof.get("presses"), proof.get("releases"), proof.get("contacts"),
                     proof.get("qualified"), proof.get("settled"), proof.get("passive_free")) != (
                     expected, 1, 1, 1, 1, True, True) or (miss and not verified_miss(proof)) or (
-                    (ordinary or action == DAMAGE) and not miss and not verified_damage(proof)):
+                    (ordinary or action == DAMAGE) and not miss and not verified_damage(proof)) or (
+                    action == DAMAGE and proof.get("target") != TARGET):
                 raise RuntimeError(proof.get("status") or "The fenced stock animation did not settle")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: proof}

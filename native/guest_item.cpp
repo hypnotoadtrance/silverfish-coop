@@ -1,4 +1,5 @@
 #include "guest_item.hpp"
+#include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 
 #include <algorithm>
@@ -542,8 +543,9 @@ namespace
         if (fixture && (!env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") ||
                         !env("SILVERFISH_COOP_HEADLESS"))) return nullptr;
         const auto world = context.world->GetPathName();
-        if (world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P") &&
-            !(fixture && world == STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"))) return nullptr;
+        if (fixture ? (world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P") &&
+                       world != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")) :
+                      !silverfish::native_guest_melee::ordinary_world(context.world)) return nullptr;
         auto* pipe = find<Unreal::UClass>(old_pipe_path);
         auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
         if (!pipe || item_class != pipe || !base || !pipe->IsChildOf(base)) return nullptr;

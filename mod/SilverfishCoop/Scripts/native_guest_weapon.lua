@@ -1,6 +1,7 @@
 local guest_weapon = {}
 local guest_save = require("guest_save")
 local weapon_profiles = require("guest_weapon_registry")
+local cqc = require("native_enemy_loot_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -17,7 +18,7 @@ local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
 end
 
-local function equipped_guid(pawn, save, world)
+local function equipped_guid(pawn, save, world, area)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
     local held_class = held:GetClass()
@@ -38,7 +39,7 @@ local function equipped_guid(pawn, save, world)
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
-    if world and (class_name == camera_path or class_name == old_pipe_path)
+    if world and ((class_name == camera_path and area == camera_map) or (class_name == old_pipe_path and cqc[area] ~= nil))
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
@@ -130,7 +131,7 @@ function guest_weapon.rows(state, phase, status_row)
     for _, detail in ipairs(state.guests) do
         local ok, guid, kind = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
-            if pawn and save then return equipped_guid(pawn, save, state.map == camera_map and state.world or nil) end
+            if pawn and save then return equipped_guid(pawn, save, state.world, state.map) end
         end)
         if ok and guid and kind then
             rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind)

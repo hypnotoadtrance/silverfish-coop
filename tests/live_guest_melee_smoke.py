@@ -19,11 +19,12 @@ from tools.silverfish.native_gold import valid_guid
 from tools.silverfish import native_host_save
 from tools.silverfish.native_guest_melee import (AIM_FIXTURE, AIM_KEY, CANARY, CANARY_KEY, DAMAGE, EQUIP,
                                                 EQUIP_KEY, KIND, SWING, SWING_KEY, verified_damage, verified_miss)
+from tools.silverfish.enemy_loot_profiles import BY_MAP as CQC_ZONES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE
 
 
-async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False) -> None:
-    mode = "ordinary-" if ordinary else "damage-" if stock_damage else ""
+async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False, second_cqc=False) -> None:
+    mode = "ordinary-second-cqc-" if second_cqc else "ordinary-" if ordinary else "damage-" if stock_damage else ""
     name = "stock-old-pipe-" + mode + uuid.uuid4().hex[:8]
     host, guest = ("--campaign", name), ("--profile", name)
     host_run, guest_run = work / "campaigns" / name / "run", work / "clients" / name / "run"
@@ -74,7 +75,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         row = status.get("game", {}).get(SOURCES_KEY, {}).get(OLD_PIPE, {})
         return tuple(row.get(key) for key in ("map", "actor", "class_path", "state")) == (*SOURCES[OLD_PIPE], "available")
 
-    async def normal_primary(guid, expected):
+    async def normal_primary(guid, expected, target="-"):
         press = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         assert (press["guid"], press["stock_wrappers"]) == (guid, 2), press
         for _ in range(50):
@@ -88,6 +89,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                         swing["contacts"], swing["qualified"], swing["settled"], swing["passive_free"]) == (
                     DEAD_BRIDGE, guid, expected, 1, 1, 1, 1, True, True), swing
                 assert (verified_damage if expected == "stock_damage_verified" else verified_miss)(swing), swing
+                assert swing["target"] == target, (swing, target)
                 reply = await action(guest, SWING, "--target", guid, "--operation-id", event["operation_id"])
                 assert reply[SWING_KEY] == swing, reply
                 directory = host_run.parent
@@ -161,10 +163,12 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
             await wait(guest_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
                        and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, KIND))
             proof["unassisted_primary_miss"] = await normal_primary(guid, "stock_miss_verified")
-            posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid))[AIM_KEY]
-            assert (posed["map"], posed["pawn"], posed["guid"]) == (area, equipped["pawn"], guid), posed
+            lane = ("--amount", "2") if second_cqc else ()
+            target = CQC_ZONES[DEAD_BRIDGE].actors[int(second_cqc)]
+            posed = (await action(host, AIM_FIXTURE, "--target", "guest", "--item-guid", guid, *lane))[AIM_KEY]
+            assert (posed["map"], posed["pawn"], posed["guid"], posed["target"]) == (area, equipped["pawn"], guid, target), posed
             proof["headless_aim_setup"] = posed
-            proof["ordinary_primary_damage"] = await normal_primary(guid, "stock_damage_verified")
+            proof["ordinary_primary_damage"] = await normal_primary(guid, "stock_damage_verified", target)
             after = await inventory_item(character, guid)
             assert after == held, (held, after)
             proof.update(unchanged_equipment=after, verified=True)
@@ -214,6 +218,9 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--stock-damage", action="store_true", help="take the actual DB_CR exit and verify one stock NPC hit")
     modes.add_argument("--ordinary-primary", action="store_true", help="exercise the normal guest equip and primary input path")
+    parser.add_argument("--second-cqc", action="store_true", help="stage the second registered Dead Bridge CQC for ordinary primary")
     options = parser.parse_args()
+    if options.second_cqc and not options.ordinary_primary:
+        parser.error("--second-cqc requires --ordinary-primary")
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None,
-                       stock_damage=options.stock_damage, ordinary=options.ordinary_primary))
+                       stock_damage=options.stock_damage, ordinary=options.ordinary_primary, second_cqc=options.second_cqc))

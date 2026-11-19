@@ -1,10 +1,10 @@
 local melee = {}
 local guest_save = require("guest_save")
+local cqc = require("native_enemy_loot_registry")
 
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
-local npc_path = dead_bridge .. ".DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0"
-local npc_name = "NPC_State_Infantry_CQC_C " .. npc_path
+local npc_name = cqc[dead_bridge].names[1]
 local damage_start = "native-guest-melee-damage-canary-start"
 local swing_start = "native-guest-melee-swing-start"
 local fixture_aim = "native-guest-melee-aim-fixture"
@@ -26,7 +26,7 @@ local latest, equipment, staged_aim
 
 local function qualified_host(state, phase, testing)
     return enabled and phase == "hosting" and state.listening and state.server == false
-        and (state.map == dead_bridge or testing and state.map == crossroads)
+        and (cqc[state.map] ~= nil or testing and state.map == crossroads)
         and (testing and fixtures and type(SilverfishStartNativeGuestMeleeCanary) == "function"
             and type(SilverfishEquipNativeGuestOldPipe) == "function"
             or not testing and type(SilverfishStartNativeGuestOldPipeSwing) == "function")
@@ -46,8 +46,8 @@ local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
 
-local function observation(damage, ordinary, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
-                           sweeps, calls, before, after, total)
+local function observation(damage, ordinary, area, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
+                           sweeps, calls, before, after, total, target)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_melee_") ~= nil
     local settled_status = damage and "stock_damage_verified" or "surface_verified"
     local miss = ordinary and status == "stock_miss_verified"
@@ -64,7 +64,11 @@ local function observation(damage, ordinary, ok, status, serial, presses, releas
             and not (damage and status == "stock_damage_aim_fenced") and not miss and not cancelled) then
         error("mutation_unverified_guest_melee_abi", 0)
     end
-    if damage and ((sweeps ~= 0 and sweeps ~= 1) or (calls ~= 0 and calls ~= 1) or calls > sweeps
+    local profile = cqc[area]
+    local target_ok = ordinary and (target == "-" or profile and profile.paths[target] ~= nil)
+        or not ordinary and target == npc_name
+    if damage and (not target_ok or ((miss or cancelled) and target ~= "-") or (settled and not miss and target == "-")
+        or (sweeps ~= 0 and sweeps ~= 1) or (calls ~= 0 and calls ~= 1) or calls > sweeps
         or not finite(before) or not finite(after) or not finite(total)
         or ((miss or cancelled) and (sweeps ~= 0 or calls ~= 0 or before ~= -1 or after ~= -1 or total ~= -1))
         or (settled and not miss and (sweeps ~= 1 or calls ~= 1 or before < 100 or before > 160 or after <= 0 or total <= 0
@@ -73,7 +77,7 @@ local function observation(damage, ordinary, ok, status, serial, presses, releas
     end
     return {status = status, serial = serial, presses = presses, releases = releases,
         contacts = contacts, qualified = qualified, settled = settled, passives = passives,
-        sweeps = sweeps, calls = calls, before = before, after = after, total = total}
+        sweeps = sweeps, calls = calls, before = before, after = after, total = total, target = target}
 end
 
 local function valid(value)
@@ -128,13 +132,15 @@ local function restore_pose(pose)
     end
 end
 
-local function damage_pose(state, pawn)
-    local enemy = StaticFindObject(npc_path)
+local function damage_pose(state, pawn, name)
+    local profile = cqc[state.map]
+    local path = profile and profile.paths[name]
+    local enemy = path and StaticFindObject(path)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local host = state.local_pawn and state.local_pawn.pawn
     local camera, capsule, controller = pawn.Camera, pawn.CapsuleComponent, pawn.Controller
     local check = SilverfishCheckNativeGuestMeleeDamagePose
-    if type(check) ~= "function" or not valid(enemy) or enemy:GetFullName() ~= npc_name
+    if type(check) ~= "function" or not valid(enemy) or enemy:GetFullName() ~= name
         or not enemy:HasAuthority() or not same(enemy:GetWorld(), state.world) or enemy.Alive ~= true
         or not valid(host) or not same(host:GetWorld(), state.world)
         or not valid(camera) or not same(camera:GetOwner(), pawn)
@@ -192,7 +198,7 @@ local function damage_pose(state, pawn)
                                     controller:SetControlRotation(aim)
                                     camera:K2_SetWorldRotation(aim, false, {}, true)
                                     probes = probes + 1
-                                    local ready, reason = check(pawn:GetAddress())
+                                    local ready, reason = check(pawn:GetAddress(), enemy:GetAddress())
                                     if ready == true then
                                         pawn:ForceNetUpdate()
                                         return true
@@ -222,7 +228,7 @@ end
 
 local function read(scope, abort)
     local native = abort and SilverfishAbortNativeGuestMeleeCanary or SilverfishReadNativeGuestMeleeCanary
-    local checked, proof = pcall(function() return observation(scope.damage, scope.ordinary, native(scope.proof.serial)) end)
+    local checked, proof = pcall(function() return observation(scope.damage, scope.ordinary, scope.map, native(scope.proof.serial)) end)
     if not checked then
         if scope.pose then
             pcall(SilverfishAbortNativeGuestMeleeCanary, scope.proof.serial)
@@ -246,21 +252,24 @@ function melee.command(fields, state, phase, standing)
     if not qualified_host(state, phase, not ordinary) then error("native_guest_melee_fixture_unavailable", 0) end
     local damage = action == damage_start or ordinary
     if damage or action == fixture_aim or action == "native-guest-melee-canary-start" or action == "native-guest-melee-canary-equip" then
-        if (damage and state.map ~= dead_bridge) or (action == "native-guest-melee-canary-start" and state.map ~= crossroads)
+        if (action == damage_start and state.map ~= dead_bridge) or (action == "native-guest-melee-canary-start" and state.map ~= crossroads)
+            or (action == "native-guest-melee-canary-equip" and state.map ~= crossroads and state.map ~= dead_bridge)
             or (action == damage_start and type(SilverfishStartNativeGuestMeleeDamageCanary) ~= "function") then
             error("native_guest_melee_fixture_unavailable", 0)
         end
         local name, guid = fields[3], fields[4]
-        if #fields ~= 4 or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]") then
+        if #fields ~= (action == fixture_aim and 5 or 4) or type(guid) ~= "string" or #guid ~= 32
+            or guid:find("[^0-9A-F]") or not guid:find("[^0]") then
             error("native_guest_melee_exact_guid_required", 0)
         end
         local pawn, save = exact_guest(state, phase, name, standing)
         if not pawn then error("native_guest_melee_exact_owner_required", 0) end
         if action == fixture_aim then
-            if state.map ~= dead_bridge or type(SilverfishCheckNativeGuestMeleeDamagePose) ~= "function" then
+            local target, profile = fields[5], cqc[state.map]
+            if not profile or not profile.paths[target] or type(SilverfishCheckNativeGuestMeleeDamagePose) ~= "function" then
                 error("native_guest_melee_fixture_unavailable", 0)
             end
-            staged_aim = {map = state.map, pawn = name, address = pawn:GetAddress(), guid = guid, expires = os.time() + 10}
+            staged_aim = {map = state.map, pawn = name, address = pawn:GetAddress(), guid = guid, target = target, expires = os.time() + 10}
             return "stock Old Pipe aim fixture armed"
         end
         if action == "native-guest-melee-canary-equip" then
@@ -274,8 +283,9 @@ function melee.command(fields, state, phase, standing)
         end
         local fixture_bound = ordinary and staged_aim and staged_aim.map == state.map and staged_aim.pawn == name
             and staged_aim.address == pawn:GetAddress() and staged_aim.guid == guid and os.time() <= staged_aim.expires
+        local target = action == damage_start and npc_name or fixture_bound and staged_aim.target
         if fixture_bound then staged_aim = nil end
-        local pose = (action == damage_start or fixture_bound) and damage_pose(state, pawn)
+        local pose = target and damage_pose(state, pawn, target)
         local invoke = ordinary and SilverfishStartNativeGuestOldPipeSwing
             or damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
         local called, result = pcall(function() return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid)) end)
@@ -288,7 +298,7 @@ function melee.command(fields, state, phase, standing)
             restore_pose(pose)
             error(status, 0)
         end
-        local checked, proof = pcall(observation, damage, ordinary, table.unpack(result, 1, result.n))
+        local checked, proof = pcall(observation, damage, ordinary, state.map, table.unpack(result, 1, result.n))
         if not checked then
             if pose and math.type(serial) == "integer" and serial > 0 then
                 pcall(SilverfishAbortNativeGuestMeleeCanary, serial)
@@ -317,7 +327,7 @@ function melee.rows(state, phase, status_row, standing)
     if staged_aim then
         if staged_aim.map ~= state.map or os.time() > staged_aim.expires then staged_aim = nil
         elseif qualified_host(state, phase, true) then
-            rows[#rows + 1] = status_row(fixture_aim, state.map, staged_aim.pawn, staged_aim.guid)
+            rows[#rows + 1] = status_row(fixture_aim, state.map, staged_aim.pawn, staged_aim.guid, staged_aim.target)
         end
     end
     if not qualified_host(state, phase, false) and not qualified_host(state, phase, true) then return rows end
@@ -334,7 +344,7 @@ function melee.rows(state, phase, status_row, standing)
         latest.pawn, latest.guid, proof.serial, proof.status,
         proof.presses, proof.releases, proof.contacts, proof.qualified, proof.settled and 1 or 0, proof.passives and 1 or 0}
     if latest.damage then
-        fields[13], fields[14], fields[15] = npc_name, proof.sweeps, proof.calls
+        fields[13], fields[14], fields[15] = proof.target, proof.sweeps, proof.calls
         fields[16], fields[17], fields[18] = proof.before, proof.after, proof.total
     end
     rows[#rows + 1] = status_row(table.unpack(fields))

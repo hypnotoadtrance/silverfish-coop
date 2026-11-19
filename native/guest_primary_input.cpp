@@ -1,4 +1,5 @@
 #include "guest_primary_input.hpp"
+#include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 
 #include <array>
@@ -609,7 +610,7 @@ namespace
             !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
         if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
-        if (next.item == &old_pipe && (!world || world->GetPathName() != bridge_world || next.seat.host))
+        if (next.item == &old_pipe && (next.seat.host || !silverfish::native_guest_melee::ordinary_world(world)))
             return "stock_guest_old_pipe_primary_unqualified";
         next.seat.pawn = pawn;
         next.seat.world = world;

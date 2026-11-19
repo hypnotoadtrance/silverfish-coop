@@ -1,5 +1,6 @@
 local primary = {}
 local weapon_profiles = require("guest_weapon_registry")
+local cqc = require("native_enemy_loot_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -179,7 +180,7 @@ function primary.command(fields, state, phase)
 
     local guid, kind, quest = fields[5], fields[6], fields[7]
     local camera = kind == "camera"
-    local old_pipe = kind == "old-pipe" and current.map == camera_map
+    local old_pipe = kind == "old-pipe" and cqc[current.map] ~= nil
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
         or (not camera and not old_pipe and not weapon_profiles.paths[kind])

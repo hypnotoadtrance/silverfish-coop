@@ -1,4 +1,5 @@
 #include "guest_melee.hpp"
+#include "enemy_loot_registry.hpp"
 #include "guest_regen.hpp"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -32,14 +34,15 @@ namespace
 {
     namespace U = RC::Unreal;
     namespace H = U::Hook;
+    namespace cqc = silverfish::enemy_loot_profiles;
     using Lua = RC::LuaMadeSimple::Lua;
     using Iteration = H::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
     using Guid = std::array<std::uint32_t, 4>;
 
     constexpr auto map_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
-    constexpr auto damage_map = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
-    constexpr auto damage_target_path = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.NPC_State_Infantry_CQC_C_0");
+    constexpr auto damage_map = cqc::actors.front().world;
+    constexpr auto damage_target_path = cqc::actors.front().path;
     constexpr auto damage_target_class = STR("/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C");
     constexpr auto npc_class = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto effects_class = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C");
@@ -349,8 +352,13 @@ namespace
         {
             auto* component = hit.contact_component(contacted.GetRawPtr(index));
             if (!component) return reject("sphere_contact");
-            if (component->GetOuterPrivate() != enemy) return reject("sphere_other_actor");
-            if (!first) first = component;
+            auto* owner = component->GetOuterPrivate();
+            if (!live(owner) || (enemy && owner != enemy)) return reject("sphere_other_actor");
+            if (!first)
+            {
+                first = component;
+                enemy = owner;
+            }
         }
         if (refusal) *refusal = "ready";
         return TraceProof{*origin, *direction, first};
@@ -529,6 +537,7 @@ namespace
         struct Damage
         {
             U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
+            std::string target_name{"-"};
             U::FFrame *contact_frame{}, *sweep_frame{}, *deal_frame{};
             Vector origin{}, direction{};
             int sweeps{}, calls{};
@@ -581,19 +590,31 @@ namespace
         return value ? value->GetPropertyValueInContainer(actor) : -1.0;
     }
 
-    U::UObject* placed_enemy(U::UWorld* world)
+    bool qualified_enemy(U::UObject* candidate, U::UWorld* world)
     {
-        auto* actor = find<U::AActor>(damage_target_path);
+        if (!live(world) || !live(candidate) || candidate->GetClassPrivate() != find<U::UClass>(damage_target_class)) return false;
+        const auto world_name = world->GetPathName();
+        const auto actor_name = candidate->GetPathName();
+        const auto profile = std::ranges::find_if(cqc::actors, [&](const auto& value) {
+            return world_name == value.world && actor_name == value.path;
+        });
+        if (profile == cqc::actors.end() || find<U::AActor>(profile->path) != candidate) return false;
+        auto* actor = static_cast<U::AActor*>(candidate);
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
         auto* faction = field<U::FByteProperty>(actor, STR("Faction"));
         auto* maximum = field<U::FDoubleProperty>(actor, STR("Max_Health"));
-        if (!live(world) || world->GetPathName() != damage_map || !live(actor) || actor->GetWorld() != world ||
-            actor->GetClassPrivate() != find<U::UClass>(damage_target_class) || !actor->HasAnyFlags(U::RF_WasLoaded) ||
+        if (actor->GetWorld() != world || !actor->HasAnyFlags(U::RF_WasLoaded) ||
             actor->GetLevel() != object(world, STR("PersistentLevel")) || !role || role->GetPropertyValueInContainer(actor) != 3 ||
             !faction || faction->GetPropertyValueInContainer(actor) != 4 || !maximum ||
             maximum->GetPropertyValueInContainer(actor) != 160.0 || !boolean(actor, STR("Alive"), true) ||
-            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return nullptr;
-        return actor;
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return false;
+        return true;
+    }
+
+    U::UObject* placed_enemy(U::UWorld* world)
+    {
+        auto* actor = find<U::AActor>(damage_target_path);
+        return qualified_enemy(actor, world) ? actor : nullptr;
     }
 
     void* output(U::FFrame& frame, U::FProperty* property)
@@ -673,7 +694,7 @@ namespace
     {
         if (!swing.pending) return;
         const bool ordinary = swing.mode == SwingMode::ordinary;
-        const auto cancellable = ordinary && !swing.damage.calls;
+        const bool cancellable = ordinary && !swing.damage.calls && !swing.damage.sweeps && swing.damage.target_name == "-";
         if (!owner_current(swing)) return finish(cancellable ? "stock_swing_cancelled" : "mutation_unverified_guest_melee_owner");
         if (Clock::now() >= swing.deadline) return finish(cancellable ? "stock_swing_cancelled" : "mutation_unverified_guest_melee_timeout");
         if (swing.contacts != 1 || swing.qualified != 1 || !idle(swing)) return;
@@ -724,21 +745,33 @@ namespace
             return;
         }
         const bool ordinary = swing.mode == SwingMode::ordinary;
+        auto* world = static_cast<U::UWorld*>(swing.world.Get());
         auto* enemy = swing.damage.target.Get();
-        const auto hp = enemy_health(enemy);
-        const bool target_current = enemy && enemy == placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) &&
-            std::isfinite(hp) && hp >= 100.0 && hp <= 160.0;
-        if (!passives_unchanged(swing) || (!ordinary && (!target_current ||
+        const auto eligible = [world](U::UObject* actor) {
+            if (!qualified_enemy(actor, world)) return false;
+            const auto hp = enemy_health(actor);
+            return std::isfinite(hp) && hp >= 100.0 && hp <= 160.0;
+        };
+        if (!passives_unchanged(swing) || (!ordinary && (!eligible(enemy) ||
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
-        const auto trace = target_current ? stock_trace(receiver, swing.pawn.Get(), enemy) : std::nullopt;
-        if (!trace)
+        const auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy);
+        if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
+        if (!trace || (ordinary && !eligible(enemy)))
         {
             if (!ordinary) return refuse("stock_damage_aim_fenced");
             call.PreventOriginalFunctionCall();
             ++swing.qualified;
             swing.damage.fenced_miss = true;
             return;
+        }
+        if (ordinary)
+        {
+            auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
+            if (!deal) return refuse("mutation_unverified_guest_melee_stock_damage_path");
+            swing.damage.target = enemy;
+            swing.damage.deal = deal;
+            swing.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
         }
         swing.damage.contact_frame = &frame;
         swing.damage.component = trace->first;
@@ -803,7 +836,7 @@ namespace
         auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
         if (call.OriginalFunctionCallPrevented() || !swing.pending || proof.calls ||
             frame.PreviousFrame() != proof.sweep_frame || receiver != proof.target.Get() ||
-            receiver != placed_enemy(static_cast<U::UWorld*>(swing.world.Get())) || fn != proof.deal.Get() || !args ||
+            !qualified_enemy(receiver, static_cast<U::UWorld*>(swing.world.Get())) || fn != proof.deal.Get() || !args ||
             !hit.bound() || !hit_value || hit_value->GetStruct().Get() != hit.type ||
             hit.owned_component(hit_value->ContainerPtrToValuePtr<void>(args), receiver) != proof.component.Get() ||
             !damage || !damage_type || damage->GetStruct().Get() != damage_type || !blunt ||
@@ -884,7 +917,8 @@ namespace
             lua.set_number(hit.before);
             lua.set_number(hit.after);
             lua.set_number(hit.total);
-            return 14;
+            lua.set_string(hit.target_name);
+            return 15;
         }
         return 9;
     }
@@ -911,14 +945,29 @@ namespace
     {
         bool clear = false;
         std::string_view status = "arguments";
-        if (fixture_enabled() && U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_integer())
+        const auto argc = lua.get_stack_size();
+        if (fixture_enabled() && U::IsInGameThreadRaw() && (argc == 1 || (argc == 2 && lua.is_integer(2))) && lua.is_integer(1))
         {
             auto* pawn = pawn_at(lua.get_integer());
             auto* save = object(pawn, STR("Save"));
             auto* canonical = object(object(pawn, STR("As Game Instance FP")), STR("SaveSlot_Ref"));
             auto* pipe = object(pawn, STR("EquipedItem"));
-            auto* world = find<U::UWorld>(damage_map);
-            auto* target = placed_enemy(world);
+            auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+            U::UObject* target{};
+            if (argc == 1) target = placed_enemy(world);
+            else if (const auto requested = lua.get_integer(); requested > 0 && silverfish::native_guest_melee::ordinary_world(world))
+            {
+                for (const auto& row : cqc::actors)
+                {
+                    if (world->GetPathName() != row.world) continue;
+                    auto* actor = find<U::AActor>(row.path);
+                    if (reinterpret_cast<std::uintptr_t>(actor) == static_cast<std::uintptr_t>(requested) && qualified_enemy(actor, world))
+                    {
+                        target = actor;
+                        break;
+                    }
+                }
+            }
             if (!target) status = "placed_target";
             else if (!pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world ||
                 !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical))
@@ -952,10 +1001,10 @@ namespace
         auto* save = object(pawn, STR("Save"));
         auto* game = object(pawn, STR("As Game Instance FP"));
         auto* canonical = object(game, STR("SaveSlot_Ref"));
-        auto* world = find<U::UWorld>(damage ? damage_map : map_path);
+        auto* world = ordinary && pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : find<U::UWorld>(damage ? damage_map : map_path);
         if (!pawn || reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(save_address) ||
             !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical) || !live(world) ||
-            static_cast<U::AActor*>(pawn)->GetWorld() != world)
+            static_cast<U::AActor*>(pawn)->GetWorld() != world || (ordinary && !silverfish::native_guest_melee::ordinary_world(world)))
             return proof(lua, false, "native_guest_melee_exact_owner_unqualified");
         auto* pipe = object(pawn, STR("EquipedItem"));
         auto* mesh = object(pipe, STR("Wep_Skeli"));
@@ -1017,7 +1066,7 @@ namespace
         if (!candidate.passive_free) return proof(lua, false, "native_guest_melee_guid_or_passives_unqualified");
         if constexpr (damage)
         {
-            auto* enemy = placed_enemy(world);
+            auto* enemy = ordinary ? nullptr : placed_enemy(world);
             auto* sweep = find<U::UFunction>(effects_sweep);
             auto* library = find<U::UObject>(effects_default);
             auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
@@ -1033,6 +1082,7 @@ namespace
             candidate.damage.target = enemy;
             candidate.damage.sweep = sweep;
             candidate.damage.deal = deal;
+            if (enemy) candidate.damage.target_name = RC::to_utf8_string(enemy->GetFullName());
             candidate.damage.library = library;
             candidate.damage.graph = contact_graph;
         }
@@ -1081,13 +1131,21 @@ namespace
             if (swing.pending)
             {
                 if (swing.mode == SwingMode::ordinary)
-                    finish(swing.damage.calls ? "mutation_unverified_guest_melee_abort_after_damage" : "stock_swing_cancelled");
+                    finish(swing.damage.calls || swing.damage.sweeps || swing.damage.target_name != "-" ?
+                        "mutation_unverified_guest_melee_abort_after_contact" : "stock_swing_cancelled");
                 else finish("aborted_contact_fenced");
             }
         }
         else tick();
         return report(lua);
     }
+}
+
+bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
+{
+    if (!live(world)) return false;
+    const auto name = world->GetPathName();
+    return std::ranges::any_of(cqc::worlds, [&](const auto* path) { return name == path && find<U::UWorld>(path) == world; });
 }
 
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)

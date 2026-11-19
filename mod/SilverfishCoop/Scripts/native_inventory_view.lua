@@ -1,5 +1,6 @@
 local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
+local cqc = require("native_enemy_loot_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -169,7 +170,7 @@ local function page(fields)
         local equippable = ((source == "backpack" or source == "equipment")
             and (weapon_profiles.kinds[class] ~= nil or class == camera_path
                 or (class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
-                    and fields[4] == "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P")))
+                    and cqc[fields[4]] ~= nil)))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = item:gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or mre_enabled and meals[class]
