@@ -27,7 +27,7 @@ from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
-from . import native_mosby_station_view, native_mosby_tape, native_smg_hold
+from . import native_borough_barter, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -40,7 +40,7 @@ POSITION_MAX_AGE = 3.0
 GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
-                        native_dialogue.OPEN, native_dialogue.CHOOSE,
+                        native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION,
                         native_mosby_tape.PREFLIGHT, native_mosby_tape.CONVERT, native_mosby_tape.READINGS_PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
@@ -162,7 +162,8 @@ class Host:
                  guest_sickness: bool = False, broker_input: bool = False, wipe_view_enabled: bool = False,
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
-                 mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False):
+                 mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False, mama_dialogue_enabled: bool = False,
+                 native_dead_bridge_enemy_loot: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -191,13 +192,14 @@ class Host:
         self.expanded_zones = expanded_zones
         self.native_shop_view = native_shop_view
         self.native_loot_input = native_loot_input
+        self.native_dead_bridge_enemy_loot = native_dead_bridge_enemy_loot
         self.guest_regen = guest_regen
         self.guest_sickness = guest_sickness
         self.broker_input = broker_input
         self.wipe_view_enabled = wipe_view_enabled
         self.wire_board_enabled = wire_board_enabled
         self.dialogue_sessions = native_dialogue.DialogueSessions(
-            mosby=mosby_dialogue_enabled, shopkeep=shopkeep_dialogue_enabled,
+            mosby=mosby_dialogue_enabled, shopkeep=shopkeep_dialogue_enabled, mama=mama_dialogue_enabled,
         ) if dialogue_enabled else None
         self.mosby_station_enabled = mosby_station_enabled
         self.camera_ready_at = {}
@@ -773,27 +775,37 @@ class Host:
                 write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             if authored_plan:
                 authorization = ("authored", str(authored_plan.travel_time_step or 0))
-            if departure_proof is None:
+            cqc_departure = current == DEAD_BRIDGE and getattr(self, "native_dead_bridge_enemy_loot", False)
+            if departure_proof is None and not cqc_departure:
                 self.begin_zone_guests(transport)
                 await bridge.command("travel", destination, *authorization)
             else:
-                hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
-                with hold:
-                    try:
-                        departure = await bridge.command("travel-party", destination, *departure_proof)
-                    except (OSError, RuntimeError, ValueError):
-                        self.begin_zone_guests(transport)
-                        raise
-                    message = departure.get("ack", {}).get("message")
-                    if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable"):
-                        return {"ok": False, "error": message}
-                    moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
-                    if message in moving:
-                        return {"ok": False, "error": "travel_blocked",
-                                "blockers": [{"id": moving[message], "reason": "too_far"}]}
-                    self.begin_zone_guests(transport)
-                    if message != "zone travel requested":
-                        raise RuntimeError("The game did not verify the checked party departure")
+                command, arguments = ("travel-party", departure_proof) if departure_proof else ("travel", authorization)
+                for attempt in range(2):
+                    hold = transport.hold_game_routes() if transport else contextlib.nullcontext()
+                    with hold:
+                        try:
+                            departure = await bridge.command(command, destination, *arguments)
+                        except (OSError, RuntimeError, ValueError):
+                            self.begin_zone_guests(transport)
+                            raise
+                        message = departure.get("ack", {}).get("message")
+                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable"):
+                            return {"ok": False, "error": message}
+                        if departure_proof:
+                            moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
+                            if message in moving:
+                                return {"ok": False, "error": "travel_blocked",
+                                        "blockers": [{"id": moving[message], "reason": "too_far"}]}
+                        if message != native_enemy_loot.PENDING:
+                            self.begin_zone_guests(transport)
+                            if message != "zone travel requested":
+                                raise RuntimeError("The game did not verify the checked party departure")
+                            break
+                    self.last_game, self.last_seen = departure, time.monotonic()
+                    if not cqc_departure or attempt or not native_enemy_loot.pending(self):
+                        raise RuntimeError("The stock CQC departure hold did not identify its reserved roll")
+                    await native_enemy_loot.observe(self, bridge)
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,
@@ -1508,6 +1520,8 @@ class Host:
                 if not self.dialogue_sessions:
                     raise party.RuleError("native_dialogue_unavailable")
                 result = await self.dialogue_sessions.act(self, bridge, character, action, target, request["operation_id"])
+            elif action == native_borough_barter.ACTION:
+                result = await native_borough_barter.trade(self, bridge, character, target, request["operation_id"])
             elif action in (native_mosby_tape.PREFLIGHT, native_mosby_tape.READINGS_PREFLIGHT):
                 result = await native_mosby_tape.preflight(self, bridge, character, action, target)
             elif action == native_mosby_tape.CONVERT:
@@ -1804,6 +1818,7 @@ class Host:
             "native_dialogue": self.dialogue_sessions is not None,
             "native_dialogue_mosby": bool(self.dialogue_sessions and native_dialogue.SCIENTIST_SHOP in self.dialogue_sessions.maps),
             "native_dialogue_shopkeep": bool(self.dialogue_sessions and native_dialogue.SHOPKEEP in self.dialogue_sessions.maps),
+            "native_dialogue_mama": bool(self.dialogue_sessions and BOROUGH in self.dialogue_sessions.maps),
             "native_mosby_station": self.mosby_station_enabled,
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
@@ -2644,6 +2659,7 @@ class Host:
                     result = {"revision": await self.checkpoint_native(bridge)}
                     self.control.event("checkpoint_saved", revision=result["revision"], command_id=path.stem)
                     if action == "stop":
+                        await native_enemy_loot.observe(self, bridge)
                         self.stopping = True
                 else:
                     raise ValueError("Action unavailable on the host")
@@ -2841,6 +2857,7 @@ class Host:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
             self.sync_native_health_limits()
+            await native_enemy_loot.observe(self, bridge)
             await native_flood_jammer.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
@@ -2932,7 +2949,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     expanded_zones: bool = False, native_shop_view: bool = False,
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
                     guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None,
-                    guest_held_fire: bool = False) -> None:
+                    guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -2943,12 +2960,18 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
     native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
+    if native_dead_bridge_enemy_loot and not (native_loot_input and native_backend == "cpp" and
+            staged_script(work, "native_enemy_loot.lua", "native-enemy-loot-cqc-capability") and
+            staged_script(work, "guest_save.lua", "native-guest-bind-exact")):
+        raise ValueError("Stock Dead Bridge enemy loot requires the current native co-op stage")
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
     wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     dialogue_enabled = native_guest and native_zones and staged_script(work, "native_dialogue.lua")
     mosby_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_mosby.lua")
     shopkeep_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop")
+    mama_dialogue_enabled = (dialogue_enabled and staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma")
+                             and staged_script(work, "native_borough_barter.lua", "SilverfishTradeNativeBoroughMama"))
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
@@ -3025,9 +3048,12 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
                              guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
-                             native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire)
+                             native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
+                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot)
             bridge = Bridge(bridge_directory, process)
-            await bridge.wait_for(lambda state: state["state"] == "ready")
+            ready = await bridge.wait_for(lambda state: state["state"] == "ready")
+            if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_capability") is not True:
+                raise RuntimeError("The staged addon did not expose the exact stock Dead Bridge enemy loot bridge")
             extraction_rules = {}
             prepared_preset = None
             if start_preset:
@@ -3108,9 +3134,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               broker_input=broker_input, wipe_view_enabled=wipe_view_enabled,
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
-                              shopkeep_dialogue_enabled=shopkeep_dialogue_enabled,
+                              shopkeep_dialogue_enabled=shopkeep_dialogue_enabled, mama_dialogue_enabled=mama_dialogue_enabled,
                               mosby_station_enabled=mosby_station_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
+                              native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -3201,7 +3228,7 @@ def load_invite(file: Path, build: str) -> dict:
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby",
-            "native_mosby_station", "native_dialogue_shopkeep")
+            "native_mosby_station", "native_dialogue_shopkeep", "native_dialogue_mama")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
@@ -3210,6 +3237,8 @@ def load_invite(file: Path, build: str) -> dict:
         raise ValueError("Invitation enables held fire without stock guest controls")
     if invite.get("native_dialogue_shopkeep") and not invite.get("native_dialogue"):
         raise ValueError("Invitation enables the ShopKeep conversation without stock dialogue")
+    if invite.get("native_dialogue_mama") and not invite.get("native_dialogue"):
+        raise ValueError("Invitation enables Mama's conversation without stock dialogue")
     return invite
 
 
@@ -3293,6 +3322,7 @@ class Client:
         self.dialogue_view = (native_dialogue.DialogueView(
             bridge, control, mosby=invite.get("native_dialogue_mosby", False),
             shopkeep=invite.get("native_dialogue_shopkeep", False), shopkeep_view=invite.get("native_shop_view", False),
+            mama=invite.get("native_dialogue_mama", False),
         )
                               if invite.get("native_dialogue") else None)
         self.mosby_station = native_mosby_station_view.StationView(bridge, control) if invite.get("native_mosby_station") else None
@@ -4029,6 +4059,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         raise ValueError("Restage the native client for stock Stone Maze station interaction")
     if invite.get("native_dialogue_shopkeep") and not staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop"):
         raise ValueError("Restage the native client for the stock ShopKeep counter dialogue")
+    if invite.get("native_dialogue_mama") and not staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma"):
+        raise ValueError("Restage the native client for Mama's stock Borough dialogue")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
     if guest_primary_input and not staged_script(work, "native_guest_primary_input.lua"):

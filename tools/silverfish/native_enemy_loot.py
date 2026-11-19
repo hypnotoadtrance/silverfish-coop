@@ -1,4 +1,4 @@
-"""Bank and claim ammunition from exact staged stock enemy encounters."""
+"""Bank and claim ammunition from exact stock enemy encounters."""
 
 import asyncio
 import math
@@ -14,7 +14,10 @@ from .travel import DEAD_BRIDGE
 BANK = "native-enemy-loot-bank"
 CLAIM = "native-enemy-loot-claim"
 APPROACH = "native-enemy-loot-approach"
+RETIRE = "native-enemy-loot-retire"
+PENDING = "native_enemy_loot_roll_pending"
 STATE_KEY = "native_enemy_loot_rolls"
+CQC_SCOPE = "native_enemy_loot_cqc"
 SHELLS = "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"
 DEATH_VIEW = "native_enemy_loot_death_view"
 SHELL_ACTOR = f"Ammo_ShotgunShells_BP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Ammo_ShotgunShells_BP_C_"
@@ -78,13 +81,19 @@ async def project_client(client) -> None:
         client.control.event("native_enemy_loot_death_projected", **proof)
 
 
-def _available(host):
+def _ordinary(host, area):
+    return area == DEAD_BRIDGE and getattr(host, "native_dead_bridge_enemy_loot", False) is True
+
+
+def _available(host, *, bank=False, fixture=False):
     area = host.last_game.get("map")
-    if (not host.fixtures or not host.native_guest or not host.native_profile or host.stopping or host.transitioning
-            or host.native_checkpoint_unsafe or host.party["wipe"] or host.last_game.get("state") != "hosting"
+    ordinary = _ordinary(host, area)
+    if ((not host.fixtures and (not ordinary or fixture)) or not host.native_guest or not host.native_profile or host.stopping
+            or ((host.transitioning or host.party["wipe"]) and not (bank and ordinary))
+            or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
             or area not in (MAP, DEAD_BRIDGE) or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_enemy_loot_unavailable")
-    if area == DEAD_BRIDGE and any(os.environ.get(name) != "1" for name in (
+    if area == DEAD_BRIDGE and not ordinary and any(os.environ.get(name) != "1" for name in (
         "SILVERFISH_COOP_NATIVE_ENEMY_LOOT", "SILVERFISH_COOP_NATIVE_NPC_TEST",
     )):
         raise party.RuleError("native_enemy_loot_unavailable")
@@ -92,7 +101,7 @@ def _available(host):
 
 
 async def approach(host, bridge, target: str | None) -> dict:
-    area = _available(host)
+    area = _available(host, fixture=True)
     role, sep, guid = target.partition("|") if isinstance(target, str) else ("", "", "")
     roll = host.party.get(STATE_KEY, {}).get(guid) if sep and valid_guid(guid) else None
     character = host.roles().get(role)
@@ -117,23 +126,94 @@ async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=fro
     return revision
 
 
+def _cqc_receipt(game):
+    scope = game.get(CQC_SCOPE, {})
+    return scope if (scope.get("map"), scope.get("bandit")) == (DEAD_BRIDGE, CQC) else {}
+
+
+def pending(host):
+    return _ordinary(host, host.last_game.get("map")) and _cqc_receipt(host.last_game).get("reserved") is True
+
+
+def _stock_killer(host, source):
+    if not _ordinary(host, source.get("map")):
+        member = host.roles().get(source.get("killer_role"))
+        return member if member and native_loot._scope(host, member) == source.get("killer_pawn") else None
+    record = _cqc_receipt(host.last_game)
+    bounty = host.last_game.get("native_enemy_bounty", {})
+    pawn = source.get("killer_pawn")
+    if ((bounty.get("map"), bounty.get("bandit"), bounty.get("cache_unchanged")) != (DEAD_BRIDGE, CQC, True)
+            or not isinstance(pawn, str) or not pawn.startswith("Player_FP_C " + DEAD_BRIDGE + ".DeadBridge_P:PersistentLevel.")
+            or type(source.get("bounty_calls")) is not int or source["bounty_calls"] < 1):
+        return None
+    identity = record.get("killer_character")
+    if source.get("killer_role") == "host":
+        if (identity is None and pawn == native_loot._scope(host, "host") and bounty.get("source") == "stock_host"
+                and bounty.get("override_count") == 0 and bounty.get("original_instances") == source.get("bounty_instances")
+                and bounty.get("original_active") == source.get("bounty_active")):
+            return "host"
+        return None
+    counts = tuple(bounty.get(field) for field in ("permanent_count", "timed_count", "gear_count"))
+    if (source.get("killer_role") == "guest" and identity in host.party["players"] and identity != "host"
+            and bounty.get("source") == "guest_detached" and bounty.get("override_count") == source["bounty_calls"]
+            and all(type(amount) is int and amount >= 0 for amount in counts) and source.get("bounty_instances") == sum(counts)
+            and source.get("bounty_active") is (sum(counts) > 0)
+            and not any(other != identity and member.get("pawn") == pawn for other, member in host.native_recipients().items())):
+        return identity
+    return None
+
+
+async def _retire(host, bridge, roll):
+    try:
+        snapshot = await bridge.command(RETIRE, roll["actor"], roll["escrow"]["slot"], roll["guid"], timeout=6)
+        result = snapshot.get("native_enemy_loot_escrow", {})
+        if ((snapshot.get("state"), snapshot.get("map"), result.get("state"), result.get("actor"), result.get("slot"), result.get("guid"))
+                != ("hosting", DEAD_BRIDGE, "retired", roll["actor"], roll["escrow"]["slot"], roll["guid"]) or
+                _cqc_receipt(snapshot).get("reserved") is not False):
+            raise RuntimeError("The committed shotgun shells did not verify exact physical retirement")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+    except (asyncio.CancelledError, OSError, RuntimeError, ValueError):
+        host.stopping = True
+        raise
+
+
+async def observe(host, bridge):
+    if not pending(host) or host.stopping or host.native_checkpoint_unsafe:
+        return
+    try:
+        await bank(host, bridge, CQC)
+    except party.RuleError as error:
+        host.native_checkpoint_unsafe = host.stopping = True
+        raise RuntimeError(f"The reserved stock CQC roll could not be verified ({error})") from error
+
+
 async def bank(host, bridge, target: str | None) -> dict:
-    area = _available(host)
+    area = _available(host, bank=True)
+    cqc = _ordinary(host, area)
     source = host.last_game.get("native_enemy_loot", {})
     if (source.get("state"), source.get("map"), source.get("loot_calls"), source.get("ammo_class")) != (
             "stock_loot_observed", area, 1, SHELLS) or target != source.get("bandit") or (area == DEAD_BRIDGE and target != CQC):
         raise party.RuleError("native_enemy_loot_exact_drop_unavailable")
-    roles = host.roles()
-    killer = roles.get(source.get("killer_role"))
-    if not killer or native_loot._scope(host, killer) != source.get("killer_pawn"):
-        raise party.RuleError("native_enemy_loot_exact_killer_unavailable")
+    ammo = source.get("ammo_actor")
+    if cqc and (not isinstance(ammo, str) or not ammo.startswith(SHELL_ACTOR)
+                or not ammo.removeprefix(SHELL_ACTOR).isascii() or not ammo.removeprefix(SHELL_ACTOR).isdecimal()):
+        raise party.RuleError("native_enemy_loot_exact_drop_unavailable")
     for recorded in host.party.get(STATE_KEY, {}).values():
-        if (recorded["epoch"], recorded["bandit"], recorded["actor"]) == (host.zone_epoch, target, source["ammo_actor"]):
+        if (recorded["epoch"], recorded["bandit"], recorded["actor"]) == (host.zone_epoch, target, ammo):
+            if cqc and pending(host):
+                if recorded.get("escrow") is None or not _cqc_receipt(host.last_game).get("captured"):
+                    raise RuntimeError("The durable CQC roll conflicts with the pending stock shell")
+                await _retire(host, bridge, recorded)
             return {"native_enemy_loot_roll": native_loot.public_roll(recorded)}
+    if cqc and (not pending(host) or _cqc_receipt(host.last_game).get("captured") is not False):
+        raise party.RuleError("native_enemy_loot_exact_drop_unavailable")
+    killer = _stock_killer(host, source)
+    if not killer:
+        raise party.RuleError("native_enemy_loot_exact_killer_unavailable")
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(BANK, target, slot, source["ammo_actor"], timeout=7)
+        snapshot = await bridge.command(BANK, target, slot, ammo, timeout=7)
         proof = snapshot.get("native_enemy_loot_escrow", {})
         at, guid = proof.get("position"), proof.get("guid")
         if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("state"), proof.get("pawn"),
@@ -151,10 +231,12 @@ async def bank(host, bridge, target: str | None) -> dict:
             raise RuntimeError("The stock enemy drop identity already exists")
         records[guid] = roll
         revision = await _commit(host, bridge, candidate, snapshot)
+        if cqc:
+            await _retire(host, bridge, roll)
         report = native_loot.public_roll(roll)
         host.control.event("native_enemy_loot_roll_committed", revision=revision, **report)
         return {"native_enemy_loot_roll": report}
-    except (OSError, RuntimeError, ValueError):
+    except (asyncio.CancelledError, OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

@@ -56,7 +56,10 @@ DEPOT_DOCUMENTS = CollectionContract("DepotDocs", "native-depot-documents", "Dep
 BRANDY = CollectionContract("Clt_Brandy", "native-brandy", "Fine Vintage", BLACK_MARKET,
                             "black_market_redemption_required", 900, frozenset({"8"}), "consumed_brandy",
                             native_authored_pickup.CITY_BRANDY, frozenset({BLACK_MARKET}))
-CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY)}
+POCKET_WATCH = CollectionContract("Clt_Watch", "native-pocket-watch", "Pocket Watch", SCAV_BAR,
+                                  "scav_bar_redemption_required", 1000, frozenset(), "consumed_watch",
+                                  native_authored_pickup.POCKET_WATCH, frozenset({SCAV_BAR}))
+CONTRACTS = {spec.quest_id: spec for spec in (COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, POCKET_WATCH)}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
 AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source}

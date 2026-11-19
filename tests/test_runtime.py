@@ -121,3 +121,18 @@ class StageBackendTests(unittest.TestCase):
 
             runtime.launch(*paths, headless=True, native_zones=True)
             self.assertNotIn(fixture_flag, game.call_args.kwargs["env"])
+
+    @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
+    def test_cqc_enemy_loot_is_explicit_and_independent_from_fixtures(self):
+        self.install_cpp_fixture()
+        flag = "SILVERFISH_COOP_NATIVE_CQC_LOOT"
+        paths = self.work, self.work / "profile", self.work / "bridge"
+        host = dict(headless=False, port=17432, native_events=True, native_guest=True, native_zones=True, native_loot_input=True)
+        with patch.dict(os.environ, {flag: "1"}), patch("tools.silverfish.win_job.GameProcess") as game:
+            runtime.launch(*paths, **host)
+            self.assertNotIn(flag, game.call_args.kwargs["env"])
+            runtime.launch(*paths, native_dead_bridge_enemy_loot=True, **host)
+            self.assertEqual(game.call_args.kwargs["env"][flag], "1")
+            self.assertNotIn("SILVERFISH_COOP_NATIVE_FIXTURES", game.call_args.kwargs["env"])
+            with self.assertRaisesRegex(ValueError, "native campaign host"):
+                runtime.launch(*paths, headless=True, native_zones=True, native_dead_bridge_enemy_loot=True)

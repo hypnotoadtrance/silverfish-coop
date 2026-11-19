@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -8,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from tools.silverfish import native_enemy_loot, native_host_save, party
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.runtime import Bridge, MAP
+from tools.silverfish.service import Host
 from tools.silverfish.travel import DEAD_BRIDGE
 
 
@@ -54,6 +56,136 @@ class DeadBridgeEnemyLootTests(unittest.TestCase):
         with patch.dict("os.environ", clear=True):
             game["map"] = MAP
             self.assertEqual(native_enemy_loot._available(host), MAP)
+
+
+class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
+    first = "aaaaaaaa-0000-0000-0000-000000000001"
+    second = "aaaaaaaa-0000-0000-0000-000000000002"
+    guid = "B" * 32
+    slot = "SFCoop_" + "b" * 32
+
+    def setUp(self):
+        self.target = native_enemy_loot.CQC
+        self.ammo = native_enemy_loot.SHELL_ACTOR + "2147480954"
+        path = f"Player_FP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Player_FP_C_"
+        self.host_pawn, self.first_pawn, self.second_pawn = [path + str(index) for index in (101, 102, 103)]
+        self.party = party.new_party()
+        for member in ("host", self.first, self.second):
+            party.add_player(self.party, member)
+        self.host = SimpleNamespace(
+            fixtures=False, native_guest=True, native_profile=Path("staged-profile"), stopping=False,
+            transitioning=False, native_checkpoint_unsafe=False, native_dead_bridge_enemy_loot=True,
+            party=self.party, zone_epoch="b" * 32, control=Mock(), checkpoint_native=AsyncMock(return_value=7),
+            last_seen=time.monotonic(), roles=lambda: {"host": "host", "guest": self.first, "guest2": self.second},
+            native_recipients=lambda: {self.first: {"pawn": self.first_pawn, "connected": True},
+                                       self.second: {"pawn": self.second_pawn, "connected": False}},
+        )
+        self.scope = dict(map=DEAD_BRIDGE, bandit=self.target, killer_character=self.second, reserved=True, captured=False)
+        self.source = dict(map=DEAD_BRIDGE, bandit=self.target, state="stock_loot_observed", killer_role="guest",
+                           killer_pawn=self.second_pawn, ammo_actor=self.ammo, ammo_class=native_enemy_loot.SHELLS,
+                           ammo_quantity=8, loot_calls=1, bounty_calls=2, bounty_instances=1, bounty_active=True)
+        self.bounty = dict(map=DEAD_BRIDGE, bandit=self.target, cache_unchanged=True, source="guest_detached",
+                           override_count=2, permanent_count=1, timed_count=0, gear_count=0,
+                           original_instances=0, original_active=False)
+        self.initial = dict(state="hosting", map=DEAD_BRIDGE, native_enemy_loot=self.source,
+                            native_enemy_bounty=self.bounty, native_enemy_loot_cqc=self.scope,
+                            pawns={"local": {"name": self.host_pawn, "location": [50, 2, 3]},
+                                   "guest": {"name": self.first_pawn, "location": [50, 2, 3]}})
+        self.host.last_game = self.initial
+        self.captured = dict(map=DEAD_BRIDGE, state="captured", actor=self.ammo, pawn=self.second_pawn,
+                             slot=self.slot, guid=self.guid, units=8, position=[1, 2, 3])
+        self.frame = dict(slot=self.slot, map=DEAD_BRIDGE)
+
+    async def test_banks_actual_second_guest_and_retires_once_after_commit(self):
+        async def game(action, *arguments, **_):
+            if action == native_enemy_loot.BANK:
+                self.assertTrue(self.host.native_checkpoint_unsafe)
+                self.assertEqual(arguments, (self.target, self.slot, self.ammo))
+                return dict(self.initial, native_enemy_loot_escrow=self.captured,
+                            native_enemy_loot_cqc=dict(self.scope, captured=True))
+            self.assertEqual(action, native_enemy_loot.RETIRE)
+            self.assertEqual(arguments, (self.ammo, self.slot, self.guid))
+            self.host.checkpoint_native.assert_awaited_once()
+            stored = self.host.party[native_enemy_loot.STATE_KEY][self.guid]
+            self.assertEqual((stored["killer"], stored["escrow"]), (self.second, self.frame))
+            return dict(self.initial, native_enemy_loot_escrow=dict(self.captured, state="retired"),
+                        native_enemy_loot_cqc=dict(self.scope, captured=True, reserved=False))
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=game))
+        with patch.object(native_host_save, "new_slot", return_value=self.slot), patch.object(
+                native_host_save, "record", return_value=self.frame) as record, patch.dict("os.environ", clear=True):
+            await native_enemy_loot.observe(self.host, bridge)
+            await native_enemy_loot.observe(self.host, bridge)
+            replay = await native_enemy_loot.bank(self.host, bridge, self.target)
+        record.assert_called_once_with(self.host.native_profile, self.slot, DEAD_BRIDGE, flush=True)
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(replay["native_enemy_loot_roll"]["killer"], self.second)
+        self.assertFalse(self.host.stopping or self.host.native_checkpoint_unsafe)
+
+    async def test_refuses_another_members_bounty_or_identity_before_bank(self):
+        bridge = SimpleNamespace(command=AsyncMock())
+        for proof, scope in ((dict(self.bounty, permanent_count=0), self.scope),
+                             (dict(self.bounty, override_count=1), self.scope),
+                             (self.bounty, dict(self.scope, killer_character=self.first))):
+            self.host.last_game = dict(self.initial, native_enemy_bounty=proof, native_enemy_loot_cqc=scope)
+            self.host.stopping = self.host.native_checkpoint_unsafe = False
+            # The same pawn cannot be reassigned to a different live owner.
+            if scope["killer_character"] == self.first:
+                self.host.native_recipients = lambda: {self.second: {"pawn": self.second_pawn, "connected": True}}
+            with self.assertRaisesRegex(RuntimeError, "exact_killer_unavailable"):
+                await native_enemy_loot.observe(self.host, bridge)
+            self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
+        bridge.command.assert_not_awaited()
+
+    async def test_claim_is_available_without_fixtures_to_another_member_once(self):
+        roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
+                    guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],
+                    killer=self.second, claimed_by=None, escrow=self.frame)
+        self.party[native_enemy_loot.STATE_KEY] = {self.guid: roll}
+        snapshot = dict(self.initial, native_enemy_loot_escrow=dict(self.captured, state="claimed", pawn=self.first_pawn))
+        bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+        with patch.object(native_host_save, "verify_record"):
+            result = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
+            repeated = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
+            with self.assertRaisesRegex(party.RuleError, "already_claimed"):
+                await native_enemy_loot.claim(self.host, bridge, "host", self.guid, "a" * 32)
+        self.assertEqual(result, repeated)
+        self.assertEqual(result["native_enemy_loot_claim"]["claimed_by"], self.first)
+        self.assertEqual(bridge.command.await_count, 1)
+        self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({self.first}))
+        with self.assertRaisesRegex(party.RuleError, "unavailable"):
+            await native_enemy_loot.approach(self.host, bridge, f"host|{self.guid}")
+
+    async def test_same_thread_travel_hold_banks_before_retiring_the_party(self):
+        host = self.host
+        host.transitioning = True
+        host.last_game = dict(self.initial, native_enemy_loot_cqc=dict(self.scope, reserved=False))
+        host.smg_holds = None
+        host.travelling_guests = Mock(return_value={"member": {}})
+        host.world_flush_supported = False
+        host.begin_zone_guests = Mock()
+        host.reopen_zone_guests = AsyncMock()
+        host.internal_port = 12345
+        destination = {"state": "hosting", "map": MAP}
+        request = dict(self.initial, ack={"message": native_enemy_loot.PENDING})
+        accepted = {"ack": {"message": "zone travel requested"}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(request, accepted)),
+                                 wait_for=AsyncMock(return_value=destination), process=SimpleNamespace(pid=0))
+        transport = SimpleNamespace(hold_game_routes=Mock(side_effect=nullcontext))
+
+        async def bank_reserved(current, _):
+            self.assertIs(current.last_game, request)
+            host.begin_zone_guests.assert_not_called()
+            self.assertEqual(bridge.command.await_count, 1)
+
+        with patch.object(native_enemy_loot, "observe", side_effect=bank_reserved) as bank, patch(
+                "tools.silverfish.service.verify_loopback_socket"):
+            result = await Host.switch_zone(host, bridge, transport, MAP, None, host.roles())
+        self.assertTrue(result["ok"])
+        self.assertEqual([item.args for item in bridge.command.await_args_list], [("travel", MAP), ("travel", MAP)])
+        bank.assert_awaited_once_with(host, bridge)
+        host.begin_zone_guests.assert_called_once_with(transport)
+        host.reopen_zone_guests.assert_awaited_once()
 
 
 class DeadBridgeDeathViewTests(unittest.IsolatedAsyncioTestCase):

@@ -213,15 +213,16 @@ local function count(array)
     return array and array:GetArrayNum()
 end
 
-function meet.objective_guid(save, class)
+function meet.objective_guid(save, class, one_stack_unit)
     local result
-    for _, array in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
+    for store, array in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
         local size = count(array)
         if not int32(size) or size < 0 or size > 4096 then refused("inventory_extent") end
         for row = 1, size do
             local item = array[row]
             if item and same(item[item_class], class) then
                 local id, units = item[item_guid_field], item[item_quantity]
+                if one_stack_unit and (store ~= 1 or units ~= 1) then refused("objective_requires_one_stock_stack_unit") end
                 if result or not id or not int32(id.A) or not int32(id.B) or not int32(id.C) or not int32(id.D)
                     or not int32(units) or units < 0 or units > 1 then refused("objective_requires_exact_single_wire") end
                 local guid = string.format("%08X%08X%08X%08X", id.A & 0xffffffff, id.B & 0xffffffff,

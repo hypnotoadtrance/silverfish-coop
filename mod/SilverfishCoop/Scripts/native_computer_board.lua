@@ -47,6 +47,15 @@ local recipes = {
         redeem_map = black_market, wrong_board = "black_market_redemption_required",
         stage_objective = "SilverfishStageBrandyObjective",
     },
+    ["native-pocket-watch"] = {
+        id = "Clt_Watch", title = "Pocket Watch", fault = "pocket_watch",
+        objective_path = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C",
+        cash = 1000, difficulty = 0, fail_on_death = false, redeem = 10,
+        offered_boards = {10}, factions = {}, reputation = {}, advantage = {},
+        no_track_flag = true, one_stack_unit = true,
+        redeem_map = scav_bar, wrong_board = "scav_bar_redemption_required",
+        stage_objective = "SilverfishStagePocketWatchObjective",
+    },
 }
 local operations = {}
 for prefix, spec in pairs(recipes) do
@@ -133,10 +142,17 @@ local function recipe(spec, row)
         if boards[index] ~= board_id then refuse(spec, "quest_recipe_unqualified") end
     end
     if not exact_map(rep, spec.reputation) then refuse(spec, "quest_reputation_unqualified") end
+    if spec.one_stack_unit then
+        local defaults = objective[1]:GetCDO()
+        if not valid(defaults) or not same(defaults:GetClass(), objective[1]) or defaults.Stacks ~= true then
+            refuse(spec, "objective_stack_class_unqualified")
+        end
+    end
     return objective[1]
 end
 
 local function reputation(spec, context)
+    if #spec.factions == 0 then return {} end
     local library = StaticFindObject(characters_path)
     if not valid(library) or library:GetFullName() ~= "FL_Characters_C " .. characters_path then
         refuse(spec, "reputation_library_unavailable")
@@ -187,15 +203,19 @@ end
 local function redeem(spec, context, before, objective, identity, owner)
     local library = StaticFindObject(library_path)
     if not valid(library) or library:GetFullName() ~= "FL_CodeLib01_C " .. library_path then refuse(spec, "turn_in_library_unavailable") end
-    local effect, trait = FName("IntensePersonality", EFindName.FNAME_Find), {}
-    if effect:GetComparisonIndex() == 0 then refuse(spec, "reputation_trait_unavailable") end
-    context.instance:FindPassiveEffect(effect, true, trait, trait)
-    if type(trait.EffectActive) ~= "boolean" or not int32(trait.Instances) or trait.Instances < 0 then refuse(spec, "trait_unqualified") end
     local expected_rep = {}
-    for _, faction in ipairs(spec.factions) do
-        local prior = before.rep[faction]
-        expected_rep[faction] = prior.amount + spec.reputation[faction] * (prior.found and 1 + trait.Instances or 1)
-        if not int32(expected_rep[faction]) then refuse(spec, "reputation_range") end
+    if #spec.factions > 0 then
+        local effect, trait = FName("IntensePersonality", EFindName.FNAME_Find), {}
+        if effect:GetComparisonIndex() == 0 then refuse(spec, "reputation_trait_unavailable") end
+        context.instance:FindPassiveEffect(effect, true, trait, trait)
+        if type(trait.EffectActive) ~= "boolean" or not int32(trait.Instances) or trait.Instances < 0 then
+            refuse(spec, "trait_unqualified")
+        end
+        for _, faction in ipairs(spec.factions) do
+            local prior = before.rep[faction]
+            expected_rep[faction] = prior.amount + spec.reputation[faction] * (prior.found and 1 + trait.Instances or 1)
+            if not int32(expected_rep[faction]) then refuse(spec, "reputation_range") end
+        end
     end
     if not int32(before.cash + spec.cash) or not int32(before.xp + 1) then refuse(spec, "reward_range") end
 
@@ -216,8 +236,8 @@ local function redeem(spec, context, before, objective, identity, owner)
         local observed = progress(spec, context)
         if not unchanged(context) or output.Success ~= true or valid(output.ConfirmationPopup)
             or not valid_transition(spec, before, observed, -10, spec.cash, 1, expected_rep)
-            or wire.objective_guid(context.save, objective)
-            or owner == "guest" and wire.objective_guid(context.receiving_save, objective) then return end
+            or wire.objective_guid(context.save, objective, spec.one_stack_unit)
+            or owner == "guest" and wire.objective_guid(context.receiving_save, objective, spec.one_stack_unit) then return end
         return observed
     end)
     if not checked or not after then error("mutation_unverified_stock_" .. spec.fault .. "_turn_in", 0) end
@@ -247,7 +267,7 @@ function contract.command(fields, state, phase)
     end
     local identity, owner
     if before.step == 1 or before.step == 2 then
-        identity = wire_check(spec, wire.objective_guid, context.receiving_save, objective)
+        identity = wire_check(spec, wire.objective_guid, context.receiving_save, objective, spec.one_stack_unit)
         if identity then owner = same(context.receiving_save, context.save) and "host" or "guest" end
     end
     local after = before

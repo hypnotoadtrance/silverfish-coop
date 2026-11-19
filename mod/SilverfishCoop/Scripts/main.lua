@@ -17,6 +17,7 @@ local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
 local native_dialogue = require("native_dialogue")
+local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mosby_station = require("native_mosby_station_view")
 local native_computer_board = require("native_computer_board")
@@ -401,12 +402,16 @@ local function run_command(fields, state, current_phase)
     if guest_save.active() and stock_save_probes[command] then
         error("Clear the managed native guest save before running a stock-save probe", 0)
     end
+
+    if command == "travel" and native_enemy_loot.departure_pending(state, current_phase) then
+        return "native_enemy_loot_roll_pending"
+    end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
         native_guest_regen.clear(command == "native-guest-clear" and argument or nil)
         if command ~= "native-guest-clear" then native_wipe_view.clear() end
-        native_enemy_loot.clear()
+        if command == "native-guest-clear" then native_enemy_loot.clear_fixture() else native_enemy_loot.clear() end
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
@@ -816,6 +821,7 @@ local function run_command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
         or native_dialogue.command(fields, state, current_phase)
+        or native_borough_barter.command(fields, state, current_phase, players)
         or native_mosby_tape.command(fields, state, current_phase)
         or native_mosby_station.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
@@ -954,6 +960,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

@@ -114,6 +114,14 @@ namespace
             STR("/Script/Engine.BoxComponent"),
             STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C:SendInteractionToActor"),
         },
+        DialogueProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.NPC_Mama_C_1"),
+            STR("/Game/Classes/NPCs/NPC_Characters/NPC_Mama.NPC_Mama_C"),
+            STR("Sphere_Interact"),
+            STR("/Script/Engine.SphereComponent"),
+            STR("/Game/Classes/NPCs/NPC_Characters/NPC_Mama.NPC_Mama_C:SendInteractionToActor"),
+        },
     };
 
     template <typename T>

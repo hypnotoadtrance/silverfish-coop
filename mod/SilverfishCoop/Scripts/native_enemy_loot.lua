@@ -15,7 +15,10 @@ local projection_enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local observe = os.getenv("SILVERFISH_COOP_NATIVE_ENEMY_LOOT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_NPC_TEST") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local enabled = observe and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local enabled = observe and fixtures
+local ordinary = projection_enabled and os.getenv("SILVERFISH_COOP_NATIVE_CQC_LOOT") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local worlds = { [map] = "World " .. map .. ".PlaytestMap_01", [dead_bridge] = "World " .. dead_bridge .. ".DeadBridge_P" }
 local watch, escrow, projection
 
@@ -42,12 +45,27 @@ end
 
 local function read(host)
     local result = table.pack(SilverfishReadNativeEnemyLoot(host:GetAddress()))
-    if result.n ~= 15 and result.n ~= 23 then return end
+    if result.n ~= 15 and result.n ~= 23 and result.n ~= 26 then return end
     for index = 1, result.n do
         if result[index] == "" then result[index] = "-" end
         if type(result[index]) == "boolean" then result[index] = result[index] and 1 or 0 end
     end
     return result
+end
+
+local function ordinary_host(state, phase, finishing)
+    if not ordinary or phase ~= "hosting" or state.map ~= dead_bridge or state.server ~= false or not state.listening
+        or not valid(state.world) or state.world:GetFullName() ~= worlds[dead_bridge] then return end
+    local host, fresh = transport.scoped_host(state, phase)
+    if host and same(host.pawn:GetWorld(), state.world) and (fresh or finishing and watch and watch.ordinary
+        and same(watch.world, state.world) and same(watch.host, host.pawn)) then return host.pawn end
+end
+
+local function member(state, phase, host, name)
+    if type(name) ~= "string" or #name > 512 or name:find("%c") then return end
+    if name == host:GetFullName() then return host end
+    local ok, pawn, save, character = pcall(guest_save.exact_item_context, state, phase, name)
+    if ok and valid(pawn) and valid(save) and type(character) == "string" then return pawn, save, character end
 end
 
 local function cqc_actor(state, name)
@@ -108,11 +126,20 @@ function enemy_loot.clear()
     clear_projection()
 end
 
+function enemy_loot.clear_fixture()
+    if watch and not watch.ordinary then enemy_loot.clear() end
+end
+
+function enemy_loot.departure_pending(state, phase)
+    return ordinary and phase == "hosting" and state.map == dead_bridge and
+        type(SilverfishNativeCqcEnemyLootPending) == "function" and SilverfishNativeCqcEnemyLootPending() == true
+end
+
 function enemy_loot.watched_cqc(state, phase, expected, receipt)
     local host, guest = participants(state, phase)
     if state.map ~= dead_bridge or expected ~= cqc_name or not watch or watch.name ~= expected
         or not same(state.world, watch.world)
-        or not same(host, watch.host) or not same(guest, watch.guest) then return end
+        or not same(host, watch.host) or not watch.ordinary and not same(guest, watch.guest) then return end
     if receipt then return host, guest end
     local actor = cqc_actor(state, expected)
     if not valid(actor) or not actor:HasAuthority() or actor.Alive ~= true or actor.Initialized ~= true
@@ -162,12 +189,21 @@ local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) <= 10000000
 end
 
+local function retire_actor(ammo)
+    ammo:SetActorEnableCollision(false)
+    ammo:SetActorHiddenInGame(true)
+    if ammo:GetActorEnableCollision() ~= false or ammo.bHidden ~= true then error("mutation_unverified_enemy_loot_retirement", 0) end
+    ammo:K2_DestroyActor()
+end
+
 local function stash(state, phase, fields)
-    local host = participants(state, phase)
+    local cqc = watch and watch.ordinary
+    local host = cqc and ordinary_host(state, phase, true) or not cqc and participants(state, phase)
     local bandit, slot, expected = fields[3], fields[4], fields[5]
     local report = watch and watch.proof
     if not valid(host) or #fields ~= 5 or not is_slot(slot) or not report or not same(state.world, watch.world)
-        or bandit ~= watch.name or not valid(watch.bandit) or report[1] ~= "stock_loot_observed" or report[9] ~= 1
+        or bandit ~= watch.name or (not cqc and not valid(watch.bandit)) or report[1] ~= "stock_loot_observed" or report[9] ~= 1
+        or (cqc and (report.n ~= 26 or report[25] ~= 1 or report[26] ~= 0))
         or report[13] ~= expected or report[14] ~= shells then error("native_enemy_loot_roll_unavailable", 0) end
     local ammo = StaticFindObject(expected:match("^%S+ (.+)$") or "")
     if not valid(ammo) or not same(ammo:GetClass(), StaticFindObject(shells)) or not same(ammo:GetWorld(), state.world)
@@ -185,7 +221,7 @@ local function stash(state, phase, fields)
     end
     local pool = api:CreateSaveGameObject(class)
     if not valid(pool) then error("native_enemy_loot_escrow_unavailable", 0) end
-    local ok, reason, count, guid = SilverfishCaptureNativeEnemyLootEscrow(watch.bandit:GetAddress(), pool:GetAddress(), ammo:GetAddress(), 0)
+    local ok, reason, count, guid = SilverfishCaptureNativeEnemyLootEscrow(watch.address, pool:GetAddress(), ammo:GetAddress(), 0)
     if not ok then error(tostring(reason), 0) end
     if count ~= 1 or not is_guid(guid) or not api:SaveGameToSlot(pool, slot, 0) then
         error("mutation_unverified_enemy_loot_escrow_save", 0)
@@ -194,24 +230,57 @@ local function stash(state, phase, fields)
     if not valid(restored) or not SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress()) then
         error("mutation_unverified_enemy_loot_escrow_readback", 0)
     end
-    ammo:SetActorEnableCollision(false)
-    ammo:SetActorHiddenInGame(true)
-    if ammo:GetActorEnableCollision() ~= false or ammo.bHidden ~= true then error("mutation_unverified_enemy_loot_retirement", 0) end
-    ammo:K2_DestroyActor()
     escrow = {world = state.world, status = "captured", pawn = report[4], actor = expected, slot = slot, guid = guid, units = units,
         at = {X = at.X, Y = at.Y, Z = at.Z}}
+    if cqc then
+        watch.capture = escrow
+        watch.capture.ammo, watch.capture.address = ammo, ammo:GetAddress()
+        watch.proof = read(host) or watch.proof
+    else
+        retire_actor(ammo)
+    end
     return "typed stock enemy ammunition escrowed"
 end
 
+local function retire(state, phase, fields)
+    local host = ordinary_host(state, phase, true)
+    local captured = watch and watch.ordinary and watch.capture
+    if #fields ~= 5 or not valid(host) or not captured or not same(state.world, captured.world)
+        or (fields[3] ~= captured.actor or fields[4] ~= captured.slot or fields[5] ~= captured.guid)
+        or type(SilverfishFinishNativeCqcEnemyLoot) ~= "function" then
+        error("native_enemy_loot_retirement_unavailable", 0)
+    end
+    if captured.status == "retired" then
+        escrow = captured
+        return "exact stock ammunition already retired"
+    end
+    local ammo = captured.ammo
+    if not valid(ammo) or not same(ammo:GetWorld(), state.world) or ammo:GetFullName() ~= captured.actor
+        or not same(ammo:GetClass(), StaticFindObject(shells)) or not ammo:HasAuthority() or ammo:IsActorBeingDestroyed() then
+        error("mutation_unverified_enemy_loot_exact_retirement_actor", 0)
+    end
+    retire_actor(ammo)
+    local ok, status = SilverfishFinishNativeCqcEnemyLoot(host:GetAddress(), captured.address)
+    if ok ~= true or status ~= "retired" then error("mutation_unverified_enemy_loot_retirement", 0) end
+    captured.status = "retired"
+    escrow = captured
+    watch.proof = read(host) or watch.proof
+    return "exact stock ammunition retired after commit"
+end
+
 local function claim(state, phase, fields)
-    local host, guest = participants(state, phase)
+    local host = ordinary_host(state, phase)
+    local guest
+    local cqc = valid(host)
+    if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
     if #fields ~= 8 or not is_slot(slot) or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z)
         or not valid(host) or type(SilverfishClaimNativeEnemyLootEscrow) ~= "function" then
         error("native_enemy_loot_claim_unavailable", 0)
     end
-    local pawn = host:GetFullName() == name and host or guest:GetFullName() == name and guest or nil
+    local pawn = cqc and member(state, phase, host, name)
+        or host:GetFullName() == name and host or valid(guest) and guest:GetFullName() == name and guest or nil
     if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
     local at, reach = pawn:K2_GetActorLocation(), pawn.InteractionRange
     if not at or not finite(reach) or reach <= 0 or reach > 1000 or
@@ -229,13 +298,17 @@ local function claim(state, phase, fields)
 end
 
 local function approach(state, phase, fields)
-    local host, guest = participants(state, phase)
+    local host = fixtures and ordinary_host(state, phase)
+    local guest
+    local cqc = valid(host)
+    if not cqc then host, guest = participants(state, phase) end
     local name, guid = fields[3], fields[4]
     local x, y, z = tonumber(fields[5]), tonumber(fields[6]), tonumber(fields[7])
     if #fields ~= 7 or not is_guid(guid) or not finite(x) or not finite(y) or not finite(z) or not valid(host) then
         error("native_enemy_loot_fixture_unavailable", 0)
     end
-    local pawn = host:GetFullName() == name and host or guest:GetFullName() == name and guest or nil
+    local pawn = cqc and member(state, phase, host, name)
+        or host:GetFullName() == name and host or valid(guest) and guest:GetFullName() == name and guest or nil
     if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
     local before, facing = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
     local reach = pawn.InteractionRange
@@ -262,6 +335,31 @@ function enemy_loot.sync(state, phase)
         local ok, current = pcall(proxy_in, state, phase)
         if not ok or not same_proxy(current, projection) then clear_projection() end
     end
+    if watch and watch.ordinary and valid(state.world) and not same(state.world, watch.world) then enemy_loot.clear() end
+    if ordinary and state.map == dead_bridge then
+        local host = ordinary_host(state, phase)
+        if not valid(host) or type(SilverfishSetNativeCqcEnemyLootScope) ~= "function"
+            or type(SilverfishReadNativeEnemyLoot) ~= "function" then return end
+        local actor = cqc_actor(state, cqc_name)
+        local address = valid(actor) and actor:GetAddress() or watch and watch.ordinary and watch.address
+        if not address then return end
+        local arguments = {host:GetAddress(), address}
+        for _, guest in ipairs(state.guests or {}) do
+            local pawn, save, character = member(state, phase, host, guest.name)
+            if valid(save) and same(pawn, guest.pawn) then
+                arguments[#arguments + 1] = pawn:GetAddress()
+                arguments[#arguments + 1] = save:GetAddress()
+                arguments[#arguments + 1] = character
+            end
+        end
+        if SilverfishSetNativeCqcEnemyLootScope(table.unpack(arguments)) == true then
+            if not watch or not watch.ordinary then
+                watch = {world = state.world, host = host, bandit = actor, name = cqc_name, address = address, ordinary = true}
+            end
+            watch.proof = read(host) or watch.proof
+        end
+        return
+    end
     if not watch then return end
     local host, guest = participants(state, phase)
     if not same(state.world, watch.world) or not same(host, watch.host) or not same(guest, watch.guest) then
@@ -276,6 +374,7 @@ end
 function enemy_loot.command(fields, state, phase)
     local action = fields[2]
     if action == "native-enemy-loot-project-death" then return project_death(fields, state, phase) end
+    if action == "native-enemy-loot-retire" then return retire(state, phase, fields) end
     if action == "native-enemy-loot-bank" or action == "native-enemy-loot-claim" then
         escrow = nil
         return (action == "native-enemy-loot-bank" and stash or claim)(state, phase, fields)
@@ -285,13 +384,14 @@ function enemy_loot.command(fields, state, phase)
         return approach(state, phase, fields)
     end
     if action == "native-enemy-loot-clear" and #fields == 2 then
-        enemy_loot.clear()
+        if not enabled or (ordinary and state.map == dead_bridge) then error("native_enemy_loot_fixture_unavailable", 0) end
+        enemy_loot.clear_fixture()
         return "stock enemy loot observer cleared"
     end
     if action ~= "native-enemy-loot-watch" then return end
     local expected = fields[3]
     local host, guest = participants(state, phase)
-    if not valid(host) or not valid(guest) or #fields ~= 3 or type(expected) ~= "string" or #expected > 512
+    if (ordinary and state.map == dead_bridge) or not valid(host) or not valid(guest) or #fields ~= 3 or type(expected) ~= "string" or #expected > 512
         or expected:find("%c")
         or type(SilverfishSetNativeEnemyLootScope) ~= "function" or type(SilverfishReadNativeEnemyLoot) ~= "function" then
         error("The stock enemy loot observer requires an exact staged host and enrolled guest", 0)
@@ -325,12 +425,16 @@ function enemy_loot.command(fields, state, phase)
     if accepted ~= true or reason ~= "watching" then
         error("The stock enemy loot watch could not bind (" .. tostring(reason) .. ")", 0)
     end
-    watch = { world = state.world, host = host, guest = guest, bandit = bandit, name = expected, proof = read(host) }
+    watch = { world = state.world, host = host, guest = guest, bandit = bandit, address = bandit:GetAddress(), name = expected, proof = read(host) }
     return "stock enemy loot watch armed"
 end
 
 function enemy_loot.rows(state, phase, status_row)
     local rows = {}
+    if ordinary and type(SilverfishNativeCqcEnemyLootAvailable) == "function" and SilverfishNativeCqcEnemyLootAvailable() == true
+        and type(SilverfishCaptureNativeEnemyLootEscrow) == "function" and type(SilverfishClaimNativeEnemyLootEscrow) == "function" then
+        rows[#rows + 1] = status_row("native-enemy-loot-cqc-capability", 1)
+    end
     local checked, current = pcall(proxy_in, state, phase)
     if checked and current then
         local actor = current.actor
@@ -362,9 +466,12 @@ function enemy_loot.rows(state, phase, status_row)
     end
     if phase ~= "hosting" or not worlds[state.map] then return rows end
     if watch and watch.proof and same(state.world, watch.world) then
-        rows[1] = status_row("native-enemy-loot", state.map, watch.name, table.unpack(watch.proof, 1, 15))
-        if watch.proof.n == 23 then
+        rows[#rows + 1] = status_row("native-enemy-loot", state.map, watch.name, table.unpack(watch.proof, 1, 15))
+        if watch.proof.n >= 23 then
             rows[#rows + 1] = status_row("native-enemy-bounty", state.map, watch.name, table.unpack(watch.proof, 16, 23))
+        end
+        if watch.proof.n == 26 and watch.ordinary then
+            rows[#rows + 1] = status_row("native-enemy-loot-cqc", state.map, watch.name, table.unpack(watch.proof, 24, 26))
         end
     end
     if escrow and same(escrow.world, state.world) then

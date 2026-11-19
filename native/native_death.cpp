@@ -46,6 +46,7 @@
 #include "enemy_loot.hpp"
 #include "fresh_clock.hpp"
 #include "quest_rewards.hpp"
+#include "borough_barter.hpp"
 #include "shop_view.hpp"
 #include "nothing_return.hpp"
 #include "guest_npc.hpp"
@@ -1357,6 +1358,7 @@ namespace
             silverfish::native_enemy_loot::register_lua(lua);
             silverfish::native_fresh_clock::register_lua(lua);
             silverfish::native_quest_rewards::register_lua(lua);
+            silverfish::borough_barter::register_lua(lua);
             silverfish::native_shop_view::register_lua(lua);
             silverfish::native_nothing_return::register_lua(lua);
             silverfish::native_black_stone::register_lua(lua);

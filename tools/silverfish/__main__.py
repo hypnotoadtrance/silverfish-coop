@@ -65,6 +65,8 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
     host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
+    host.add_argument("--native-dead-bridge-enemy-loot", action="store_true",
+                      help="automatically share the exact Dead Bridge CQC stock shotgun-shell roll")
     host.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     host.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
     host.add_argument("--native-expanded-zones", action="store_true", help="enable the curated stock exit catalog")
@@ -147,7 +149,7 @@ def parser() -> argparse.ArgumentParser:
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
-        "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture",
+        "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture", "native-borough-mama-trade",
         "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",
         "native-mosby-station-fixture",
         "native-campaign-npc-approach", "native-campaign-npc-refresh", "native-guest-sickness-fixture",
@@ -165,6 +167,7 @@ def parser() -> argparse.ArgumentParser:
         "native-coup-report-preflight", "native-coup-report-approach",
         "native-depot-documents-preflight", "native-depot-documents-approach",
         "native-brandy-preflight", "native-brandy-approach",
+        "native-pocket-watch-preflight", "native-pocket-watch-approach",
         "native-meet-broker-preflight", "native-meet-broker-approach",
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-inventory-list",
@@ -230,6 +233,7 @@ async def execute(opts):
                         expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
                         guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness,
                         guest_held_fire=opts.native_guest_held_fire,
+                        native_dead_bridge_enemy_loot=opts.native_dead_bridge_enemy_loot,
                         start_preset=opts.native_start_preset,
                         world_seed=opts.native_world_seed,
                         extraction=None if opts.native_extraction_keep is None else (

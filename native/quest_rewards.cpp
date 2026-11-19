@@ -44,6 +44,7 @@ namespace
     constexpr auto board_item_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto coup_report_item_path = STR("/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C");
     constexpr auto depot_documents_item_path = STR("/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C");
+    constexpr auto pocket_watch_item_path = STR("/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
@@ -663,6 +664,7 @@ namespace
         int cash;
         const U::TCHAR* reward{};
         int xp = 1;
+        bool stackable_unit{};
     };
 
     constexpr ObjectiveQuest copper_stop_objective{"wire", PartyWorld::borough, STR("Clt_Wire"), wire_path, 0};
@@ -670,6 +672,8 @@ namespace
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
+    constexpr ObjectiveQuest pocket_watch_objective{"pocket_watch", PartyWorld::scav_bar, STR("Clt_Watch"),
+        pocket_watch_item_path, 1000, nullptr, 1, true};
     constexpr ObjectiveQuest stone_maze_objective{"stone_maze", PartyWorld::scientist, stone_maze_id,
         stone_maze_tape_path, 7500, stone_maze_armor_path, 3};
 
@@ -706,14 +710,16 @@ namespace
             return fail("wire_objective_active_recipe_required");
         auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
         if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            !bool_value(defaults, STR("Stacks"), false)) return fail("wire_objective_nonstackable_stock_class_required");
+            !bool_value(defaults, STR("Stacks"), Quest.stackable_unit))
+            return fail(Quest.stackable_unit ? "wire_objective_stackable_stock_class_required" :
+                "wire_objective_nonstackable_stock_class_required");
         const auto is_objective = [&](const void* row) { return inventory.klass(row) == wanted; };
 
         Inventory::Match source;
         if (!inventory.locate(party.detached, objective_id, source) || source.count != 1 || source.backpack_index < 0 ||
             !is_objective(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(source.row);
-        if (ammo < 0 || ammo > 1) return fail("wire_objective_single_item_required");
+        if (ammo < (Quest.stackable_unit ? 1 : 0) || ammo > 1) return fail("wire_objective_single_item_required");
         bool host_conflict = false;
         if (!inventory.visit(party.stock, [&](const void* row, bool, int) {
                 host_conflict |= is_objective(row) || inventory.identity(row) == objective_id;
@@ -1151,6 +1157,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
+    lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);
     lua.register_function("SilverfishCaptureStoneMazeReward", capture_stone_maze_reward);
     lua.register_function("SilverfishVerifyStoneMazeReward", verify_stone_maze_reward);

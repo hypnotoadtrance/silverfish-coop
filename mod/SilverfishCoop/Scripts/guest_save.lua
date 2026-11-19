@@ -277,7 +277,7 @@ function guest_save.exact_item_context(state, phase, name)
     local binding = bindings[name]
     if not binding or not binding.character or
         not live_binding(binding, state, host, guest, heartbeat_fresh(), os.time()) then return end
-    return guest.pawn, binding.detached
+    return guest.pawn, binding.detached, binding.character
 end
 
 local function flag_value(flags, key)

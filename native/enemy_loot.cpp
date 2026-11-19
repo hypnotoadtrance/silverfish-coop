@@ -48,6 +48,7 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto add_item_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto shell_path = STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C");
     constexpr auto projectile_path =
@@ -56,6 +57,7 @@ namespace
     constexpr int max_effects = 256;
     constexpr int max_cache_effects = 1024;
     constexpr int max_inventory = 4096;
+    constexpr int max_guests = 4;
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -122,10 +124,16 @@ namespace
         return getenv_s(&size, value.data(), value.size(), name) == 0 && size == value.size() && value[0] == '1';
     }
 
-    bool enabled()
+    bool fixtures_enabled()
     {
         return env("SILVERFISH_COOP_NATIVE_ENEMY_LOOT") && env("SILVERFISH_COOP_NATIVE_NPC_TEST") &&
             env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS");
+    }
+
+    bool ordinary_enabled()
+    {
+        return env("SILVERFISH_COOP_NATIVE_CQC_LOOT") && env("SILVERFISH_COOP_NATIVE_ZONE") &&
+            env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && env("SILVERFISH_COOP_NATIVE_LOOT");
     }
 
     Address address(U::UObject* value) { return reinterpret_cast<Address>(value); }
@@ -133,6 +141,7 @@ namespace
     struct Participant
     {
         U::FWeakObjectPtr pawn{}, controller{}, player{}, save{};
+        std::string character;
     };
 
     struct Schema
@@ -333,6 +342,8 @@ namespace
     {
         U::FFrame* frame{};
         U::FWeakObjectPtr killer{};
+        U::FWeakObjectPtr save{};
+        std::string character;
         std::string projectile;
         double before{};
         bool died{};
@@ -346,17 +357,20 @@ namespace
         int original_bounty_instances{}, bounty_overrides{};
         std::string_view bounty_source{"pending"};
         U::FWeakObjectPtr killer{};
+        U::FWeakObjectPtr killer_save{};
         U::FWeakObjectPtr ammo_drop{};
-        bool captured{};
+        bool captured{}, reserved{};
         std::string_view role{"-"};
-        std::string killer_name, projectile, ammo_actor, ammo_class;
+        std::string killer_name, killer_character, projectile, ammo_actor, ammo_class;
         double damage{}, before{}, after{};
     };
 
     struct Scope
     {
         U::FWeakObjectPtr world{}, instance{}, driver{}, npc{};
-        Participant host{}, guest{};
+        Address npc_identity{}, ammo_identity{};
+        Participant host{};
+        std::array<Participant, max_guests> guests{};
         Schema schema{};
         Hit hit{};
         Proof proof{};
@@ -364,13 +378,39 @@ namespace
         U::FFrame* loot_frame{};
         Clock::time_point until{};
         std::uint64_t generation{};
-        bool dead_bridge{};
+        bool dead_bridge{}, ordinary{};
     };
 
     Scope scope;
-    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
+
+    bool member_current(const Scope& state, const Participant& member, bool local)
+    {
+        auto* world = state.world.Get();
+        auto* pawn = member.pawn.Get();
+        auto* controller = member.controller.Get();
+        auto* player = member.player.Get();
+        auto* save = member.save.Get();
+        if (!authority(pawn, world) || !authority(controller, world) || !live(player) || !live(save) ||
+            object(pawn, STR("Save")) != save || object(pawn, STR("Controller")) != controller ||
+            object(controller, STR("Pawn")) != pawn || object(controller, STR("Player")) != player ||
+            object(player, STR("PlayerController")) != controller) return false;
+        if (local) return true;
+        auto* driver = state.driver.Get();
+        if (!live(driver) || save == state.host.save.Get() || player == state.host.player.Get() ||
+            object(player, STR("Driver")) != driver || object(player, STR("OwningActor")) != controller) return false;
+        auto* property = field<U::FArrayProperty>(driver, STR("ClientConnections"));
+        auto* inner = property ? U::CastField<U::FObjectProperty>(property->GetInner()) : nullptr;
+        if (!inner) return false;
+        U::FScriptArrayHelper connections(property, property->ContainerPtrToValuePtr<void>(driver));
+        if (connections.Num() < 1 || connections.Num() > max_guests) return false;
+        int matches = 0;
+        for (int index = 0; index < connections.Num(); ++index)
+            matches += inner->GetObjectPropertyValue(connections.GetRawPtr(index)) == player;
+        return matches == 1;
+    }
 
     bool local_roster(const Scope& state)
     {
@@ -378,26 +418,22 @@ namespace
         auto* instance = state.instance.Get();
         auto* driver = state.driver.Get();
         auto* local = state.host.player.Get();
-        auto* remote = state.guest.player.Get();
-        if (!live(world) || !live(instance) || !live(driver) || !live(local) || !live(remote) || local == remote ||
+        if (!live(world) || !live(instance) || !live(driver) || !live(local) ||
             !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")) ||
             object(world, STR("OwningGameInstance")) != instance || object(world, STR("NetDriver")) != driver ||
             object(driver, STR("World")) != world || sole_object(instance, STR("LocalPlayers")) != local ||
-            sole_object(driver, STR("ClientConnections")) != remote || object(remote, STR("Driver")) != driver ||
-            object(remote, STR("OwningActor")) != state.guest.controller.Get() ||
-            object(instance, STR("SaveSlot_Ref")) != state.host.save.Get() || state.host.save.Get() == state.guest.save.Get())
+            object(instance, STR("SaveSlot_Ref")) != state.host.save.Get() || !member_current(state, state.host, true))
             return false;
-        for (const auto* member : {&state.host, &state.guest})
-        {
-            auto* pawn = member->pawn.Get();
-            auto* controller = member->controller.Get();
-            auto* player = member->player.Get();
-            if (!authority(pawn, world) || !authority(controller, world) || !live(member->save.Get()) ||
-                object(pawn, STR("Save")) != member->save.Get() || object(pawn, STR("Controller")) != controller ||
-                object(controller, STR("Pawn")) != pawn || object(controller, STR("Player")) != player ||
-                object(player, STR("PlayerController")) != controller) return false;
-        }
-        return true;
+        return state.ordinary || (sole_object(driver, STR("ClientConnections")) == state.guests[0].player.Get() &&
+            member_current(state, state.guests[0], false));
+    }
+
+    const Participant* exact_killer(const Scope& state, U::UObject* pawn)
+    {
+        if (pawn == state.host.pawn.Get()) return &state.host;
+        for (const auto& guest : state.guests)
+            if (pawn == guest.pawn.Get() && member_current(state, guest, false)) return &guest;
+        return nullptr;
     }
 
     bool current(const Scope& state)
@@ -407,6 +443,12 @@ namespace
         return state.generation == generation.load(std::memory_order_acquire) && authority(npc, world) &&
             local_roster(state) && object(npc, STR("As Game Instance FP")) == state.instance.Get() &&
             static_cast<U::AActor*>(npc)->GetLevel() == object(world, STR("PersistentLevel"));
+    }
+
+    bool ticket_current(const Scope& state)
+    {
+        return current(state) || (state.ordinary && (state.proof.reserved || state.proof.captured) &&
+            state.generation == generation.load(std::memory_order_acquire) && local_roster(state));
     }
 
     bool cqc_ammunition(U::UObject* npc, U::UObject* world)
@@ -531,7 +573,7 @@ namespace
             if (address(candidate) == guest && candidate->GetClassPrivate() == pawn_type) peer = candidate;
             if (address(candidate) == actor && (candidate->GetClassPrivate() == bandit_type ||
                 (candidate == cqc && candidate->GetClassPrivate() == cqc_type))) enemy = candidate;
-            return home && peer && enemy ? RC::LoopAction::Break : RC::LoopAction::Continue;
+            return home && (next.ordinary || peer) && enemy ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
         next.dead_bridge = enemy && enemy == cqc;
         auto* world = find<U::UWorld>(next.dead_bridge ? cqc_world_path : world_path);
@@ -542,10 +584,12 @@ namespace
         next.driver = object(world, STR("NetDriver"));
         next.instance = owner;
         next.npc = enemy;
+        next.npc_identity = address(enemy);
         next.generation = generation.load(std::memory_order_acquire);
-        if (!authority(enemy, world) || !boolean(enemy, STR("Alive"), true) || !boolean(enemy, STR("Initialized"), true) ||
+        if ((next.ordinary && !next.dead_bridge) || !authority(enemy, world) ||
+            !boolean(enemy, STR("Alive"), true) || !boolean(enemy, STR("Initialized"), true) ||
             !set_participant(next.host, home, controller, store, local) ||
-            !set_participant(next.guest, peer, controller, store, connection) || !current(next))
+            (!next.ordinary && !set_participant(next.guests[0], peer, controller, store, connection)) || !current(next))
             return "stock_enemy_loot_authority_or_roster_unavailable";
         if (next.dead_bridge && !cqc_ammunition(enemy, world)) return "stock_dead_bridge_cqc_loadout_unavailable";
         next.bounty.name = U::FName{STR("Bounty"), U::FNAME_Find};
@@ -570,6 +614,36 @@ namespace
         return installed.load(std::memory_order_acquire) && U::IsInGameThreadRaw();
     }
 
+    bool reserved(const Scope& state)
+    {
+        auto* world = state.world.Get();
+        auto* driver = state.driver.Get();
+        return state.ordinary && state.proof.reserved && state.generation == generation.load(std::memory_order_acquire) &&
+            live(world) && live(driver) && object(world, STR("NetDriver")) == driver &&
+            authority(state.proof.ammo_drop.Get(), world);
+    }
+
+    void reserve_pickup(Iteration& call, U::UObject* receiver, U::UFunction* function, const void* args)
+    {
+        if (!available() || !scope.proof.reserved || !function || call.OriginalFunctionCallPrevented()) return;
+        const auto name = function->GetFName();
+        static const U::FName interact{STR("SendInteractionToActor")};
+        static const U::FName store{STR("PutInInventory")};
+        static const U::FName pickup{STR("PickUp_Object")};
+        static const U::FName add{STR("AddItemToInventory")};
+        auto* shell = scope.proof.ammo_drop.Get();
+        if ((name == interact || name == store || name == pickup) && receiver == shell &&
+            function->GetOuterPrivate() == find<U::UClass>(item_path) && reserved(scope))
+            call.PreventOriginalFunctionCall();
+        else if (name == add && args && receiver == scope.instance.Get() &&
+            function == find<U::UFunction>(add_item_path) && reserved(scope))
+        {
+            auto* item = parameter<U::FObjectProperty>(function, STR("Item"), 0, false);
+            if (item && item->GetObjectPropertyValue(item->ContainerPtrToValuePtr<void>(args)) == shell)
+                call.PreventOriginalFunctionCall();
+        }
+    }
+
     void prepare_hit(U::UObject* npc, U::FFrame& frame)
     {
         if (scope.hit.frame || scope.proof.killer.Get() || !frame.Locals() || !boolean(npc, STR("Alive"), true)) return;
@@ -579,42 +653,54 @@ namespace
             !authority(actor, scope.world.Get())) return;
         const auto* parameter = scope.schema.instigator->ContainerPtrToValuePtr<void>(frame.Locals());
         auto* killer = scope.schema.instigator->GetObjectPropertyValue(parameter);
-        if (!killer || (killer != scope.host.pawn.Get() && killer != scope.guest.pawn.Get()) ||
+        const auto* member = killer ? exact_killer(scope, killer) : nullptr;
+        if (!member ||
             object(actor, STR("Owner")) != killer || object(actor, STR("Instigator")) != killer) return;
         const auto health = scope.schema.health->GetPropertyValueInContainer(npc);
         if (!std::isfinite(health) || health <= 0) return;
-        scope.hit = {&frame, U::FWeakObjectPtr{killer}, RC::to_utf8_string(actor->GetFullName()), health, false};
+        scope.hit = {&frame, U::FWeakObjectPtr{killer}, member->save, member->character,
+            RC::to_utf8_string(actor->GetFullName()), health, false};
     }
 
-    void prepare_bounty(U::UObject* killer)
+    bool attributed_killer(U::UObject* npc)
+    {
+        auto* last = object(npc, STR("LastDamagedMe"));
+        const auto& proof = scope.proof;
+        if (proof.killer_name.empty()) return false;
+        if (auto* killer = proof.killer.Get()) return last == killer;
+        // Unreal can clear the actor reference after an authenticated shooter disconnects.
+        // A different last damager can never inherit the captured lethal proof.
+        return scope.ordinary && !last;
+    }
+
+    void prepare_bounty()
     {
         auto& bounty = scope.bounty;
         auto& proof = scope.proof;
-        bounty.counts = {};
         bounty.cache_size = -1;
         if (!cache_snapshot(scope.instance.Get(), bounty, false))
         {
             proof.bounty_source = "unqualified";
             return;
         }
-        if (killer == scope.host.pawn.Get())
+        if (proof.role == "host")
         {
             proof.bounty_source = "stock_host";
             return;
         }
-        BountyCounts counts;
-        if (killer != scope.guest.pawn.Get() || !count_bounty(scope.guest.save.Get(), bounty.name, counts))
+        if ((!scope.ordinary && !count_bounty(scope.guests[0].save.Get(), bounty.name, bounty.counts)) ||
+            (scope.ordinary && proof.bounty_source != "guest_detached"))
         {
             proof.bounty_source = "unqualified";
             return;
         }
-        bounty.counts = counts;
         proof.bounty_source = "guest_detached";
     }
 
 
     void pre(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
     {
+        reserve_pickup(iteration, object_receiver, frame.Node(), frame.Locals());
         if (!available() || object_receiver != scope.npc.Get() || frame.Object() != object_receiver ||
             iteration.OriginalFunctionCallPrevented()) return;
         auto* node = frame.Node();
@@ -634,15 +720,15 @@ namespace
         {
             scope.hit.died = true;
         }
-        if (node == scope.schema.loot && caller->Node() == scope.schema.script && scope.proof.killer.Get() &&
+        if (node == scope.schema.loot && caller->Node() == scope.schema.script && !scope.proof.killer_name.empty() &&
             scope.proof.loot_calls == 0 && boolean(object_receiver, STR("Alive"), false))
         {
-            if (object(object_receiver, STR("LastDamagedMe")) != scope.proof.killer.Get())
+            if (!attributed_killer(object_receiver))
             {
                 scope.proof.status = "stock_loot_killer_changed";
                 return;
             }
-            prepare_bounty(scope.proof.killer.Get());
+            prepare_bounty();
             scope.loot_frame = &frame;
             ++scope.proof.loot_calls;
         }
@@ -668,13 +754,21 @@ namespace
             return;
         }
         scope.proof.killer = killer;
+        scope.proof.killer_save = hit.save;
         scope.proof.killer_name = RC::to_utf8_string(killer->GetFullName());
+        scope.proof.killer_character = std::move(hit.character);
         scope.proof.role = killer == scope.host.pawn.Get() ? "host" : "guest";
         scope.proof.projectile = std::move(hit.projectile);
         scope.proof.damage = dealt;
         scope.proof.before = hit.before;
         scope.proof.after = after;
         scope.proof.status = "stock_kill_confirmed";
+        if (scope.ordinary && scope.proof.role == "guest")
+        {
+            auto* save = scope.proof.killer_save.Get();
+            scope.proof.bounty_source = object(killer, STR("Save")) == save && live(save) &&
+                count_bounty(save, scope.bounty.name, scope.bounty.counts) ? "guest_detached" : "unqualified";
+        }
     }
 
     void observe_bounty(Iteration& iteration, U::UObject* instance, U::FFrame& frame)
@@ -697,7 +791,7 @@ namespace
         }
         const auto stock_count = schema.instances->GetPropertyValue(instances);
         const auto stock_active = schema.bounty->GetPropertyValue(active);
-        if (stock_count < 0 || stock_active != (stock_count > 0))
+        if (stock_count < 0 || stock_active != (stock_count > 0) || (scope.ordinary && stock_count != bounty.cache_bounty))
         {
             proof.bounty_source = "unqualified";
             return;
@@ -712,8 +806,8 @@ namespace
         proof.original_bounty_instances = stock_count;
         if (proof.bounty_source == "guest_detached")
         {
-            if (!current(scope) || proof.killer.Get() != scope.guest.pawn.Get() ||
-                object(scope.npc.Get(), STR("LastDamagedMe")) != proof.killer.Get() ||
+            if (!current(scope) || (!scope.ordinary && proof.killer.Get() != scope.guests[0].pawn.Get()) ||
+                !attributed_killer(scope.npc.Get()) ||
                 stock_count != bounty.cache_bounty || !cache_snapshot(instance, bounty, true))
             {
                 proof.bounty_source = "unqualified";
@@ -743,8 +837,7 @@ namespace
     void finish_loot(Iteration& iteration, U::UObject* npc, U::FFrame& frame)
     {
         scope.loot_frame = nullptr;
-        if (iteration.OriginalFunctionCallPrevented() || !frame.Locals() || !current(scope) ||
-            object(npc, STR("LastDamagedMe")) != scope.proof.killer.Get()) return;
+        if (iteration.OriginalFunctionCallPrevented() || !frame.Locals() || !current(scope) || !attributed_killer(npc)) return;
         scope.proof.cache_unchanged = cache_snapshot(scope.instance.Get(), scope.bounty, true);
         if (!scope.proof.cache_unchanged && scope.proof.bounty_overrides)
             scope.proof.status = "stock_bounty_cache_changed_during_loot";
@@ -771,6 +864,23 @@ namespace
         scope.proof.ammo_class = RC::to_utf8_string(ammo->GetClassPrivate()->GetPathName());
         scope.proof.ammo_count = units;
         scope.proof.ammo_drop = ammo;
+        scope.ammo_identity = address(ammo);
+        if (scope.ordinary)
+        {
+            const auto& proof = scope.proof;
+            const bool host = proof.bounty_source == "stock_host" && !proof.bounty_overrides &&
+                proof.bounty_instances == proof.original_bounty_instances;
+            const bool guest = proof.bounty_source == "guest_detached" && proof.bounty_overrides == proof.bounty_calls &&
+                proof.bounty_instances == scope.bounty.counts.total();
+            if (proof.status != "stock_loot_observed" || !proof.cache_unchanged || proof.bounty_calls < 1 || (!host && !guest) ||
+                ammo->GetClassPrivate() != find<U::UClass>(shell_path) ||
+                static_cast<U::AActor*>(ammo)->GetLevel() != object(scope.world.Get(), STR("PersistentLevel")))
+            {
+                scope.proof.status = "stock_enemy_drop_attribution_unverified";
+                return;
+            }
+            scope.proof.reserved = true;
+        }
     }
 
     void post(Iteration& iteration, U::UObject* object_receiver, U::FFrame& frame, void*)
@@ -793,7 +903,7 @@ namespace
 
     std::string_view seed_bounty_fixture(Scope& next)
     {
-        auto* guest_save = next.guest.save.Get();
+        auto* guest_save = next.guests[0].save.Get();
         auto* instance = next.instance.Get();
         auto& bounty = next.bounty;
         BountyCounts before;
@@ -827,7 +937,8 @@ namespace
 
     int set_scope(const Lua& lua)
     {
-        if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
+        if (!available() || !fixtures_enabled() || scope.ordinary || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
             return answer(lua, false, "native_enemy_loot_exact_watch_required");
         const auto host = lua.get_integer();
         const auto guest = lua.get_integer();
@@ -835,7 +946,7 @@ namespace
         if (host <= 0 || guest <= 0 || actor <= 0 || host == guest)
             return answer(lua, false, "native_enemy_loot_exact_watch_required");
         if (address(scope.host.pawn.Get()) == static_cast<Address>(host) &&
-            address(scope.guest.pawn.Get()) == static_cast<Address>(guest) &&
+            address(scope.guests[0].pawn.Get()) == static_cast<Address>(guest) &&
             address(scope.npc.Get()) == static_cast<Address>(actor) && current(scope))
         {
             scope.until = Clock::now() + lease;
@@ -854,14 +965,92 @@ namespace
         return answer(lua, true, scope.proof.status);
     }
 
+    bool character_id(std::string_view id)
+    {
+        if (id.size() != 36) return false;
+        for (std::size_t index = 0; index < id.size(); ++index)
+        {
+            const auto c = id[index];
+            const bool dash = index == 8 || index == 13 || index == 18 || index == 23;
+            if (dash ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
+        return true;
+    }
+
+    int set_cqc_scope(const Lua& lua)
+    {
+        const auto size = lua.get_stack_size();
+        if (!available() || !ordinary_enabled() || size < 2 || size > 2 + max_guests * 3 ||
+            (size - 2) % 3 || !lua.is_integer(1) || !lua.is_integer(2))
+            return answer(lua, false, "native_enemy_loot_exact_watch_required");
+        const auto host = lua.get_integer();
+        const auto npc = lua.get_integer();
+        if (host <= 0 || npc <= 0 || host == npc)
+            return answer(lua, false, "native_enemy_loot_exact_watch_required");
+        const bool same_scope = scope.ordinary && address(scope.host.pawn.Get()) == static_cast<Address>(host) &&
+            scope.npc_identity == static_cast<Address>(npc) && ticket_current(scope);
+        if (!same_scope && reserved(scope)) return answer(lua, false, "native_enemy_loot_roll_pending");
+        Scope next;
+        if (!same_scope)
+        {
+            next.ordinary = true;
+            if (const auto error = bind(next, static_cast<Address>(host), 0, static_cast<Address>(npc)); !error.empty())
+                return answer(lua, false, error);
+        }
+        auto& active = same_scope ? scope : next;
+        const auto count = (size - 2) / 3;
+        std::array<Participant, max_guests> members{};
+        auto* pawn_type = find<U::UClass>(pawn_path);
+        auto* store = find<U::UClass>(save_path);
+        auto* controller = find<U::UClass>(controller_path);
+        auto* connection = find<U::UClass>(STR("/Script/Engine.NetConnection"));
+        if (!pawn_type || !store || !controller || !connection)
+            return answer(lua, false, "stock_enemy_loot_classes_unavailable");
+        for (int index = 0; index < count; ++index)
+        {
+            if (!lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
+                return answer(lua, false, "native_enemy_loot_exact_roster_required");
+            const auto pawn = lua.get_integer();
+            const auto save = lua.get_integer();
+            const std::string id{lua.get_string()};
+            if (pawn <= 0 || pawn == host || save <= 0 || !character_id(id))
+                return answer(lua, false, "native_enemy_loot_exact_roster_required");
+            auto& member = members[static_cast<std::size_t>(index)];
+            U::UObject* actor{};
+            for (const auto& prior : active.guests)
+                if (address(prior.pawn.Get()) == static_cast<Address>(pawn)) actor = prior.pawn.Get();
+            if (!actor)
+                U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+                    if (address(candidate) != static_cast<Address>(pawn)) return RC::LoopAction::Continue;
+                    if (live(candidate) && candidate->GetClassPrivate() == pawn_type) actor = candidate;
+                    return RC::LoopAction::Break;
+                });
+            if (!set_participant(member, actor, controller, store, connection) ||
+                address(member.save.Get()) != static_cast<Address>(save) || !member_current(active, member, false))
+                return answer(lua, false, "native_enemy_loot_exact_roster_required");
+            member.character = id;
+            for (int previous = 0; previous < index; ++previous)
+            {
+                const auto& other = members[static_cast<std::size_t>(previous)];
+                if (other.pawn.Get() == actor || other.controller.Get() == member.controller.Get() ||
+                    other.player.Get() == member.player.Get() || other.save.Get() == member.save.Get() || other.character == id)
+                    return answer(lua, false, "native_enemy_loot_duplicate_roster_member");
+            }
+        }
+        active.guests = std::move(members);
+        active.until = Clock::now() + lease;
+        if (!same_scope) scope = std::move(next);
+        return answer(lua, true, scope.proof.status);
+    }
+
     int read(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto requested = lua.get_integer();
         if (requested <= 0 || address(scope.host.pawn.Get()) != static_cast<Address>(requested) ||
-            Clock::now() >= scope.until || !current(scope)) return 0;
+            (!scope.proof.reserved && Clock::now() >= scope.until) || !ticket_current(scope)) return 0;
         const auto& report = scope.proof;
-        lua.set_string(report.status);
+        lua.set_string(report.reserved && !reserved(scope) ? "mutation_unverified_enemy_loot_reserved_shell_missing" : report.status);
         lua.set_integer(report.hits);
         lua.set_string(report.role);
         lua.set_string(report.killer_name);
@@ -884,7 +1073,37 @@ namespace
         lua.set_integer(scope.bounty.counts.timed);
         lua.set_integer(scope.bounty.counts.gear);
         lua.set_bool(report.cache_unchanged);
-        return 23;
+        if (!scope.ordinary) return 23;
+        lua.set_string(report.killer_character);
+        lua.set_bool(report.reserved);
+        lua.set_bool(report.captured);
+        return 26;
+    }
+
+    int finish_cqc(const Lua& lua)
+    {
+        if (!available() || !scope.ordinary || !scope.proof.reserved || !scope.proof.captured || !ticket_current(scope) ||
+            lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
+            return answer(lua, false, "native_enemy_loot_retirement_unavailable");
+        const auto host = lua.get_integer();
+        const auto ammo = lua.get_integer();
+        if (host <= 0 || ammo <= 0 || static_cast<Address>(host) != address(scope.host.pawn.Get()) ||
+            static_cast<Address>(ammo) != scope.ammo_identity || reserved(scope))
+            return answer(lua, false, "native_enemy_loot_retirement_unavailable");
+        scope.proof.reserved = false;
+        return answer(lua, true, "retired");
+    }
+
+    int cqc_pending(const Lua& lua)
+    {
+        lua.set_bool(available() && scope.ordinary && scope.proof.reserved);
+        return 1;
+    }
+
+    int cqc_available(const Lua& lua)
+    {
+        lua.set_bool(available() && ordinary_enabled());
+        return 1;
     }
 
     int clear(const Lua&)
@@ -910,8 +1129,8 @@ namespace silverfish::native_enemy_loot
     bool verified_ammo_roll(Address bandit, Address ammo, shared_loot::EscrowOwner& claimant, U::UObject*& actor,
                             bool consume)
     {
-        if (!available() || !bandit || !ammo || address(scope.npc.Get()) != bandit ||
-            Clock::now() >= scope.until || !current(scope)) return false;
+        if (!available() || !bandit || !ammo || scope.npc_identity != bandit || !ticket_current(scope) ||
+            (scope.ordinary ? !reserved(scope) : Clock::now() >= scope.until)) return false;
         auto& proof = scope.proof;
         auto* dropped = proof.ammo_drop.Get();
         auto* world = scope.world.Get();
@@ -922,10 +1141,19 @@ namespace silverfish::native_enemy_loot
             !authority(dropped, world) || address(dropped) != ammo || !shell || dropped->GetClassPrivate() != shell ||
             static_cast<U::AActor*>(dropped)->GetLevel() != object(world, STR("PersistentLevel")) ||
             !count || count->GetPropertyValueInContainer(dropped) != proof.ammo_count) return false;
-        const auto& participant = proof.role == "guest" ? scope.guest : scope.host;
-        auto* killer = participant.pawn.Get();
-        if (proof.killer.Get() != killer || !qualify_escrow_claimant(address(killer), address(participant.save.Get()),
-                                                                  address(scope.host.save.Get()), claimant)) return false;
+        if (scope.ordinary)
+        {
+            // ItemActorToStruct needs only a live context in the same world. The
+            // kill receipt already fixes the deceased or disconnected shooter.
+            claimant = {static_cast<U::UWorld*>(world), scope.host.pawn.Get(), scope.host.save.Get(), scope.host.save.Get()};
+        }
+        else
+        {
+            const auto& participant = proof.role == "guest" ? scope.guests[0] : scope.host;
+            auto* killer = participant.pawn.Get();
+            if (proof.killer.Get() != killer || !qualify_escrow_claimant(address(killer), address(participant.save.Get()),
+                                                                      address(scope.host.save.Get()), claimant)) return false;
+        }
         actor = dropped;
         if (consume) proof.captured = true;
         return true;
@@ -933,12 +1161,16 @@ namespace silverfish::native_enemy_loot
 
     void install_hooks()
     {
-        if (!enabled() || installed.load(std::memory_order_acquire)) return;
+        if ((!fixtures_enabled() && !ordinary_enabled()) || installed.load(std::memory_order_acquire)) return;
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             pre, {false, false, owner, STR("Observe stock enemy projectiles and death")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             post, {false, false, owner, STR("Observe attributed stock enemy loot")});
-        if (callbacks[0] == Hook::ERROR_ID || callbacks[1] == Hook::ERROR_ID)
+        if (ordinary_enabled())
+            callbacks[2] = Hook::RegisterProcessEventPreCallback(
+                reserve_pickup, {false, false, owner, STR("Fence exact bankable enemy shells")});
+        if (callbacks[0] == Hook::ERROR_ID || callbacks[1] == Hook::ERROR_ID ||
+            (ordinary_enabled() && callbacks[2] == Hook::ERROR_ID))
         {
             uninstall_hooks();
             return;
@@ -959,11 +1191,18 @@ namespace silverfish::native_enemy_loot
 
     void register_lua(Lua& lua)
     {
-        if (!enabled()) return;
+        if (!fixtures_enabled() && !ordinary_enabled()) return;
         clear_scope();
         lua.register_function("SilverfishSetNativeEnemyLootScope", set_scope);
         lua.register_function("SilverfishReadNativeEnemyLoot", read);
         lua.register_function("SilverfishClearNativeEnemyLootScope", clear);
+        if (ordinary_enabled())
+        {
+            lua.register_function("SilverfishSetNativeCqcEnemyLootScope", set_cqc_scope);
+            lua.register_function("SilverfishFinishNativeCqcEnemyLoot", finish_cqc);
+            lua.register_function("SilverfishNativeCqcEnemyLootPending", cqc_pending);
+            lua.register_function("SilverfishNativeCqcEnemyLootAvailable", cqc_available);
+        }
     }
 
     void clear_scope()

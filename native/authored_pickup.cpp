@@ -44,6 +44,7 @@ namespace
         const U::TCHAR* item_class;
         double x, y, z;
         int item_type;
+        int stack_units{};
     };
 
     constexpr std::array profiles{
@@ -88,6 +89,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3"),
             STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
             7580.6051850203, 5202.1434900782, -642.6426753447, 9,
+        },
+        Profile{
+            "crossroads-pocket-watch",
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1"),
+            STR("/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
+            9338.318763111682, 8669.320108298598, 391.93632416768173, 11, 1,
         },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -247,7 +255,12 @@ namespace
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false) || !boolean(actor, STR("Physics"), false) ||
-            !boolean(actor, STR("Stacks"), false)) return false;
+            !boolean(actor, STR("Stacks"), profile.stack_units != 0)) return false;
+        if (profile.stack_units)
+        {
+            auto* count = field<U::FIntProperty>(actor, STR("Ammo"));
+            if (!count || count->GetPropertyValueInContainer(actor) != profile.stack_units) return false;
+        }
         auto* item = static_cast<U::AActor*>(actor);
         auto* category = field<U::FByteProperty>(actor, STR("ItemType"));
         if (item->GetWorld() != world || item->GetLevel() != object(world, STR("PersistentLevel")) ||
@@ -828,6 +841,23 @@ namespace
         if (!scope || address(target) != supplied[1] || !authorized(*scope, pawn, target))
             return result(lua, false, "authored_pickup_exact_claimant_unavailable");
         if (!rows.bind()) return result(lua, false, "authored_pickup_inventory_schema_unavailable");
+        if (scope->profile->stack_units)
+        {
+            auto* equipment = field<U::FArrayProperty>(target, STR("PlayerEquipment"));
+            auto* equipment_row = equipment ? U::CastField<U::FStructProperty>(equipment->GetInner()) : nullptr;
+            if (!equipment_row || equipment_row->GetStruct().Get() != rows.type)
+                return result(lua, false, "authored_pickup_inventory_schema_unavailable");
+            auto* item_class = scope->actor.Get()->GetClassPrivate();
+            for (auto* property : {rows.array, equipment})
+            {
+                U::FScriptArrayHelper items(property, property->ContainerPtrToValuePtr<void>(target));
+                if (items.Num() < 0 || items.Num() > 1024)
+                    return result(lua, false, "authored_pickup_inventory_schema_unavailable");
+                for (int index = 0; index < items.Num(); ++index)
+                    if (read(rows.klass, items.GetRawPtr(index)) == item_class)
+                        return result(lua, false, "authored_pickup_stock_stack_merge_unqualified");
+            }
+        }
         auto* scratch = isolated(supplied[2], rows);
         if (!scratch || scratch == target) return result(lua, false, "authored_pickup_isolated_escrow_required");
         Guid guid{};

@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_host_save
 from tools.silverfish import native_computer_board as collections
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from tools.silverfish.native_authored_pickup import DEAD_END, SOURCES
+from tools.silverfish.native_authored_pickup import DEAD_END, SOURCES, STATE_KEY as PICKUPS
 from tools.silverfish.travel import BOROUGH, CITY, CROSSROADS, NORTHEAST_RAIL, RAIL_YARD
 
 
@@ -30,6 +30,9 @@ class CollectionSmoke:
     spec: collections.CollectionContract
     maps: tuple[str, ...]
     reputation: dict[str, tuple[str, int]]
+    accept_before_pickup: bool = False
+    stock_pickup: bool = False
+    stackable: bool = False
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -121,7 +124,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         balances = {}
         for role, frame in (("host", owner), ("guest", member)):
             flags = stock_flags(directory, frame, redemption)
-            balances[role] = {key: flags.get(key, 0) for key in wanted}
+            keys = wanted if plan.reputation else (*wanted, *(key for key in flags if key.startswith("Rep_")))
+            balances[role] = {key: flags.get(key, 0) for key in keys}
         return balances
 
     async def board_state(*states):
@@ -141,6 +145,41 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         saved = await wait(run, lambda state: record(state).get("step") == step)
         return record(saved)
 
+    async def accept():
+        await action(host, spec.command("approach"), "--target", character)
+        if start_area != BOROUGH and redemption == BOROUGH:
+            refused = await action(guest, "native-quest-start", "--target", quest, accepted=False)
+            assert "not_offered" in refused["error"], refused
+            evidence["before_host_xp"] = refused["error"]
+            await action(host, "native-turret-photo-xp-fixture")
+        offered = (await action(guest, spec.command("preflight")))[spec.key]
+        assert offered["board"] == board and offered["step_after"] is None, offered
+        host_xp = offered["xp_before"]
+        assert (host_xp == 0 if plan.accept_before_pickup else host_xp >= 3), offered
+        offset = 0
+        while offset is not None:
+            catalog = (await action(guest, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
+            assert (catalog["board"], catalog["offset"]) == (board, offset), catalog
+            offers = {row["id"]: row["co_op"] for row in catalog["quests"]}
+            if quest in offers:
+                assert offers[quest] in ("experimental", "verified"), catalog
+                evidence["stock_catalog"] = {"board": catalog["board"], "co_op": offers[quest], "host_xp": offered["xp_before"]}
+                break
+            next_offset = catalog["next_offset"]
+            assert next_offset is None or offset < next_offset <= 128, catalog
+            offset = next_offset
+        assert "stock_catalog" in evidence, catalog
+        if board_input:
+            await board_state("armed", "focused")
+            await board_press("loading")
+            await board_state("offer")
+            await board_press("starting")
+            accepted = await committed_quest(1)
+        else:
+            accepted = await action(guest, "native-quest-start", "--target", quest)
+        assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
+        evidence["accepted"] = accepted
+
     try:
         start_area = plan.maps[0]
         authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", start_area, *host_flags)
@@ -155,17 +194,32 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         async def collect_pickup():
             selected = ("--pickup-source", source)
             await action(host, "native-authored-pickup-approach", "--target", "guest", *selected)
-            interaction = (await action(guest, "native-authored-pickup-fixture", *selected))["native_authored_pickup_interaction"]
-            assert interaction["source"] == source and interaction["entry"] == "fixture", interaction
-            claim = (await action(guest, "native-authored-pickup-claim", "--target", source))["native_authored_pickup_claim"]
+            if plan.stock_pickup:
+                await wait(client_run, lambda state: state.get("game", {}).get("native_authored_pickup_sources", {})
+                           .get(source, {}).get("state") == "available")
+                interaction = (await action(guest, "native-authored-pickup-stock-fixture", *selected))["native_authored_pickup_interaction"]
+                assert interaction["source"] == source and interaction["entry"] == "stock", interaction
+                status = await wait(run, lambda state: source in state.get("gameplay", {}).get(PICKUPS, {}))
+                claim = status["gameplay"][PICKUPS][source]
+            else:
+                interaction = (await action(guest, "native-authored-pickup-fixture", *selected))["native_authored_pickup_interaction"]
+                assert interaction["source"] == source and interaction["entry"] == "fixture", interaction
+                claim = (await action(guest, "native-authored-pickup-claim", "--target", source))["native_authored_pickup_claim"]
             assert (claim["source"], claim["map"], claim["actor"], claim["owner"]) == (source, pickup_map, pickup_actor, character), claim
             guid = claim["guid"]
             row = (await inventory(guest))[guid]
             assert (row["class_path"], row["quantity"], row["source"]) == (pickup_class, 1, "backpack"), row
+            assert row["stackable"] is plan.stackable, row
             assert guid not in await inventory(host)
             evidence["stock_pickup"] = {"interaction": interaction, "claim": claim, "inventory": row}
             return guid
 
+        if plan.accept_before_pickup:
+            assert start_area == redemption and pickup_map != start_area
+            await accept()
+            refused = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
+            assert "objective_required" in refused["error"], refused
+            evidence["turn_in_without_item"] = refused["error"]
         guid = await collect_pickup() if start_area == pickup_map else None
         for route in routes:
             evidence["pending_route"] = (route.source, route.destination, route.entrance, route.actor)
@@ -185,36 +239,13 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 guid = await collect_pickup()
 
         assert guid is not None and current["game"]["map"] == redemption
-        await action(host, spec.command("approach"), "--target", character)
-        if start_area != BOROUGH and redemption == BOROUGH:
-            refused = await action(guest, "native-quest-start", "--target", quest, accepted=False)
-            assert "not_offered" in refused["error"], refused
-            evidence["before_host_xp"] = refused["error"]
-            await action(host, "native-turret-photo-xp-fixture")
-        offered = (await action(guest, spec.command("preflight")))[spec.key]
-        assert offered["board"] == board and offered["step_after"] is None and offered["xp_before"] >= 3, offered
-        offset = 0
-        while offset is not None:
-            catalog = (await action(guest, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
-            assert (catalog["board"], catalog["offset"]) == (board, offset), catalog
-            offers = {row["id"]: row["co_op"] for row in catalog["quests"]}
-            if quest in offers:
-                assert offers[quest] in ("experimental", "verified"), catalog
-                evidence["stock_catalog"] = {"board": catalog["board"], "co_op": offers[quest]}
-                break
-            next_offset = catalog["next_offset"]
-            assert next_offset is None or offset < next_offset <= 128, catalog
-            offset = next_offset
-        assert "stock_catalog" in evidence, catalog
-        if board_input:
-            await board_state("armed", "focused")
-            await board_press("loading")
-            await board_state("offer")
-            await board_press("starting")
-            accepted = await committed_quest(1)
+        if plan.accept_before_pickup:
+            await action(host, spec.command("approach"), "--target", character)
+            if board_input:
+                await board_state("armed", "focused")
+                await board_press("loading")
         else:
-            accepted = await action(guest, "native-quest-start", "--target", quest)
-        assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
+            await accept()
         active = (await action(guest, spec.command("preflight")))[spec.key]
         assert (active["step_after"], active["objective_guid"], active["objective_owner"]) == (1, guid, "guest"), active
         reputation = active["reputation"]

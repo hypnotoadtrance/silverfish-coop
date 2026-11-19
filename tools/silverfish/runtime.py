@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_dialogue, native_downed_markers, native_mosby_station_view, native_mosby_tape
+from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_mosby_station_view, native_mosby_tape
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from . import native_smg_hold
@@ -296,7 +296,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False,
            guest_clock: bool = False,
-           broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False):
+           broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
+           native_dead_bridge_enemy_loot: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -316,6 +317,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_HEADLESS", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_CQC_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
@@ -359,6 +361,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         raise ValueError("The merchant view requires scoped native guest ownership")
     if native_loot_input and (not native_zones or port is not None and not native_guest):
         raise ValueError("Natural stock crate interaction requires scoped native guest ownership")
+    if native_dead_bridge_enemy_loot and (port is None or not native_guest or not native_zones or not native_loot_input):
+        raise ValueError("Stock Dead Bridge enemy loot requires the native campaign host and escrow bridge")
     if broker_input and (not native_zones or port is not None):
         raise ValueError("Broker interact input requires a staged native guest")
     if native_wipe_view and (not native_zones or port is not None and not native_guest):
@@ -384,6 +388,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
         if headless and port is None:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
+    if native_dead_bridge_enemy_loot:
+        env["SILVERFISH_COOP_NATIVE_CQC_LOOT"] = "1"
     if native_zone_walls:
         env["SILVERFISH_COOP_NATIVE_ZONE_WALLS"] = "1"
     if expanded_zones:
@@ -1018,6 +1024,11 @@ class Bridge:
                     if dialogue_progress is not None:
                         raise ValueError("Duplicate stock dialogue progress")
                     dialogue_progress = fields
+                elif fields[0] == "native-borough-barter":
+                    proof = native_borough_barter.parse(fields)
+                    if ("native_borough_barter" in data or data.get("state") != "hosting" or data.get("map") != proof["map"]):
+                        raise ValueError("Invalid stock Borough barter frame scope")
+                    data["native_borough_barter"] = proof
                 elif fields[0] == "native-mosby-tape":
                     data["native_mosby_tape"] = native_mosby_tape.parse_exchange(fields)
                 elif fields[0] == "native-mosby-station-view":
@@ -1107,6 +1118,12 @@ class Bridge:
                         "permanent_count": int(fields[7]), "timed_count": int(fields[8]), "gear_count": int(fields[9]),
                         "cache_unchanged": fields[10] == "1",
                     }
+                elif fields == ["native-enemy-loot-cqc-capability", "1"]:
+                    data["native_enemy_loot_cqc_capability"] = True
+                elif fields[0] == "native-enemy-loot-cqc" and len(fields) == 6 and all(value in ("0", "1") for value in fields[4:]):
+                    data["native_enemy_loot_cqc"] = {"map": fields[1], "bandit": fields[2],
+                                                     "killer_character": None if fields[3] == "-" else fields[3],
+                                                     "reserved": fields[4] == "1", "captured": fields[5] == "1"}
                 elif fields[0] == "native-enemy-loot-death-view" and len(fields) == 8:
                     area, actor, mode, epoch, guid, hidden, collision = fields[1:]
                     if (hidden in ("0", "1") and collision in ("0", "1")

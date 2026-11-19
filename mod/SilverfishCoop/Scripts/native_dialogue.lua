@@ -2,6 +2,7 @@ local dialogue = {}
 local guest_save = require("guest_save")
 local mosby = require("native_dialogue_mosby")
 local shopkeep = require("native_dialogue_shopkeep")
+local mama = require("native_dialogue_mama")
 local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -24,7 +25,7 @@ local castaway = {
     rows = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
         [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1, continuation = true}},
 }
-local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep}
+local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep, [mama.map] = mama}
 
 local npc_lines = "NPC_Dialogue_3_CE4B2EF741973F79EF3C89BB03B96687"
 local responses = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
@@ -104,7 +105,7 @@ local function catalog(state, profile, progress)
         local receiver = StaticFindObject(profile.receiver)
         if not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
             or receiver:GetFullName() ~= "GlobalPing_ScriptingReciver_BP_C " .. profile.receiver or not same(receiver:GetWorld(), state.world)
-            or named(receiver.Ping_ID) ~= "Talk_Castaway" or count(receiver.ActorsToPower) ~= 1
+            or named(receiver.Ping_ID) ~= (profile.talk_ping or "Talk_Castaway") or count(receiver.ActorsToPower) ~= 1
             or not same(receiver.ActorsToPower[1], controller) then reject("stock_receiver_unqualified") end
     end
     local result = {}
@@ -239,6 +240,7 @@ end
 
 function dialogue.clear()
     hide()
+    mama.clear()
     if binding and type(SilverfishClearNativeDialogueInputScope) == "function" then SilverfishClearNativeDialogueInputScope() end
     binding, session, host_report = nil, nil, nil
     connections = {}
@@ -321,11 +323,13 @@ local function host_command(fields, state, phase)
     host_report = nil
     local action, name = fields[2], fields[3]
     local commit = action == "native-dialogue-commit"
-    local shop_open = action == "native-dialogue-shopkeep-open"
+    local shop_open = action == "native-dialogue-shopkeep-open" or action == "native-dialogue-mama-open"
     local shop_cash = action == "native-dialogue-shopkeep-cash"
-    if #fields ~= (commit and 12 or shop_open and 7 or shop_cash and 6 or 3) then reject("arguments_unqualified") end
+    local mama_trade = action == "native-dialogue-mama-trade"
+    if #fields ~= (commit and 12 or shop_open and 7 or (shop_cash or mama_trade) and 6 or 3) then reject("arguments_unqualified") end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
-    if (shop_open or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
+    if (action == "native-dialogue-shopkeep-open" or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
+    if (action == "native-dialogue-mama-open" or mama_trade) and profile ~= mama then reject("mama_scope_unavailable") end
     if action == "native-dialogue-approach" then
         if not (headless and fixtures) then reject("approach_unavailable") end
         local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
@@ -356,16 +360,21 @@ local function host_command(fields, state, phase)
         rows, effect_name = updated, effect.effect
     elseif shop_open then
         if identity ~= fields[4] or tostring(progress.meet) ~= fields[5] or tostring(progress.cash) ~= fields[6]
-            or tostring(progress.xp) ~= fields[7] then reject("shopkeep_open_scope_changed") end
+            or tostring(progress.xp) ~= fields[7] then reject(profile.id .. "_open_scope_changed") end
         progress, effect_name = profile.open(context, progress)
-    elseif shop_cash then
+    elseif shop_cash or mama_trade then
         local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
         local effect = profile.effects[row] and profile.effects[row][ordinal]
         if not effect or not effect.ping or not rows[row].choices[ordinal] or identity ~= fields[6] then
-            reject("shopkeep_cash_scope_changed")
+            reject(shop_cash and "shopkeep_cash_scope_changed" or "mama_trade_scope_changed")
         end
-        profile.grant_cash(state, phase, pawn, connection, context)
-        effect_name = "cash-granted"
+        if shop_cash then
+            profile.grant_cash(state, phase, pawn, connection, context)
+            effect_name = "cash-granted"
+        else
+            profile.grant(state, phase, pawn, connection, context)
+            effect_name = "trade-granted"
+        end
     end
     host_report = {profile = profile, world = state.world, pawn = pawn, name = name, npc = npc, target = target,
         controller = controller, rows = rows, connection = identity, progress = progress, effect = effect_name}
@@ -418,7 +427,8 @@ end
 function dialogue.command(fields, state, phase)
     local action = fields[2]
     if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit"
-        or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash" then
+        or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash"
+        or action == "native-dialogue-mama-open" or action == "native-dialogue-mama-trade" then
         return host_command(fields, state, phase)
     end
     local handoff = action == "native-dialogue-shopkeep-view"

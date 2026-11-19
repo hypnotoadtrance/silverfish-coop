@@ -22,9 +22,7 @@ ACTIONS = {PREFLIGHT: "preflight", "native-turret-photo-start": "start", CAPTURE
 TARGETS = {"turret-13", "turret-15"}
 BOARDS = {area: native_computer_board.BOARDS[area] for area in native_computer_board.BOROUGH_SCIENTIST_BOARDS}
 CATALOG_BOARDS = native_computer_board.BOARDS
-SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, native_computer_board.QUEST_ID,
-             native_computer_board.COUP_REPORT.quest_id, native_computer_board.DEPOT_DOCUMENTS.quest_id,
-             native_computer_board.BRANDY.quest_id}
+SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, *native_computer_board.CONTRACTS}
 
 
 def _pawn(host, character, area):
