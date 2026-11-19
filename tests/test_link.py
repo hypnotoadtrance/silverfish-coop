@@ -122,6 +122,28 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.disconnected.empty())
         await self.exchange(1200)
 
+    async def test_travel_hold_drops_game_packets_keeps_control_and_releases_same_route(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        guest = self.request["guest_id"]
+        await self.exchange(1024)
+        host_endpoint, client_endpoint = self.host.guest_endpoint(guest), self.client.address
+        self.host.restrict_game_routes({guest})
+
+        async def identify(guest_id, payload):
+            return {"guest": guest_id, "echo": payload["echo"]}
+
+        self.application_handler = identify
+        with self.host.hold_game_routes():
+            self.game_client.sendto(b"old client world", client_endpoint)
+            self.game_host.sendto(b"old host world", host_endpoint)
+            self.assertEqual(await self.client.request({"echo": "travelling"}), {"guest": guest, "echo": "travelling"})
+            for inbox in (self.host_inbox, self.client_inbox):
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(inbox.messages.get(), .15)
+        self.assertTrue(self.host.connected(guest))
+        self.assertEqual((self.host.guest_endpoint(guest), self.client.address), (host_endpoint, client_endpoint))
+        await self.exchange(4097)
+
     async def test_client_pins_game_socket_until_explicit_reset(self):
         alternate, alternate_inbox = await self.udp()
         self.assertTrue((await self.connect_guest())["accepted"])

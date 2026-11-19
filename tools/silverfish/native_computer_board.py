@@ -149,7 +149,8 @@ async def _commit(host, bridge, actor: str, verb: str) -> dict:
                           reputation={faction: row["after"] for faction, row in reputation.items()},
                           consumed_board=arguments[0], objective_owner=actor)
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
-        revision = await host.checkpoint_native(bridge, candidate)
+        required = frozenset({actor}) if turning_in and actor != "host" else frozenset()
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         event = "native_computer_board_completed" if turning_in else "native_computer_board_started"

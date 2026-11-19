@@ -18,7 +18,7 @@ from . import (link, matrix_service, native_authored_pickup, native_blue, native
                native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, party, wipe)
-from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
+from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
@@ -90,6 +90,30 @@ def pending_cube(state: dict) -> tuple[str, dict] | None:
     if len(pending) > 1:
         raise ValueError("The campaign has two pending item transports")
     return pending[0] if pending else None
+
+
+def verify_travel_checkpoint(world: dict) -> None:
+    """Reject world and transport pairs that cannot be resumed together."""
+    try:
+        state = party.load_party(world.get("party"))
+        cube, matrix, dream = pending_cube(state), native_matrix.pending(state), native_dream.visit(state)
+    except (KeyError, TypeError, ValueError) as error:
+        raise CampaignFormatError("Invalid transport state in the campaign checkpoint") from error
+    if sum(trip is not None for trip in (cube, matrix, dream)) > 1:
+        raise CampaignFormatError("A checkpoint contains multiple committed transport events")
+    area = world.get("map")
+    if area is not None and not isinstance(area, str):
+        raise CampaignFormatError("The campaign checkpoint has an invalid map")
+    if cube and area != cube[1]["source"]:
+        raise CampaignFormatError("The committed item travel does not match the checkpoint map")
+    if matrix and area != matrix["source"]:
+        raise CampaignFormatError("The committed Matrix trip does not match the checkpoint map")
+    if dream:
+        recovery_map = dream["source"] if dream["phase"] == "departing" else dream["destination"]
+        if area != recovery_map:
+            raise CampaignFormatError("The Stardust visit does not match the checkpoint map")
+    elif area in native_dream.PROFILES:
+        raise CampaignFormatError("A Stardust zone requires its active visit in the checkpoint")
 
 
 def checkpoint_seed(world: dict) -> int | None:
@@ -269,15 +293,18 @@ class Host:
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
 
     def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
-                   guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None) -> int:
+                   guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
+                   require_guest_frames: frozenset[str] = frozenset()) -> int:
         if self.last_game.get("state") != "hosting":
             raise RuntimeError("Wait for the host map to finish loading")
+        current_map = self.last_game["map"]
+        checkpoint_party = self.party if proposed_party is None else proposed_party
         status = self.store.status()
         world = status["world"]
         world.update({
-            "map": self.last_game["map"], "host": _pawn(self.last_game, "local"),
-            "party": self.party if proposed_party is None else proposed_party,
+            "map": current_map, "host": _pawn(self.last_game, "local"), "party": checkpoint_party,
         })
+        verify_travel_checkpoint(world)
         if native_record is not None:
             if native_record["map"] != world["map"]:
                 raise RuntimeError("The stock host save belongs to a different campaign map")
@@ -298,8 +325,19 @@ class Host:
                 world["native_rest"] = rest
             elif level:
                 world.pop("native_rest", None)
-        return self.store.checkpoint(world, self.checkpoint_guest_changes(status, guest_records or {}),
-                                     unleased_states=unleased_states)
+        captures = guest_records or {}
+        changes = self.checkpoint_guest_changes(status, captures)
+        if require_guest_frames:
+            previous = {entry["character_id"]: entry["state"].get("native_guest_save") or {} for entry in status["characters"]}
+            planned = [state.get("native_guest_save") for state in changes.values()]
+            for character in require_guest_frames:
+                unleased = (unleased_states or {}).get(character, {}).get("native_guest_save")
+                expected = captures.get(character) or unleased
+                if (not expected or expected.get("character_id") != character or not expected.get("slot")
+                        or expected["slot"] == previous.get(character, {}).get("slot")
+                        or (expected not in planned and expected != unleased)):
+                    raise RuntimeError("The checkpoint would omit a newly modified detached guest save")
+        return self.store.checkpoint(world, changes, unleased_states=unleased_states)
 
     def checkpoint_guest_changes(self, status: dict, guest_records: dict[str, dict]) -> dict[str, dict]:
         guest = _pawn(self.last_game, "guest")
@@ -396,9 +434,10 @@ class Host:
         self.control.event("native_world_checkpoint_flushed", **proof)
 
     async def checkpoint_native(self, bridge: Bridge, proposed_party: dict | None = None, *,
-                                unleased_states: dict | None = None) -> int:
+                                unleased_states: dict | None = None,
+                                require_guest_frames: frozenset[str] = frozenset()) -> int:
         if self.native_profile is None:
-            return self.checkpoint(proposed_party, unleased_states=unleased_states)
+            return self.checkpoint(proposed_party, unleased_states=unleased_states, require_guest_frames=require_guest_frames)
         source = self.last_game.get("map")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
@@ -419,7 +458,7 @@ class Host:
         self.last_seen = time.monotonic()
         guest_records = await self.capture_guest_records(bridge)
         revision = self.checkpoint(proposed_party, native_record=record, guest_records=guest_records,
-                                   unleased_states=unleased_states)
+                                   unleased_states=unleased_states, require_guest_frames=require_guest_frames)
         try:
             keep = {entry["slot"] for path in (self.store.path, self.store.previous_path)
                     for entry in native_host_save.references(read_json(path))}
@@ -2742,7 +2781,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("Expanded stock routes require --native-zones and the current stage")
     profile = directory / "game-user"
     with Control(directory / "run") as control, CampaignStore(
-        directory / "save", verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
+        directory / "save", verify_world=verify_travel_checkpoint,
+        verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
     ) as store:
         old_world = store.status()["world"]
         if start_zone and old_world.get("map") not in (None, start_zone):

@@ -224,7 +224,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            revision = await host.checkpoint_native(bridge, candidate)
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
             host.party = candidate
             host.native_checkpoint_unsafe = False
             host.control.event("native_loot_claim_committed", revision=revision, **claimed)
@@ -232,7 +232,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         if action == "seed":
             if not proof["lucky_looter"]:
                 raise RuntimeError("The exact stock guest Lucky Looter fixture did not verify")
-            await host.checkpoint_native(bridge)
+            await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
             host.native_checkpoint_unsafe = False
         return {"native_loot": proof}
     except (OSError, RuntimeError, ValueError):

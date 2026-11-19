@@ -142,8 +142,6 @@ async def _grant_xp(host, bridge, candidate: dict, accepted: list[str]) -> None:
     for character in accepted:
         native_rewards.queue(candidate["players"][character], 1)
     projected = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in accepted]
-    if len(projected) != len(accepted):
-        raise RuntimeError("The Copper Wire items and XP did not bind the same stock recipient")
     await native_rewards.project(host, bridge, candidate, projected)
 
 
@@ -201,7 +199,7 @@ async def turn_in(host, bridge, actor: str) -> dict:
                   "commune_rep": proof["rep_after"], "consumed_wire": proof["objective_guid"],
                   "objective_owner": actor if proof["objective_owner"] == "guest" else "host"}
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
-        revision = await host.checkpoint_native(bridge, candidate)
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(accepted))
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_wire_quest_completed", revision=revision, **record)
@@ -225,7 +223,7 @@ async def settle(host, bridge) -> None:
         accepted = await _grant(host, bridge, candidate)
         if accepted:
             await _grant_xp(host, bridge, candidate, accepted)
-            revision = await host.checkpoint_native(bridge, candidate)
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(accepted))
             host.party = candidate
             host.control.event("native_wire_quest_pending_awards_committed", revision=revision, recipients=accepted)
         host.native_checkpoint_unsafe = False

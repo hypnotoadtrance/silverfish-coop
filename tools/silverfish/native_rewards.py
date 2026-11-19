@@ -18,10 +18,11 @@ def pending_recipients(host, candidate: dict) -> list[tuple[str, str, int]]:
     recipients = host.native_recipients()
     return [(character, recipients[character]["pawn"], player[PENDING])
             for character, player in candidate["players"].items()
-            if character in recipients and player.get(PENDING, 0) > 0]
+            if character in recipients and recipients[character]["connected"] and player.get(PENDING, 0) > 0]
 
 
-async def project(host, bridge, candidate: dict, recipients: list[tuple[str, str, int]]) -> None:
+async def project(host, bridge, candidate: dict, recipients: list[tuple[str, str, int]]) -> frozenset[str]:
+    """Apply the planned XP and return the detached saves the commit must contain."""
     source = host.last_game.get("map")
     for character, pawn, amount in recipients:
         snapshot = await bridge.command("native-guest-quest-xp", pawn, str(amount), timeout=5)
@@ -31,6 +32,7 @@ async def project(host, bridge, candidate: dict, recipients: list[tuple[str, str
             raise RuntimeError("The detached guest quest XP did not survive native readback")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         candidate["players"][character].pop(PENDING)
+    return frozenset(character for character, _, _ in recipients)
 
 
 async def settle(host, bridge) -> None:
@@ -40,8 +42,8 @@ async def settle(host, bridge) -> None:
     candidate = party.load_party(host.party)
     host.native_checkpoint_unsafe = True
     try:
-        await project(host, bridge, candidate, recipients)
-        await host.checkpoint_native(bridge, candidate)
+        applied = await project(host, bridge, candidate, recipients)
+        await host.checkpoint_native(bridge, candidate, require_guest_frames=applied)
     except (OSError, RuntimeError, ValueError):
         host.stopping = True
         raise

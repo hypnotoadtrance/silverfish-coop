@@ -2,6 +2,8 @@
 
 The staged Direct IP build supports an experimental native party of up to four guests. One host and four guests completed the loopback travel, Observatory sleep, and party wipe sequence. The campaign store, guest catalog, and action channel also support the two playtest maps. See the [locked design](DESIGN.md) for release requirements.
 
+A same-PC Direct IP transport run used a non-loopback host-only interface and a selected UDP port. Four authenticated guests exchanged fragmented 12 KiB gameplay packets on separate routes. One guest reconnected on the same game-facing endpoints while another exchanged packets. Pausing gameplay forwarding for travel left control requests working. The run used UDP test endpoints in place of Unreal game instances.
+
 | Area | Verified or implemented in the staged build | Work before campaign play |
 | --- | --- | --- |
 | Hosting and players | Authenticated Direct IP, guest-owned character selection, native replicated movement, reconnect and host restart. A five-instance run enrolled four guests with separate saves and completed stock travel, sleep, and wipe recovery. | Live coverage across separate PCs. Steam Invite is deferred |
@@ -103,6 +105,8 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 ## Pending live verification
 
 - Ordinary travel takes a fresh roster reading after the source checkpoint. The game thread rechecks each exact pawn and the 15-meter limit before opening the destination. Offline tests covered a player moving during checkpointing, a late refusal, and preservation of the current guest connections.
+- Stock transport checkpoints keep the source map and pending trip together until arrival commits. An offline cancellation and restart test recovered the trip from the source. The loader also recovered an older destination checkpoint with a pending source trip from its last valid backup.
+- Wallet debits, loot claims, guest equipment changes, and quest settlements require the updated guest save in the same commit. Offline tests covered missing inventory frames and reconnecting to receive queued quest XP exactly once.
 - The authored travel registry covers 145 directed exits across 55 worlds. The seven Golden Nexus pads use their stock destination markers and one-step travel time. The three CrossRoads pads share an entrance tag, so headless position and wall probes require the exact pad actor.
 - The Flood Plains contract follows the placed jammer's stock damage and power-signal sequence. The adapter checks authoritative quest progress and can hide the defeated jammer on each guest. The new smoke test uses an actual guest-owned projectile and checks both stock save files after settlement.
 - The suppressed Light Pistol and standard SMG use stock 9mm Ball. Their smoke test covers full magazine depletion and reload through the original input bindings. The Gunsmith's cash counter can list the stock 200-round Ball shelf when the host's settings enable reusable stock.

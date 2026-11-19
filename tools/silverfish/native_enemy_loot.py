@@ -42,9 +42,9 @@ async def approach(host, bridge, target: str | None) -> dict:
     return {"native_enemy_loot_approach": proof}
 
 
-async def _commit(host, bridge, candidate, snapshot):
+async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=frozenset()):
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    revision = await host.checkpoint_native(bridge, candidate)
+    revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames)
     host.party = candidate
     host.native_checkpoint_unsafe = False
     return revision
@@ -141,7 +141,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await _commit(host, bridge, candidate, snapshot)
+        revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}))
         host.control.event("native_enemy_loot_claim_committed", revision=revision, **report)
         return result
     except (OSError, RuntimeError, ValueError):

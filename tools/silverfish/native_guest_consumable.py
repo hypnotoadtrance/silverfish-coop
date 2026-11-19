@@ -58,7 +58,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str) -> dic
         recent = candidate["receipts"].setdefault(character, [])
         recent.append({"id": operation_id, "request": fingerprint, "result": result})
         del recent[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate)
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

@@ -61,7 +61,14 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         host.native_checkpoint_unsafe = True
     try:
         if bandit_fixture is None:
-            snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
+            try:
+                snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
+            except RuntimeError as error:
+                if str(error) != "guest_weapon_refused_detached_save":
+                    raise
+                if mutates:
+                    host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
         else:
             try:
                 snapshot = await bridge.command("native-bandit-shot-fixture", bandit_fixture, pawn, guid, timeout=5)
@@ -132,7 +139,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            await host.checkpoint_native(bridge, candidate)
+            await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
             host.party = candidate
             host.native_checkpoint_unsafe = False
         return result

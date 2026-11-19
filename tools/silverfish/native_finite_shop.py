@@ -168,7 +168,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate)
+        required = frozenset({character}) if character != "host" else frozenset()
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

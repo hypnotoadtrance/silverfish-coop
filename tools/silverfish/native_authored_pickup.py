@@ -88,7 +88,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate)
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

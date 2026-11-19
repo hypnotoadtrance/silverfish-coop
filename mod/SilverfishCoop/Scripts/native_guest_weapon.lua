@@ -86,10 +86,10 @@ function guest_weapon.command(fields, state, phase)
     if type(invoke) ~= "function" or type(inspect) ~= "function" then
         error("The matched native weapon add-on is unavailable", 0)
     end
-    local pawn, detached = guest_save.exact_item_context(state, phase, name)
+    local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, name)
+    if not qualified or not pawn or not detached then error("guest_weapon_refused_detached_save", 0) end
     if equipped_target then
-        local readable, equipped, kind = false, nil, nil
-        if pawn and detached then readable, equipped, kind = pcall(equipped_guid, pawn, detached) end
+        local readable, equipped, kind = pcall(equipped_guid, pawn, detached)
         if not readable or not equipped or not kind then
             observation = {map = state.map, action = action, pawn = name, guid = "equipped", ok = false,
                 status = "guest_weapon_no_qualified_equipped_item"}
@@ -97,7 +97,6 @@ function guest_weapon.command(fields, state, phase)
         end
         guid = equipped
     end
-    if not pawn or not detached then error("The exact guest weapon save is unavailable", 0) end
     if fixture then
         local path = action == "seed-ammo" and ammo_path or seed_profile or smg_path
         local class = StaticFindObject(path)

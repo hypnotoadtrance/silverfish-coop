@@ -111,7 +111,8 @@ async def settle(host, bridge, draft: dict) -> bool:
             if updated.get("state") != "hosting" or updated.get("map") != host.last_game["map"]:
                 raise RuntimeError("The host's stock wipe retention update left its qualified world")
             host.last_game, host.last_seen = updated, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, unleased_states=offline)
+        guests = frozenset(plan["owners"]) - {"host"}
+        revision = await host.checkpoint_native(bridge, candidate, unleased_states=offline, require_guest_frames=guests)
     except (OSError, RuntimeError, ValueError):
         host.stopping = True
         raise
@@ -229,7 +230,7 @@ async def recover(host, bridge, character: str, bag_id: str | None, operation_id
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate)
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

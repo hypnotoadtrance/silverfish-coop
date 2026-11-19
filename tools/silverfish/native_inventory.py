@@ -50,7 +50,7 @@ async def inspect(host, bridge, character: str, offset: int) -> dict:
         raise party.RuleError("native_inventory_scope_unavailable")
     if character != "host" and character not in host.native_recipients():
         raise party.RuleError("native_inventory_scope_unavailable")
-    await host.checkpoint_native(bridge)
+    await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
     frame = saved_frame(host, host.store.status(), character)
     if not frame or frame["map"] != host.last_game.get("map"):
         raise RuntimeError("The exact character inventory frame is unavailable")
