@@ -3,6 +3,8 @@ local guest_save = require("guest_save")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
+local headless_test = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"
 local observation, fixture, ready
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -11,6 +13,45 @@ local function exact_guid(value)
 end
 local function bounded(number, minimum, maximum)
     return type(number) == "number" and number >= minimum and number <= maximum
+end
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function damage_test_source(state, pawn, detached)
+    local world = state.world
+    if not headless_test or not valid(world) or world:GetFullName() ~= "World " .. borough
+        or not same(pawn:GetWorld(), world) or not pawn:HasAuthority() or pawn.Dead ~= false
+        or pawn.GodMode ~= false or pawn.Sickness ~= 0 or pawn.MaxHealth ~= 250
+        or pawn.RegenDmg_Coeff ~= 0.5 or pawn.Min_RegenRatio ~= 0.25
+        or detached.PlayerHealth ~= 250 or detached.PlayerRegen ~= 250 then
+        error("guest_mre_refused_fixture_stock_damage_baseline", 0)
+    end
+    local source = StaticFindObject(borough .. ":PersistentLevel.WorldSettings")
+    local class = StaticFindObject("/Script/Engine.WorldSettings")
+    if not valid(source) or not same(source:GetClass(), class) or not same(source:GetWorld(), world)
+        or not same(source:GetOuter(), world.PersistentLevel) or not source:HasAuthority() then
+        error("guest_mre_refused_fixture_stock_damage_source", 0)
+    end
+    return source
+end
+
+local function wound_test_guest(pawn, detached, host, stock, source)
+    local host_health, host_regen = stock.PlayerHealth, stock.PlayerRegen
+    local hp, regen = detached.PlayerHealth, detached.PlayerRegen
+    local total, lethal = {}, {}
+    local called = pcall(function()
+        pawn:DealDamage({Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 40}, {}, source,
+            {X = 0, Y = 0, Z = 0}, false, total, lethal)
+    end)
+    if not called or total.TotalDamage ~= 40 or lethal.IsLethal ~= false or pawn.Dead ~= false
+        or not same(pawn.Save, detached) or not same(host.Save, stock)
+        or detached.PlayerHealth ~= hp - 40 or detached.PlayerRegen ~= regen - 20
+        or stock.PlayerHealth ~= host_health or stock.PlayerRegen ~= host_regen then
+        error("mutation_unverified_guest_mre_fixture_stock_damage", 0)
+    end
+    return {amount = total.TotalDamage, hp_before = hp, hp_after = detached.PlayerHealth,
+        regen_before = regen, regen_after = detached.PlayerRegen}
 end
 
 function mre.sync(state, phase)
@@ -40,6 +81,7 @@ function mre.command(fields, state, phase)
         error("guest_mre_refused_exact_detached_save", 0)
     end
     if test then
+        local source = damage_test_source(state, pawn, detached)
         local invoked, ok, status, food, intox, stock_intox = pcall(
             SilverfishSeedNativeGuestMreFixture, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress())
         if invoked and ok == false and type(status) == "string" and status:match("^guest_mre_refused_[a-z0-9_]+$") then
@@ -49,7 +91,8 @@ function mre.command(fields, state, phase)
             or math.type(stock_intox) ~= "integer" or not bounded(stock_intox, 0, 100) then
             error("mutation_unverified_guest_mre_fixture", 0)
         end
-        fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox}
+        local damage = wound_test_guest(pawn, detached, host, stock, source)
+        fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox, damage = damage}
         return "exact detached MRE test baseline verified"
     end
     local called, used, status, before, after, food_before, food_after, regen_before, regen_after,
@@ -80,7 +123,9 @@ function mre.rows(state, phase, status_row)
     if not enabled or phase ~= "hosting" or state.server ~= false or not state.listening then return {} end
     local rows = {}
     if fixture and fixture.map == state.map then
-        rows[#rows + 1] = status_row("native-guest-mre-fixture", fixture.map, fixture.name, fixture.food, fixture.intox, fixture.stock_intox)
+        local damage = fixture.damage
+        rows[#rows + 1] = status_row("native-guest-mre-fixture", fixture.map, fixture.name, fixture.food, fixture.intox,
+            fixture.stock_intox, damage.amount, damage.hp_before, damage.hp_after, damage.regen_before, damage.regen_after)
     end
     local function real(value) return string.format("%.17g", value) end
     if row and row.map == state.map then

@@ -161,6 +161,8 @@ Collect the Scientist's authored blank data tape and take it to the Stone Maze d
 
 For Pump Room, take a blank data tape to the Utility Tunnels download station. Use Interact twice to review and confirm the conversion. Black Market offers `Clt_EatherPumpTape` at 8 host XP. The guest who owns the filled tape can redeem it there through stock Interact.
 
+Black Market offers `Jmr_Lake` at zero host XP. Accept it at the board, travel together to Lake, and destroy the authored jammer with stock weapons. Return to Black Market and redeem the shared contract through Interact.
+
 At Borough's board, use Up and Down to select Copper Stop, Find a Computer Board, or Dead Bridge Turret Photos. Interact checks the selected contract. Press it again to accept or redeem when the panel prompts you. At the Scientist's board, the same controls redeem Find a Computer Board for the player carrying it.
 
 The Dead Bridge photography contract unlocks on Borough's board at 4 host XP. Equip a stock camera and center a turret before pressing primary input. Either player can take either photo. For scripted actions, use `native-turret-photo-capture --target turret-13` or `--target turret-15` while framing the matching turret. The host verifies the shot in the game and records each turret once. Return to Borough and use `native-quest-turnin --target Photo_DB_Turrets` for the shared cash and personal XP.
