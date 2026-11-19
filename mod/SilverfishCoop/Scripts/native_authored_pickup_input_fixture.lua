@@ -49,7 +49,7 @@ for _, profile in ipairs(supply_profiles) do
         precise_distances[profile.source] = {48, 62, 78, 95, 115, 150, 195}
     end
 end
-local approach_front = {[dust_filter] = 0, [molasses] = 180}
+local approach_front = {[dust_filter] = 0, [molasses] = 180, [stolen_bag] = -90}
 -- The exact City stack sits in the low wall shelf at yaw -105 degrees.
 if shelf_source then approach_front[shelf_source] = 75 end
 local cabinet_labels = {[dust_filter] = "authored_dust_cabinet", [molasses] = "authored_molasses_cabinet",
@@ -187,7 +187,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel, tall_aim)
+local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel, tall_aim, floor_depth)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -227,7 +227,7 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
             for _, angle in ipairs(angles) do
                 local heading = math.rad((front or 0) + angle)
                 local x, y = center.X + distance * math.cos(heading), center.Y + distance * math.sin(heading)
-                local top, bottom = center.Z + 160, center.Z - 240
+                local top, bottom = center.Z + 160, center.Z - (floor_depth or 240)
                 local tested_heights = {}
                 for trace_kind = 1, multilevel and 2 or 1 do
                     local from_z = top
@@ -291,8 +291,11 @@ function input.precise_approach(state, phase, profile, pawn, actor)
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
+    local forest_locker_top = profile.source == stolen_bag
+    -- The bag sits above the stock locker bank, about 248 units above the room floor.
     approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],
-        profile.source == molasses or profile.source == shelf_source)
+        profile.source == molasses or profile.source == shelf_source or forest_locker_top, nil,
+        forest_locker_top and 275 or nil)
     return "stock pickup floor and interaction sight verified"
 end
 
