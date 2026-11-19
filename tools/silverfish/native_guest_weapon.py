@@ -3,7 +3,7 @@
 import re
 import time
 
-from . import party
+from . import guest_weapon_profiles, party
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
@@ -11,16 +11,10 @@ GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
-FIRE_CLASSES = {
-    "smg": "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C",
-    "smg-standard": "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C",
-    "light-pistol": "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C",
-    "light-pistol-suppressed": "/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C",
-    "nagant-scoped": "/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C",
-}
+FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.FIREARMS}
 CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH}
 PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera"))
-SEED_KINDS = frozenset({"light-pistol", "light-pistol-suppressed", "smg-standard"})
+SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed)
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,

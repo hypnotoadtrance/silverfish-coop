@@ -1,4 +1,5 @@
 local inventory_view = {}
+local weapon_profiles = require("guest_weapon_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -10,15 +11,8 @@ local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTe
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
-local equippable_paths = {
-    ["/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"] = true,
-    ["/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"] = true,
-    ["/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = true,
-    ["/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"] = true,
-    ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = true,
-    ["/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"] = true,
-}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
 local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
@@ -159,7 +153,8 @@ local function page(fields)
         if slots[position] then error("The authenticated inventory view repeats a stock inventory position", 0) end
         slots[position] = true
         seen[guid] = true
-        local equippable = (source == "backpack" or source == "equipment") and equippable_paths[class] == true
+        local equippable = (source == "backpack" or source == "equipment")
+            and (weapon_profiles.kinds[class] ~= nil or class == camera_path)
         local name = item:gsub("_", " ")
         local usable = source == "backpack" and class == bandage_path
         if usable then name = "Bandage" end

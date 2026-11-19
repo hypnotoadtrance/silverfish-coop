@@ -1,27 +1,12 @@
 local guest_weapon = {}
 local guest_save = require("guest_save")
+local weapon_profiles = require("guest_weapon_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local smg_path = "/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C"
-local pistol_path = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
-local standard_smg_path = "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"
-local suppressed_pistol_path = "/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
-local weapon_kinds = {
-    [smg_path] = "smg",
-    [standard_smg_path] = "smg-standard",
-    [pistol_path] = "light-pistol",
-    [suppressed_pistol_path] = "light-pistol-suppressed",
-    ["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = "nagant-scoped",
-}
-local seed_profiles = {
-    ["light-pistol"] = pistol_path,
-    ["light-pistol-suppressed"] = suppressed_pistol_path,
-    ["smg-standard"] = standard_smg_path,
-}
 local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -57,7 +42,7 @@ local function equipped_guid(pawn, save, world)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
         return guid:find("[^0]") and guid or nil, "camera"
     end
-    return guid:find("[^0]") and guid or nil, weapon_kinds[class_name]
+    return guid:find("[^0]") and guid or nil, weapon_profiles.kinds[class_name]
 end
 
 function guest_weapon.command(fields, state, phase)
@@ -75,7 +60,7 @@ function guest_weapon.command(fields, state, phase)
     local inspect = operations.inspect
     local name, guid = fields[3], fields[4]
     local fixture = action == "seed" or action == "seed-ammo"
-    local seed_profile = action == "seed" and #fields == 5 and fixtures and headless and seed_profiles[fields[5]]
+    local seed_profile = action == "seed" and #fields == 5 and fixtures and headless and weapon_profiles.seeds[fields[5]]
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
     if not enabled or (#fields ~= 4 and not seed_profile) or phase ~= "hosting"
@@ -98,7 +83,7 @@ function guest_weapon.command(fields, state, phase)
         guid = equipped
     end
     if fixture then
-        local path = action == "seed-ammo" and ammo_path or seed_profile or smg_path
+        local path = action == "seed-ammo" and ammo_path or seed_profile or weapon_profiles.paths.smg
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) end
     end

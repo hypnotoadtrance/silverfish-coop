@@ -1,4 +1,5 @@
 #include "guest_primary_input.hpp"
+#include "guest_weapon_registry.hpp"
 
 #include <array>
 #include <atomic>
@@ -62,20 +63,8 @@ namespace
     constexpr std::size_t receipt_limit = 8;
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
 
-    struct Equipment
-    {
-        std::string_view kind;
-        const U::TCHAR* path;
-    };
-
-    constexpr std::array equipment{
-        Equipment{"smg", STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C")},
-        Equipment{"smg-standard", STR("/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C")},
-        Equipment{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C")},
-        Equipment{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C")},
-        Equipment{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C")},
-        Equipment{"camera", camera_path},
-    };
+    using Equipment = silverfish::guest_weapon_profiles::Profile;
+    constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -545,7 +534,7 @@ namespace
         if (!live(world) || world->GetPathName() != bridge_world) return false;
         Scope local;
         local.seat.host = true;
-        local.item = &equipment.back();
+        local.item = &camera;
         // The stock camera can still advance the objective if its display
         // lens is unsuitable for an authorized capture. Verify ownership here.
         if (!bind_player(local, pawn, address(object_field(pawn, STR("Controller"))), address(world),
@@ -622,8 +611,10 @@ namespace
         next.seat.host = host;
         if (pawn <= 0 || controller <= 0 || world <= 0 || !parse_guid(text, next.guid))
             return result(lua, false, "native_guest_primary_exact_scope_required");
-        for (const auto& candidate : equipment)
-            if (candidate.kind == kind) next.item = &candidate;
+        if (kind == camera.kind) next.item = &camera;
+        else
+            for (const auto& candidate : silverfish::guest_weapon_profiles::firearms)
+                if (candidate.kind == kind) next.item = &candidate;
         if (!next.item || (host && next.item->kind != "camera"))
             return result(lua, false, "native_guest_primary_weapon_unqualified");
         if ((next.item->kind == "camera") != (size == 6) || (size == 6 && lua.get_string() != camera_quest))
@@ -773,7 +764,7 @@ namespace
         const auto world_address = lua.get_integer();
         Scope next;
         next.seat.host = true;
-        next.item = &equipment.back();
+        next.item = &camera;
         if (pawn_address <= 0 || controller_address <= 0 || world_address <= 0 ||
             !parse_guid(lua.get_string(), next.guid) || lua.get_string() != camera_quest)
             return result(lua, false, "stock_host_camera_fixture_identity_unqualified");

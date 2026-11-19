@@ -1,9 +1,30 @@
+from pathlib import Path
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_guest_consumable, native_guest_weapon, party
+from tools.silverfish import generate_guest_weapon_registry, native_guest_consumable, native_guest_weapon, party
+
+
+class NativeGuestWeaponProfilesTests(unittest.TestCase):
+    def test_game_adapters_match_launcher_profiles(self):
+        repo = Path(__file__).resolve().parents[1]
+        for filename, expected in generate_guest_weapon_registry.outputs().items():
+            with self.subTest(filename=filename):
+                self.assertEqual((repo / filename).read_text(encoding="utf-8"), expected)
+
+    def test_ordinary_pistol_classes_are_exact(self):
+        for kind, blueprint in {
+            "army-pistol": "Wep_ArmyPistol", "pistol": "Wep_Pistol",
+            "pistol-02": "Wep_Pistol02", "tac-pistol": "Wep_TacPistol",
+        }.items():
+            path = f"/Game/Classes/Weapons/{blueprint}.{blueprint}_C"
+            self.assertEqual(native_guest_weapon.FIRE_CLASSES[kind], path)
+            self.assertIn(path, native_guest_weapon.CLASS_PATHS)
+            self.assertIn(kind, native_guest_weapon.SEED_KINDS)
+        self.assertNotIn("pistol-long", native_guest_weapon.PRIMARY_KINDS)
+        self.assertNotIn("1911-02", native_guest_weapon.PRIMARY_KINDS)
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):

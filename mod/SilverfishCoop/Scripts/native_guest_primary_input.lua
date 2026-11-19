@@ -1,4 +1,5 @@
 local primary = {}
+local weapon_profiles = require("guest_weapon_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -9,10 +10,6 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
-local kinds = {
-    smg = true, ["smg-standard"] = true, ["light-pistol"] = true, ["light-pistol-suppressed"] = true,
-    ["nagant-scoped"] = true, camera = true,
-}
 local event_path, is_downed, binding, fixture_proof
 
 local function valid(object)
@@ -126,7 +123,8 @@ function primary.command(fields, state, phase)
     local camera = kind == "camera"
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
-        or not kinds[kind] or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
+        or (kind ~= "camera" and not weapon_profiles.paths[kind])
+        or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
         or type(SilverfishTakeNativeGuestPrimaryIntent) ~= "function" then
         primary.reset()
         error("The authenticated stock equipment selection is unavailable", 0)

@@ -1,4 +1,4 @@
-"""Verify original primary and reload inputs with two additional stock 9mm weapons."""
+"""Verify original primary and reload inputs with exact stock 9mm weapons."""
 
 import argparse
 import asyncio
@@ -10,13 +10,15 @@ import uuid
 
 from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
+from tools.silverfish.guest_weapon_profiles import FIREARMS
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-WEAPONS = {"light-pistol-suppressed": ("Wep_LightPistol_Suppressed", 14), "smg-standard": ("Wep_SMG_01", 30)}
+WEAPONS = {profile.kind: profile for profile in FIREARMS if profile.ball_magazine and profile.headless_seed}
+DEFAULT_WEAPONS = ("light-pistol-suppressed", "smg-standard")
 
 
-async def verify(work, vanilla_saved):
+async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
     name = "stock-9mm-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     client = ("--profile", name)
@@ -76,7 +78,9 @@ async def verify(work, vanilla_saved):
         invitation = await ask("invite", *host, "--name", "Stock 9mm tester", "--character", "Gunsmith")
         guest = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         first = await enroll()
-        for kind, (blueprint, capacity) in WEAPONS.items():
+        for kind in kinds:
+            profile = WEAPONS[kind]
+            capacity = profile.ball_magazine.capacity
             guid = uuid.uuid4().hex.upper()
             seeded = (await action(host, "native-guest-weapon-seed", "--kind", kind, "--item-guid", guid))["native_guest_weapon"]
             assert seeded["guid"] == guid and seeded["stored_ammo"] == 7, seeded
@@ -104,7 +108,7 @@ async def verify(work, vanilla_saved):
             assert (refilled["guid"], refilled["before"]) == (guid, 0), refilled
             assert 0 < refilled["after"] <= capacity, refilled
             assert refilled["after"] == refilled["reserve_before"] - refilled["reserve_after"], refilled
-            evidence["weapons"][kind] = {"class_path": f"/Game/Classes/Weapons/{blueprint}.{blueprint}_C",
+            evidence["weapons"][kind] = {"class_path": profile.path,
                                          "guid": guid, "scope": kind, "shots": shots, "empty": empty,
                                          "stock_reload": refilled, "reserve_guid": reserve_guid}
         await stop(host, authority)
@@ -143,5 +147,8 @@ if __name__ == "__main__":
     cli_parser = argparse.ArgumentParser(description=__doc__)
     cli_parser.add_argument("--work", type=Path, required=True)
     cli_parser.add_argument("--vanilla-saved", type=Path)
+    cli_parser.add_argument("--weapon", action="append", choices=sorted(WEAPONS),
+                            help="verify this authored weapon profile, repeat for multiple profiles")
     settings = cli_parser.parse_args()
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved))
+    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved,
+                       tuple(dict.fromkeys(settings.weapon)) if settings.weapon else DEFAULT_WEAPONS))
