@@ -29,6 +29,7 @@ from .native_host_save import SLOT
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
+from .native_guest_melee import parse as parse_guest_melee
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
@@ -307,7 +308,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False, guest_mre: bool = False,
            guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
-           native_dead_bridge_enemy_loot: bool = False):
+           native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -333,6 +334,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE", None)
+    env.pop("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT", None)
@@ -419,6 +421,10 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
             env["SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES"] = "1"
     if guest_held_fire:
         env["SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE"] = "1"
+    if guest_melee_canary:
+        if not (headless and native_guest and native_zones and native_fixtures and port is not None):
+            raise ValueError("The Old Pipe animation canary requires a staged headless native host")
+        env["SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY"] = "1"
     if guest_clock:
         env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK"] = "1"
         if headless:
@@ -882,6 +888,11 @@ class Bridge:
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
+                elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary"):
+                    parsed = parse_guest_melee(fields)
+                    if parsed:
+                        key, row = parsed
+                        data[key] = row
                 elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
                     with contextlib.suppress(ValueError):
                         row = native_smg_hold.parse(fields)

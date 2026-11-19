@@ -76,6 +76,15 @@ local profiles = {
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
     {
+        map = crossroads,
+        source = "crossroads-old-pipe",
+        path = crossroads .. ".CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1",
+        class = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C",
+        name = "MeleeWep_OldPipe_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+        fixture_only = true,
+    },
+    {
         map = savlo_estate,
         source = "savlo-estate-evil-eye-ring",
         path = savlo_estate .. ".SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
@@ -126,9 +135,12 @@ local profiles = {
 }
 local map_profiles = {}
 for _, profile in ipairs(profiles) do
-    local entries = map_profiles[profile.map] or {}
-    entries[#entries + 1] = profile
-    map_profiles[profile.map] = entries
+    if not profile.fixture_only or (os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
+        and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1") then
+        local entries = map_profiles[profile.map] or {}
+        entries[#entries + 1] = profile
+        map_profiles[profile.map] = entries
+    end
 end
 
 local binding, report
@@ -180,7 +192,16 @@ function pickup.update(state, phase)
 end
 
 local function select_profile(requested)
-    if requested == nil and #binding.placements == 1 then requested = binding.placements[1].source end
+    if requested == nil then
+        local sole
+        for _, profile in ipairs(binding.placements) do
+            if not profile.fixture_only then
+                if sole then sole = nil; break end
+                sole = profile.source
+            end
+        end
+        requested = sole
+    end
     local profile = binding.active[requested]
     if not profile then error("authored_pickup_exact_source_required", 0) end
     return profile

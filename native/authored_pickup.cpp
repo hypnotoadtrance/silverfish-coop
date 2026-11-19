@@ -100,6 +100,13 @@ namespace
             9338.318763111682, 8669.320108298598, 391.93632416768173, 11, 1, true,
         },
         Profile{
+            "crossroads-old-pipe",
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1"),
+            STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"),
+            -5145.994939851458, 1711.4458331043368, 31.917839181893726, 2,
+        },
+        Profile{
             "savlo-estate-evil-eye-ring",
             STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1"),
@@ -297,6 +304,8 @@ namespace
     {
         if (!lua.is_string()) return nullptr;
         const auto source = lua.get_string();
+        if (source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
+            env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))) return nullptr;
         const auto match = std::ranges::find_if(profiles, [&source](const Profile& profile) { return profile.source == source; });
         return match == profiles.end() ? nullptr : &scopes[static_cast<std::size_t>(match - profiles.begin())];
     }

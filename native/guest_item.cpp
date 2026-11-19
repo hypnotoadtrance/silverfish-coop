@@ -55,6 +55,7 @@ namespace
     constexpr int rifle_caliber = 3;
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
+    constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto ammo_type_path = STR("/Game/Classes/Libraries/Structs/AmmoType_Struct.AmmoType_Struct");
@@ -535,6 +536,22 @@ namespace
             ? camera : nullptr;
     }
 
+    Unreal::UClass* qualified_old_pipe(Unreal::UObject* item_class, const Context& context)
+    {
+        if (!env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") || !env("SILVERFISH_COOP_NATIVE_FIXTURES") ||
+            !env("SILVERFISH_COOP_HEADLESS") || !live(context.world) ||
+            context.world->GetPathName() != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")) return nullptr;
+        auto* pipe = find<Unreal::UClass>(old_pipe_path);
+        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
+        if (!pipe || item_class != pipe || !base || !pipe->IsChildOf(base)) return nullptr;
+        auto* defaults = pipe->GetClassDefaultObject().Get();
+        auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+        auto* ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        return defaults && defaults->GetClassPrivate() == pipe && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+            category && category->GetPropertyValueInContainer(defaults) == 2 && ammo &&
+            ammo->GetPropertyValueInContainer(defaults) == -1 && boolean(defaults, STR("Stacks"), false) ? pipe : nullptr;
+    }
+
     bool ready_pawn(const Context& context)
     {
         auto* health = field<Unreal::FDoubleProperty>(context.save, STR("PlayerHealth"));
@@ -576,7 +593,7 @@ namespace
         return value == -1 || value == 0;
     }
 
-    enum class Operation { Seed, SeedAmmo, Equip, Inspect, Fire, Disarm, Reload };
+    enum class Operation { Seed, SeedAmmo, Equip, EquipOldPipe, Inspect, Fire, Disarm, Reload };
 
     struct AmmoStackSchema
     {
@@ -694,18 +711,24 @@ namespace
     int equip(const Lua& lua, const Context& context, const Inventory& inventory)
     {
         const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
+        const bool old_pipe = context.weapon == find<Unreal::UClass>(old_pipe_path);
         const auto* magazine_profile = camera ? nullptr : stock_magazine(context.weapon);
         if (!ordinary_magazine_payload(magazine_profile, context, inventory))
             return result(lua, false, "guest_weapon_payload_unqualified");
         if (auto* actor = equipped(context, inventory))
         {
-            if (!camera)
+            if (!camera && !old_pipe)
             {
                 const bool verified = ordinary_magazine_payload(magazine_profile, context, inventory, actor);
                 return result(lua, verified, verified ? "equipped" : "guest_weapon_payload_unqualified");
             }
             const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
             auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+            if (old_pipe)
+            {
+                const bool verified = stored == -1 && ammo && ammo->GetPropertyValueInContainer(actor) == stored;
+                return result(lua, verified, verified ? "old_pipe_equipped" : "stock_guest_old_pipe_row_unqualified");
+            }
             const bool verified = camera_stock_ammo(stored) && ammo && ammo->GetPropertyValueInContainer(actor) == stored &&
                 camera_capture_ready(actor);
             return result(lua, verified, verified ? "camera_equipped" : "stock_guest_camera_capture_unavailable");
@@ -724,6 +747,10 @@ namespace
         if (camera)
         {
             if (!camera_stock_ammo(loaded)) return result(lua, false, "guest_camera_row_unqualified");
+        }
+        else if (old_pipe)
+        {
+            if (loaded != -1) return result(lua, false, "stock_guest_old_pipe_row_unqualified");
         }
         else
         {
@@ -777,6 +804,8 @@ namespace
             const bool verified = proven && camera_capture_ready(actor);
             return result(lua, verified, verified ? "camera_equipped" : "mutation_unverified_guest_camera_equip");
         }
+        if (old_pipe)
+            return result(lua, proven, proven ? "old_pipe_equipped" : "mutation_unverified_guest_old_pipe_equip");
         return result(lua, proven, proven ? "equipped" : "mutation_unverified_guest_weapon_equip");
     }
 
@@ -1736,6 +1765,11 @@ namespace
         if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
         if (!inventory.item) return fail("owned_guest_weapon_guid_required");
         auto* row_class = inventory.row_class(inventory.item);
+        if constexpr (operation == Operation::EquipOldPipe)
+        {
+            context.weapon = qualified_old_pipe(row_class, context);
+            return context.weapon ? equip(lua, context, inventory) : fail("stock_guest_old_pipe_class_unqualified");
+        }
         context.weapon = qualified_weapon(row_class);
         if constexpr (operation == Operation::Equip || operation == Operation::Inspect)
             if (!context.weapon) context.weapon = qualified_camera(row_class);
@@ -1757,6 +1791,8 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
     {
+        if (env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_HEADLESS"))
+            lua.register_function("SilverfishEquipNativeGuestOldPipe", run<Operation::EquipOldPipe>);
         lua.register_function("SilverfishSeedNativeGuestWeapon", run<Operation::Seed>);
         lua.register_function("SilverfishSeedNativeGuestAmmo", run<Operation::SeedAmmo>);
         lua.register_function("SilverfishDisarmNativeGuestWeapon", run<Operation::Disarm>);

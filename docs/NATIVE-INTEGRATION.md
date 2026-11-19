@@ -196,6 +196,8 @@ The clean Bandage test ran the stock `GainHealth` operation while the guest was 
 
 The headless inventory-input run opened the guest overlay through the stock menu, selected the exact Bandage GUID, and confirmed it twice. The host verified the guest's stack went from one to zero. The guest recovered the same pawn after packet loss, and the Bandage stayed consumed across host restart and replay. Nine original single-player file hashes matched.
 
+An Observatory guest split a nine-round 9 mm Ball stack into five and four through the local action interface. The host refused a request based on a stale count. The guest then used the original inventory binding and the overlay's Home confirmation to split the five-round stack into three and two. Exact stack GUIDs and counts of three, four, and two restored after a same-port restart. The host inventory and original save hashes matched their baselines.
+
 The Bomber Jacket run used the stock inventory input and two Home confirmations to equip the authentic owned row. The guest's backpack lost that row and the armor slot gained the same GUID. The host verified 0.2 slash and acid resistance and the stock 0.25 carry weight reduction. A second jacket was refused while the slot was occupied. After restart, the exact row and resistance values restored on the guest and the host inventory matched its starting snapshot.
 
 The guest equipped their earned HazOp Gear, swapped to the Bomber Jacket, then used the stock inventory controls to switch back. Each swap moved the previous armor to the backpack with its original GUID. The HazOp stats, both items, and the completed quest restored after restart. The host kept its own HazOp reward and inventory throughout.

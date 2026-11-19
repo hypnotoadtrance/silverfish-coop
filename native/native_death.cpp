@@ -26,6 +26,7 @@
 #include "black_stone.hpp"
 #include "guest_item.hpp"
 #include "guest_armor.hpp"
+#include "guest_melee.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "inventory_view.hpp"
@@ -1240,6 +1241,7 @@ namespace
             silverfish::native_guest_clock::uninstall_hooks();
             silverfish::native_guest_primary_input::uninstall_hooks();
             silverfish::native_guest_sickness::uninstall_hooks();
+            silverfish::native_guest_melee::uninstall_hooks();
             silverfish::native_guest_consumable::uninstall_hooks();
             silverfish::native_loot_crate_input::uninstall_hooks();
             silverfish::native_enemy_loot::uninstall_hooks();
@@ -1338,6 +1340,7 @@ namespace
             silverfish::native_transport::register_lua(lua);
             silverfish::native_guest_item::register_lua(lua);
             silverfish::native_guest_armor::register_lua(lua);
+            silverfish::native_guest_melee::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);

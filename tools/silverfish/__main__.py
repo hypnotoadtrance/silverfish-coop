@@ -65,6 +65,7 @@ def parser() -> argparse.ArgumentParser:
                       help="detach the authenticated guest's native save for the C++ playtest")
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
+    host.add_argument("--native-guest-melee-canary", action="store_true", help="observe one fenced stock Old Pipe swing in a headless fixture")
     host.add_argument("--native-guest-mre", action="store_true", help="enable guest MRE and Canned Peaches use with personal intoxication")
     host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
     host.add_argument("--native-authored-enemy-loot", "--native-dead-bridge-enemy-loot",
@@ -149,6 +150,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-smg-hold-fixture", "native-guest-held-fire-fixture",
+        "native-guest-melee-canary-equip", "native-guest-melee-canary",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
         "native-guest-bandage", "native-guest-mre", "native-guest-canned-peaches", "native-guest-mre-fixture",
         "native-inventory-view-key-fixture", "native-guest-clock-fixture",
@@ -247,6 +249,7 @@ async def execute(opts):
                         expanded_zones=opts.native_expanded_zones, native_shop_view=opts.native_shop_view,
                         guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness, guest_mre=opts.native_guest_mre,
                         guest_held_fire=opts.native_guest_held_fire,
+                        guest_melee_canary=opts.native_guest_melee_canary,
                         native_dead_bridge_enemy_loot=opts.native_dead_bridge_enemy_loot,
                         start_preset=opts.native_start_preset, difficulty=opts.native_difficulty,
                         world_seed=opts.native_world_seed,

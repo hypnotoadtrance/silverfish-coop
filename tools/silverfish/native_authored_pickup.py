@@ -19,6 +19,7 @@ COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
 SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
 POCKET_WATCH = "crossroads-pocket-watch"
+OLD_PIPE = "crossroads-old-pipe"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
 BOROUGH_MRE = "borough-mre"
@@ -42,6 +43,8 @@ SOURCES = {
                            "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
     POCKET_WATCH: (CROSSROADS, f"Item_PocketWatch_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1",
                    "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
+    OLD_PIPE: (CROSSROADS, f"MeleeWep_OldPipe_C {CROSSROADS}.CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1",
+               "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"),
     SAVLO_RING: (SAVLO_ESTATE, f"Art_EvilEyeRing_C {SAVLO_ESTATE}.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
                  "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
     BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",
@@ -68,8 +71,10 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
-    if requested is None and len(sources) == 1:
-        return sources[0]
+    if requested is None:
+        defaults = [source for source in sources if source != OLD_PIPE]
+        if len(defaults) == 1:
+            return defaults[0]
     if isinstance(requested, str) and requested in sources:
         return requested
     raise party.RuleError("authored_pickup_exact_source_required")

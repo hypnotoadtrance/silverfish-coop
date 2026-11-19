@@ -25,6 +25,7 @@ from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
+from . import native_guest_melee
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
@@ -2305,6 +2306,10 @@ class Host:
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()
                     result = await native_guest_armor.perform(self, bridge, character, request.get("operation_id") or path.stem,
                                                               action, guid)
+                elif action in (native_guest_melee.EQUIP, native_guest_melee.CANARY) and self.fixtures:
+                    character = self.roles().get(request.get("target") or "guest")
+                    result = await native_guest_melee.perform(self, bridge, action, character, request.get("item_guid"),
+                                                              request.get("operation_id") or path.stem)
                 elif action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo",
                                  "native-guest-weapon-seed-light-pistol") and self.native_guest and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
@@ -3053,7 +3058,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     extraction: tuple[int, bool, bool] | None = None, guest_regen: bool = False,
                     guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None, guest_mre: bool = False,
                     difficulty: str | None = None,
-                    guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False) -> None:
+                    guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
+                    guest_melee_canary: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -3082,6 +3088,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
     host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
+    if guest_melee_canary and not (headless and fixtures and native_guest and native_zones and native_backend == "cpp"
+                                  and staged_script(work, "native_guest_melee.lua", "SilverfishStartNativeGuestMeleeCanary")):
+        raise ValueError("The Old Pipe animation canary requires the current staged headless native co-op bridge")
     if guest_held_fire and not (native_guest_controls and
                                 staged_script(work, "native_guest_smg_hold.lua", "held-fire-command.tsv")
                                 and staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent")):
@@ -3158,7 +3167,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
                              guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input, guest_mre=guest_mre,
                              native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
-                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot)
+                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary)
             bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
             if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 3:
