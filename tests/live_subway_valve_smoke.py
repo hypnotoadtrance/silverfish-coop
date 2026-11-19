@@ -114,7 +114,8 @@ async def verify(work: Path, vanilla_saved: Path):
     async def inventory(owner, ids):
         matched, offset = {}, 0
         while offset is not None:
-            page = (await action(owner, "native-inventory-list", "--target", str(offset)))["native_inventory"]
+            options = ("--amount", str(offset)) if owner == host else ("--target", str(offset))
+            page = (await action(owner, "native-inventory-list", *options))["native_inventory"]
             matched.update((row["guid"], row) for row in page["items"] if row["guid"] in ids)
             offset = page["next_offset"]
         return matched
