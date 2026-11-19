@@ -21,7 +21,8 @@ ACTIONS = {PREFLIGHT: "preflight", "native-turret-photo-start": "start", CAPTURE
            "native-turret-photo-turn-in": "turn_in", XP_FIXTURE: "xp_fixture", HOST_AIM_FIXTURE: "aim_fixture"}
 TARGETS = {"turret-13", "turret-15"}
 BOARDS = native_computer_board.BOARDS
-SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, native_computer_board.QUEST_ID}
+SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, native_computer_board.QUEST_ID,
+             native_computer_board.COUP_REPORT.quest_id}
 
 
 def _pawn(host, character, area):
@@ -79,11 +80,7 @@ async def offers(host, bridge, character, offset):
     host.last_game, host.last_seen = snapshot, time.monotonic()
     rows = native_quest_catalog.page(catalog, f"board@{int(offset or 0)}", board=True)
     for quest in rows["quests"]:
-        identifier = quest["id"]
-        if identifier == native_computer_board.COUP_REPORT.quest_id:
-            quest["co_op"] = "experimental"
-        else:
-            quest["co_op"] = "verified" if identifier in SUPPORTED else "unqualified"
+        quest["co_op"] = "verified" if quest["id"] in SUPPORTED else "unqualified"
     return {"native_bounty_board": {**proof, **rows}}
 
 
