@@ -10,6 +10,9 @@ import uuid
 
 from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from tools.silverfish.guest_weapon_profiles import FIREARMS
 
 
