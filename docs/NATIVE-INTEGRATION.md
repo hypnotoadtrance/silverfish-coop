@@ -46,7 +46,11 @@ The opt-in expanded exit registry contains 138 directed routes across 54 maps. I
 
 The Observatory rest command and stock sleep screen both use the exact SavePoint and stock day cycle. A host and two guests rested for one game hour, left via the CrossRoads exit, and returned to the saved Observatory bed after all three went down. All three recovered full native health. The stock sleep-screen run measured unchanged desktop cursor bounds across 1,305 samples. The rest catalog covers 11 cooked beds, including City's verified neutral bed.
 
+A later headless run repeated this with a host and four guests. All four guests kept separate saves and were refused at the stock bed on both peers. The host confirmed sleep, all five returned to the exact Observatory bed after a wipe, and nine original save hashes matched. Sixty cursor samples taken with all five games active showed the full desktop bounds.
+
 A connected guest rendered the host's directional light, sky material, fog, and clouds in Forest, CrossRoads, and DeadBridge while its local Unreal SaveGame stayed unchanged. The party took Forest's stock exit into CrossRoads, crossed DeadBridge in both directions, and took the stock door into Cistern. Cistern's cooked day controller only tracks time, and the test verified that the outdoor projection cleared on arrival. The registry now qualifies 30 cooked outdoor profiles. Live coverage also includes Observatory and City.
+
+The guest's original time header advanced after the host slept one hour at the Observatory. It displayed the host's time after the stock door into the time-only Cistern. At the Observatory, the guest's underlying local clock value stayed fixed throughout the projection. The original single-player save hashes matched.
 
 The extraction test used one retained row and a stock backpack display restricted to its owner. The host froze both typed save generations, accepted the guest's selected SMG, and preserved its equipment index. It moved the nine-round reserve to a separate stock save generation tied to the guest and their death position. The host's recovery request was denied. The guest recovered all nine rounds once through the local action interface.
 
@@ -75,6 +79,8 @@ A separate run used the stock interact binding to open the same crate. The guest
 A headless two-player run used the stock interaction at two CrossRoads crates and one Dead Bridge crate. All three used the authenticated guest's Lucky Looter trait. The guest claimed a Face Mask and shotgun shells from the two CrossRoads rolls, and the host's competing claims were refused. Dead Bridge returned an empty roll. All three rolls survived the round trip and a host restart, and nine original single-player file hashes matched.
 
 The finite market service supports cash purchases and whole-stack sales at Observatory, Scav Bar, and Black Market. Guests at Scav Bar and Black Market opened the purchase overlay through the stock interact binding, confirmed a stock offer, and later sold the exact typed stack through the local action interface. Shared wallet and merchant stock survived the host restarts. At the Scientist, the guest used the same overlay to pay 298 cash for the stock camera. The transaction credited 298 to the merchant, preserved its reusable offer, and recorded a distinct camera GUID in the guest save. The guest equipped that exact camera after restart.
+
+The Gunsmith test opened 12 offers through stock Interact and checked Page Up and Page Down navigation. The guest paid 1,380 shared cash for 200 rounds of 9mm Ball. The guest's exact stack, the wallet, and the merchant's cash survived restart. The stock shelf remained available, and the original save hashes matched.
 
 The verified fresh Wanderer preset uses the stock Observatory start, Mercy rules, and in-memory character application. A loopback host committed seed 142857 before accepting invitations. The starter armor, bag, and note retained their exact GUIDs after a same-port restart. The guest kept its independent default inventory. The original save files kept the same hashes.
 
@@ -125,7 +131,5 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 - The shipped Black Market board hides the `MeetBroker` template because both stock visibility flags are false. A live start request reached the correct board and was refused by its offer check. An already-active stock row qualifies for the typed starter kit and XP path in offline tests. Its live redemption remains unverified.
 
 - The authored travel registry covers 145 directed exits across 55 worlds. The seven Golden Nexus pads use their stock destination markers and one-step travel time. The three CrossRoads pads share an entrance tag, so headless position and wall probes require the exact pad actor.
-- The Gunsmith's cash counter can list the stock 200-round Ball shelf when the host's settings enable reusable stock. The shelf transaction and restart still need a live check.
-- The guest's stock time header uses a fresh host clock frame while leaving the guest save intact. The clock smoke exercises the original widget at Observatory and can follow the stock exits to the time-only Cistern.
 
 The stock Silverfish build ships Unreal's Null subsystem. A Steam Invite test needs an authorized Steamworks integration under the game's App ID and two separately entitled Steam sessions for a real invite round-trip. The existing Direct IP path supports local two-process testing without Steam. [Steamworks setup](https://partner.steamgames.com/doc/sdk/api) · [Steam lobby invites](https://partner.steamgames.com/doc/api/ISteamMatchmaking#InviteUserToLobby)

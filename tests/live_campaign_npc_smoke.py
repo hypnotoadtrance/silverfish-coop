@@ -1,7 +1,8 @@
-"""Observe stock CrossRoads encounter squads on a fresh headless loopback party."""
+"""Observe stock CrossRoads encounters on a headless loopback party."""
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 import math
 import os
@@ -16,6 +17,12 @@ from live_multi_smoke import saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from tools.silverfish import native_host_save
+from tools.silverfish.campaign import CampaignStore
+
+
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 LEVEL = MAP + ".CrossRoads_P:PersistentLevel."
 SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(LEVEL) + r"AI_Spawner_Squad_BP_C_(\d+)\Z")
@@ -27,6 +34,50 @@ DATA = {
     "flayer": ({"stock_antfarm"}, "NPC_Flayer_C", {"Flayers": 2}),
 }
 SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
+FLAYER_REPLAY_SHA = "8f17247a7b18f3e91ba33ec6c4bd72d711935a2217667a5933e8713084e93c95"
+FLAYER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999494537]
+
+
+def seed_flayer_replay(source: Path, destination: Path) -> dict:
+    """Carry over only the verified stock frame and saved CrossRoads host spawn."""
+    saved = json.loads((source / "save" / "campaign.json").read_text(encoding="utf-8"))
+    old_world = saved["world"]
+    expected_host = {"map": MAP, "location": FLAYER_REPLAY_SPAWN, "health": 250.0}
+    frame = native_host_save.verify(source / "game-user", old_world)
+    if (not frame or frame["map"] != MAP or frame["sha256"] != FLAYER_REPLAY_SHA
+            or old_world.get("host") != expected_host):
+        raise ValueError("Flayer replay requires the verified d474f2cf stock frame and CrossRoads spawn")
+    content = native_host_save.slot_path(source / "game-user", frame["slot"]).read_bytes()
+    if sha256(content).hexdigest() != FLAYER_REPLAY_SHA:
+        raise ValueError("The immutable Flayer replay frame changed while being read")
+
+    destination.mkdir(parents=True, exist_ok=False)
+    profile = destination / "game-user"
+    native_host_save.directory(profile).mkdir(parents=True)
+    with native_host_save.slot_path(profile, frame["slot"]).open("xb") as stream:
+        stream.write(content)
+    copied = native_host_save.record(profile, frame["slot"], MAP, flush=True)
+    with CampaignStore(destination / "save",
+                       verify_checkpoint=lambda state: native_host_save.verify_checkpoint(profile, state)) as campaign:
+        campaign.save_world({"map": MAP, "host": expected_host, "native_host_save": copied})
+        created = campaign.status()
+        if created["campaign_id"] == saved["campaign_id"] or created["characters"] or created["guest_count"]:
+            raise RuntimeError("The staged Flayer replay did not create fresh campaign identities")
+    return {"frame": copied, "spawn": expected_host, "campaign_id": created["campaign_id"]}
+
+
+def verify_flayer_restore(run: Path, server: dict, seed: dict) -> dict:
+    events = (json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+    observed, = (event for event in events if event.get("event") == "native_host_save_restored"
+                 and event.get("generation") == server.get("generation"))
+    pawn = server["game"]["pawns"]["local"]
+    if (server.get("campaign", {}).get("campaign_id") != seed["campaign_id"]
+            or (observed.get("state"), observed.get("map"), observed.get("slot"), observed.get("pawn"))
+            != ("restored", MAP, seed["frame"]["slot"], pawn.get("name"))
+            or math.dist(pawn["location"], seed["spawn"]["location"]) > 2
+            or pawn.get("health") != seed["spawn"]["health"]):
+        raise AssertionError({"restore": observed, "host_pawn": pawn, "replay": seed})
+    return {"receipt": observed, "pawn": pawn}
 
 
 def status(run: Path) -> dict:
@@ -208,11 +259,13 @@ def stock_flayer_infection(server: dict, report: dict) -> bool:
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
-                   stock_refresh: bool = False) -> None:
+                   stock_refresh: bool = False, flayer_replay: Path | None = None) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
-    host = work / "campaigns" / name / "run"
+    campaign_root = work / "campaigns" / name
+    prepared = seed_flayer_replay(flayer_replay, campaign_root) if flayer_replay else None
+    host = campaign_root / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
     guest.mkdir(parents=True)
@@ -245,6 +298,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 "verification_scope": "join" if join_only else "combat" if combat else "encounter", "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
                 "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat}
+    if prepared:
+        evidence["flayer_replay"] = {"prepared": prepared}
     last_frames = {"host": None, "guest": None}
     client_history = {"frames": 0, "network_frames": 0, "max_local_authority": 0,
                       "max_local_begins": 0, "max_local_initializations": 0,
@@ -357,7 +412,10 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             fixture_flags += ("--native-guest-sickness",)
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
                     "--native-events", "--native-guest", "--start-zone", MAP, *fixture_flags)
-        await wait("The CrossRoads host did not start", lambda server, _, __: server.get("state") == "hosting", 45)
+        initial, _, _ = await wait("The CrossRoads host did not start",
+                                   lambda server, _, __: server.get("state") == "hosting", 45)
+        if prepared:
+            evidence["flayer_replay"]["adopted"] = verify_flayer_restore(host, initial, prepared)
         invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
         if join_only:
@@ -483,6 +541,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
+    parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
     parser.add_argument("--combat", action="store_true", help="observe a stock melee attack against the exact detached guest")
     parser.add_argument("--stock-refresh", action="store_true",
                         help="inspect stock Husk reinforcement readiness and permit one eligible stock director refresh")
@@ -505,6 +564,8 @@ if __name__ == "__main__":
         parser.error("--require-client-denial and --approach require --replicate")
     if options.flayer_veto and options.cohort != "flayer":
         parser.error("--flayer-veto requires --cohort flayer")
+    if options.flayer_replay and (options.cohort != "flayer" or not options.flayer_replay.is_dir()):
+        parser.error("--flayer-replay requires --cohort flayer and the verified d474f2cf campaign directory")
     if options.require_client_denial and options.cohort == "flayer" and not options.flayer_veto:
         parser.error("--require-client-denial for Flayers requires --flayer-veto")
     if options.join_only and (options.approach or options.require_client_denial):
@@ -516,4 +577,5 @@ if __name__ == "__main__":
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
-                         join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh))
+                         join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
+                         flayer_replay=options.flayer_replay))
