@@ -39,7 +39,7 @@ def select_routes(selectors):
     return routes
 
 
-async def verify(work, vanilla, routes):
+async def verify(work, vanilla, routes, check_regroup=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -137,6 +137,12 @@ async def verify(work, vanilla, routes):
             guest_lane = await near_probe("guest", "guest_veto", ("guest_denied",) if door else ("wall",))
             await act(position, target="guest", exit_position="far", **options)
             host_lane = await near_probe("host", "distance_veto", ("host_out_of_range",) if door else ("wall",), guest_lane)
+            if check_regroup:
+                named = await wait(run, lambda state: any(
+                    member["role"] == "guest" and member["name"] == "Pathfinder" and member["distance_m"] > 15
+                    for member in state.get("game", {}).get("native_zone_regroup", {}).get("blockers", [])), timeout=12)
+                leg["regroup"] = named["game"]["native_zone_regroup"]
+                assert leg["regroup"]["map"] == route.source and leg["regroup"]["display"] == "headless", leg["regroup"]
             await near_probe("host", "group_probe", ("host_opening", "travel_requested") if door else ("clear",),
                              host_lane, group=True)
             current = await paired(route.destination, current["zone_epoch"])
@@ -174,9 +180,10 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
+    parser.add_argument("--verify-regroup-message", action="store_true")
     config = parser.parse_args()
     try:
         selected = select_routes(config.route)
     except ValueError as error:
         parser.error(str(error))
-    asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected))
+    asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected, config.verify_regroup_message))

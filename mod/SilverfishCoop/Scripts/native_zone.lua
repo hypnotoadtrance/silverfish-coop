@@ -166,6 +166,7 @@ function zone.start(bridge)
     event_path = bridge .. "/native-zone-events"
     expanded_event_path = bridge .. "/native-authored-exit-events"
     heartbeat_path = bridge .. "/native-zone-heartbeat"
+    wall.start(bridge)
 end
 
 function zone.sync(state, phase)

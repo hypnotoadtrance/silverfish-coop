@@ -1,5 +1,6 @@
 local wall = {}
 local zones = require("zone_maps")
+local regroup = require("zone_regroup")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE_WALLS") == "1"
 local expanded = os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
@@ -63,6 +64,10 @@ local function clear_record(index)
     if observation and observation.index == index then observation = nil end
 end
 
+function wall.start(bridge)
+    if enabled then regroup.start(bridge) end
+end
+
 function wall.clear()
     for key in pairs(records) do clear_record(key) end
     retry_at = {}
@@ -70,6 +75,7 @@ function wall.clear()
     primary_key = nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
     status, failure = "inactive", ""
+    regroup.clear()
 end
 
 local function same_rotation(first, second)
@@ -136,7 +142,7 @@ end
 local function host_can_pass(state, local_pawn, world, accepting)
     if not accepting or not local_pawn:HasAuthority() or type(state.clients) ~= "number"
         or state.clients < 0 or state.clients > 4 then return false end
-    local count, positions = 0, {}
+    local count, positions, blockers = 0, {}, {}
     local host_position = local_pawn:K2_GetActorLocation()
     for _, details in ipairs(state.pawns) do
         if details.kind == "guest" then
@@ -148,10 +154,14 @@ local function host_can_pass(state, local_pawn, world, accepting)
             positions[address] = true
             count = count + 1
             local squared = distance_squared(host_position, remote:K2_GetActorLocation())
-            if not finite(squared) or squared > range_squared then return false end
+            if not finite(squared) then return false end
+            if squared > range_squared then
+                blockers[#blockers + 1] = {pawn = details.name, slot = details.slot, meters = math.sqrt(squared) / 100}
+            end
         end
     end
-    return count == state.clients
+    if count ~= state.clients then return false end
+    return #blockers == 0, blockers
 end
 
 local function sync_shape(index, world, fixture, desired)
@@ -188,6 +198,26 @@ end
 
 local function in_world(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+end
+
+local function nearby_exit(location)
+    local name, nearest = nil, 450 ^ 2
+    for key, record in pairs(records) do
+        local shape = record.component
+        local center, extent = shape:K2_GetComponentLocation(), shape:GetScaledBoxExtent()
+        local directions = {shape:GetForwardVector(), shape:GetRightVector(), shape:GetUpVector()}
+        local x, y, z = location.X - center.X, location.Y - center.Y, location.Z - center.Z
+        local squared = 0
+        for index, length in ipairs({extent.X, extent.Y, extent.Z}) do
+            local axis = directions[index]
+            local outside = math.max(0, math.abs(x * axis.X + y * axis.Y + z * axis.Z) - length)
+            squared = squared + outside ^ 2
+        end
+        if squared < nearest or (squared == nearest and name and key < name) then
+            name, nearest = key, squared
+        end
+    end
+    return name
 end
 
 local function entrance_name(actor)
@@ -279,7 +309,9 @@ function wall.sync(state, phase, fixture, accepting, secondary)
         status, failure = "arming", "Waiting for a compatible pawn capsule and exit Box"
         return
     end
-    local desired = hosting and host_can_pass(state, local_pawn, world, accepting) and local_capsule or nil
+    local permitted, blockers
+    if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
+    local desired = permitted and local_capsule or nil
     local sources = wall_sources(world, state.map, route, fixture, secondary)
     for key in pairs(records) do
         if not sources[key] then clear_record(key) end
@@ -302,6 +334,12 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     status = primary_key and records[primary_key] and "ready" or had_error and "error" or "arming"
     table.sort(diagnostics)
     failure = table.concat(diagnostics, ", ")
+    local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation())
+    if near then
+        regroup.show(state, near, blockers)
+    else
+        regroup.clear()
+    end
 end
 
 local function nexus_probe_target(pawn, capsule_component, box, start, center)
@@ -482,9 +520,10 @@ function wall.rows(status_row)
     if not enabled then return {} end
     local primary = records[primary_key]
     local host_open = primary and valid(primary.host_capsule)
-    return {status_row("native-zone-wall", status, host_open and 1 or 0,
+    local rows = {status_row("native-zone-wall", status, host_open and 1 or 0,
         observation and observation.slot or "-", observation and observation.outcome or "-",
         observation and observation.remaining or "-", failure)}
+    return regroup.rows(rows, status_row)
 end
 
 return wall

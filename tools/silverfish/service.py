@@ -2740,6 +2740,13 @@ class Host:
 
     async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
+            if self.native_zone_walls:
+                recipients = self.native_recipients()
+                labels = self.store.character_names(recipients)
+                area = self.last_game.get("map", "")
+                listing = [area, *(f"{owner['pawn']}\t{owner['role']}\t{labels[character]}"
+                                   for character, owner in recipients.items() if character in labels)]
+                write_text(bridge.directory / "native-zone-roster", "\n".join(listing) + "\n")
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
         for operation_id, source, pawn, bed, hours in bridge.native_rest_requests():

@@ -910,6 +910,16 @@ class Bridge:
                         "state": fields[1], "host_open": fields[2] == "1", "slot": fields[3],
                         "outcome": fields[4], "remaining_uu": _finite(fields[5]), "failure": fields[6],
                     }
+                elif fields[0] == "native-zone-regroup" and len(fields) == 8:
+                    area, exit_actor, display, pawn, role, name, meters = fields[1:]
+                    distance = _finite(meters)
+                    if distance is None or distance <= 15 or display not in ("visible", "hidden", "headless"):
+                        continue
+                    regroup = data.setdefault("native_zone_regroup", {
+                        "map": area, "exit_actor": exit_actor, "display": display, "blockers": [],
+                    })
+                    if (area, exit_actor, display) == (regroup["map"], regroup["exit_actor"], regroup["display"]):
+                        regroup["blockers"].append({"pawn": pawn, "role": role, "name": name, "distance_m": distance})
                 elif fields[0] == "native-door" and len(fields) == 4:
                     data["native_door"] = {
                         "decision": fields[1], "guest_denied": int(fields[2]), "requests": int(fields[3]),

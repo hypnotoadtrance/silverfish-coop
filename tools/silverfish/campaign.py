@@ -365,6 +365,13 @@ class CampaignStore:
     def _public_character(self, character_id):
         return {"character_id": character_id, **copy.deepcopy(self._data["characters"][character_id])}
 
+    def character_names(self, character_ids):
+        with self._mutex:
+            self._require_open()
+            characters = self._data["characters"]
+            return {character_id: characters[character_id]["name"]
+                    for character_id in character_ids if character_id in characters}
+
     def linked_character_catalog(self, guest_id):
         """Only for an application session already authenticated by this store."""
         with self._mutex:
