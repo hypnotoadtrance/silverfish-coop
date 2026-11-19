@@ -67,7 +67,8 @@ namespace
         .world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
         .actor = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1"),
         .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C"),
-        .x = -14140.884409849416, .y = 15120.301926356009, .z = -318.57768194632746,
+        // World pose of the stock authority actor after the active quest leaves it in place.
+        .x = -15818.69, .y = 15743.97, .z = 381.31,
         .item_type = 1, .dead_drop = true,
     };
 
@@ -1579,7 +1580,11 @@ namespace
             if (now < drop_settles_at) return 0;
             const auto& bound = scopes.front();
             if (bound.actor.Get() == actor && bound.claimed && boolean(actor, STR("bHidden"), true)) shown = "claimed";
-            else if (drop_gate(state) && present_drop(state)) shown = "stock-active";
+            else if (!drop_gate(state)) return drop_diagnostic(lua, "canonical_quest_inactive", actor);
+            else if (const auto* fault = source_fault(actor, state.world.Get(), dead_drop_profile))
+                return drop_diagnostic(lua, fault, actor);
+            else if (!present_drop(state)) return drop_diagnostic(lua, "stock_world_visibility_or_box", actor);
+            else shown = "stock-active";
         }
         else if (drop_gate(state) && present_drop(state))
         {
