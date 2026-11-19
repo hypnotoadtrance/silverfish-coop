@@ -1,4 +1,4 @@
-"""Verify original primary and reload inputs with exact stock Ball ammo weapons."""
+"""Verify original primary and reload inputs with qualified stock firearm profiles."""
 
 import argparse
 import asyncio
@@ -13,17 +13,17 @@ from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.silverfish.guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL
+from tools.silverfish.guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-WEAPONS = {profile.kind: profile for profile in FIREARMS if profile.ball_magazine and profile.headless_seed}
+WEAPONS = {profile.kind: profile for profile in FIREARMS if profile.magazine and profile.headless_seed}
 DEFAULT_WEAPONS = ("light-pistol-suppressed", "smg-standard")
 
 
 async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
-    uses_45 = any(WEAPONS[kind].ball_magazine.ammo == FORTY_FIVE_BALL for kind in kinds)
-    prefix = "stock-45-ball" if uses_45 else "stock-9mm"
+    uses_45 = any(WEAPONS[kind].magazine.ammo == FORTY_FIVE_BALL for kind in kinds)
+    prefix = "stock-buckshot" if "sg-71-a" in kinds else "stock-45-ball" if uses_45 else "stock-9mm"
     name = prefix + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     client = ("--profile", name)
@@ -75,6 +75,16 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             await action(owner, "stop")
         assert await asyncio.wait_for(proc.wait(), 15) == 0, proc.returncode
 
+    async def seed_reserve():
+        guid = uuid.uuid4().hex.upper()
+        seeded = await action(host, "native-guest-weapon-seed-ammo", "--item-guid", guid)
+        assert seeded["native_guest_weapon"]["guid"] == guid, seeded
+        return guid
+
+    async def reload_input():
+        pressed = (await action(client, "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
+        return await receipt("native_guest_reload_input", pressed["sequence"])
+
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones")
     client_flags = ("--headless", "--native-zones", "--native-guest-primary-input", "--native-guest-reload-input")
     try:
@@ -86,13 +96,12 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
         reserve_45 = 0
         for kind in kinds:
             profile = WEAPONS[kind]
-            capacity = profile.ball_magazine.capacity
-            ammo = profile.ball_magazine.ammo
-            check_wrong_ammo = ammo == FORTY_FIVE_BALL and "nonmatching_reserve" not in evidence
+            capacity = profile.magazine.capacity
+            ammo = profile.magazine.ammo
+            wrong_key = "buckshot_nonmatching_reserve" if ammo == TWELVE_GAUGE_BUCK else "nonmatching_reserve"
+            check_wrong_ammo = ammo in (FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK) and wrong_key not in evidence
             if check_wrong_ammo:
-                nonmatching_guid = uuid.uuid4().hex.upper()
-                nonmatching = await action(host, "native-guest-weapon-seed-ammo", "--item-guid", nonmatching_guid)
-                assert nonmatching["native_guest_weapon"]["guid"] == nonmatching_guid, nonmatching
+                nonmatching_guid = await seed_reserve()
             guid = uuid.uuid4().hex.upper()
             seeded = (await action(host, "native-guest-weapon-seed", "--kind", kind, "--item-guid", guid))["native_guest_weapon"]
             assert seeded["guid"] == guid and seeded["stored_ammo"] == 7, seeded
@@ -105,7 +114,9 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
                 press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
                 assert press["guid"] == guid and press["stock_wrappers"] == 2, press
                 shot = await receipt("native_guest_primary_input", press["sequence"])
-                assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guid, loaded, loaded - 1, 1), shot
+                assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
+                    guid, loaded, loaded - 1, ammo.projectile_count
+                ), shot
                 shots.append({"press": press, "stock_shot": shot})
             empty = (await action(client, "native-guest-weapon-inspect", "--target", guid))["native_guest_weapon"]
             assert (empty["stored_ammo"], empty["actor_ammo"]) == (0, 0), empty
@@ -115,13 +126,11 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             if check_wrong_ammo:
                 wrong_ammo = await ask("action", *client, "native-guest-weapon-reload", "--target", guid, success=False)
                 assert wrong_ammo["error"] == "no_matching_guest_ammo", wrong_ammo
-                evidence["nonmatching_reserve"] = {"guid": nonmatching_guid, "refused": wrong_ammo["error"]}
+                evidence[wrong_key] = {"guid": nonmatching_guid, "refused": wrong_ammo["error"]}
 
-            reserve_guid = uuid.uuid4().hex.upper()
-            reserve = (await action(host, "native-guest-weapon-seed-ammo", "--item-guid", reserve_guid))["native_guest_weapon"]
-            assert reserve["guid"] == reserve_guid, reserve
-            reload = (await action(client, "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
-            refilled = await receipt("native_guest_reload_input", reload["sequence"])
+            reserve_guid = await seed_reserve()
+            second_reserve = await seed_reserve() if ammo == TWELVE_GAUGE_BUCK else None
+            refilled = await reload_input()
             assert (refilled["guid"], refilled["before"]) == (guid, 0), refilled
             assert 0 < refilled["after"] <= capacity, refilled
             assert refilled["after"] == refilled["reserve_before"] - refilled["reserve_after"], refilled
@@ -133,7 +142,16 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
             evidence["weapons"][kind] = {"class_path": profile.path,
                                          "guid": guid, "scope": kind, "shots": shots, "empty": empty,
                                          "stock_reload": refilled, "reserve_guid": reserve_guid,
-                                         "ammo_row": ammo.row, "ammo_item": ammo.item_path}
+                                         "ammo_row": ammo.row, "ammo_item": ammo.item_path,
+                                         "projectile": ammo.projectile_path}
+            if ammo == TWELVE_GAUGE_BUCK:
+                second = await reload_input()
+                assert (refilled["after"], refilled["reserve_before"], refilled["reserve_after"]) == (5, 10, 5), refilled
+                assert (second["guid"], second["before"], second["after"],
+                        second["reserve_before"], second["reserve_after"]) == (guid, 5, 10, 5, 0), second
+                evidence["weapons"][kind].update(
+                    second_reserve_guid=second_reserve, first_stack_reload=refilled, stock_reload=second
+                )
         await stop(host, authority)
         await stop(client, guest)
         await launch(host, "host-restart", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)

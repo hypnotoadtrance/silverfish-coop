@@ -15,6 +15,11 @@ FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.
 CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH}
 PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera"))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed)
+PROJECTILES_PER_ROUND = {
+    firearm.kind: firearm.magazine.ammo.projectile_count
+    for firearm in guest_weapon_profiles.FIREARMS
+    if firearm.magazine
+}
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
@@ -109,10 +114,15 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         elif (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
               or type(actor) is not int or actor != (stored if proof["status"] == "equipped" else -1)):
             raise RuntimeError("Native guest stock weapon ammunition did not verify")
-        if operation == "fire" and (proof["status"] != "equipped" or type(proof.get("before")) is not int
-                                    or proof.get("after") != stored or proof["before"] - stored != 1
-                                    or proof.get("projectiles") != 1):
-            raise RuntimeError("The stock shot did not produce one verified guest-owned projectile and ammo debit")
+        if operation == "fire":
+            equipped = snapshot.get("native_guest_equipped_weapons", {}).get(pawn, {})
+            shot_kind = equipped.get("kind") if equipped.get("guid") == guid else None
+            expected_projectiles = PROJECTILES_PER_ROUND.get(shot_kind, 1)
+            projectile_count = proof.get("projectiles")
+            if (proof["status"] != "equipped" or type(proof.get("before")) is not int
+                    or proof.get("after") != stored or proof["before"] - stored != 1
+                    or type(projectile_count) is not int or projectile_count != expected_projectiles):
+                raise RuntimeError("The stock shot did not verify its guest-owned projectile count and one round debit")
         if operation == "reload":
             before, reserve_before, reserve_after = (proof.get(key) for key in ("before", "reserve_before", "reserve_after"))
             if (proof["status"] != "equipped" or proof.get("after") != stored

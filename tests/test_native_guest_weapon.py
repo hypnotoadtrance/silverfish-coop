@@ -33,14 +33,24 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units),
                          (1, "45Cal_Ball", "Ammo_Magnum_BP", "Projectile_Pistol_Magnum", 10))
         firearms = {
-            profile.kind: (profile.blueprint, profile.ball_magazine.capacity, profile.ball_magazine.burst_length)
+            profile.kind: (profile.blueprint, profile.magazine.capacity, profile.magazine.burst_length)
             for profile in guest_weapon_profiles.FIREARMS
-            if profile.ball_magazine and profile.ball_magazine.ammo == ammo
+            if profile.magazine and profile.magazine.ammo == ammo
         }
         self.assertEqual(firearms, {
             "1911": ("Wep_1911", 8, 1), "1911-fancy": ("Wep_1911_Fancy", 8, 1),
             "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
         })
+
+    def test_only_stock_sg_71_a_uses_buckshot_and_first_stack_reload(self):
+        ammo = guest_weapon_profiles.TWELVE_GAUGE_BUCK
+        self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
+                         (4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, 9))
+        profiles = [profile for profile in guest_weapon_profiles.FIREARMS
+                    if profile.magazine and profile.magazine.reload_first_stack]
+        self.assertEqual([(profile.kind, profile.blueprint, profile.magazine.capacity) for profile in profiles],
+                         [("sg-71-a", "Wep_ShotGun_SemiAuto", 10)])
+        self.assertEqual(profiles[0].magazine.ammo, ammo)
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -133,6 +143,38 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                                                             "native-guest-weapon-inspect", guid),
                          {"native_guest_weapon": proof})
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_nine_projectile_receipt_requires_same_authenticated_equipped_shotgun(self):
+        guid, operation = "1" * 32, "a" * 32
+        proof = {"map": "zone", "action": "fire", "pawn": "exact pawn", "guid": guid, "ok": True,
+                 "status": "equipped", "actor_ammo": 5, "stored_ammo": 5, "before": 6, "after": 5, "projectiles": 9}
+        for pawn, kind, equipped_guid, count, accepted in (
+            ("exact pawn", "sg-71-a", guid, 9, True),
+            ("exact pawn", "sg-71-a", "2" * 32, 9, False),
+            ("other pawn", "sg-71-a", guid, 9, False),
+            ("exact pawn", "pistol", guid, 9, False),
+            ("exact pawn", "sg-71-a", guid, 1, False),
+            ("exact pawn", "sg-71-a", guid, 8, False),
+        ):
+            with self.subTest(pawn=pawn, kind=kind, equipped_guid=equipped_guid, count=count):
+                host = self.host()
+                bridge = SimpleNamespace(command=AsyncMock(return_value={
+                    "state": "hosting", "map": "zone", "native_guest_weapon": dict(proof, projectiles=count),
+                    "native_guest_equipped_weapons": {pawn: {"kind": kind, "guid": equipped_guid}},
+                }))
+                request = native_guest_weapon.perform(
+                    host, bridge, "character", operation, "native-guest-weapon-fire", guid
+                )
+                if accepted:
+                    self.assertEqual((await request)["native_guest_weapon"], proof)
+                    self.assertEqual(host.checkpoint_native.await_args.kwargs,
+                                     {"require_guest_frames": frozenset({"character"})})
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "projectile count"):
+                        await request
+                    self.assertTrue(host.native_checkpoint_unsafe)
+                    self.assertTrue(host.stopping)
+                    host.checkpoint_native.assert_not_awaited()
 
     async def test_verified_bandage_consumption_requires_exact_guest_checkpoint(self):
         guid, operation = "1" * 32, "b" * 32

@@ -64,7 +64,7 @@ namespace
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
 
     using Equipment = silverfish::guest_weapon_profiles::Profile;
-    constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false, nullptr};
+    constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false, nullptr, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
