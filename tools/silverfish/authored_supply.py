@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 import hashlib
 
-from .guest_weapon_profiles import FORTY_FIVE_BALL, StockAmmo
-from .travel import CITY, CROSSROADS
+from .guest_weapon_profiles import FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK, StockAmmo
+from .travel import CITY, CROSSROADS, SLUMS
 
 
 @dataclass(frozen=True)
@@ -38,11 +38,24 @@ class Placement:
 
 # Exact PersistentLevel actor and owned root Box exports from the cooked maps.
 # Weight and value are the placed stack totals. The CDO supplies 10 rounds.
-PLACEMENTS = (
-    Placement(CITY, "Ammo_Magnum_BP_C_1", (5424.624698003305, -6504.258364840004, 933.0565996312665),
-              False, FORTY_FIVE_BALL, 10, 0.13, 50),
-    Placement(CROSSROADS, "Ammo_Magnum_BP_C_1", (6033.949367709363, 10806.238708443801, 940.5129757964019),
-              True, FORTY_FIVE_BALL, 10, 0.13, 50),
+CITY_AMMO = Placement(
+    CITY, "Ammo_Magnum_BP_C_1", (5424.624698003305, -6504.258364840004, 933.0565996312665),
+    False, FORTY_FIVE_BALL, 10, 0.13, 50,
 )
+CROSSROADS_AMMO = Placement(
+    CROSSROADS, "Ammo_Magnum_BP_C_1", (6033.949367709363, 10806.238708443801, 940.5129757964019),
+    True, FORTY_FIVE_BALL, 10, 0.13, 50,
+)
+SLUMS_BUCKSHOT = Placement(
+    SLUMS, "Ammo_ShotgunShells_BP_C_1", (-1803.0074007604399, -5600.062070282763, -313.7406382956242),
+    True, TWELVE_GAUGE_BUCK, 14, 0.47600000000000003, 112,
+)
+FORT_LETO_BUCKSHOT = Placement(
+    "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P", "Ammo_ShotgunShells_BP_C_1",
+    (-9828.90113131438, -30484.624521705286, -215.50793747703088),
+    True, TWELVE_GAUGE_BUCK, 5, 0.17, 40,
+)
+
+PLACEMENTS = (CITY_AMMO, CROSSROADS_AMMO, SLUMS_BUCKSHOT, FORT_LETO_BUCKSHOT)
 
 BY_SOURCE = {row.source: row for row in PLACEMENTS}

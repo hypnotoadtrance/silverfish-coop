@@ -10,7 +10,7 @@ from tools.silverfish.service import Client
 from tools.silverfish.travel import CITY, CROSSROADS
 
 
-CITY_AMMO, CROSSROADS_AMMO = authored_supply.PLACEMENTS
+CITY_AMMO, CROSSROADS_AMMO = authored_supply.CITY_AMMO, authored_supply.CROSSROADS_AMMO
 EPOCH, OLD_EPOCH = "a" * 32, "b" * 32
 PAWN, CHARACTER = "Player_FP_C exact guest", "guest-1"
 
@@ -23,6 +23,10 @@ class SupplyCatalogTests(unittest.TestCase):
     def test_generated_source_ids_include_map_for_identical_actor_names(self):
         self.assertEqual(CITY_AMMO.name, CROSSROADS_AMMO.name)
         self.assertNotEqual(CITY_AMMO.source, CROSSROADS_AMMO.source)
+        slums, fort = authored_supply.SLUMS_BUCKSHOT, authored_supply.FORT_LETO_BUCKSHOT
+        self.assertEqual(slums.name, fort.name)
+        self.assertNotEqual(slums.source, fort.source)
+        self.assertEqual((slums.units, fort.units), (14, 5))
         self.assertEqual((CITY_AMMO.area, CROSSROADS_AMMO.area), (CITY, CROSSROADS))
         self.assertEqual(pickup.select_source(CROSSROADS, None), pickup.POCKET_WATCH)
         for row in authored_supply.PLACEMENTS:

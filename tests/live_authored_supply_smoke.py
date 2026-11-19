@@ -1,4 +1,4 @@
-"""Verify two stock .45 Ball pickups, exact owner saves, and stale zone refusal."""
+"""Verify two stock ammunition pickups, exact owner saves, and stale zone refusal."""
 
 import argparse
 import asyncio
@@ -18,17 +18,19 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_authored_pickup as pickup
-from tools.silverfish.authored_supply import PLACEMENTS
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.authored_supply import CITY_AMMO, CROSSROADS_AMMO, SLUMS_BUCKSHOT
 from tools.silverfish.control import submit
 from tools.silverfish.native_gold import valid_guid
-from tools.silverfish.travel import CITY, CROSSROADS, RAIL_YARD
+from tools.silverfish.travel import CROSSROADS, RAIL_YARD
 
 
-CITY_AMMO, CROSSROADS_AMMO = PLACEMENTS
+FIRST_SOURCE = {"slums": SLUMS_BUCKSHOT, "city": CITY_AMMO}
 ROLES = ("guest", "guest2")
 
 
-async def exercise(work: Path, vanilla_saved: Path) -> None:
+async def exercise(work: Path, vanilla_saved: Path, first_site: str) -> None:
+    first_placement = FIRST_SOURCE[first_site]
     if not vanilla_saved.is_dir():
         raise ValueError("The original Saved directory is missing")
     original = saved_hashes(vanilla_saved)
@@ -141,35 +143,41 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         proof["claims"][source] = dict(stock_input=pressed, receipt=receipt)
         return receipt
 
-    async def travel(prior, destination, entrance, actor):
+    def overlap_to(source, destination):
+        route, = (route for route in AUTHORED_ROUTES if
+                  (route.source, route.destination, route.kind) == (source, destination, "overlap"))
+        return {"entrance": route.entrance, "exit_actor": route.actor}
+
+    async def travel(prior, destination):
+        exit_scope = overlap_to(prior["game"]["map"], destination)
         for role in ROLES:
-            await local(run, "native-exit-position", target=role, exit_position="near", entrance=entrance, exit_actor=actor)
-        await local(run, "native-exit-position", target="host", exit_position="inside", entrance=entrance, exit_actor=actor)
+            await local(run, "native-exit-position", target=role, exit_position="near", **exit_scope)
+        await local(run, "native-exit-position", target="host", exit_position="inside", **exit_scope)
         arrived = await paired(destination, prior["zone_epoch"])
         assert arrived["generation"] == prior["generation"]
-        proof["routes"].append(dict(destination=destination, entrance=entrance, epoch=arrived["zone_epoch"]))
+        proof["routes"].append(dict(destination=destination, entrance=exit_scope["entrance"], epoch=arrived["zone_epoch"]))
         return arrived
 
     try:
-        host = await start(run, "host", "host", *campaign, "--port", "0", "--start-zone", CITY, *host_flags)
+        host = await start(run, "host", "host", *campaign, "--port", "0", "--start-zone", first_placement.area, *host_flags)
         await wait(run, lambda state: state.get("state") == "hosting")
         peers = []
         for index in range(2):
             issued = await invite(index)
             invites.append(issued)
             peers.append(await start_peer(index, issued, f"guest-{index+1}"))
-            city = await paired(CITY, count=index + 1)
+            first_visit = await paired(first_placement.area, count=index + 1)
         party_members = [issued["character_id"] for issued in invites]
         host_items = await inventory(run, "host")
         baseline = [await inventory(directory, identity) for directory, identity in zip(clients, party_members)]
-        source = CITY_AMMO.source
-        await wait(run, lambda state: projected(state, CITY_AMMO, "available"))
+        source = first_placement.source
+        await wait(run, lambda state: projected(state, first_placement, "available"))
         old = uuid.uuid4().hex
-        assert old != city["zone_epoch"]
+        assert old != first_visit["zone_epoch"]
         stale = await local(clients[0], pickup.ACTION, expected=False, target=f"{source}@{old}")
         wrong_map = await local(clients[0], pickup.ACTION, expected=False, target=CROSSROADS_AMMO.source)
-        await local(run, "native-exit-position", target=ROLES[0], exit_position="far", entrance="Rail_City",
-                    exit_actor="Level_Exit_BP_C_1")
+        await local(run, "native-exit-position", target=ROLES[0], exit_position="far",
+                    **overlap_to(first_placement.area, RAIL_YARD))
         too_far = await local(clients[0], pickup.ACTION, expected=False, target=source)
         assert (stale["error"], wrong_map["error"], too_far["error"]) == (
             "native_authored_pickup_stale_zone", "native_authored_pickup_unavailable",
@@ -177,20 +185,20 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         assert await inventory(clients[0], party_members[0]) == baseline[0] and source not in ledger(status(run))
         proof["refusals"] = [stale["error"], wrong_map["error"], too_far["error"]]
 
-        first = await pickup_with_stock_f(CITY_AMMO, 0, city)
+        first = await pickup_with_stock_f(first_placement, 0, first_visit)
         contested = await local(clients[1], pickup.ACTION, target=source, expected=False)
         assert contested["error"] == "native_authored_pickup_already_claimed", contested
         assert await inventory(clients[1], party_members[1]) == baseline[1]
         proof["contested"] = contested["error"]
-        rail = await travel(city, RAIL_YARD, "Rail_City", "Level_Exit_BP_C_1")
-        crossroads = await travel(rail, CROSSROADS, "Depot_Cross_Rail", "Level_Exit_BP_C_0")
+        rail = await travel(first_visit, RAIL_YARD)
+        crossroads = await travel(rail, CROSSROADS)
         delayed = await local(clients[1], pickup.ACTION, expected=False,
-                              target=f"{CROSSROADS_AMMO.source}@{city['zone_epoch']}")
+                              target=f"{CROSSROADS_AMMO.source}@{first_visit['zone_epoch']}")
         assert delayed["error"] == "native_authored_pickup_stale_zone", delayed
         second = await pickup_with_stock_f(CROSSROADS_AMMO, 1, crossroads)
         assert first["guid"] != second["guid"]
         owned = [await inventory(directory, identity) for directory, identity in zip(clients, party_members)]
-        for index, (placement, receipt) in enumerate(zip(PLACEMENTS, (first, second), strict=True)):
+        for index, (placement, receipt) in enumerate(zip((first_placement, CROSSROADS_AMMO), (first, second), strict=True)):
             row = owned[index][receipt["guid"]]
             assert (row["class_path"], row["source"], row["quantity"], row["stackable"]) == (
                 placement.ammo.item_path, "backpack", placement.units, True), row
@@ -211,10 +219,10 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         assert ledger(restored) == {first["source"]: first, second["source"]: second}
         for directory in (run, *clients):
             await wait(directory, lambda state: projected(state, CROSSROADS_AMMO, "claimed"))
-        rail = await travel(restored, RAIL_YARD, "Depot_Cross_Rail", "Level_Exit_BP_C_1")
-        await travel(rail, CITY, "Rail_City", "Level_Exit_BP_C_220")
+        rail = await travel(restored, RAIL_YARD)
+        await travel(rail, first_placement.area)
         for directory in (run, *clients):
-            await wait(directory, lambda state: projected(state, CITY_AMMO, "claimed"))
+            await wait(directory, lambda state: projected(state, first_placement, "claimed"))
         assert [await inventory(directory, identity) for directory, identity in zip(clients, party_members)] == owned
         assert await inventory(run, "host") == host_items
         proof.update(verified=True, restored_inventory=owned, original_saves_unchanged=saved_hashes(vanilla_saved) == original)
@@ -239,5 +247,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, required=True, help="original Saved directory to hash before and after")
+    parser.add_argument("--first-site", choices=FIRST_SOURCE, default="slums")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), args.first_site))
