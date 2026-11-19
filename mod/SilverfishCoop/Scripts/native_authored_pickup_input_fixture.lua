@@ -23,6 +23,7 @@ local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
 local savlo_locker = "trench-savlo-locker"
 local fort_leto_key = "fort-leto-locker-key-543"
+local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
@@ -30,13 +31,19 @@ local precise_distances = {
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
 }
-local supplies = {}
+local supplies, shelf_source = {}, nil
 for _, profile in ipairs(supply_profiles) do
     supplies[profile.source] = profile
     sources[profile.source] = profile.map
     precise_distances[profile.source] = {95, 125, 155, 190}
+    if profile.path == city_shelf_supply then
+        shelf_source = profile.source
+        precise_distances[profile.source] = {48, 62, 78, 95, 115, 150, 195}
+    end
 end
-local cabinet_front = {[dust_filter] = 0, [molasses] = 180}
+local approach_front = {[dust_filter] = 0, [molasses] = 180}
+-- The exact City stack sits in the low wall shelf at yaw -105 degrees.
+if shelf_source then approach_front[shelf_source] = 75 end
 local cabinet_labels = {[dust_filter] = "authored_dust_cabinet", [molasses] = "authored_molasses_cabinet",
     [savlo_locker] = "authored_savlo_locker"}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
@@ -274,8 +281,8 @@ function input.precise_approach(state, phase, profile, pawn, actor)
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
-    approach_clear_sight(state, pawn, actor, actor.Box, label, distances, cabinet_front[profile.source],
-        profile.source == molasses)
+    approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],
+        profile.source == molasses or profile.source == shelf_source)
     return "stock pickup floor and interaction sight verified"
 end
 
