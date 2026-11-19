@@ -1,4 +1,4 @@
-"""Verify ShopKeep reception, stock cash purchase, optional food use and isolated restart."""
+"""Verify ShopKeep reception, stock cash purchase and isolated restart."""
 
 import argparse
 import asyncio
@@ -15,13 +15,13 @@ from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from tools.silverfish import native_dialogue as dialogue, native_guest_consumable as consumable, native_host_save
+from tools.silverfish import native_dialogue as dialogue, native_host_save
 from tools.silverfish.control import submit
 from tools.silverfish.travel import NORTHEAST_RAIL, SHOPKEEP
 
 
-async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
-    name = ("shopkeep-peaches-" if canned_peaches else "shopkeep-") + uuid.uuid4().hex[:8]
+async def verify(work: Path, original: Path):
+    name = "shopkeep-" + uuid.uuid4().hex[:8]
     root = work / "campaigns" / name
     host_run, guest_run = root / "run", work / "clients" / name / "run"
     host_run.mkdir(parents=True)
@@ -35,9 +35,6 @@ async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones",
                   "--native-expanded-zones", "--native-shop-view")
     guest_flags = ("--headless", "--native-zones")
-    if canned_peaches:
-        host_flags += ("--native-guest-mre",)
-        guest_flags += ("--native-guest-inventory-view",)
     jobs = []
     evidence = {}
 
@@ -111,37 +108,6 @@ async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
         assert view["next_offset"] is None, view
         return {row["guid"]: row for row in view["items"]}
 
-    async def eat_peaches(item):
-        guid = item["guid"]
-        await action(guest_run, "native-shop-view-fixture", target="back")
-        await action(guest_run, "native-inventory-view-fixture")
-        state = await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        selection = state["game"].get("native_guest_inventory_use_view", {})
-        key = "native-inventory-view-key-fixture"
-        for _ in range(state["game"]["native_inventory_view"]["count"]):
-            if selection.get("guid") == guid:
-                break
-            selection = (await action(guest_run, key, target="down")).get("native_guest_inventory_use_view", {})
-        assert (selection.get("state"), selection.get("guid")) == ("selecting", guid), selection
-        confirming = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert (confirming["state"], confirming["guid"]) == ("confirming", guid), confirming
-        pressed = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
-        assert (pressed["state"], pressed["guid"]) == ("using", guid), pressed
-        result_key = consumable.RESULT[consumable.CANNED_PEACHES]
-        receipt = await wait_event(guest_run, "native_guest_inventory_used", lambda event: event.get("view_sequence") ==
-                                  pressed["sequence"] and event.get(result_key, {}).get("guid") == guid)
-        proof = receipt[result_key]
-        assert (proof["class_path"], proof["quantity_before"], proof["quantity_after"]) == (
-            item["class_path"], item["quantity"], item["quantity"] - 1), proof
-        assert proof["food_after"] == min(proof["food_before"] + 12, 200) > proof["food_before"], proof
-        assert proof["health_before"] == proof["health_after"] and proof["regen_after"] == max(25, proof["regen_before"]), proof
-        assert proof["intox_after"] == max(proof["intox_before"] - 1, 0), proof
-        assert proof["host_intox_before"] == proof["host_intox_after"], proof
-        await wait(guest_run, lambda s: s.get("game", {}).get("native_guest_inventory_use_view", {}) ==
-                   dict(pressed, state="used"))
-        await action(guest_run, key, target="back")
-        return receipt
-
     try:
         authority = await launch(host_run, "host", "host", *team, "--port", "0", "--start-zone", NORTHEAST_RAIL, *host_flags)
         await wait(host_run, lambda state: state.get("state") == "hosting")
@@ -163,20 +129,14 @@ async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
         assert 5000 <= listing["merchant_cash_before"] <= 35_000, listing
-        if canned_peaches:
-            offer, = [row for row in listing["offers"] if row["class_path"] == consumable.CANNED_PEACHES_CLASS]
-            purchase = (await action(guest_run, "native-finite-shop-buy", target=f"{offer['guid']}@{offer['price']}"))[
-                "native_finite_purchase"]
-            assert purchase["offers"] == [offer], purchase
-        else:
-            current = await page(opened["merchant"]["sequence"], offset=0)
-            offer, = [row for row in listing["offers"] if (row["guid"], row["price"]) == (current["guid"], current["price"])]
-            confirm = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
-            assert confirm["state"] == "confirming", confirm
-            submitted = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
-            assert submitted["state"] == "buying", submitted
-            purchase = (await wait_event(guest_run, "native_shop_view_purchased", lambda event: event.get(
-                "native_finite_purchase", {}).get("offers") == [offer]))["native_finite_purchase"]
+        current = await page(opened["merchant"]["sequence"], offset=0)
+        offer, = [row for row in listing["offers"] if (row["guid"], row["price"]) == (current["guid"], current["price"])]
+        confirm = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
+        assert confirm["state"] == "confirming", confirm
+        submitted = (await action(guest_run, "native-shop-view-fixture", target="enter"))["native_shop_view"]
+        assert submitted["state"] == "buying", submitted
+        purchase = (await wait_event(guest_run, "native_shop_view_purchased", lambda event: event.get(
+            "native_finite_purchase", {}).get("offers") == [offer]))["native_finite_purchase"]
         assert 0 < offer["price"] <= listing["wallet_before"], offer
         assert (purchase["wallet_after"], purchase["merchant_cash_after"]) == (
             listing["wallet_before"] - offer["price"], listing["merchant_cash_before"] + offer["price"]), purchase
@@ -184,16 +144,6 @@ async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
         assert (row["source"], row["class_path"], row["quantity"]) == ("backpack", offer["class_path"], offer["quantity"]), row
         assert offer["guid"] not in await inventory(host_run), purchase
         evidence["finite_purchase"] = {"quote": offer, "receipt": purchase, "owned_item": row}
-        if canned_peaches:
-            consumed = await eat_peaches(row)
-            evidence["stock_peaches_used"] = consumed
-            remaining = (await inventory(guest_run)).get(offer["guid"])
-            if row["quantity"] == 1:
-                assert remaining is None, remaining
-            else:
-                assert remaining and remaining["quantity"] == row["quantity"] - 1, remaining
-        else:
-            remaining = row
 
         await stop(host_run, authority)
         await stop(guest_run, guest)
@@ -217,11 +167,7 @@ async def verify(work: Path, original: Path, *, canned_peaches: bool = False):
         after = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert after["wallet_before"] == purchase["wallet_after"] and after["merchant_cash_before"] == purchase["merchant_cash_after"], after
         assert all(item["guid"] != offer["guid"] for item in after["offers"]), after
-        assert (await inventory(guest_run)).get(offer["guid"]) == remaining, after
-        if canned_peaches:
-            replay = await action(guest_run, consumable.CANNED_PEACHES, target=offer["guid"], operation_id=consumed["operation_id"])
-            key = consumable.RESULT[consumable.CANNED_PEACHES]
-            assert replay[key] == consumed[key], replay
+        assert (await inventory(guest_run)).get(offer["guid"]) == row, after
         evidence.update(verified=True, restart={"stock_flag": stock.get("Meet_ShopKeep"), "merchant": reopened,
                                                 "wallet": after["wallet_before"], "merchant_cash": after["merchant_cash_before"]})
     except BaseException as error:
@@ -247,6 +193,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--canned-peaches", action="store_true", help="verify exact stock food use after the cash purchase")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), canned_peaches=args.canned_peaches))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))

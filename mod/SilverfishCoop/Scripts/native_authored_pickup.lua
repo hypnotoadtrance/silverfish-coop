@@ -115,6 +115,14 @@ local profiles = {
         name = "KeyCard_Savlo_BP_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
+    {
+        map = city,
+        source = "city-canned-peaches",
+        path = city .. ".City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
+        class = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C",
+        name = "Item_CannedPeaches_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
 }
 local map_profiles = {}
 for _, profile in ipairs(profiles) do

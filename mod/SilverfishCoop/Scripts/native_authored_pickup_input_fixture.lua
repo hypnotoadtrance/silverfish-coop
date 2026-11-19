@@ -4,6 +4,7 @@ local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
+    ["city-canned-peaches"] = city,
     ["scientist-blank-data-tape"] = scientist,
     ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",

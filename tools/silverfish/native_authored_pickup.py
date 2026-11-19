@@ -13,6 +13,7 @@ ACTOR = f"Item_CompBoard_C {OBSERVATORY}.Observitory_P:PersistentLevel.Item_Comp
 ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
 CITY_BRANDY = "city-paladin-brandy"
+CITY_PEACHES = "city-canned-peaches"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
@@ -31,6 +32,8 @@ SOURCES = {
                 "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"),
     CITY_BRANDY: (CITY, f"Item_VintageWine_C {CITY}.City_01_P:PersistentLevel.Item_VintageWine_C_1",
                   "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
+    CITY_PEACHES: (CITY, f"Item_CannedPeaches_C {CITY}.City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
+                   "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
     COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
     DEPOT_DOCUMENTS: (RAIL_YARD, f"Documents_DepotOffice_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",

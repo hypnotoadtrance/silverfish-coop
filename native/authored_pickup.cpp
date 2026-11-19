@@ -134,6 +134,13 @@ namespace
             STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
             30714.073646980298, -137718.5051940477, 2043.691163490359, 9,
         },
+        Profile{
+            "city-canned-peaches",
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedPeaches_C_1"),
+            STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
+            -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
+        },
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
