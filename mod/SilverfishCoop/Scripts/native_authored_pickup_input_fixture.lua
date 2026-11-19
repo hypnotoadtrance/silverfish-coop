@@ -2,6 +2,7 @@ local input = {}
 local supply_profiles = require("authored_supply_catalog")
 local cash_profiles = require("authored_cash_catalog")
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 local sources = {
@@ -9,7 +10,8 @@ local sources = {
     ["city-paladin-brandy"] = city,
     ["city-canned-peaches"] = city,
     ["scientist-blank-data-tape"] = scientist,
-    ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
+    ["crossroads-pocket-watch"] = crossroads,
+    ["crossroads-dead-drop-bag"] = crossroads,
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["borough-mre"] = "/Game/Classes/Maps/Maps_SafeZones/Borough",
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
@@ -27,6 +29,7 @@ local savlo_keycard = "trench-savlo-keycard"
 local savlo_locker = "trench-savlo-locker"
 local fort_leto_key = "fort-leto-locker-key-543"
 local stolen_bag = "forest-brokers-artifacts-bag"
+local dead_drop = "crossroads-dead-drop-bag"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
     [dust_filter] = {125, 160, 195},
@@ -35,6 +38,7 @@ local precise_distances = {
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
+    [dead_drop] = {85, 115, 145, 175, 210},
 }
 local supplies, shelf_source = {}, nil
 for _, profile in ipairs(supply_profiles) do
@@ -160,7 +164,8 @@ end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
-    local bag = profile.source == stolen_bag and profile.map == sources[stolen_bag] and profile.authority_sight == true
+    local bag = (profile.source == stolen_bag or profile.source == dead_drop)
+        and profile.map == sources[profile.source] and profile.authority_sight == true
     if (not cash and not bag and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
         or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
         or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
@@ -297,6 +302,7 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     end
     local forest_locker_top = profile.source == stolen_bag
     local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
+        or profile.source == dead_drop
         or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
     approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],

@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_dust_cabinet, native_host_save, native_savlo_locker, party
+from . import native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_gold import valid_guid
@@ -32,6 +32,7 @@ TRENCH = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
 STOLEN_BAG = "forest-brokers-artifacts-bag"
+DEAD_DROP = native_dead_drop.SOURCE
 SOURCES = {
     SOURCE: (OBSERVATORY, ACTOR, ITEM_CLASS),
     CITY_WIRE: (CITY, f"Item_CopperWire_C {CITY}.City_01_P:PersistentLevel.Item_CopperWire_C_3",
@@ -62,6 +63,7 @@ SOURCES = {
                     "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
+    DEAD_DROP: (native_dead_drop.MAP, native_dead_drop.ACTOR, native_dead_drop.CLASS),
     STOLEN_BAG: (FOREST, f"Brokers_ArtifactsBag_C {FOREST}.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
                  "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
 }
@@ -87,7 +89,7 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
+        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE) and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
     if isinstance(requested, str) and requested in sources:
@@ -114,6 +116,8 @@ def fixture_proof(game: dict, source: str, entry: str = "fixture") -> dict:
 async def project(service, bridge, pickups: dict) -> None:
     area, phase = service.last_game.get("map"), service.last_game.get("state")
     for source in MAP_SOURCES.get(area, ()):
+        if source == DEAD_DROP and phase == "connected":
+            continue
         if source not in pickups or _displayed(service.last_game, source).get("state") != "available":
             continue
         snapshot = await bridge.command("native-authored-pickup-project", "claimed", source, timeout=5)
@@ -123,7 +127,7 @@ async def project(service, bridge, pickups: dict) -> None:
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:
-    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in STOCK_CASH):
+    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in STOCK_CASH or target == DEAD_DROP):
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
             raise party.RuleError("native_authored_pickup_stale_zone")
         return f"{target}@{epoch}"
@@ -200,7 +204,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     target, has_epoch, epoch = target.partition("@")
     is_supply = target in STOCK_SUPPLIES
     is_cash = target in STOCK_CASH
-    bound_epoch = is_supply or is_cash
+    bound_epoch = is_supply or is_cash or target == DEAD_DROP
     if target not in SOURCES or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
     if bound_epoch:
@@ -221,6 +225,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             return receipt["result"]
     if target in host.party.get(STATE_KEY, {}):
         raise party.RuleError("native_authored_pickup_already_claimed")
+    if target == DEAD_DROP and not native_dead_drop.frame(host):
+        raise party.RuleError("authored_pickup_dead_drop_inactive")
     if target == SAVLO_KEYCARD and not native_savlo_locker.observed(host.last_game, "opened"):
         raise party.RuleError("native_authored_pickup_savlo_locker_closed")
     blocker = native_dust_cabinet.SOURCES.get(target)
@@ -243,6 +249,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 or _current_pawn(host, character) != pawn or host.party["wipe"] is not None
                 or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
             raise party.RuleError("native_authored_pickup_owner_or_source_changed")
+    if target == DEAD_DROP and not native_dead_drop.frame(host):
+        raise party.RuleError("authored_pickup_dead_drop_inactive")
     amount = _displayed(host.last_game, target).get("wallet_value") if is_cash else None
     if is_cash and not valid_cash_amount(target, amount):
         raise party.RuleError("authored_cash_stock_value_unavailable")

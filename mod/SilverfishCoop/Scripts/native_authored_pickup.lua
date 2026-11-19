@@ -19,7 +19,17 @@ local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 local fort_leto = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
+local dead_drop = {
+    map = crossroads,
+    source = "crossroads-dead-drop-bag",
+    path = crossroads .. ".CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1",
+    class = "/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C",
+    name = "Bag_DeadDrop_CrossRoads_C",
+    authority_sight = true,
+    quest_source = true,
+}
 local profiles = {
+    dead_drop,
     {
         map = observatory,
         source = "observatory-comp-board",
@@ -224,7 +234,7 @@ local function select_profile(requested)
     if requested == nil then
         local sole
         for _, profile in ipairs(binding.placements) do
-            if not profile.fixture_only and not profile.stock_supply and not profile.stock_cash then
+            if not profile.fixture_only and not profile.stock_supply and not profile.stock_cash and not profile.quest_source then
                 if sole then sole = nil; break end
                 sole = profile.source
             end
@@ -351,6 +361,26 @@ local arguments = {
 
 function pickup.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-dead-drop-project" then
+        local detail = state.local_pawn
+        if #fields ~= 4 or phase ~= "connected" or not state.listening or state.server ~= true
+            or state.map ~= dead_drop.map or not detail or detail.name ~= fields[4] or not valid(detail.pawn)
+            or type(SilverfishProjectNativeCrossroadsDeadDrop) ~= "function" then
+            error("dead_drop_projection_scope_unavailable", 0)
+        end
+        local applied, status = SilverfishProjectNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), fields[3])
+        if applied ~= true then error(status, 0) end
+        return "verified local stock Dead Drop presentation"
+    end
+    if action == "native-dead-drop-clear" then
+        if #fields ~= 2 or phase ~= "connected" or not state.listening or state.server ~= true
+            or state.map ~= dead_drop.map or type(SilverfishClearNativeCrossroadsDeadDrop) ~= "function" then
+            error("dead_drop_projection_scope_unavailable", 0)
+        end
+        local cleared, status = SilverfishClearNativeCrossroadsDeadDrop()
+        if cleared ~= true then error(status, 0) end
+        return "cleared local stock Dead Drop presentation"
+    end
     local count = arguments[action]
     if not count then return end
     if #fields ~= count and #fields ~= count + 1 then error("authored_pickup_arguments", 0) end
@@ -403,9 +433,19 @@ function pickup.take_press(pawn)
 end
 
 function pickup.rows(state, phase, status_row)
-    local qualified = pickup.update(state, phase)
-    if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return {} end
     local rows = {}
+    local host = phase == "hosting" and state.server == false
+    local client = phase == "connected" and state.server == true
+    local detail = state.local_pawn
+    if state.map == dead_drop.map and state.listening and (host or client) and detail and valid(detail.pawn)
+        and type(SilverfishObserveNativeCrossroadsDeadDrop) == "function" then
+        local shown, epoch = SilverfishObserveNativeCrossroadsDeadDrop(detail.pawn:GetAddress(), host)
+        if shown then
+            rows[1] = status_row("native-dead-drop", shown, state.map, dead_drop.name .. " " .. dead_drop.path, detail.name, epoch)
+        end
+    end
+    local qualified = pickup.update(state, phase)
+    if not qualified or type(SilverfishReadNativeAuthoredPickup) ~= "function" then return rows end
     for _, profile in ipairs(binding.placements) do
         if binding.active[profile.source] then
             local active, claimed, sequence, fixture, amount = SilverfishReadNativeAuthoredPickup(profile.source)

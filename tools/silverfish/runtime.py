@@ -18,7 +18,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
-from . import native_authored_pickup, native_borough_barter, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_subway_valve
@@ -1554,6 +1554,10 @@ class Bridge:
                     data[native_savlo_locker.KEY] = native_savlo_locker.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-savlo-locker-diagnostic" and len(fields) == 3 and fields[1] == native_savlo_locker.TRENCH:
                     data["native_savlo_locker_diagnostic"] = fields[2]
+                elif fields[0] == native_dead_drop.TAG:
+                    if native_dead_drop.KEY in data:
+                        raise ValueError("Repeated stock CrossRoads Dead Drop report")
+                    data[native_dead_drop.KEY] = native_dead_drop.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-authored-pickup" and len(fields) in (6, 7):
                     source, area, actor, item_class, state = fields[1:6]
                     placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})

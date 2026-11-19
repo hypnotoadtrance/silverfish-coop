@@ -18,7 +18,7 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from tools.silverfish import native_dust_cabinet as stock_cabinet, native_host_save, native_savlo_locker as stock_locker
+from tools.silverfish import native_dead_drop, native_dust_cabinet as stock_cabinet, native_host_save, native_savlo_locker as stock_locker
 from tools.silverfish import native_computer_board as collections
 from tools.silverfish.authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from tools.silverfish.native_authored_pickup import DEAD_END, FORT_LETO, FORT_LETO_LOCKER_KEY, SCIENTIST_BLANK_TAPE, SOURCES, STATE_KEY as PICKUPS
@@ -40,6 +40,7 @@ class CollectionSmoke:
     cabinet: stock_cabinet.Cabinet | None = None
     savlo_locker: bool = False
     pickup_location: tuple[float, float, float] | None = None
+    conditional_pickup: bool = False
 
     def routes(self) -> tuple[AuthoredRoute, ...]:
         routes = []
@@ -244,6 +245,42 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         if start_area == BOROUGH:
             evidence["stock_xp_setup"] = await action(host, "native-turret-photo-xp-fixture")
 
+        async def verify_drop_hidden(label):
+            host_hidden = await wait(run, lambda frame: native_dead_drop.observed(frame.get("game", {}), "hidden"), timeout=12)
+            client_hidden = await wait(client_run, lambda frame: native_dead_drop.observed(frame.get("game", {}), "hidden"), timeout=12)
+            for disconnected in (host_hidden, client_hidden):
+                assert source not in disconnected["game"].get("native_authored_pickup_sources", {}), disconnected["game"]
+            refused = await action(guest, "native-authored-pickup-stock-fixture", "--pickup-source", source, accepted=False)
+            assert "source_required" in refused["error"] or "scope_unavailable" in refused["error"], refused
+            blocked = await action(guest, "native-authored-pickup-claim", "--target", source, accepted=False)
+            expected = "authored_pickup_dead_drop_inactive" if label == "before_acceptance" else "native_authored_pickup_already_claimed"
+            assert blocked["error"] == expected, blocked
+            evidence[label] = {key: frame["game"][native_dead_drop.KEY]
+                               for key, frame in (("authority", host_hidden), ("client", client_hidden))}
+
+        async def verify_drop_projection():
+            epoch = current["zone_epoch"]
+            native = await wait(run, lambda frame: native_dead_drop.observed(frame.get("game", {}), "stock-active")
+                                and frame.get("gameplay", {}).get(native_dead_drop.FRAME, {}).get("epoch") == epoch)
+            client_frame = await wait(client_run, lambda frame: native_dead_drop.observed(
+                frame.get("game", {}), "projected").get("epoch") == epoch)
+            previous_pawn = client_frame["game"][native_dead_drop.KEY]["pawn"]
+            dropped = await action(guest, "drop-link")
+            assert dropped["link_connected"] is False, dropped
+            after = await wait(client_run, lambda frame: frame.get("link_connected") is False
+                               and native_dead_drop.observed(frame.get("game", {}), "hidden").get("pawn") == previous_pawn,
+                               timeout=8)
+            assert source not in after["game"].get("native_authored_pickup_sources", {}), after["game"]
+            reconnected = await action(guest, "reconnect")
+            assert reconnected["resumed"] and reconnected["game_connected"], reconnected
+            returned = await wait(client_run, lambda frame: frame.get("zone_epoch") == epoch and
+                                  native_dead_drop.observed(frame.get("game", {}), "projected").get("pawn") == previous_pawn)
+            assert returned["game"][native_dead_drop.KEY]["epoch"] == epoch, returned["game"]
+            evidence["source_activation"] = {"authority": native["game"][native_dead_drop.KEY],
+                                             "client": client_frame["game"][native_dead_drop.KEY],
+                                             "lease_expired": after["game"][native_dead_drop.KEY],
+                                             "reconnect": returned["game"][native_dead_drop.KEY]}
+
         async def collect_locker_key():
             source = FORT_LETO_LOCKER_KEY
             key_map, key_actor, key_class = SOURCES[source]
@@ -287,6 +324,8 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         locker_key = None
 
         async def collect_pickup():
+            if plan.conditional_pickup:
+                await verify_drop_projection()
             selected = ("--pickup-source", source)
             profile = plan.cabinet
             if plan.savlo_locker:
@@ -345,14 +384,22 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             evidence["stock_pickup"] = {"interaction": interaction, "claim": claim, "inventory": row}
             return guid
 
-        if plan.accept_before_pickup:
-            assert start_area == redemption and pickup_map != start_area
+        async def accept_without_item():
             await accept()
             refused = await action(guest, "native-quest-turnin", "--target", quest, accepted=False)
             assert "objective_required" in refused["error"], refused
             evidence["turn_in_without_item"] = refused["error"]
-        guid = await collect_pickup() if start_area == pickup_map else None
-        for route in routes:
+
+        if plan.conditional_pickup:
+            assert plan.accept_before_pickup and start_area == pickup_map and source == native_dead_drop.SOURCE
+            await verify_drop_hidden("before_acceptance")
+            inactive_epoch = current["zone_epoch"]
+        elif plan.accept_before_pickup:
+            assert start_area == redemption and pickup_map != start_area
+            await accept_without_item()
+
+        async def follow(route):
+            nonlocal current
             evidence["pending_route"] = (route.source, route.destination, route.entrance, route.actor)
             endpoint = ("--entrance", route.entrance)
             if route.kind == "door":
@@ -366,9 +413,19 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
                 await action(host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
             current = await paired(route.destination, (current["generation"], current["zone_epoch"]))
             evidence["routes"].append(evidence.pop("pending_route"))
+
+        guid = await collect_pickup() if start_area == pickup_map and not plan.conditional_pickup else None
+        for route in routes:
+            await follow(route)
+            if plan.conditional_pickup and route.destination == redemption and "accepted" not in evidence:
+                await accept_without_item()
             if plan.savlo_locker and route.destination == FORT_LETO:
                 locker_key = await collect_locker_key()
             if route.destination == pickup_map and guid is None:
+                if plan.conditional_pickup:
+                    stale = await action(guest, "native-authored-pickup-claim", "--target", f"{source}@{inactive_epoch}", accepted=False)
+                    assert stale["error"] == "native_authored_pickup_stale_zone", stale
+                    evidence["stale_claim"] = stale["error"]
                 guid = await collect_pickup()
             if exchange and route.destination == exchange.map:
                 guid = await download_tape(guid)
@@ -423,6 +480,14 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             trade = restarted["campaign"]["world"]["party"][exchange.ledger][evidence["stock_download"]["receipt"]["blank_guid"]]
             assert trade["filled_guid"] == guid and trade["station"] == exchange.station and trade["owner"] == character, trade
         assert (await action(guest, "native-quest-turnin", "--target", quest))["effect"] == "native_quest_already_settled"
+        if plan.conditional_pickup:
+            current = restarted
+            start = next(index for index, route in enumerate(routes) if route.source == redemption)
+            for route in routes[start:]:
+                await follow(route)
+                if route.destination == pickup_map:
+                    break
+            await verify_drop_hidden("after_completion")
         evidence.update(verified=True, restarted_generation=restarted["generation"])
     except BaseException as error:
         evidence["failure"] = str(error)

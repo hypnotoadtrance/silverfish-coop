@@ -52,6 +52,8 @@ namespace
     constexpr auto savlo_keycard_item_path = STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C");
     constexpr auto pump_tape_item_path = STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
+    constexpr auto dead_drop_item_path = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C");
+    constexpr auto dead_drop_quest_id = STR("DeadDrop_CrossRoads");
     constexpr auto stolen_bag_item_path = STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C");
     constexpr auto stone_maze_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_StoneMaze_01.DataTape_StoneMaze_01_C");
     constexpr auto stone_maze_armor_path = STR("/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C");
@@ -310,7 +312,7 @@ namespace
 
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
                           U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
-                          int expected_final_step = 2, int expected_xp = 1)
+                          int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0)
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -348,7 +350,8 @@ namespace
             consumed->GetPropertyValueInContainer(found) != (wanted != nullptr) ||
             xp->GetPropertyValueInContainer(found) != expected_xp || cash->GetPropertyValueInContainer(found) != expected_cash) return false;
         const auto current_step = step->GetPropertyValueInContainer(found);
-        if (phase == WirePhase::complete ? current_step != -10 : current_step < 1 || current_step > expected_final_step)
+        if (phase == WirePhase::complete ? current_step != -10 :
+            current_step < 1 || current_step > expected_final_step || (exact_active_step && current_step != exact_active_step))
             return false;
         U::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(found));
         if (requested.Num() != (wanted ? 1 : 0) ||
@@ -681,6 +684,8 @@ namespace
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
+    constexpr ObjectiveQuest dead_drop_objective{"dead_drop", PartyWorld::black_market, dead_drop_quest_id,
+        dead_drop_item_path, 300};
     constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
         stolen_bag_item_path, 1200};
     constexpr ObjectiveQuest pocket_watch_objective{"pocket_watch", PartyWorld::scav_bar, STR("Clt_Watch"),
@@ -1381,6 +1386,13 @@ namespace
     }
 }
 
+bool silverfish::native_quest_rewards::active_crossroads_dead_drop(RC::Unreal::UObject* canonical_save)
+{
+    auto* item = find<U::UClass>(dead_drop_item_path);
+    return item && exact(canonical_save, find<U::UClass>(save_path)) &&
+        objective_recipe(canonical_save, dead_drop_quest_id, item, 300, nullptr, nullptr, WirePhase::active, 2, 1, 1);
+}
+
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
@@ -1390,6 +1402,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
     lua.register_function("SilverfishStageStolenBagObjective", stage_objective<stolen_bag_objective>);
+    lua.register_function("SilverfishStageCrossroadsDeadDropObjective", stage_objective<dead_drop_objective>);
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);

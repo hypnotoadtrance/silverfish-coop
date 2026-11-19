@@ -51,6 +51,16 @@ local recipes = {
         redeem_map = black_market, wrong_board = "black_market_redemption_required",
         stage_objective = "SilverfishStageBrandyObjective",
     },
+    ["native-dead-drop"] = {
+        id = "DeadDrop_CrossRoads", title = "CrossRoads Dead Drop", fault = "dead_drop",
+        objective_path = "/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C",
+        cash = 300, difficulty = 1, fail_on_death = false, redeem = 1, fixture_xp = 1,
+        offered_boards = {1, 3}, factions = {8, 4}, reputation = {[8] = 40, [4] = -5},
+        reputation_flags = {[8] = "Rep_Freelancer", [4] = "Rep_State"}, advantage = {[8] = 20},
+        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true,
+        redeem_map = black_market, wrong_board = "black_market_redemption_required",
+        stage_objective = "SilverfishStageCrossroadsDeadDropObjective",
+    },
     ["native-stolen-bag"] = {
         id = "Clt_StolenBag", title = "Stolen Goods", fault = "stolen_bag",
         objective_path = "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C",

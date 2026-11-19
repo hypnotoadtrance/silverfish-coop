@@ -3,6 +3,7 @@
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
 #include "stock_cash.hpp"
+#include "quest_rewards.hpp"
 #include "stock_wallet.hpp"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -57,9 +59,20 @@ namespace
         double stack_weight{};
         int stack_value{};
         bool stock_cash{};
+        bool dead_drop{};
+    };
+
+    constexpr Profile dead_drop_profile{
+        .source = "crossroads-dead-drop-bag",
+        .world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+        .actor = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Bag_DeadDrop_CrossRoads_C_1"),
+        .item_class = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C"),
+        .x = -14140.884409849416, .y = 15120.301926356009, .z = -318.57768194632746,
+        .item_type = 1, .dead_drop = true,
     };
 
     constexpr std::array profiles{
+        dead_drop_profile,
         Profile{
             "observatory-comp-board",
             STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
@@ -175,6 +188,7 @@ namespace
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
     };
+    static_assert(profiles.front().dead_drop);
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interact_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto money_base = STR("/Game/Classes/Items/Item_Money_Master.Item_Money_Master_C");
@@ -328,6 +342,17 @@ namespace
     std::array<Scope, profiles.size()> scopes{};
     std::uint64_t sequence{};
     Scope* fixture_scope{};
+    struct DropProjection
+    {
+        Scope scope{};
+        std::string epoch;
+        Clock::time_point expires{};
+    };
+    DropProjection drop_projection{};
+    U::FWeakObjectPtr drop_settled_actor{};
+    Clock::time_point drop_settles_at{};
+    constexpr auto drop_lease = std::chrono::milliseconds(1800);
+    constexpr auto drop_settle = std::chrono::milliseconds(750);
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
@@ -457,12 +482,103 @@ namespace
             value == object(actor, STR("RootComponent")) ? value : nullptr;
     }
 
+    bool placed_dead_drop(U::UObject* actor, U::UObject* world)
+    {
+        const auto& profile = dead_drop_profile;
+        if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
+            !live(world) || world->GetPathName() != profile.world || !actor->HasAnyFlags(U::RF_WasLoaded) ||
+            !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return false;
+        auto* item = static_cast<U::AActor*>(actor);
+        return item->GetWorld() == world && item->GetLevel() == object(world, STR("PersistentLevel"));
+    }
+
+    bool dead_drop_identity(U::UObject* actor, U::UObject* world)
+    {
+        if (!placed_dead_drop(actor, world) || !boolean(actor, STR("bReplicates"), false) ||
+            !boolean(actor, STR("Stacks"), false)) return false;
+        auto* item = static_cast<U::AActor*>(actor);
+        auto* quest = field<U::FNameProperty>(actor, STR("Quest_ID"));
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        const U::FName key{STR("DeadDrop_CrossRoads"), U::FNAME_Find};
+        auto facing = item->K2_GetActorRotation();
+        return source_box(actor) && quest && !key.IsNone() && quest->GetPropertyValueInContainer(actor) == key &&
+            mode && mode->GetPropertyValueInContainer(actor) == 0 && boolean(actor, STR("DespawnIfPlayerOwns"), true) &&
+            boolean(actor, STR("Physics"), false) &&
+            std::abs(std::remainder(facing.GetPitch(), 360.0)) <= 0.5 &&
+            std::abs(std::remainder(facing.GetYaw() + 90.0, 360.0)) <= 0.5 &&
+            std::abs(std::remainder(facing.GetRoll(), 360.0)) <= 0.5;
+    }
+
+    bool hidden_drop(U::AActor* actor)
+    {
+        auto point = actor->K2_GetActorLocation();
+        return boolean(actor, STR("bHidden"), true) && actor->GetActorEnableCollision() &&
+            std::abs(point.GetX()) <= 1.0 && std::abs(point.GetY()) <= 1.0 && std::abs(point.GetZ() - 9999.0) <= 1.0;
+    }
+
+    bool present_drop(const Scope& state)
+    {
+        auto* actor = static_cast<U::AActor*>(state.actor.Get());
+        return dead_drop_identity(actor, state.world.Get()) && state.box.Get() == source_box(actor) &&
+            exact_source(actor, state.world.Get(), dead_drop_profile) &&
+            boolean(actor, STR("bHidden"), false) && actor->GetActorEnableCollision();
+    }
+
+    bool drop_gate(const Scope& state)
+    {
+        if (!state.profile || !state.profile->dead_drop) return true;
+        if (!local_scope(state)) return false;
+        if (state.host)
+        {
+            auto* save = object(object(state.world.Get(), STR("OwningGameInstance")), STR("SaveSlot_Ref"));
+            return env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") &&
+                drop_settled_actor.Get() == state.actor.Get() && Clock::now() >= drop_settles_at &&
+                object(state.pawn.Get(), STR("Save")) == save &&
+                silverfish::native_quest_rewards::active_crossroads_dead_drop(save);
+        }
+        const auto& bound = drop_projection.scope;
+        return Clock::now() < drop_projection.expires && state.actor.Get() == bound.actor.Get() &&
+            state.world.Get() == bound.world.Get() && state.pawn.Get() == bound.pawn.Get() &&
+            state.controller.Get() == bound.controller.Get() && state.driver.Get() == bound.driver.Get();
+    }
+
+    bool drop_fence(U::UObject* actor)
+    {
+        if (!exact(actor, dead_drop_profile.item_class) || actor->GetPathName() != dead_drop_profile.actor) return false;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        if (!placed_dead_drop(actor, world)) return false;
+        auto* driver = object(world, STR("NetDriver"));
+        auto* field_server = field<U::FObjectProperty>(driver, STR("ServerConnection"));
+        auto* server = read(field_server, driver);
+        return live(driver) && object(driver, STR("World")) == world &&
+            exact(object(world, STR("OwningGameInstance")), instance_path) &&
+            field_server && (server ? connection(driver, server) : env("SILVERFISH_COOP_NATIVE_GUEST_SAVE"));
+    }
+
+    bool settle_drop_projection()
+    {
+        drop_projection.expires = {};
+        scopes.front().observed = {};
+        auto* actor = static_cast<U::AActor*>(drop_projection.scope.actor.Get());
+        auto* world = drop_projection.scope.world.Get();
+        if (placed_dead_drop(actor, world))
+        {
+            actor->SetActorHiddenInGame(true);
+            U::FHitResult ignored{};
+            if (!hidden_drop(actor))
+                actor->K2_SetActorLocation(U::FVector{0.0, 0.0, 9999.0}, false, ignored, true);
+            if (!hidden_drop(actor)) return false;
+        }
+        drop_projection = {};
+        return true;
+    }
+
     Scope* actor_scope(U::UObject* actor)
     {
         if (!actor) return nullptr;
         const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
         if (match == scopes.end() || !local_scope(*match)) return nullptr;
-        if ((match->profile->stock_ammo || match->profile->stock_cash) &&
+        if ((match->profile->stock_ammo || match->profile->stock_cash || match->profile->dead_drop) &&
             (!exact_source(actor, match->world.Get(), *match->profile, !match->claimed) ||
              source_box(actor) != match->box.Get())) return nullptr;
         return &*match;
@@ -495,7 +611,8 @@ namespace
     bool available(const Scope& scope)
     {
         auto* actor = scope.actor.Get();
-        return !scope.claimed && local_scope(scope) && exact_source(actor, scope.world.Get(), *scope.profile) &&
+        return !scope.claimed && local_scope(scope) && drop_gate(scope) &&
+            (!scope.profile->dead_drop || present_drop(scope)) && exact_source(actor, scope.world.Get(), *scope.profile) &&
             source_box(actor) == scope.box.Get() && static_cast<U::AActor*>(actor)->GetActorEnableCollision() &&
             boolean(actor, STR("bHidden"), false);
     }
@@ -503,7 +620,8 @@ namespace
     bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (!local_scope(scope) || !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
+        if (!local_scope(scope) || (scope.profile->dead_drop && (!scope.host || !claimed || !drop_gate(scope))) ||
+            !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
             return false;
         const bool hidden = claimed || scope.original_hidden;
         const bool collision = !claimed && scope.original_collision;
@@ -518,7 +636,8 @@ namespace
     void clear(Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-        if (scope.claimed && live(actor) && boolean(actor, STR("bActorIsBeingDestroyed"), false))
+        if (scope.claimed && scope.profile && !scope.profile->dead_drop &&
+            live(actor) && boolean(actor, STR("bActorIsBeingDestroyed"), false))
         {
             actor->SetActorHiddenInGame(scope.original_hidden);
             actor->SetActorEnableCollision(scope.original_collision);
@@ -529,6 +648,9 @@ namespace
 
     void clear()
     {
+        settle_drop_projection();
+        drop_settled_actor = {};
+        drop_settles_at = {};
         for (auto& scope : scopes) clear(scope);
     }
 
@@ -607,12 +729,22 @@ namespace
         if (name == add_name)
         {
             if (function != find<U::UFunction>(add_path)) return;
-            const auto* scope = actor_scope(read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args));
-            if (scope && context == object(scope->world.Get(), STR("OwningGameInstance"))) call.PreventOriginalFunctionCall();
+            auto* item = read(parameter<U::FObjectProperty>(function, STR("Item"), 0), args);
+            const auto* scope = actor_scope(item);
+            if ((scope && context == object(scope->world.Get(), STR("OwningGameInstance"))) ||
+                (drop_fence(item) && context == object(static_cast<U::AActor*>(item)->GetWorld(), STR("OwningGameInstance"))))
+                call.PreventOriginalFunctionCall();
             return;
         }
         auto* scope = actor_scope(context);
-        if (!scope) return;
+        if (!scope)
+        {
+            // Stock waits half a second before hiding a dormant bag. Veto its exact
+            // placed pickup callbacks even before Lua has a qualified input lease.
+            if (function->GetOuterPrivate() == find<U::UClass>(base_class) && drop_fence(context))
+                call.PreventOriginalFunctionCall();
+            return;
+        }
         const bool cash_callback = scope->profile->stock_cash && name == interact_name && function == interaction(true);
         if (!cash_callback && function->GetOuterPrivate() != find<U::UClass>(base_class)) return;
         call.PreventOriginalFunctionCall();
@@ -1323,6 +1455,8 @@ namespace
         Scope next{world, pawn, actor, box, object(pawn, STR("Controller")), object(world, STR("NetDriver")),
             &profile, host, false, actor->GetActorEnableCollision(), boolean(actor, STR("bHidden"), true)};
         if (!local_scope(next)) return result(lua, false, "authored_pickup_local_controller_unavailable");
+        if (profile.dead_drop && (!present_drop(next) || !drop_gate(next)))
+            return result(lua, false, "authored_pickup_dead_drop_inactive");
         scope = next;
         return result(lua, true, "authored_pickup_scope_bound");
     }
@@ -1357,8 +1491,9 @@ namespace
     int status(const Lua& lua)
     {
         auto* scope = ready() && lua.get_stack_size() == 1 ? select_source(lua) : nullptr;
-        const bool active = scope && local_scope(*scope) &&
-            exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile, !scope->claimed);
+        const bool active = scope && local_scope(*scope) && (scope->claimed || drop_gate(*scope)) &&
+            exact_source(scope->actor.Get(), scope->world.Get(), *scope->profile, !scope->claimed) &&
+            (scope->claimed || !scope->profile->dead_drop || present_drop(*scope));
         const bool emitted = active && Clock::now() < scope->observed.expires;
         lua.set_bool(active);
         lua.set_bool(active && scope->claimed);
@@ -1366,6 +1501,100 @@ namespace
         lua.set_bool(emitted && scope->observed.fixture);
         lua.set_integer(active && scope->host && scope->profile->stock_cash ? loose_cash_value(scope->actor.Get()) : 0);
         return 5;
+    }
+
+    Scope dead_drop_seat(Address address_value, bool host)
+    {
+        auto* pawn = live_address(address_value, find<U::UClass>(pawn_path));
+        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        auto* actor = find<U::AActor>(dead_drop_profile.actor);
+        Scope candidate{world, pawn, actor, source_box(actor), object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &dead_drop_profile, host};
+        return local_scope(candidate) ? candidate : Scope{};
+    }
+
+    int observe_drop(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer() || !lua.is_bool(2)) return 0;
+        const auto address_value = static_cast<Address>(lua.get_integer());
+        const bool host = lua.get_bool();
+        auto state = dead_drop_seat(address_value, host);
+        if (!state.profile) return 0;
+        const auto now = Clock::now();
+        auto* actor = static_cast<U::AActor*>(state.actor.Get());
+        if (!host && drop_projection.scope.profile &&
+            (!drop_gate(state) || !present_drop(state)) && !settle_drop_projection()) return 0;
+        std::string_view shown;
+        std::string_view epoch = "-";
+        if (!actor) shown = "absent";
+        else if (!dead_drop_identity(actor, state.world.Get())) return 0;
+        else if (hidden_drop(actor)) shown = "hidden";
+        else if (host)
+        {
+            if (drop_settled_actor.Get() != actor)
+            {
+                drop_settled_actor = actor;
+                drop_settles_at = now + drop_settle;
+            }
+            if (now < drop_settles_at) return 0;
+            const auto& bound = scopes.front();
+            if (bound.actor.Get() == actor && bound.claimed && boolean(actor, STR("bHidden"), true)) shown = "claimed";
+            else if (drop_gate(state) && present_drop(state)) shown = "stock-active";
+        }
+        else if (drop_gate(state) && present_drop(state))
+        {
+            shown = "projected";
+            epoch = drop_projection.epoch;
+        }
+        if (shown.empty()) return 0;
+        lua.set_string(shown);
+        lua.set_string(epoch);
+        return 2;
+    }
+
+    bool valid_drop_epoch(std::string_view epoch)
+    {
+        return epoch.size() == 32 && epoch != "00000000000000000000000000000000" &&
+            std::ranges::all_of(epoch, [](char digit) { return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f'); });
+    }
+
+    int project_drop(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer() || !lua.is_string(2))
+            return result(lua, false, "dead_drop_projection_arguments");
+        const auto address_value = static_cast<Address>(lua.get_integer());
+        const std::string epoch{lua.get_string()};
+        auto state = dead_drop_seat(address_value, false);
+        auto* actor = static_cast<U::AActor*>(state.actor.Get());
+        if (!valid_drop_epoch(epoch) || !state.profile || !dead_drop_identity(actor, state.world.Get()))
+            return result(lua, false, "dead_drop_projection_scope_unavailable");
+        const auto now = Clock::now();
+        if (drop_projection.epoch == epoch && drop_gate(state) && present_drop(state))
+        {
+            drop_projection.expires = now + drop_lease;
+            return result(lua, true, "renewed");
+        }
+        if (!settle_drop_projection() || !hidden_drop(actor))
+            return result(lua, false, "dead_drop_projection_stock_pose_unavailable");
+        const auto& source = dead_drop_profile;
+        U::FHitResult ignored{};
+        drop_projection = {state, epoch, {}};
+        const bool moved = actor->K2_SetActorLocation(U::FVector{source.x, source.y, source.z}, false, ignored, true);
+        if (moved) actor->SetActorHiddenInGame(false);
+        if (!moved || !present_drop(state))
+        {
+            const bool restored = settle_drop_projection();
+            return result(lua, false, restored ? "dead_drop_projection_not_applied" : "mutation_unverified_dead_drop_projection");
+        }
+        drop_projection.expires = now + drop_lease;
+        return result(lua, true, "projected");
+    }
+
+    int clear_drop(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 0) return result(lua, false, "dead_drop_clear_unavailable");
+        const bool cleared = settle_drop_projection();
+        return result(lua, cleared, cleared ? "cleared" : "mutation_unverified_dead_drop_projection_reset");
     }
 
     std::string cash_flag(U::UObject* actor, U::UObject* world)
@@ -1567,6 +1796,9 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
+        lua.register_function("SilverfishObserveNativeCrossroadsDeadDrop", observe_drop);
+        lua.register_function("SilverfishProjectNativeCrossroadsDeadDrop", project_drop);
+        lua.register_function("SilverfishClearNativeCrossroadsDeadDrop", clear_drop);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishClaimNativeAuthoredCash", claim_cash);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);

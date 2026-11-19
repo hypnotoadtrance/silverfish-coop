@@ -31,7 +31,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_savlo_locker, native_subway_valve
+from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
 from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
@@ -573,6 +573,8 @@ class Host:
             view["shared_wallet"] = balance
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
+        if dead_drop := native_dead_drop.frame(self):
+            view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
             view[native_dust_cabinet.frame_key(cabinet["map"])] = cabinet
         if locker := native_savlo_locker.frame(self):
@@ -3524,6 +3526,7 @@ class Client:
         self.last_crate_intent = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
+        self.dead_drop_projection = (None, 0.0)
         self.dialogue_view = (native_dialogue.DialogueView(
             bridge, control, mosby=invite.get("native_dialogue_mosby", False),
             shopkeep=invite.get("native_dialogue_shopkeep", False), shopkeep_view=invite.get("native_shop_view", False),
@@ -3957,6 +3960,7 @@ class Client:
                         self.loot_tracking = tracking
                 await project_players(self.bridge, self.last_game, self.gameplay, client=True, viewer_role=self.viewer_role)
                 await self.downed_markers.sync(self)
+                await native_dead_drop.project_client(self)
                 if time.monotonic() - self.gameplay_seen < 3:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
