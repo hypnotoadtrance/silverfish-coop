@@ -1,3 +1,4 @@
+from collections import Counter
 import tempfile
 import time
 import unittest
@@ -6,8 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_authored_pickup as pickup, native_computer_board, native_host_save, native_quest
-from tools.silverfish import native_wire_board, party, runtime
-from tools.silverfish.travel import BLACK_MARKET, CITY, OBSERVATORY
+from tools.silverfish import authored_cash, generate_authored_cash, native_loot, native_wire_board, party, runtime
+from tools.silverfish.travel import BLACK_MARKET, CITY, CROSSROADS, OBSERVATORY
 
 
 WIRE, BRANDY = pickup.CITY_WIRE, pickup.CITY_BRANDY
@@ -88,6 +89,59 @@ class AuthoredPickupSelectorTests(unittest.TestCase):
         self.assertEqual(snapshot[pickup.CASH_KEY]["amount"], 7)
         status.write_text(host_header + "\n".join((placed, report, credit.replace("C_7-", "C_8-"))), encoding="utf-8")
         self.assertIsNone(bridge.snapshot())
+
+
+    def test_generated_cash_catalog_preserves_legacy_and_distinguishes_equal_actor_names(self):
+        self.assertEqual(Counter(row.area for row in authored_cash.PLACEMENTS), {CITY: 32, CROSSROADS: 1})
+        self.assertEqual(len({row.path for row in authored_cash.PLACEMENTS}), 33)
+        self.assertEqual(len(authored_cash.BY_SOURCE), 33)
+        self.assertEqual(sum(not row.physics for row in authored_cash.PLACEMENTS), 9)
+        self.assertEqual({row.item.class_path: (row.item.minimum, row.item.maximum)
+                          for row in authored_cash.PLACEMENTS}, native_loot.CASH_RANGES)
+        self.assertEqual(authored_cash.BY_SOURCE[CASH].stock_flag, "Item_Money_CoupleBills_C_7-City_01_P-")
+        city, crossroads = (authored_cash.BY_SOURCE[s] for s in ("city-small-stack-1", "crossroads-small-stack-1"))
+        self.assertEqual(city.name, crossroads.name)
+        self.assertNotEqual(city.path, crossroads.path)
+        self.assertNotEqual(city.stock_flag, crossroads.stock_flag)
+        self.assertFalse(city.physics)
+        self.assertTrue(crossroads.physics)
+        for relative, expected in generate_authored_cash.outputs().items():
+            self.assertEqual((Path(__file__).resolve().parents[1] / relative).read_text(encoding="utf-8"), expected)
+
+    def test_cash_bridge_refuses_other_classes_ranges_maps_and_client_amounts(self):
+        path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        status = path / "status.tsv"
+        bridge = runtime.Bridge(path, Mock())
+        slot = "SFCoop_" + "a" * 32
+
+        def report(source, amount, *, map_override=None, state="hosting", stock_flag=None):
+            placement = authored_cash.BY_SOURCE[source]
+            area = placement.area
+            level = area if map_override is None else map_override
+            role = "host" if state == "hosting" else "client"
+            rows = (
+                ("schema", "1"),
+                ("session", role, state, level, "1", "0" if role == "host" else "1"),
+                ("native-authored-pickup", *row(source).values(), str(amount)),
+                ("native-authored-pickup-claim", source, area, PAWN, "1", "1", "cash_credited", "-", slot),
+                (pickup.CASH_TAG, source, area, PAWN, slot, str(amount), "50", str(50 + amount),
+                 placement.stock_flag if stock_flag is None else stock_flag),
+            )
+            status.write_text("\n".join("\t".join(fields) for fields in rows), encoding="utf-8")
+            return bridge.snapshot()
+
+        for source in (CASH, "crossroads-small-stack-1", "city-large-stack-1", "city-massive-pile-1"):
+            placement = authored_cash.BY_SOURCE[source]
+            with self.subTest(source=source):
+                for amount in (placement.item.minimum, placement.item.maximum):
+                    valid = report(source, amount)
+                    self.assertEqual(valid[pickup.CASH_KEY]["amount"], amount)
+                    self.assertEqual(valid[pickup.SOURCES_KEY][source]["wallet_value"], amount)
+                self.assertIsNone(report(source, placement.item.minimum - 1))
+                self.assertIsNone(report(source, placement.item.maximum + 1))
+                self.assertIsNone(report(source, placement.item.minimum, state="connected"))
+        self.assertIsNone(report("crossroads-small-stack-1", 30, map_override=CITY))
+        self.assertIsNone(report("crossroads-small-stack-1", 30, stock_flag="Item_Money_SmallStack_C_1-City_01_P-"))
 
 
 class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):

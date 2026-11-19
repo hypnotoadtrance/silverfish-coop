@@ -1,5 +1,6 @@
 local input = {}
 local supply_profiles = require("authored_supply_catalog")
+local cash_profiles = require("authored_cash_catalog")
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
@@ -7,8 +8,6 @@ local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
     ["city-canned-peaches"] = city,
-    ["city-couple-bills-7"] = city,
-    ["city-couple-bills-8"] = city,
     ["scientist-blank-data-tape"] = scientist,
     ["crossroads-pocket-watch"] = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P",
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
@@ -30,8 +29,6 @@ local fort_leto_key = "fort-leto-locker-key-543"
 local stolen_bag = "forest-brokers-artifacts-bag"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
-    ["city-couple-bills-7"] = {95, 125, 155, 190},
-    ["city-couple-bills-8"] = {95, 125, 155, 190},
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
@@ -48,6 +45,12 @@ for _, profile in ipairs(supply_profiles) do
         shelf_source = profile.source
         precise_distances[profile.source] = {48, 62, 78, 95, 115, 150, 195}
     end
+end
+local cash_sources = {}
+for _, profile in ipairs(cash_profiles) do
+    cash_sources[profile.source] = profile
+    sources[profile.source] = profile.map
+    precise_distances[profile.source] = {95, 125, 155, 190}
 end
 local approach_front = {[dust_filter] = 0, [molasses] = 180, [stolen_bag] = -90}
 -- The exact City stack sits in the low wall shelf at yaw -105 degrees.
@@ -156,7 +159,7 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
 end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
-    local cash = profile.stock_cash == true and (profile.source == "city-couple-bills-7" or profile.source == "city-couple-bills-8")
+    local cash = cash_sources[profile.source] == profile
     local bag = profile.source == stolen_bag and profile.map == sources[stolen_bag] and profile.authority_sight == true
     if (not cash and not bag and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
         or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
@@ -287,15 +290,17 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     if not distances then return end
     local label = "authored_pickup_fixture_" .. profile.source
     if (profile.stock_supply and supplies[profile.source] ~= profile)
+        or (profile.stock_cash and cash_sources[profile.source] ~= profile)
         or not approach_scope(state, phase, pawn, actor, sources[profile.source])
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
     local forest_locker_top = profile.source == stolen_bag
+    local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
+        or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
     approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],
-        profile.source == molasses or profile.source == shelf_source or forest_locker_top, nil,
-        forest_locker_top and 275 or nil)
+        nested_floor, nil, forest_locker_top and 275 or nil)
     return "stock pickup floor and interaction sight verified"
 end
 
@@ -424,6 +429,7 @@ function input.press(state, phase, profile)
     local inspect, press = SilverfishReadNativeAuthoredPickup, SilverfishProbeNativeInteractInput
     if not headless or (not guest and not (host and host_fixtures)) or not state.listening or profile.map ~= state.map
         or (profile.stock_supply and supplies[profile.source] ~= profile)
+        or (profile.stock_cash and cash_sources[profile.source] ~= profile)
         or sources[profile.source] ~= state.map or type(inspect) ~= "function" or type(press) ~= "function" then
         error("authored_pickup_stock_input_fixture_unavailable", 0)
     end

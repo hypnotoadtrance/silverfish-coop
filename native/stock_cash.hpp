@@ -18,7 +18,7 @@ namespace silverfish::stock_cash
         return type && base && type->IsChildOf(base);
     }
 
-    inline bool qualified_value(Unreal::UClass* type, int amount)
+    inline bool qualified_value(Unreal::UClass* type, int amount, Unreal::UObject* placed = nullptr)
     {
         struct CashProfile { const Unreal::TCHAR* path; int minimum; int maximum; };
         constexpr std::array profiles{
@@ -40,6 +40,9 @@ namespace silverfish::stock_cash
             minimum->GetArrayDim() != 1 || maximum->GetArrayDim() != 1 ||
             minimum->GetPropertyValueInContainer(defaults) != profile->minimum ||
             maximum->GetPropertyValueInContainer(defaults) != profile->maximum) return false;
+        if (placed && (placed->GetClassPrivate() != type ||
+            minimum->GetPropertyValueInContainer(placed) != profile->minimum ||
+            maximum->GetPropertyValueInContainer(placed) != profile->maximum)) return false;
         return amount >= profile->minimum && amount <= profile->maximum;
     }
 }

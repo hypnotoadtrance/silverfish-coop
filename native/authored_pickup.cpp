@@ -172,22 +172,7 @@ namespace
             STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
             -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
         },
-        Profile{
-            .source = "city-couple-bills-7",
-            .world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
-            .actor = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_Money_CoupleBills_C_7"),
-            .item_class = STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"),
-            .x = -685.8361208569721, .y = 4674.064705473622, .z = 12.734350318836803,
-            .item_type = 1, .physics = true, .stock_cash = true,
-        },
-        Profile{
-            .source = "city-couple-bills-8",
-            .world = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
-            .actor = STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_Money_CoupleBills_C_8"),
-            .item_class = STR("/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"),
-            .x = -727.2304047599307, .y = 4674.064705, .z = 12.734349193875403,
-            .item_type = 1, .physics = true, .stock_cash = true,
-        },
+#include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
     };
     constexpr auto base_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -413,17 +398,15 @@ namespace
 
     int loose_cash_value(U::UObject* actor)
     {
-        auto* range_min = field<U::FIntProperty>(actor, STR("Value_Min"));
-        auto* range_max = field<U::FIntProperty>(actor, STR("Value_Max"));
         auto* value = field<U::FIntProperty>(actor, STR("Value"));
         auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
-        if (!value || !range_min || !range_max || !mode || mode->GetPropertyValueInContainer(actor) != 2 ||
-            !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bReplicates"), false) ||
-            range_min->GetPropertyValueInContainer(actor) != 6 || range_max->GetPropertyValueInContainer(actor) != 10)
-            return 0;
+        if (!value || value->GetArrayDim() != 1 || !mode || mode->GetArrayDim() != 1 ||
+            mode->GetPropertyValueInContainer(actor) != 2 || !actor->HasAnyFlags(U::RF_WasLoaded) ||
+            !boolean(actor, STR("bReplicates"), false)) return 0;
         const auto amount = value->GetPropertyValueInContainer(actor);
         auto* type = actor->GetClassPrivate();
-        return silverfish::stock_cash::is_family(type) && silverfish::stock_cash::qualified_value(type, amount) ? amount : 0;
+        return silverfish::stock_cash::is_family(type) &&
+            silverfish::stock_cash::qualified_value(type, amount, actor) ? amount : 0;
     }
 
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
@@ -1314,12 +1297,15 @@ namespace
         if (address(scope.pawn.Get()) == ptr && host == scope.host && local_scope(scope))
             return result(lua, true, "authored_pickup_scope_bound");
         clear(scope);
+        const auto& profile = profiles[static_cast<std::size_t>(selected - scopes.data())];
+        auto* actor = find<U::AActor>(profile.actor);
+        // Stock permanent actors can be absent on revisits. Skip the pawn scan in that case.
+        if (profile.stock_cash && !live(actor))
+            return result(lua, false, "authored_pickup_stock_actor_identity_unqualified");
         auto* pawn = live_address(ptr, find<U::UClass>(pawn_path));
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
-        const auto& profile = profiles[static_cast<std::size_t>(selected - scopes.data())];
         if (!live(world) || world->GetPathName() != profile.world)
             return result(lua, false, "authored_pickup_source_world_unavailable");
-        auto* actor = find<U::AActor>(profile.actor);
         if (const auto* fault = source_fault(actor, world, profile))
         {
             if (live(actor) && std::string_view(fault) == "authored_pickup_stock_placement_unqualified")
@@ -1382,7 +1368,7 @@ namespace
         return 5;
     }
 
-    std::string cash_flag(U::UObject* actor)
+    std::string cash_flag(U::UObject* actor, U::UObject* world)
     {
         auto* library = find<U::UObject>(code_library);
         auto* function = find<U::UFunction>(stock_actor_id);
@@ -1402,7 +1388,7 @@ namespace
         world_context->SetObjectPropertyValue(world_context->ContainerPtrToValuePtr<void>(buffer.data()), actor);
         library->ProcessEvent(function, buffer.data());
         const auto& key = identity->GetPropertyValue(identity->ContainerPtrToValuePtr<void>(buffer.data()));
-        const auto expected = actor->GetName() + STR("-City_01_P-");
+        const auto expected = actor->GetName() + STR("-") + world->GetName() + STR("-");
         if (key.Len() != static_cast<int>(expected.size()) || expected != *key) return {};
         return RC::to_utf8_string(expected);
     }
@@ -1425,7 +1411,7 @@ namespace
         auto* mark = find<U::UFunction>(resolve_save_mode);
         silverfish::stock_wallet::Wallet wallet;
         const auto amount = loose_cash_value(actor);
-        const auto flag = cash_flag(actor);
+        const auto flag = cash_flag(actor, scope->world.Get());
         if (!amount || flag.empty() || !wallet.bind(instance) || object(pawn, STR("As Game Instance FP")) != instance ||
             !mark || mark->GetOuterPrivate() != find<U::UClass>(base_class) || mark->GetNumParms() != 0 ||
             mark->GetParmsSize() != 0 || mark->GetReturnProperty() || mark->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))

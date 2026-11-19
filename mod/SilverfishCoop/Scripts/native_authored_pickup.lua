@@ -152,15 +152,8 @@ local profiles = {
     },
 }
 local map_profiles = {}
-for _, number in ipairs({7, 8}) do
-    profiles[#profiles + 1] = {
-        map = city,
-        source = "city-couple-bills-" .. number,
-        path = city .. ".City_01_P:PersistentLevel.Item_Money_CoupleBills_C_" .. number,
-        class = "/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C",
-        name = "Item_Money_CoupleBills_C",
-        stock_cash = true,
-    }
+for _, profile in ipairs(require("authored_cash_catalog")) do
+    profiles[#profiles + 1] = profile
 end
 for _, profile in ipairs(require("authored_supply_catalog")) do
     profiles[#profiles + 1] = profile
@@ -186,6 +179,11 @@ end
 
 local function exact_slot(slot)
     return type(slot) == "string" and #slot == 39 and slot:match("^SFCoop_[0-9a-f]+$")
+end
+
+local function cash_amount(profile, amount)
+    return profile.stock_cash == true and math.type(amount) == "integer"
+        and amount >= profile.cash_min and amount <= profile.cash_max
 end
 
 local function guid(value)
@@ -271,9 +269,9 @@ local function claim(fields, state, phase, profile)
         end
         local ok, reason, amount, before, after, flag = cash(pawn:GetAddress(), save:GetAddress(), profile.source)
         report.applied = ok == true or type(reason) == "string" and reason:match("^mutation_unverified_") ~= nil
-        report.ok = ok == true and reason == "cash_credited" and math.type(amount) == "integer" and amount >= 6 and amount <= 10
+        report.ok = ok == true and reason == "cash_credited" and cash_amount(profile, amount)
             and math.type(before) == "integer" and math.type(after) == "integer" and before >= 0 and after <= 0x7fffffff
-            and after == before + amount and flag == profile.path:match("([^%.:]+)$") .. "-City_01_P-"
+            and after == before + amount and flag == profile.cash_flag
         report.status = report.ok and "cash_credited" or (ok and "mutation_unverified_authored_cash_abi" or tostring(reason))
         if report.ok then report.cash = {amount = amount, before = before, after = after, flag = flag} end
         return "authored cash pickup reported"
@@ -414,7 +412,7 @@ function pickup.rows(state, phase, status_row)
             if active then
                 local fields = {"native-authored-pickup", profile.source, state.map,
                     profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available"}
-                if profile.stock_cash and binding.host and math.type(amount) == "integer" and amount >= 6 and amount <= 10 then
+                if binding.host and cash_amount(profile, amount) then
                     fields[7] = amount
                 end
                 rows[#rows + 1] = status_row(table.unpack(fields))

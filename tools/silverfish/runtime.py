@@ -1528,7 +1528,8 @@ class Bridge:
                     placed[source] = {"source": source, "map": area, "actor": actor, "class_path": item_class, "state": state}
                     if len(fields) == 7:
                         amount = int(fields[6])
-                        if source not in native_authored_pickup.CASH_ACTORS or data.get("state") != "hosting" or not 6 <= amount <= 10:
+                        if (data.get("state"), data.get("map")) != ("hosting", area) or not (
+                                native_authored_pickup.valid_cash_amount(source, amount)):
                             raise ValueError("Invalid authority authored stock cash value")
                         placed[source]["wallet_value"] = amount
                 elif fields[0] == "native-authored-pickup-interaction" and len(fields) == 6:

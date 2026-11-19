@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from . import native_dust_cabinet, native_host_save, native_savlo_locker, party
+from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_gold import valid_guid
 from .travel import BOROUGH, CITY, CROSSROADS, FOREST, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
@@ -15,8 +16,6 @@ ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
 CITY_BRANDY = "city-paladin-brandy"
 CITY_PEACHES = "city-canned-peaches"
-CASH_CLASS = "/Game/Classes/Items/Item_Money_CoupleBills.Item_Money_CoupleBills_C"
-CASH_ACTORS = {f"city-couple-bills-{number}": f"Item_Money_CoupleBills_C_{number}" for number in (7, 8)}
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
@@ -67,8 +66,7 @@ SOURCES = {
                  "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
 }
 SOURCES.update({source: (row.area, row.actor, row.ammo.item_path) for source, row in STOCK_SUPPLIES.items()})
-SOURCES.update({source: (CITY, f"Item_Money_CoupleBills_C {CITY}.City_01_P:PersistentLevel.{actor}", CASH_CLASS)
-                for source, actor in CASH_ACTORS.items()})
+SOURCES.update({source: (row.area, row.actor, row.item.class_path) for source, row in STOCK_CASH.items()})
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
     MAP_SOURCES.setdefault(area, []).append(source)
@@ -89,7 +87,7 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES and source not in CASH_ACTORS]
+        defaults = [source for source in sources if source != OLD_PIPE and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
     if isinstance(requested, str) and requested in sources:
@@ -125,7 +123,7 @@ async def project(service, bridge, pickups: dict) -> None:
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:
-    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in CASH_ACTORS):
+    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in STOCK_CASH):
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
             raise party.RuleError("native_authored_pickup_stale_zone")
         return f"{target}@{epoch}"
@@ -165,23 +163,28 @@ def parse_merge(fields: list[str], snapshot: dict) -> dict:
     return report
 
 
+def valid_cash_amount(source: str, amount: object) -> bool:
+    placement = STOCK_CASH.get(source)
+    return placement is not None and placement.accepts(amount)
+
+
 def _matches_cash(claim: dict, credit: dict) -> bool:
     name = credit.get("source")
-    actor = CASH_ACTORS.get(name) if isinstance(name, str) else None
+    placement = STOCK_CASH.get(name) if isinstance(name, str) else None
     amount, before, after = (credit.get(key) for key in ("amount", "before", "after"))
     slot = credit.get("slot")
-    return (actor is not None and credit.get("map") == CITY and claim.get("ok") is True and claim.get("applied") is True
+    return (placement is not None and credit.get("map") == placement.area
+            and claim.get("ok") is True and claim.get("applied") is True
             and claim.get("status") == "cash_credited" and claim.get("guid") == "-"
             and all(credit.get(key) == claim.get(key) for key in ("source", "map", "pawn", "slot"))
             and isinstance(credit.get("pawn"), str) and bool(credit["pawn"])
             and isinstance(slot, str) and native_host_save.SLOT.fullmatch(slot) is not None
-            and credit.get("stock_flag") == f"{actor}-City_01_P-"
-            and all(type(value) is int for value in (amount, before, after))
-            and 6 <= amount <= 10 and 0 <= before < after < 2**31 and after - before == amount)
+            and credit.get("stock_flag") == placement.stock_flag and placement.accepts(amount)
+            and type(before) is int and type(after) is int and 0 <= before < after < 2**31 and after - before == amount)
 
 
 def parse_cash(fields: list[str], snapshot: dict) -> dict:
-    if len(fields) != 9 or (snapshot.get("state"), snapshot.get("map")) != ("hosting", CITY):
+    if len(fields) != 9 or (snapshot.get("state"), snapshot.get("map")) != ("hosting", fields[2]):
         raise ValueError("Invalid exact authored cash credit")
     source, area, pawn, slot, amount, before, after, flag = fields[1:]
     credit = {"source": source, "map": area, "pawn": pawn, "slot": slot, "amount": int(amount),
@@ -196,7 +199,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         raise party.RuleError("invalid_authored_pickup_request")
     target, has_epoch, epoch = target.partition("@")
     is_supply = target in STOCK_SUPPLIES
-    is_cash = target in CASH_ACTORS
+    is_cash = target in STOCK_CASH
     bound_epoch = is_supply or is_cash
     if target not in SOURCES or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
@@ -241,7 +244,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 or character in host.party["pending_spawns"] or host.party["players"].get(character, {}).get("downed")):
             raise party.RuleError("native_authored_pickup_owner_or_source_changed")
     amount = _displayed(host.last_game, target).get("wallet_value") if is_cash else None
-    if is_cash and (type(amount) is not int or not 6 <= amount <= 10):
+    if is_cash and not valid_cash_amount(target, amount):
         raise party.RuleError("authored_cash_stock_value_unavailable")
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
