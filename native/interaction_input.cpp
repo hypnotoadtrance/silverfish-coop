@@ -45,10 +45,6 @@ namespace
     constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
     constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
     constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
-    constexpr auto dialogue_world = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
-    constexpr auto dialogue_actor = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_Castaway_C_1");
-    constexpr auto dialogue_class = STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C");
-    constexpr auto dialogue_interaction = STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C:SendInteractionToActor");
     constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
@@ -79,6 +75,35 @@ namespace
         BoardProfile{
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"), 1, true,
+        },
+    };
+
+    struct DialogueProfile
+    {
+        const Unreal::TCHAR* world;
+        const Unreal::TCHAR* actor;
+        const Unreal::TCHAR* actor_class;
+        const Unreal::TCHAR* component;
+        const Unreal::TCHAR* component_class;
+        const Unreal::TCHAR* callback;
+    };
+
+    constexpr std::array dialogue_profiles{
+        DialogueProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_Castaway_C_1"),
+            STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C"),
+            STR("Sphere_Interact"),
+            STR("/Script/Engine.SphereComponent"),
+            STR("/Game/Classes/NPCs/NPC_Characters/NPC_Castaway.NPC_Castaway_C:SendInteractionToActor"),
+        },
+        DialogueProfile{
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.Generic_Interact_BP_C_1"),
+            STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C"),
+            STR("Box"),
+            STR("/Script/Engine.BoxComponent"),
+            STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C:SendInteractionToActor"),
         },
     };
 
@@ -344,6 +369,15 @@ namespace
         return nullptr;
     }
 
+    const DialogueProfile* dialogue_profile(Unreal::UObject* world)
+    {
+        if (!live(world)) return nullptr;
+        const auto path = world->GetPathName();
+        for (const auto& profile : dialogue_profiles)
+            if (path == profile.world) return &profile;
+        return nullptr;
+    }
+
     std::string_view qualify_wire_board(Unreal::UObject* world, const BoardProfile& profile, Unreal::UObject* actor, Unreal::UObject* box)
     {
         if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(wire_board_class) ||
@@ -426,25 +460,27 @@ namespace
         wire_board.pending = {++wire_sequence, Clock::now() + receipt_lifetime};
     }
 
-    bool exact_dialogue_actor(Unreal::UObject* actor, Unreal::UObject* sphere)
+    bool exact_dialogue_actor(const DialogueProfile& profile, Unreal::UObject* actor, Unreal::UObject* component)
     {
         auto* world = scope.world.Get();
         auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
-        return !scope.host && live(world) && world->GetPathName() == dialogue_world
-            && live(actor) && actor->GetClassPrivate() == find<Unreal::UClass>(dialogue_class)
-            && actor->GetPathName() == dialogue_actor && destroying && !destroying->GetPropertyValueInContainer(actor)
-            && static_cast<Unreal::AActor*>(actor)->GetWorld() == world && live(sphere)
-            && sphere->GetClassPrivate() == find<Unreal::UClass>(STR("/Script/Engine.SphereComponent"))
-            && sphere->GetOuterPrivate() == actor && sphere == object_field(actor, STR("Sphere_Interact"));
+        return !scope.host && live(world) && world->GetPathName() == profile.world
+            && live(actor) && actor->GetClassPrivate() == find<Unreal::UClass>(profile.actor_class)
+            && actor->GetPathName() == profile.actor && destroying && !destroying->GetPropertyValueInContainer(actor)
+            && static_cast<Unreal::AActor*>(actor)->GetWorld() == world && live(component)
+            && component->GetClassPrivate() == find<Unreal::UClass>(profile.component_class)
+            && component->GetOuterPrivate() == actor && component == object_field(actor, profile.component);
     }
 
     void intercept_dialogue(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         if (!actor || actor != dialogue_input.actor.Get() || !function || !parameters ||
             call.OriginalFunctionCallPrevented() || Clock::now() >= dialogue_input.expires ||
-            !live_scope(scope) || function != find<Unreal::UFunction>(dialogue_interaction)) return;
-        auto* sphere = dialogue_input.component.Get();
-        if (!exact_dialogue_actor(actor, sphere) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            !live_scope(scope)) return;
+        auto* target = dialogue_input.component.Get();
+        const auto* profile = dialogue_profile(scope.world.Get());
+        if (!profile || function != find<Unreal::UFunction>(profile->callback)
+            || !exact_dialogue_actor(*profile, actor, target) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
             function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
@@ -455,9 +491,9 @@ namespace
         if (!pawn || pawn != dialogue_input.pawn.Get() || pawn != scope.pawn.Get()) return;
         call.PreventOriginalFunctionCall();
         auto* hit = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
-        if (!call.OriginalFunctionCallPrevented() || hit != sphere || !dialogue_input.accepting ||
-            object_field(pawn, STR("InteractionTarget_Component")) != sphere || dialogue_sequence == max_sequence ||
-            !interaction_in_reach(pawn, actor, sphere) ||
+        if (!call.OriginalFunctionCallPrevented() || hit != target || !dialogue_input.accepting ||
+            object_field(pawn, STR("InteractionTarget_Component")) != target || dialogue_sequence == max_sequence ||
+            !interaction_in_reach(pawn, actor, target) ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
         dialogue_input.pending = {++dialogue_sequence, Clock::now() + receipt_lifetime};
     }
@@ -642,10 +678,12 @@ namespace
         const auto now = Clock::now();
         if (scope.host || !pawn || address(pawn) != requested || now >= scope.expires || !live_scope(scope))
             return respond(false);
-        auto* actor = find<Unreal::AActor>(dialogue_actor);
-        auto* sphere = object_field(actor, STR("Sphere_Interact"));
-        if (!exact_dialogue_actor(actor, sphere)) return respond(false);
-        bind_interaction(dialogue_input, actor, sphere, pawn, accepting, now);
+        const auto* profile = dialogue_profile(scope.world.Get());
+        if (!profile) return respond(false);
+        auto* actor = find<Unreal::AActor>(profile->actor);
+        auto* component = object_field(actor, profile->component);
+        if (!exact_dialogue_actor(*profile, actor, component)) return respond(false);
+        bind_interaction(dialogue_input, actor, component, pawn, accepting, now);
         return respond(true);
     }
 
