@@ -29,7 +29,7 @@ local merchants = {
     },
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_Smuggler_P"] = {
         level = "Shop_Smuggler_P", actor = "Shop_BP_C_1", data = "SmugglerShopData", barter = "Barter_BP_C_2",
-        neutral = true, smuggler_finite = true,
+        neutral = true, smuggler = true,
     },
 }
 local merchant_data_root = "/Game/Classes/Libraries/DataAssets/Merchants/"
@@ -146,10 +146,14 @@ local function merchant(state, phase, pawn_name, allow_host)
         or not exact(actor.Box, "/Script/Engine.BoxComponent") or not same(actor.Box:GetOwner(), actor) then
         refused("exact_stock_merchant_unavailable")
     end
-    if profile.smuggler_finite then
+    if profile.smuggler then
         local markup = actor.MerchantData["MarkupMin/Max"]
-        if actor.NoInfiniteStock ~= true or actor.CanSellTo ~= true or actor.LimitedCash ~= true
-            or not markup or markup.X ~= 5 or markup.Y ~= 5 then refused("smuggler_finite_stock_unverified") end
+        if type(actor.NoInfiniteStock) ~= "boolean" or actor.CanSellTo ~= true or actor.LimitedCash ~= true
+            or not markup or markup.X ~= 5 or markup.Y ~= 5 then
+            refused(string.format("smuggler_cash_stock_unverified:stock=%s:sell=%s:cash=%s:markup=%s/%s",
+                tostring(actor.NoInfiniteStock), tostring(actor.CanSellTo), tostring(actor.LimitedCash),
+                tostring(markup and markup.X), tostring(markup and markup.Y)))
+        end
     end
     local reception
     if profile.reception then
@@ -164,15 +168,15 @@ local function merchant(state, phase, pawn_name, allow_host)
             or not same(replacement.MerchantData, actor.MerchantData) or not reception and (collision ~= 1 and collision ~= 3) then
             refused(profile.reception and "shopkeep_cash_reception_unavailable"
                 or profile.camera and "scientist_cash_counter_unavailable"
-                or profile.smuggler_finite and "smuggler_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
+                or profile.smuggler and "smuggler_cash_counter_unavailable" or "gunsmith_cash_counter_unavailable")
         end
         if profile.neutral and (replacement.AcceptCash ~= true or actor["Rep Faction"] ~= 0) then
             refused(profile.reception and "shopkeep_neutral_profile_unverified"
-                or profile.smuggler_finite and "smuggler_neutral_profile_unverified" or "gunsmith_neutral_profile_unverified")
+                or profile.smuggler and "smuggler_neutral_profile_unverified" or "gunsmith_neutral_profile_unverified")
         end
     end
     return {pawn = pawn, stock = stock, actor = actor, name = target_name, instance = instance, reception = reception,
-        prove_focus = profile.smuggler_finite}
+        prove_focus = profile.smuggler}
 end
 
 local function quote_panel(context)

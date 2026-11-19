@@ -4,6 +4,7 @@ import time
 
 from . import party
 from .native_gold import valid_guid
+from .native_guest_consumable import MRE_CLASS
 from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
@@ -153,7 +154,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             raise
         proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased")
         reported = proof["offers"]
-        shelf_class = {SCIENTIST_SHOP: CAMERA, GUNSMITH: BALL_AMMO}.get(area)
+        shelf_class = {SCIENTIST_SHOP: CAMERA, GUNSMITH: BALL_AMMO, SMUGGLER: MRE_CLASS}.get(area)
         if (not sale and shelf_class and len(reported) == 1
                 and offer["class_path"] == reported[0]["class_path"] == shelf_class):
             proof["offer_guid"] = guid

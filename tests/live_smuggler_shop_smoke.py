@@ -131,12 +131,24 @@ async def verify(work: Path, original: Path):
         assert (confirming["state"], confirming["guid"], confirming["price"]) == ("confirming", offer["guid"], offer["price"])
         await action(guest_run, "native-shop-view-fixture", target="enter")
         event = await wait_event(guest_run, "native_shop_view_purchased",
-                                 lambda row: row.get("native_finite_purchase", {}).get("offers") == [offer])
+                                 lambda row: row.get("native_finite_purchase", {}).get("offer_guid") == offer["guid"])
         receipt = event["native_finite_purchase"]
+        acquired, = receipt["offers"]
+        assert acquired == dict(offer, guid=acquired["guid"]), receipt
+        shelf = receipt["stock_source"] == "stock_shelf"
+        assert receipt["stock_source"] in ("limited_stock", "stock_shelf"), receipt
+        assert (acquired["guid"] != offer["guid"]) == shelf, receipt
+        if shelf:
+            assert offer["quantity"] == 4 and offer["value"] == 100, offer
         assert (receipt["wallet_after"], receipt["merchant_cash_after"]) == (
             listing["wallet_before"] - offer["price"], listing["merchant_cash_before"] + offer["price"]), receipt
+        await wait(guest_run, lambda s: s.get("game", {}).get("native_shop_view", {}).get("state") == "ready"
+                   and s["game"]["native_shop_view"].get("wallet") == receipt["wallet_after"])
+        remaining = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
+        assert (offer in remaining["offers"]) == shelf and acquired["guid"] not in {
+            row["guid"] for row in remaining["offers"]}, remaining
         await action(guest_run, "native-shop-view-fixture", target="back")
-        return offer, receipt, opened
+        return offer, acquired, receipt, opened
 
     async def inventory(directory):
         page = (await action(directory, "native-inventory-list"))["native_inventory"]
@@ -185,12 +197,12 @@ async def verify(work: Path, original: Path):
         await approach()
         initial_flags = await checkpoint_flags()
         initial_host_inventory = await inventory(host_run)
-        offer, purchase, opened = await buy_stock()
-        bought = (await inventory(guest_run))[offer["guid"]]
+        offer, acquired, purchase, opened = await buy_stock()
+        bought = (await inventory(guest_run))[acquired["guid"]]
         assert (bought["source"], bought["quantity"], bought["class_path"]) == ("backpack", offer["quantity"], meals.MRE_CLASS)
-        assert offer["guid"] not in await inventory(host_run)
-        used = await eat_stock(offer)
-        remainder = (await inventory(guest_run)).get(offer["guid"])
+        assert acquired["guid"] not in await inventory(host_run)
+        used = await eat_stock(acquired)
+        remainder = (await inventory(guest_run)).get(acquired["guid"])
         assert (remainder["quantity"] if remainder else 0) == offer["quantity"] - 1, remainder
         settled_flags = await checkpoint_flags()
         assert (initial_flags[0]["Player_Cash"], settled_flags[0]["Player_Cash"]) == (100_000, purchase["wallet_after"])
@@ -214,9 +226,12 @@ async def verify(work: Path, original: Path):
         afterward = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert (afterward["wallet_before"], afterward["merchant_cash_before"]) == (
             purchase["wallet_after"], purchase["merchant_cash_after"]), afterward
-        assert offer["guid"] not in {item["guid"] for item in afterward["offers"]}
-        assert (await inventory(guest_run)).get(offer["guid"]) == remainder
-        replay = await action(guest_run, meals.MRE, target=offer["guid"], operation_id=used["operation_id"])
+        assert acquired["guid"] not in {item["guid"] for item in afterward["offers"]}
+        if purchase["stock_source"] == "stock_shelf":
+            renewed_offer, = [item for item in afterward["offers"] if item["class_path"] == meals.MRE_CLASS]
+            assert renewed_offer == dict(offer, guid=renewed_offer["guid"]), renewed_offer
+        assert (await inventory(guest_run)).get(acquired["guid"]) == remainder
+        replay = await action(guest_run, meals.MRE, target=acquired["guid"], operation_id=used["operation_id"])
         assert replay["native_guest_mre"] == used["native_guest_mre"], replay
         evidence.update(verified=True, restart={"wallet": afterward["wallet_before"],
                         "merchant_cash": afterward["merchant_cash_before"], "remaining": remainder})

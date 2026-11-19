@@ -41,7 +41,7 @@ namespace
         const Unreal::TCHAR* cash_barter_replacement{};
         bool camera_only{};
         const Unreal::TCHAR* reception{};
-        bool smuggler_finite{};
+        bool smuggler{};
     };
 
     constexpr std::array merchants{
@@ -103,6 +103,7 @@ namespace
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto camera_class = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto gunsmith_ammo_class = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
+    constexpr auto smuggler_mre_class = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto saved_shop_struct = STR("/Game/Classes/Libraries/Structs/ShopInventory_SaveStruct.ShopInventory_SaveStruct");
     constexpr auto payload_struct = STR("/Script/StructUtils.InstancedStruct");
@@ -183,7 +184,7 @@ namespace
         Unreal::UObject* stock{};
         Unreal::UObject* instance{};
         Unreal::UObject* reception{};
-        bool camera_only{}, guards_neutral_purchase{};
+        bool camera_only{}, guards_neutral_purchase{}, smuggler{};
         bool host{};
     };
 
@@ -306,7 +307,7 @@ namespace
         return mode == 1 || mode == 3;
     }
 
-    bool smuggler_finite_stock(Unreal::UObject* shop, Unreal::UObject* data)
+    bool smuggler_cash_stock(Unreal::UObject* shop, Unreal::UObject* data)
     {
         auto* markup = field<Unreal::FStructProperty>(data, STR("MarkupMin/Max"));
         auto* vector_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector2D"));
@@ -316,7 +317,7 @@ namespace
             return false;
         const auto* bounds = markup->ContainerPtrToValuePtr<void>(data);
         return x->GetPropertyValueInContainer(bounds) == 5.0 && y->GetPropertyValueInContainer(bounds) == 5.0 &&
-            read_bool(shop, STR("NoInfiniteStock"), true) && read_bool(shop, STR("CanSellTo"), true) &&
+            field<Unreal::FBoolProperty>(shop, STR("NoInfiniteStock")) && read_bool(shop, STR("CanSellTo"), true) &&
             read_bool(shop, STR("LimitedCash"), true);
     }
 
@@ -333,6 +334,7 @@ namespace
         }
         if (!profile) return "shop_exact_merchant_unavailable";
         context.camera_only = profile->camera_only;
+        context.smuggler = profile->smuggler;
         context.guards_neutral_purchase = profile->cash_barter_replacement && !profile->camera_only;
         context.world = find<Unreal::UWorld>(profile->world);
         auto* data = find<Unreal::UObject>(profile->data);
@@ -364,8 +366,8 @@ namespace
             return "shop_exact_guest_and_canonical_saves_unavailable";
         if (!read_bool(context.stock, STR("BarterOnly"), false))
             return "shop_stock_cash_trade_unavailable";
-        if (profile->smuggler_finite && !smuggler_finite_stock(context.shop, data))
-            return "shop_smuggler_finite_stock_unverified";
+        if (context.smuggler && !smuggler_cash_stock(context.shop, data))
+            return "shop_smuggler_cash_stock_unverified";
         if (profile->reception)
         {
             context.reception = find<Unreal::UObject>(profile->reception);
@@ -383,7 +385,7 @@ namespace
                 !authority(conversion, context.world) || read_object(context.shop, STR("BarterReplacement")) != conversion ||
                 read_object(conversion, STR("MerchantData")) != data || (!context.reception && !cash_counter_open(context.shop)))
                 return context.reception ? "shop_shopkeep_cash_reception_unavailable" :
-                    profile->smuggler_finite ? "shop_smuggler_cash_counter_unavailable" :
+                    context.smuggler ? "shop_smuggler_cash_counter_unavailable" :
                     context.camera_only ? "shop_scientist_cash_counter_unavailable" : "shop_gunsmith_cash_counter_unavailable";
             if (context.guards_neutral_purchase)
             {
@@ -391,7 +393,7 @@ namespace
                 if (static_cast<Unreal::AActor*>(conversion)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
                     !read_bool(conversion, STR("AcceptCash"), true) || !faction || faction->GetPropertyValueInContainer(context.shop) != 0)
                     return context.reception ? "shop_shopkeep_neutral_profile_unverified" :
-                        profile->smuggler_finite ? "shop_smuggler_neutral_profile_unverified" : "shop_gunsmith_neutral_profile_unverified";
+                        context.smuggler ? "shop_smuggler_neutral_profile_unverified" : "shop_gunsmith_neutral_profile_unverified";
             }
         }
         if (!qualified_connection(context))
@@ -850,7 +852,7 @@ namespace
         auto* finite = layout.finite;
         Unreal::FArrayProperty* shelf{};
         const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
-        const Unreal::UClass* gunsmith_ammo{};
+        const Unreal::UClass* reusable_supply{};
         if (context.camera_only || (context.guards_neutral_purchase && !context.reception))
         {
             auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
@@ -864,8 +866,9 @@ namespace
                 if (context.camera_only) finite = nullptr;
                 else
                 {
-                    gunsmith_ammo = find<Unreal::UClass>(gunsmith_ammo_class);
-                    if (!gunsmith_ammo) return response(lua, false, "shop_gunsmith_ammo_class_unavailable");
+                    reusable_supply = find<Unreal::UClass>(context.smuggler ? smuggler_mre_class : gunsmith_ammo_class);
+                    if (!reusable_supply) return response(lua, false, context.smuggler ?
+                        "shop_smuggler_mre_class_unavailable" : "shop_gunsmith_ammo_class_unavailable");
                 }
             }
         }
@@ -873,11 +876,11 @@ namespace
         std::set<Guid> seen;
         std::string rows;
         Offer selected;
-        int index = -1, listed = 0, ammo_shelf_count = 0;
+        int index = -1, listed = 0, supply_shelf_count = 0;
         for (auto* inventory : {shelf, finite})
         {
             if (!inventory) continue;
-            const bool gunsmith_shelf = gunsmith_ammo && inventory == shelf;
+            const bool supply_shelf = reusable_supply && inventory == shelf;
             Unreal::FScriptArrayHelper items(inventory, inventory->ContainerPtrToValuePtr<void>(context.shop));
             if (items.Num() < 0 || items.Num() > max_offers) return response(lua, false, "shop_offer_count_unavailable");
             for (int i = 0; i < items.Num(); ++i)
@@ -886,10 +889,10 @@ namespace
                 const auto key = layout.identity(item);
                 if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
                 if (context.camera_only && layout.item_type(item) != camera) continue;
-                if (gunsmith_shelf)
+                if (supply_shelf)
                 {
-                    if (layout.item_type(item) != gunsmith_ammo) continue;
-                    ++ammo_shelf_count;
+                    if (layout.item_type(item) != reusable_supply) continue;
+                    ++supply_shelf_count;
                 }
                 if constexpr (Buying)
                     if (key != chosen) continue;
@@ -898,8 +901,16 @@ namespace
                 if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
                 if (context.camera_only && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
                     return response(lua, false, "shop_exact_camera_offer_unavailable");
-                if (gunsmith_shelf && (!row.stackable || row.quantity != 200 || row.value != 600))
-                    return response(lua, false, "shop_gunsmith_exact_ammo_offer_unavailable");
+                if (supply_shelf)
+                {
+                    // Configure_Stock uses the authored MaxAmount on the
+                    // reusable shelf. Other stock rows remain out of scope.
+                    const int expected_quantity = context.smuggler ? 4 : 200;
+                    const int expected_value = context.smuggler ? 100 : 600;
+                    if (!row.stackable || row.quantity != expected_quantity || row.value != expected_value)
+                        return response(lua, false, context.smuggler ?
+                            "shop_smuggler_exact_mre_offer_unavailable" : "shop_gunsmith_exact_ammo_offer_unavailable");
+                }
                 rows += encode(row);
                 if constexpr (Buying)
                 {
@@ -909,7 +920,8 @@ namespace
                 }
             }
         }
-        if (gunsmith_ammo && ammo_shelf_count != 1) return response(lua, false, "shop_gunsmith_ammo_shelf_ambiguous");
+        if (reusable_supply && supply_shelf_count != 1) return response(lua, false, context.smuggler ?
+            "shop_smuggler_mre_shelf_ambiguous" : "shop_gunsmith_ammo_shelf_ambiguous");
         if constexpr (!Buying)
             return response(lua, true, "listed", rows, money, money, cash, cash);
         if (!source_property || index < 0) return response(lua, false, "shop_offer_no_longer_available");
@@ -924,6 +936,7 @@ namespace
             PassiveEffect skinflint{Unreal::FName{STR("Skinflint")}};
             if (!read_purchase_effect(context, skinflint) || skinflint.active)
                 return response(lua, false, context.reception ? "shop_shopkeep_skinflint_effect_unverified" :
+                    context.smuggler ? "shop_smuggler_skinflint_effect_unverified" :
                     "shop_gunsmith_skinflint_effect_unverified");
         }
         CameraReputation reputation;
@@ -953,7 +966,8 @@ namespace
             const auto minted = new_stock_guid(layout);
             if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
                 layout.owner_has(context.stock, minted))
-                return response(lua, false, context.camera_only ? "shop_camera_guid_unavailable" : "shop_gunsmith_ammo_guid_unavailable");
+                return response(lua, false, context.camera_only ? "shop_camera_guid_unavailable" :
+                    context.smuggler ? "shop_smuggler_mre_guid_unavailable" : "shop_gunsmith_ammo_guid_unavailable");
             layout.replace_identity(transferred.get(), minted);
             selected.guid = minted;
             rows = encode(selected);
