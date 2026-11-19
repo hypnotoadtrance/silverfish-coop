@@ -316,7 +316,7 @@ class Bridge:
         self.input_offset = 0
         self.death_offset = 0
         self.zone_offset = 0
-        self.transport_offsets = {"gold": 0, "blue": 0}
+        self.transport_offsets = {"gold": 0, "blue": 0, "stardust": 0}
 
     def interactions(self) -> list[str]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -375,7 +375,7 @@ class Bridge:
 
     def native_cube_requests(self, cube: str) -> list[GoldRequest]:
         offset = self.transport_offsets[cube]
-        filename = "native-transport-events" if cube == "gold" else "native-blue-events"
+        filename = "native-transport-events" if cube == "gold" else f"native-{cube}-events"
         try:
             with (self.directory / filename).open("rb") as stream:
                 stream.seek(offset)
@@ -469,6 +469,26 @@ class Bridge:
                         "location": [_finite(value) for value in fields[5:8]], "points": int(fields[8]),
                         "min_safe_rep": int(fields[9]),
                     }
+                elif fields[0] == "native-stardust" and len(fields) == 8:
+                    data["native_stardust"] = {
+                        "operation": fields[1], "state": fields[2], "map": fields[3], "pawn": fields[4],
+                        "guid": fields[5], "quantity": int(fields[6]), "payload": fields[7],
+                    }
+                elif fields[0] == "native-dream-route" and len(fields) == 10:
+                    data["native_dream_route"] = {
+                        "source": fields[1], "destination": fields[2], "pawn": fields[3], "arrival": fields[4],
+                        "visit_seconds": int(fields[5]), "startup_seconds": int(fields[6]), "fade_seconds": int(fields[7]),
+                        "return_map": fields[8], "return_bed": fields[9],
+                    }
+                elif fields[0] == "native-dream-arrival" and len(fields) == 6:
+                    data["native_dream_arrival"] = {
+                        "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],
+                    }
+                elif fields[0] == "native-dream-isolation" and len(fields) == 6:
+                    data["native_dream_isolation"] = {
+                        "state": fields[1], "map": fields[2], "actor": fields[3], "detail": fields[4],
+                        "early_requested": fields[5] == "1",
+                    }
                 elif fields[0] == "native-pickup" and len(fields) == 9:
                     data["native_pickup"] = {
                         "state": fields[1], "guid": fields[2], "class_path": fields[3],
@@ -524,6 +544,12 @@ class Bridge:
                         key: None if value == "-" else _finite(value) if key in numeric
                         else value == "1" if key in flags else value
                         for key, value in zip(keys, fields[1:], strict=True)
+                    }
+                elif fields[0] == "native-seed" and len(fields) == 8:
+                    data["native_seed"] = {
+                        "state": fields[1], "source": fields[2], "destination": fields[3], "expected": int(fields[4]),
+                        "observed": int(fields[5]) if fields[5] != "-" else None,
+                        "stock_stream": int(fields[6]) if fields[6] != "-" else None, "reason": fields[7],
                     }
                 elif fields[0] == "native-rule" and len(fields) == 3:
                     data.setdefault("native_rules", {})[fields[1]] = int(fields[2])

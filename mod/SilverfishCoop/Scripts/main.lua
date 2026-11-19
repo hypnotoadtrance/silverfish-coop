@@ -6,10 +6,12 @@ local loot = require("loot")
 local native_bed = require("native_bed")
 local native_blue = require("native_blue")
 local native_death = require("native_death")
+local native_dream = require("native_dream")
 local native_hazard = require("native_hazard")
 local native_inventory = require("native_inventory")
 local native_pickup = require("native_pickup")
 local native_shop = require("native_shop")
+local native_stardust = require("native_stardust")
 local native_transport = require("native_transport")
 local native_world = require("native_world")
 local native_zone = require("native_zone")
@@ -21,6 +23,7 @@ local zone_maps = require("zone_maps")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
+local exchange = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
 local blue_destinations = {
     ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P"] = true,
     ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true,
@@ -49,7 +52,7 @@ local acknowledged_result = ""
 local acknowledged_message = ""
 local sequence = 0
 local tick_queued = false
-local last_blue_route, last_blue_arrival
+local last_blue_route, last_blue_arrival, last_dream_route, last_dream_arrival
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -294,18 +297,23 @@ local function run_command(fields, state, current_phase)
         native_hazard.clear("co-op session is changing")
     end
     if command == "host" then
-        if #fields ~= 3 or not supported_map(argument) then
+        if (#fields ~= 3 and #fields ~= 4) or not supported_map(argument) then
             error("Expected a packaged game map", 0)
         end
         if role ~= "idle" then error("Leave the current session before hosting", 0) end
+        native_world.prepare_seed(state, current_phase, argument, fields[4])
         open_level(state.controller, argument, "listen")
         role = "host"
         expected_map = argument
         return "listen travel requested"
     elseif command == "travel" then
         local blue = #fields == 5 and fields[4] == "blue" and blue_destinations[argument]
+        local dream_departure = argument == exchange and #fields == 5 and fields[4] == "stardust"
+        local dream_return = state.map == exchange and #fields == 4 and fields[4] == "stardust-return"
+            and blue_destinations[argument]
         if not supported_map(argument) or argument == state.map
-            or (not blue and #fields ~= (argument == gold_nexus and 4 or 3)) then
+            or (argument == exchange and not dream_departure) or (state.map == exchange and not dream_return)
+            or (not (blue or dream_departure or dream_return) and #fields ~= (argument == gold_nexus and 4 or 3)) then
             error("Expected a different qualified co-op map", 0)
         end
         if role ~= "host" or current_phase ~= "hosting" then
@@ -317,8 +325,12 @@ local function run_command(fields, state, current_phase)
         if blue and not native_blue.authorize_travel(fields[5], state, current_phase) then
             error("Blue Cube travel requires the exact host inventory debit", 0)
         end
+        if dream_departure and not native_stardust.authorize_travel(fields[5], state, current_phase) then
+            error("Exchange travel requires the recorded Stardust debit", 0)
+        end
         guest_save.clear()
         vitals.reset()
+        native_world.prepare_travel_seed(state, current_phase, argument)
         open_level(state.controller, argument, "listen")
         expected_map = argument
         return "zone travel requested"
@@ -352,6 +364,23 @@ local function run_command(fields, state, current_phase)
         local itinerary = {destination = argument, bed_id = fallback and "" or fields[4], fallback = fallback}
         last_blue_arrival = native_bed.arrival(state, current_phase, itinerary)
         return "qualified Blue Cube arrival"
+    elseif command == "native-dream-route" then
+        last_dream_route = nil
+        local host = native_transport.scoped_host(state, current_phase)
+        if #fields ~= 3 or not host or host.name ~= argument then
+            error("Stardust routing requires the exact authoritative host pawn", 0)
+        end
+        last_dream_route = native_dream.source(state, current_phase)
+        last_dream_route.pawn = host.name
+        return "qualified stock Stardust route"
+    elseif command == "native-dream-arrival" then
+        last_dream_arrival = nil
+        if #fields ~= 3 or argument ~= exchange then error("Expected qualified Exchange arrival", 0) end
+        last_dream_arrival = native_dream.arrival(state, current_phase)
+        return "qualified stock Exchange arrival"
+    elseif command == "native-dream-power-fixture" then
+        if #fields ~= 2 then error("Expected isolated Exchange power fixture", 0) end
+        return native_dream.power_fixture(state, current_phase)
     elseif command == "join" then
         if #fields ~= 3 or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -401,6 +430,7 @@ local function run_command(fields, state, current_phase)
         or native_zone.command(fields, state, current_phase)
         or native_transport.command(fields, state, current_phase)
         or native_blue.command(fields, state, current_phase)
+        or native_stardust.command(fields, state, current_phase)
         or loot.command(fields, state, current_phase)
         or vitals.command(fields, state, current_phase)
         or wallet.command(fields, state, current_phase)
@@ -458,6 +488,19 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_zone.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_transport.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_blue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stardust.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_dream.rows(status_row)) do rows[#rows + 1] = row end
+        if last_dream_route and last_dream_route.source == state.map then
+            local route = last_dream_route
+            rows[#rows + 1] = status_row("native-dream-route", route.source, route.destination, route.pawn,
+                route.arrival, route.visit_seconds, route.startup_seconds, route.fade_seconds,
+                route.return_plan.destination, route.return_plan.bed_id)
+        end
+        if last_dream_arrival and last_dream_arrival.destination == state.map then
+            local arrival = last_dream_arrival
+            rows[#rows + 1] = status_row("native-dream-arrival", arrival.destination, arrival.actor,
+                arrival.x, arrival.y, arrival.z)
+        end
         if last_blue_route and last_blue_route.source == state.map then
             local route = last_blue_route
             rows[#rows + 1] = status_row("native-blue-route", route.source, route.destination, route.bed_id, route.pawn)
@@ -524,6 +567,8 @@ local function tick()
     native_zone.sync(state, current_phase)
     native_transport.sync(state, current_phase)
     native_blue.sync(state, current_phase)
+    native_stardust.sync(state, current_phase)
+    native_dream.sync(state, current_phase)
     local fields = read_command()
     if fields then
         local was_guest_bound = guest_save.active()
@@ -532,7 +577,7 @@ local function tick()
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message
         if was_guest_bound or guest_save.active() or fields[2] == "native-exit-arrival"
-            or fields[2] == "native-blue-arrival" or fields[2] == "restore" then
+            or fields[2] == "native-blue-arrival" or fields[2] == "native-dream-arrival" or fields[2] == "restore" then
             state, current_phase = observe_session()
             if not state then return end
         else

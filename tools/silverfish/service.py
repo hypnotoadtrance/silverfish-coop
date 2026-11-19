@@ -11,11 +11,11 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import link, native_blue, native_gold, native_quest, party, wipe
+from . import link, native_blue, native_dream, native_gold, native_quest, party, wipe
 from .campaign import CampaignError, CampaignStore, DEFAULT_RECONNECT_GRACE
 from .control import Control
 from .native_pickup import NativePickup, STAGED_SHOPS
-from .travel import AUTHORED_EXITS, AUTHORED_MAPS, CROSSROADS, GOLD_NEXUS, PLAYTEST_MAPS, travel_decision
+from .travel import AUTHORED_EXITS, AUTHORED_MAPS, CROSSROADS, EXCHANGE, GOLD_NEXUS, PLAYTEST_MAPS, travel_decision
 from .runtime import (Bridge, MAP, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       stop_game, verify_loopback_socket, write_json, write_text)
 
@@ -26,6 +26,9 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
 TRANSPORT_FIXTURES = ("stardust", "green", "blue", "red", "gold")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
                 "seed": ("seeded", "present"), "use-probe": ("requested",), "action-probe": ("requested",)}
+STARDUST_RESULTS = {"inspect": ("present", "absent"), "seed": ("seeded", "present"),
+                    "debit": ("removed", "decremented", "already_debited"),
+                    "restore": ("restored", "present"), "use-probe": ("requested",)}
 
 
 def _identity(directory: Path):
@@ -59,6 +62,13 @@ def pending_cube(state: dict) -> tuple[str, dict] | None:
         return "gold", gold
     if blue:
         return "blue", blue
+    return None
+
+
+def checkpoint_seed(world: dict) -> int | None:
+    value = world.get("native_observation", {}).get("native_scene", {}).get("instance_seed")
+    if type(value) in (int, float) and -2147483648 <= value <= 2147483647 and value == int(value):
+        return int(value)
     return None
 
 
@@ -108,7 +118,9 @@ class Host:
         self.native_requests = asyncio.Queue(maxsize=8)
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         self.party = party.load_party(store.status()["world"].get("party"))
-        pending_cube(self.party)
+        if pending_cube(self.party) and native_dream.visit(self.party):
+            raise ValueError("The campaign has overlapping committed item transports")
+        self.dream_blockers = None
         if death_rules is not None:
             if self.party["wipe"]:
                 raise ValueError("Finish the existing party wipe before changing its settings")
@@ -221,7 +233,7 @@ class Host:
         return roles
 
     def native_world_state(self) -> dict:
-        return {key: self.last_game[key] for key in ("native_scene", "native_rules", "native_reputation")
+        return {key: self.last_game[key] for key in ("native_scene", "native_rules", "native_reputation", "native_seed")
                 if key in self.last_game}
 
     def public_gameplay(self) -> dict:
@@ -232,6 +244,9 @@ class Host:
             if pending := self.party.get(f"{cube}_transport", {}).get("pending"):
                 view["pending_item_travel"] = {"item": cube, "source": pending["source"],
                                                "destination": pending["destination"]}
+        if dream := native_dream.visit(self.party):
+            view["stardust_visit"] = {key: dream[key] for key in ("phase", "destination", "return_map", "deadline")}
+            view["stardust_visit"]["return_blockers"] = self.dream_blockers
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
         return view
@@ -303,21 +318,35 @@ class Host:
             self.transitioning = False
 
     async def switch_zone(self, bridge: Bridge, transport, destination: str, entrance: str | None,
-                          roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None) -> dict:
+                          roles: dict[str, str], *, gold_guid: str | None = None, blue_plan: dict | None = None,
+                          dream_plan: dict | None = None) -> dict:
         current = self.last_game["map"]
         guest = _pawn(self.last_game, "guest")
         self.control.event("zone_travel_requested", source=current, destination=destination)
-        if self.native_guest and guest.get("health") is not None and not (gold_guid or blue_plan):
+        if self.native_guest and guest.get("health") is not None and not (gold_guid or blue_plan or dream_plan):
             self.checkpoint()
         try:
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
+            returning = dream_plan and dream_plan["phase"] == "returning"
+            if dream_plan:
+                authorization = ("stardust-return",) if returning else ("stardust", dream_plan["guid"])
             await bridge.command("travel", destination, *authorization)
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,
             )
             await asyncio.to_thread(verify_loopback_socket, bridge.process.pid, self.internal_port)
-            if blue_plan:
+            if dream_plan and not returning:
+                await bridge.wait_for(lambda game: self.dream_isolated(game), timeout=7)
+                observed = await bridge.command("native-dream-arrival", EXCHANGE, timeout=6)
+                proof = observed.get("native_dream_arrival", {})
+                if (not self.dream_isolated(observed) or proof.get("actor") != native_dream.ARRIVAL
+                        or proof.get("destination") != EXCHANGE or None in proof.get("location", [None])):
+                    raise RuntimeError("The stock Exchange arrival was not isolated and verified")
+            elif returning:
+                observed = await self.blue_arrival(bridge, {"source": EXCHANGE, "destination": destination,
+                                                            "bed": dream_plan["return_bed"]})
+            elif blue_plan:
                 observed = await self.blue_arrival(bridge, blue_plan)
             elif entrance:
                 observed = await bridge.command("native-exit-arrival", entrance, timeout=6)
@@ -327,6 +356,8 @@ class Host:
                 await transport.refresh_game_routes()
             self.last_game = observed
             self.last_seen = time.monotonic()
+            if dream_plan:
+                await self.ensure_dream_stack(bridge, dream_plan)
             self.zone_epoch = uuid.uuid4().hex
             self.awaiting_zone_guest = roles.get("guest")
             self.guest_pawn = None
@@ -336,6 +367,8 @@ class Host:
             candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
             if blue_plan:
                 candidate = native_blue.arrive(self.party, blue_plan["guid"], observed["map"])
+            if dream_plan:
+                candidate = native_dream.finished(self.party) if returning else native_dream.arrived(self.party, time.time())
             revision = self.checkpoint(candidate)
             if candidate is not None:
                 self.party = candidate
@@ -524,6 +557,143 @@ class Host:
         return {"ok": True, "map": self.last_game["map"], "entrance": "Bed", "travel_epoch": self.zone_epoch,
                 "revision": revision, "in_zone": True}
 
+    @staticmethod
+    def dream_isolated(game: dict) -> bool:
+        guard = game.get("native_dream_isolation", {})
+        return (game.get("state") == "hosting" and game.get("map") == EXCHANGE and guard.get("map") == EXCHANGE
+                and guard.get("state") == "ready" and guard.get("actor") == "Dream_CountDown_BP_C_1")
+
+    async def stardust_operation(self, bridge: Bridge, operation: str, guid: str, *arguments: str) -> tuple[dict, dict]:
+        game = self.last_game
+        area = game.get("map")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        if (not native_gold.valid_guid(guid) or not pawn or game.get("state") != "hosting"
+                or area not in AUTHORED_MAPS or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
+            raise ValueError("Stardust requires the active host pawn and an exact stack GUID")
+        write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+        snapshot = await bridge.command(f"native-stardust-{operation}", pawn, guid, *arguments, timeout=4)
+        row = snapshot.get("native_stardust", {})
+        quantity = row.get("quantity")
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
+                or snapshot.get("pawns", {}).get("local", {}).get("name") != pawn
+                or row.get("operation") != operation or row.get("map") != area or row.get("pawn") != pawn
+                or row.get("guid") != guid or row.get("state") not in STARDUST_RESULTS[operation]
+                or type(quantity) is not int or not 0 <= quantity <= native_dream.MAX_STACK):
+            raise RuntimeError("The game did not acknowledge the exact Stardust operation")
+        self.last_game = snapshot
+        self.last_seen = time.monotonic()
+        return snapshot, row
+
+    async def ensure_dream_stack(self, bridge: Bridge, trip: dict) -> None:
+        guid, remaining = trip["guid"], trip["before"] - 1
+        _, item = await self.stardust_operation(bridge, "inspect", guid)
+        if item["quantity"] == remaining:
+            if (remaining == 0 and item["state"] == "absent") or (
+                remaining and item["state"] == "present" and item["payload"] == trip["payload"]
+            ):
+                return
+        if item["state"] != "absent" or not remaining or trip["payload"] != native_dream.STOCK_PAYLOAD:
+            raise RuntimeError("The native Stardust remainder conflicts with the committed quantity")
+        _, restored = await self.stardust_operation(bridge, "restore", guid, str(remaining), trip["payload"])
+        if restored["quantity"] != remaining:
+            raise RuntimeError("The native Stardust remainder could not be restored exactly")
+
+    async def activate_stardust(self, bridge: Bridge, transport, request: native_gold.GoldRequest) -> dict:
+        if (not self.native_zones or self.stopping or self.transitioning or EXCHANGE not in self.allowed_maps
+                or request.source != CROSSROADS or self.last_game.get("map") != CROSSROADS
+                or self.last_game.get("state") != "hosting" or request.entry not in native_gold.INVENTORY_ENTRIES
+                or self.last_game.get("pawns", {}).get("local", {}).get("name") != request.pawn):
+            return {"ok": False, "error": "stardust_scope_unavailable"}
+        if pending_cube(self.party) or native_dream.visit(self.party):
+            return {"ok": False, "error": "item_travel_pending"}
+        if self.party["players"]["host"]["downed"]:
+            return {"ok": False, "error": "actor_downed"}
+        if refusal := self.travel_refusal(EXCHANGE, self.roles()):
+            return refusal
+        self.transitioning = True
+        try:
+            _, item = await self.stardust_operation(bridge, "inspect", request.guid)
+            if item["state"] != "present" or not item["quantity"]:
+                return {"ok": False, "error": "stardust_stack_unavailable"}
+            if item["quantity"] > 1 and item["payload"] != native_dream.STOCK_PAYLOAD:
+                return {"ok": False, "error": "unqualified_stardust_stack"}
+            snapshot = await bridge.command("native-dream-route", request.pawn, timeout=5)
+            route = snapshot.get("native_dream_route", {})
+            if (snapshot.get("state") != "hosting" or snapshot.get("map") != CROSSROADS
+                    or route.get("source") != CROSSROADS or route.get("destination") != EXCHANGE
+                    or route.get("pawn") != request.pawn or route.get("arrival") != native_dream.ARRIVAL
+                    or route.get("visit_seconds", 0) + route.get("startup_seconds", 0) != native_dream.VISIT_SECONDS
+                    or route.get("fade_seconds") != native_dream.RETURN_FADE_SECONDS
+                    or not native_blue.valid_rest(CROSSROADS, route.get("return_map"), route.get("return_bed"))):
+                return {"ok": False, "error": "stardust_route_unavailable"}
+            self.last_game = snapshot
+            self.last_seen = time.monotonic()
+            if refusal := self.travel_refusal(EXCHANGE, self.roles()):
+                return refusal
+            proposed = native_dream.begin(self.party, request.guid, item["quantity"], item["payload"],
+                                          route["return_map"], route["return_bed"])
+            self.checkpoint(proposed)
+            self.party = proposed
+            return await self.depart_dream(bridge, transport, recovery=False)
+        finally:
+            self.transitioning = False
+
+    async def depart_dream(self, bridge: Bridge, transport, *, recovery: bool) -> dict:
+        trip = native_dream.visit(self.party)
+        try:
+            if not trip or trip["phase"] != "departing" or self.last_game.get("map") != CROSSROADS:
+                raise RuntimeError("The committed Stardust departure is out of scope")
+            if recovery and trip["before"] > 1:
+                _, item = await self.stardust_operation(bridge, "inspect", trip["guid"])
+                if item["state"] == "absent":
+                    await self.ensure_dream_stack(bridge, trip)
+            _, debit = await self.stardust_operation(bridge, "debit", trip["guid"], str(trip["before"]))
+            if debit["quantity"] != trip["before"] - 1 or (not recovery and debit["state"] == "already_debited"):
+                raise RuntimeError("The committed Stardust use did not remove exactly one unit")
+            result = await self.switch_zone(bridge, transport, EXCHANGE, native_dream.ARRIVAL, self.roles(),
+                                            dream_plan=trip)
+        except (OSError, RuntimeError, ValueError):
+            self.stopping = True
+            raise
+        with contextlib.suppress(OSError):
+            self.control.event("stardust_visit_recovered" if recovery else "stardust_visit_started", id=trip["id"],
+                               guid=trip["guid"], remaining=debit["quantity"], **result)
+        return result
+
+    async def advance_dream(self, bridge: Bridge, transport, *, wiped: bool = False) -> None:
+        trip = native_dream.visit(self.party)
+        if not trip or trip["phase"] == "departing" or not self.dream_isolated(self.last_game):
+            return
+        now = time.time()
+        if self.last_game["native_dream_isolation"]["early_requested"]:
+            candidate = native_dream.accelerate(self.party, now)
+            if candidate is not self.party:
+                self.checkpoint(candidate)
+                self.party = candidate
+                self.control.event("stardust_early_return_requested", id=trip["id"], deadline=now)
+        if not wiped and not native_dream.return_due(self.party, now):
+            return
+        roles = self.roles()
+        refusal = None if wiped or trip["phase"] == "returning" else self.travel_refusal(trip["return_map"], roles)
+        if refusal:
+            if refusal != self.dream_blockers:
+                self.control.event("stardust_return_blocked", id=trip["id"], result=refusal)
+                self.dream_blockers = refusal
+            return
+        self.dream_blockers = None
+        self.transitioning = True
+        try:
+            if trip["phase"] != "returning":
+                candidate = native_dream.returning(self.party)
+                self.checkpoint(candidate)
+                self.party = candidate
+                trip = native_dream.visit(self.party)
+            result = await self.switch_zone(bridge, transport, trip["return_map"], "Bed", roles, dream_plan=trip)
+            self.control.event("stardust_return_completed", id=trip["id"], guid=trip["guid"],
+                               arrival=self.last_game.get("native_blue_arrival"), **result)
+        finally:
+            self.transitioning = False
+
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
         if request == {"action": "characters"}:
@@ -644,7 +814,12 @@ class Host:
         if result is None:
             return
         checkpoint = result["checkpoint"]
-        if checkpoint["map"] != self.last_game.get("map"):
+        if self.last_game.get("map") == EXCHANGE and native_dream.visit(self.party):
+            await self.advance_dream(bridge, transport, wiped=True)
+            if native_dream.visit(self.party):
+                return
+            checkpoint = _pawn(self.last_game, "local")
+        elif checkpoint["map"] != self.last_game.get("map"):
             outcome = await self.travel(bridge, transport, checkpoint["map"], respawning=True)
             if not outcome["ok"]:
                 raise RuntimeError("Rest checkpoint is unavailable")
@@ -897,6 +1072,23 @@ class Host:
                 elif action == "native-blue-rest-fixture" and self.native_zones and self.fixtures:
                     _, route = await self.blue_route(bridge, action)
                     result = {"native_blue_route": route}
+                elif (action in ("native-stardust-seed", "native-stardust-inspect", "native-stardust-use-probe")
+                      and self.native_zones and self.fixtures):
+                    operation = action.removeprefix("native-stardust-")
+                    arguments = ()
+                    if operation == "seed":
+                        amount = request.get("amount")
+                        if type(amount) is not int or not 1 <= amount <= native_dream.MAX_STACK:
+                            raise ValueError("Supply a positive Stardust stack quantity in --amount")
+                        arguments = (str(amount),)
+                    _, item = await self.stardust_operation(bridge, operation, request.get("target"), *arguments)
+                    result = {"native_stardust": item}
+                elif action == "native-dream-power-fixture" and self.native_zones and self.fixtures:
+                    if not self.dream_isolated(self.last_game) or not native_dream.visit(self.party):
+                        raise ValueError("The stock power fixture requires an active isolated Exchange visit")
+                    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                    snapshot = await bridge.command(action, timeout=4)
+                    result = {"native_dream_isolation": snapshot.get("native_dream_isolation")}
                 elif action == "walk":
                     await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
                     result = {"movement_scheduled": True}
@@ -972,7 +1164,8 @@ class Host:
         if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
             write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
             self.next_zone_heartbeat = now + 0.6
-        for cube, activate in (("gold", self.activate_gold), ("blue", self.activate_blue)):
+        for cube, activate in (("gold", self.activate_gold), ("blue", self.activate_blue),
+                               ("stardust", self.activate_stardust)):
             for request in bridge.native_cube_requests(cube):
                 try:
                     result = await activate(bridge, transport, request)
@@ -1014,6 +1207,8 @@ class Host:
                 self.deliver_native_deaths(bridge)
             if self.native_zones:
                 await self.service_native_zones(bridge, transport, now)
+                if not self.stopping:
+                    await self.advance_dream(bridge, transport)
             if not self.stopping:
                 await self.service_guest_native_requests(bridge)
             for operation_id in bridge.interactions():
@@ -1042,8 +1237,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     fixtures: bool = False, death_rules: dict | None = None, *,
                     native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
                     native_zone_walls: bool = False, start_zone: str | None = None) -> None:
-    if start_zone == GOLD_NEXUS:
-        raise ValueError("Use a Golden Cube to enter Gold Nexus")
+    if start_zone in (GOLD_NEXUS, EXCHANGE):
+        raise ValueError("Enter this destination through its required host transport item")
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
     if native_events and native_backend != "cpp":
@@ -1060,9 +1255,16 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
-        pending = pending_cube(party.load_party(old_world.get("party")))
+        saved_party = party.load_party(old_world.get("party"))
+        pending = pending_cube(saved_party)
+        dream = native_dream.visit(saved_party)
         if pending and (not authored or entry_map != pending[1]["source"]):
             raise ValueError("The campaign's committed item travel does not match its saved zone")
+        if ((dream or entry_map == EXCHANGE) and (
+            pending or not dream or not authored
+            or entry_map != (CROSSROADS if dream["phase"] == "departing" else EXCHANGE)
+        )):
+            raise ValueError("The campaign's Stardust visit does not match its saved zone")
         process = transport = None
         controller = None
         result = "stopped"
@@ -1076,9 +1278,16 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_zone_walls=native_zone_walls, native_fixtures=fixtures)
             bridge = Bridge(bridge_directory, process)
             await bridge.wait_for(lambda state: state["state"] == "ready")
-            await bridge.command("host", entry_map)
+            seed = checkpoint_seed(old_world)
+            await bridge.command("host", entry_map, *((str(seed),) if seed is not None else ()))
             initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
             await asyncio.to_thread(verify_loopback_socket, process.pid, internal_port)
+            if seed is not None:
+                initial_game = await bridge.wait_for(
+                    lambda game: game.get("native_seed", {}).get("state") in {"verified", "save_only", "changed", "unavailable"},
+                    timeout=7,
+                )
+                control.event("native_seed_restored", **initial_game["native_seed"])
             saved = old_world.get("host", {})
             if saved.get("map") == entry_map:
                 try:
@@ -1107,6 +1316,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             if pending:
                 resume = controller.resume_gold if pending[0] == "gold" else controller.resume_blue
                 await resume(bridge, None, recovery=True)
+            if dream and dream["phase"] == "departing":
+                await controller.depart_dream(bridge, None, recovery=True)
+            elif dream:
+                controller.last_game = await bridge.wait_for(controller.dream_isolated, timeout=7)
+                controller.last_seen = time.monotonic()
+                await controller.ensure_dream_stack(bridge, dream)
+                await controller.advance_dream(bridge, None)
             transport = await link.start_host(bind, port, "127.0.0.1", internal_port, identity,
                                               controller.admit, on_disconnect=controller.disconnected,
                                               on_request=controller.guest_request)

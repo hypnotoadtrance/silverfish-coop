@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <string_view>
 
@@ -47,6 +48,8 @@ namespace
     constexpr auto item_class_name = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
     constexpr auto item_guid_name = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
     constexpr auto item_ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
+    constexpr auto item_weight_name = STR("Weight_12_11AB9ED547504E78A849A692A36DC938");
+    constexpr auto item_value_name = STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr auto scope_lease = std::chrono::seconds(2);
     constexpr auto request_lease = std::chrono::seconds(2);
@@ -68,22 +71,32 @@ namespace
     };
     constexpr const auto& blue = artifacts[2];
     constexpr const auto& gold = artifacts.back();
+    constexpr const auto& stardust = artifacts.front();
 
-    enum class CubeKind { Blue, Gold };
+    enum class TransportKind { Gold, Blue, Stardust };
 
-    [[nodiscard]] constexpr const Artifact& cube_artifact(CubeKind kind)
+    [[nodiscard]] constexpr const Artifact& transport_artifact(TransportKind kind)
     {
-        return kind == CubeKind::Gold ? gold : blue;
+        if (kind == TransportKind::Stardust)
+        {
+            return stardust;
+        }
+        return kind == TransportKind::Gold ? gold : blue;
     }
 
-    [[nodiscard]] constexpr std::string_view cube_status(CubeKind kind, std::string_view gold_status, std::string_view blue_status)
+    [[nodiscard]] constexpr std::string_view transport_status(TransportKind kind, std::string_view gold_status,
+                                                               std::string_view blue_status, std::string_view stardust_status)
     {
-        return kind == CubeKind::Gold ? gold_status : blue_status;
+        if (kind == TransportKind::Stardust)
+        {
+            return stardust_status;
+        }
+        return kind == TransportKind::Gold ? gold_status : blue_status;
     }
 
-    [[nodiscard]] constexpr std::string_view queued_status(CubeKind kind)
+    [[nodiscard]] constexpr std::string_view queued_status(TransportKind kind)
     {
-        return cube_status(kind, "gold_request_queued", "blue_request_queued");
+        return transport_status(kind, "gold_request_queued", "blue_request_queued", "stardust_request_queued");
     }
 
     struct Entries
@@ -128,9 +141,9 @@ namespace
         std::string_view reason;
     };
 
-    struct CubeRequest
+    struct TransportRequest
     {
-        CubeKind kind;
+        TransportKind kind;
         Guid guid;
         std::uint64_t generation;
         Clock::time_point expires;
@@ -145,7 +158,7 @@ namespace
     std::atomic<std::uint64_t> generation{1};
     thread_local Scope scope;
     thread_local Receipt receipt;
-    thread_local std::optional<CubeRequest> cube_request;
+    thread_local std::optional<TransportRequest> transport_request;
 
     [[nodiscard]] bool enabled()
     {
@@ -496,16 +509,18 @@ namespace
                hooks_ready.load(std::memory_order_acquire) && active_scope();
     }
 
-    struct CubeInventory
+    struct TransportInventory
     {
         Unreal::UObject* save{};
         Unreal::FArrayProperty* backpack{};
         Unreal::UScriptStruct* item{};
         Unreal::FClassProperty* item_class{};
         Unreal::FIntProperty* ammo{};
-        Unreal::UClass* cube_class{};
+        Unreal::UClass* transport_class{};
+        Unreal::UObject* defaults{};
         void* record{};
         int index{-1};
+        std::int32_t quantity{};
     };
 
     [[nodiscard]] bool item_struct(Unreal::FProperty* property, const Unreal::UScriptStruct* item)
@@ -514,7 +529,7 @@ namespace
         return structure && structure->GetArrayDim() == 1 && structure->GetStruct().Get() == item;
     }
 
-    [[nodiscard]] std::string_view locate_cube(Unreal::UObject* save, CubeKind kind, const Guid& guid, CubeInventory& match)
+    [[nodiscard]] std::string_view locate_transport(Unreal::UObject* save, TransportKind kind, const Guid& guid, TransportInventory& match)
     {
         if (!save)
         {
@@ -536,15 +551,17 @@ namespace
         const GuidFields fields(match.item);
         match.item_class = field<Unreal::FClassProperty>(match.item, item_class_name);
         match.ammo = field<Unreal::FIntProperty>(match.item, item_ammo_name);
-        match.cube_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, cube_artifact(kind).class_path);
-        auto* defaults = match.cube_class ? match.cube_class->GetClassDefaultObject().Get() : nullptr;
-        auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
-        auto* expected_ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        match.transport_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, transport_artifact(kind).class_path);
+        match.defaults = match.transport_class ? match.transport_class->GetClassDefaultObject().Get() : nullptr;
+        auto* stacks = field<Unreal::FBoolProperty>(match.defaults, STR("Stacks"));
+        auto* expected_ammo = field<Unreal::FIntProperty>(match.defaults, STR("Ammo"));
         auto* item_base = match.item_class ? match.item_class->GetMetaClass().Get() : nullptr;
-        if (!fields.valid() || !item_base || !match.ammo || !stacks || !expected_ammo || !match.cube_class->IsChildOf(item_base) ||
-            stacks->GetPropertyValueInContainer(defaults) || expected_ammo->GetPropertyValueInContainer(defaults) != -1)
+        const bool stackable = kind == TransportKind::Stardust;
+        if (!fields.valid() || !item_base || !match.ammo || !stacks || !expected_ammo || !match.transport_class->IsChildOf(item_base) ||
+            stacks->GetPropertyValueInContainer(match.defaults) != stackable ||
+            expected_ammo->GetPropertyValueInContainer(match.defaults) != (stackable ? 1 : -1))
         {
-            return "stock_single_cube_schema_unavailable";
+            return stackable ? "stock_stardust_stack_schema_unavailable" : "stock_single_cube_schema_unavailable";
         }
         Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(save));
         Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
@@ -559,13 +576,14 @@ namespace
             {
                 continue;
             }
-            if (match.record || object_value(match.item_class, row) != match.cube_class ||
-                match.ammo->GetPropertyValueInContainer(row) != -1)
+            const auto ammo = match.ammo->GetPropertyValueInContainer(row);
+            if (match.record || object_value(match.item_class, row) != match.transport_class || (stackable ? ammo <= 0 : ammo != -1))
             {
                 return "host_backpack_guid_conflict";
             }
             match.index = index;
             match.record = row;
+            match.quantity = stackable ? ammo : 1;
         }
         for (int index = 0; index < loadout.Num(); ++index)
         {
@@ -585,19 +603,24 @@ namespace
                object_field(panel, STR("Target")) == scope.instance.Get() && object_field(panel, STR("ItemManager")) == manager;
     }
 
-    [[nodiscard]] bool request_current(const CubeRequest& request, Unreal::UObject* save)
+    [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
     {
         return save && request.save.Get() == save && request.pawn.Get() == scope.pawn.Get() &&
                request.generation == scope.generation && Clock::now() < request.expires;
     }
 
-    [[nodiscard]] std::string_view pending_conflict(const CubeRequest& pending, CubeKind kind)
+    [[nodiscard]] std::string_view pending_conflict(const TransportRequest& pending, TransportKind kind)
     {
-        return pending.kind != kind ? "another_cube_request_pending" :
-            cube_status(kind, "another_gold_request_pending", "another_blue_request_pending");
+        if (pending.kind != kind)
+        {
+            return pending.kind == TransportKind::Stardust || kind == TransportKind::Stardust ?
+                "another_transport_request_pending" : "another_cube_request_pending";
+        }
+        return transport_status(kind, "another_gold_request_pending", "another_blue_request_pending",
+                                "another_stardust_request_pending");
     }
 
-    [[nodiscard]] std::string_view queue_cube(CubeKind kind, const ItemView& candidate, std::string_view entry,
+    [[nodiscard]] std::string_view queue_transport(TransportKind kind, const ItemView& candidate, std::string_view entry,
                                               Unreal::UObject* manager)
     {
         if (entry != "use_held_item" &&
@@ -619,21 +642,23 @@ namespace
             return "stock_transport_use_ineligible";
         }
         auto* save = canonical_host_save();
-        CubeInventory match;
-        if (const auto error = locate_cube(save, kind, guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = locate_transport(save, kind, guid, match); !error.empty())
         {
             return error;
         }
         if (!match.record || match.item != candidate.structure)
         {
-            return "owned_backpack_cube_required";
+            return transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
+                                    "owned_backpack_stardust_required");
         }
-        if (cube_request && request_current(*cube_request, save))
+        if (transport_request && request_current(*transport_request, save))
         {
-            return cube_request->kind == kind && cube_request->guid == guid ?
-                cube_status(kind, "gold_request_pending", "blue_request_pending") : pending_conflict(*cube_request, kind);
+            return transport_request->kind == kind && transport_request->guid == guid ?
+                transport_status(kind, "gold_request_pending", "blue_request_pending", "stardust_request_pending") :
+                pending_conflict(*transport_request, kind);
         }
-        cube_request = CubeRequest{kind, guid, scope.generation, Clock::now() + request_lease, pawn, save, entry};
+        transport_request = TransportRequest{kind, guid, scope.generation, Clock::now() + request_lease, pawn, save, entry};
         return queued_status(kind);
     }
 
@@ -644,9 +669,11 @@ namespace
         const std::string_view role = !qualified ? "unverified" : scope.host ? "host" : "guest";
         std::string_view reason = !qualified ? "current_local_owner_unverified" :
             !scope.host ? "host_activation_required" : "coordinated_route_required";
-        if (qualified && scope.host && widget && (&item == &gold || &item == &blue))
+        if (qualified && scope.host && widget && (&item == &gold || &item == &blue || &item == &stardust))
         {
-            reason = queue_cube(&item == &gold ? CubeKind::Gold : CubeKind::Blue, candidate, entry, context);
+            const auto kind = &item == &stardust ? TransportKind::Stardust :
+                &item == &gold ? TransportKind::Gold : TransportKind::Blue;
+            reason = queue_transport(kind, candidate, entry, context);
         }
         if (receipt.role != role || receipt.item != item.name || receipt.entry != entry || receipt.reason != reason)
         {
@@ -696,7 +723,7 @@ namespace
                 return;
             }
             auto* owner = function->GetOuterPrivate();
-            const bool inherited = primary && artifact == &artifacts[0] && owner && owner->GetPathName() == consumable_path;
+            const bool inherited = primary && artifact == &stardust && owner && owner->GetPathName() == consumable_path;
             if (!inherited && owner != context->GetClassPrivate())
             {
                 return;
@@ -736,7 +763,7 @@ namespace
             if (!accepted)
             {
                 scope = {};
-                cube_request.reset();
+                transport_request.reset();
             }
         }
         lua.set_bool(accepted);
@@ -769,7 +796,7 @@ namespace
         return 2;
     }
 
-    int report_cube_request(const Lua& lua, bool ok, std::string_view detail, std::string_view entry = {})
+    int report_transport_request(const Lua& lua, bool ok, std::string_view detail, std::string_view entry = {})
     {
         lua.set_bool(ok);
         lua.set_string(detail);
@@ -777,53 +804,55 @@ namespace
         return 3;
     }
 
-    template <CubeKind kind>
-    int lua_take_cube_request(const Lua& lua)
+    template <TransportKind kind>
+    int lua_take_transport_request(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
             !current_host_argument(lua.get_integer(1)))
         {
-            return report_cube_request(lua, false, "current_transport_host_required");
+            return report_transport_request(lua, false, "current_transport_host_required");
         }
-        if (!cube_request || cube_request->kind != kind)
+        if (!transport_request || transport_request->kind != kind)
         {
-            return report_cube_request(lua, false, cube_status(kind, "no_gold_request", "no_blue_request"));
+            return report_transport_request(lua, false, transport_status(kind, "no_gold_request", "no_blue_request", "no_stardust_request"));
         }
-        const auto request = *cube_request;
-        cube_request.reset();
+        const auto request = *transport_request;
+        transport_request.reset();
         auto* save = canonical_host_save();
         if (!request_current(request, save))
         {
-            return report_cube_request(lua, false, cube_status(kind, "stale_gold_request", "stale_blue_request"));
+            return report_transport_request(lua, false, transport_status(kind, "stale_gold_request", "stale_blue_request", "stale_stardust_request"));
         }
-        CubeInventory match;
-        if (const auto error = locate_cube(save, kind, request.guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = locate_transport(save, kind, request.guid, match); !error.empty())
         {
-            return report_cube_request(lua, false, error);
+            return report_transport_request(lua, false, error);
         }
         if (!match.record)
         {
-            return report_cube_request(lua, false, "owned_backpack_cube_required");
+            return report_transport_request(lua, false, transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
+                                                                         "owned_backpack_stardust_required"));
         }
         const auto guid = format_guid(request.guid);
-        return report_cube_request(lua, true, {guid.data(), guid.size()}, request.entry);
+        return report_transport_request(lua, true, {guid.data(), guid.size()}, request.entry);
     }
 
-    [[nodiscard]] std::string_view cube_inventory_argument(const Lua& lua, CubeKind kind, Guid& guid, CubeInventory& match)
+    [[nodiscard]] std::string_view transport_inventory_argument(const Lua& lua, TransportKind kind, Guid& guid, TransportInventory& match)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
         {
-            return cube_status(kind, "host_and_gold_guid_required_on_game_thread", "host_and_blue_guid_required_on_game_thread");
+            return transport_status(kind, "host_and_gold_guid_required_on_game_thread", "host_and_blue_guid_required_on_game_thread",
+                                    "host_and_stardust_guid_required_on_game_thread");
         }
         if (!parse_guid(lua.get_string(2), guid))
         {
-            return cube_status(kind, "invalid_gold_guid", "invalid_blue_guid");
+            return transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid");
         }
         if (!current_host_argument(lua.get_integer(1)))
         {
             return "current_transport_host_required";
         }
-        return locate_cube(canonical_host_save(), kind, guid, match);
+        return locate_transport(canonical_host_save(), kind, guid, match);
     }
 
     [[nodiscard]] Unreal::UFunction* stock_no_args(Unreal::UObject* object, const Unreal::FName& name)
@@ -865,24 +894,24 @@ namespace
         alignas(std::max_align_t) std::array<std::byte, capacity> original{};
     };
 
-    template <CubeKind kind>
+    template <TransportKind kind>
     int lua_inspect_cube(const Lua& lua)
     {
         Guid guid{};
-        CubeInventory match;
-        if (const auto error = cube_inventory_argument(lua, kind, guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
             return probe_result(lua, false, error);
         }
         return probe_result(lua, true, match.record ? "present" : "absent");
     }
 
-    template <CubeKind kind>
+    template <TransportKind kind>
     int lua_commit_cube(const Lua& lua)
     {
         Guid guid{};
-        CubeInventory match;
-        if (const auto error = cube_inventory_argument(lua, kind, guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
             return probe_result(lua, false, error);
         }
@@ -903,16 +932,217 @@ namespace
         return probe_result(lua, true, "removed");
     }
 
-    template <CubeKind kind>
+    constexpr auto max_stack_quantity = std::numeric_limits<std::int32_t>::max();
+    constexpr std::string_view stock_stardust_payload = "stock-default-v1";
+
+    struct StackTotals
+    {
+        Unreal::FDoubleProperty* weight{};
+        Unreal::FIntProperty* value{};
+        double total_weight{};
+        std::int32_t total_value{};
+
+        [[nodiscard]] bool matches(const void* item) const
+        {
+            return weight->GetPropertyValueInContainer(item) == total_weight && value->GetPropertyValueInContainer(item) == total_value;
+        }
+
+        void write(void* item) const
+        {
+            weight->SetPropertyValueInContainer(item, total_weight);
+            value->SetPropertyValueInContainer(item, total_value);
+        }
+    };
+
+    [[nodiscard]] bool calculate_totals(const TransportInventory& match, std::int32_t quantity, StackTotals& totals)
+    {
+        auto* stock_weight = field<Unreal::FDoubleProperty>(match.defaults, STR("Weight"));
+        auto* stock_value = field<Unreal::FIntProperty>(match.defaults, STR("Value"));
+        totals.weight = field<Unreal::FDoubleProperty>(match.item, item_weight_name);
+        totals.value = field<Unreal::FIntProperty>(match.item, item_value_name);
+        if (!stock_weight || !stock_value || !totals.weight || !totals.value || quantity <= 0)
+        {
+            return false;
+        }
+        const auto weight = stock_weight->GetPropertyValueInContainer(match.defaults) * quantity;
+        const auto value = static_cast<std::int64_t>(stock_value->GetPropertyValueInContainer(match.defaults)) * quantity;
+        if (!std::isfinite(weight) || weight < 0 || value < 0 || value > max_stack_quantity)
+        {
+            return false;
+        }
+        totals.total_weight = weight;
+        totals.total_value = static_cast<std::int32_t>(value);
+        return true;
+    }
+
+    int stardust_result(const Lua& lua, bool ok, std::string_view detail, std::int32_t quantity = 0)
+    {
+        lua.set_bool(ok);
+        lua.set_string(detail);
+        lua.set_integer(quantity);
+        return 3;
+    }
+
+    [[nodiscard]] std::optional<std::int32_t> stardust_quantity_argument(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(3))
+        {
+            return std::nullopt;
+        }
+        const auto quantity = lua.get_integer(3);
+        if (quantity <= 0 || quantity > max_stack_quantity)
+        {
+            return std::nullopt;
+        }
+        return static_cast<std::int32_t>(quantity);
+    }
+
+    int lua_commit_stardust(const Lua& lua)
+    {
+        const auto before = stardust_quantity_argument(lua);
+        if (!before)
+        {
+            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+        }
+        Guid guid{};
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        {
+            return stardust_result(lua, false, error);
+        }
+
+        const auto remaining = *before - 1;
+        if (match.quantity == remaining)
+        {
+            return stardust_result(lua, true, "already_debited", remaining);
+        }
+        if (match.quantity != *before)
+        {
+            return stardust_result(lua, false, match.record ? "stardust_stack_quantity_mismatch" : "stardust_stack_missing", match.quantity);
+        }
+
+        auto* instance = scope.instance.Get();
+        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
+        auto* recalculate = stock_no_args(instance, carry_name);
+        if (!recalculate)
+        {
+            return stardust_result(lua, false, "stock_carry_weight_function_unavailable", match.quantity);
+        }
+        if (remaining == 0)
+        {
+            Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(match.save));
+            backpack.RemoveValues(match.index, 1);
+        }
+        else
+        {
+            StackTotals totals;
+            if (!calculate_totals(match, remaining, totals))
+            {
+                return stardust_result(lua, false, "stock_stardust_stack_totals_unavailable", match.quantity);
+            }
+            match.ammo->SetPropertyValueInContainer(match.record, remaining);
+            totals.write(match.record);
+        }
+        instance->ProcessEvent(recalculate, nullptr);
+        return stardust_result(lua, true, remaining > 0 ? "decremented" : "removed", remaining);
+    }
+
+    struct StockItemMetadata
+    {
+        Unreal::UObject* defaults;
+        Unreal::FNameProperty* stock_tag;
+        Unreal::FStructProperty* stock_data;
+        Unreal::FBoolProperty* stock_never_drop;
+        Unreal::FNameProperty* item_tag;
+        Unreal::FStructProperty* item_data;
+        Unreal::FBoolProperty* item_never_drop;
+
+        explicit StockItemMetadata(const TransportInventory& match) :
+            defaults(match.defaults), stock_tag(field<Unreal::FNameProperty>(defaults, STR("DataTag"))),
+            stock_data(field<Unreal::FStructProperty>(defaults, STR("DataStruct"))),
+            stock_never_drop(field<Unreal::FBoolProperty>(defaults, STR("NeverDrop"))),
+            item_tag(field<Unreal::FNameProperty>(match.item, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"))),
+            item_data(field<Unreal::FStructProperty>(match.item, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"))),
+            item_never_drop(field<Unreal::FBoolProperty>(match.item, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"))) {}
+
+        [[nodiscard]] bool available() const
+        {
+            auto* data_type = item_data ? item_data->GetStruct().Get() : nullptr;
+            return stock_tag && stock_data && stock_never_drop && item_tag && item_never_drop && data_type &&
+                stock_data->GetStruct().Get() == data_type && data_type->GetPathName() == STR("/Script/StructUtils.InstancedStruct");
+        }
+
+        [[nodiscard]] bool matches(const void* item) const
+        {
+            return item_never_drop->GetPropertyValueInContainer(item) == stock_never_drop->GetPropertyValueInContainer(defaults) &&
+                   item_tag->Identical(item_tag->ContainerPtrToValuePtr<void>(item), stock_tag->ContainerPtrToValuePtr<void>(defaults)) &&
+                   item_data->Identical(item_data->ContainerPtrToValuePtr<void>(item), stock_data->ContainerPtrToValuePtr<void>(defaults));
+        }
+
+        void copy_to(void* item) const
+        {
+            item_never_drop->SetPropertyValueInContainer(item, stock_never_drop->GetPropertyValueInContainer(defaults));
+            item_tag->CopyCompleteValue(item_tag->ContainerPtrToValuePtr<void>(item), stock_tag->ContainerPtrToValuePtr<void>(defaults));
+            item_data->CopyCompleteValue(item_data->ContainerPtrToValuePtr<void>(item), stock_data->ContainerPtrToValuePtr<void>(defaults));
+        }
+    };
+
+    [[nodiscard]] bool stock_stardust(const TransportInventory& match)
+    {
+        const StockItemMetadata metadata(match);
+        StackTotals totals;
+        return match.record && metadata.available() && calculate_totals(match, match.quantity, totals) &&
+               metadata.matches(match.record) && totals.matches(match.record);
+    }
+
+    [[nodiscard]] std::string_view append_stock_transport(TransportKind kind, const TransportInventory& match,
+                                                         const Guid& guid, std::int32_t ammo)
+    {
+        const StockItemMetadata metadata(match);
+        if (!metadata.available())
+        {
+            return transport_status(kind, "stock_gold_defaults_unavailable", "stock_blue_defaults_unavailable",
+                                    "stock_stardust_defaults_unavailable");
+        }
+        StackTotals totals;
+        if (!calculate_totals(match, ammo > 0 ? ammo : 1, totals))
+        {
+            return transport_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults", "invalid_stock_stardust_defaults");
+        }
+        auto* instance = scope.instance.Get();
+        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
+        auto* recalculate = stock_no_args(instance, carry_name);
+        if (!recalculate)
+        {
+            return "stock_carry_weight_function_unavailable";
+        }
+        const GuidFields fields(match.item);
+        Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(match.save));
+        if (backpack.Num() >= inventory_limit)
+        {
+            return "stock_inventory_size_out_of_range";
+        }
+        auto* item = backpack.GetRawPtr(backpack.AddValue());
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(item), match.transport_class);
+        match.ammo->SetPropertyValueInContainer(item, ammo);
+        totals.write(item);
+        metadata.copy_to(item);
+        fields.write(item, guid);
+        instance->ProcessEvent(recalculate, nullptr);
+        return {};
+    }
+
+    template <TransportKind kind>
     int lua_seed_cube(const Lua& lua)
     {
         if (!fixtures_enabled())
         {
-            return probe_result(lua, false, cube_status(kind, "native_gold_fixtures_disabled", "native_blue_fixtures_disabled"));
+            return probe_result(lua, false, transport_status(kind, "native_gold_fixtures_disabled", "native_blue_fixtures_disabled",
+                                                            "native_stardust_fixtures_disabled"));
         }
         Guid guid{};
-        CubeInventory match;
-        if (const auto error = cube_inventory_argument(lua, kind, guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, kind, guid, match); !error.empty())
         {
             return probe_result(lua, false, error);
         }
@@ -920,70 +1150,95 @@ namespace
         {
             return probe_result(lua, true, "present");
         }
-
-        auto* defaults = match.cube_class->GetClassDefaultObject().Get();
-        auto* stock_weight = field<Unreal::FDoubleProperty>(defaults, STR("Weight"));
-        auto* stock_value = field<Unreal::FIntProperty>(defaults, STR("Value"));
-        auto* stock_tag = field<Unreal::FNameProperty>(defaults, STR("DataTag"));
-        auto* stock_data = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
-        auto* stock_never_drop = field<Unreal::FBoolProperty>(defaults, STR("NeverDrop"));
-        auto* item_weight = field<Unreal::FDoubleProperty>(match.item, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"));
-        auto* item_value = field<Unreal::FIntProperty>(match.item, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
-        auto* item_tag = field<Unreal::FNameProperty>(match.item, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"));
-        auto* item_data = field<Unreal::FStructProperty>(match.item, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
-        auto* item_never_drop = field<Unreal::FBoolProperty>(match.item, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
-        auto* data_type = item_data ? item_data->GetStruct().Get() : nullptr;
-        if (!stock_weight || !stock_value || !stock_tag || !stock_data || !stock_never_drop ||
-            !item_weight || !item_value || !item_tag || !data_type || !item_never_drop ||
-            stock_data->GetStruct().Get() != data_type || data_type->GetPathName() != STR("/Script/StructUtils.InstancedStruct"))
-        {
-            return probe_result(lua, false, cube_status(kind, "stock_gold_defaults_unavailable", "stock_blue_defaults_unavailable"));
-        }
-        const auto weight = stock_weight->GetPropertyValueInContainer(defaults);
-        const auto value = stock_value->GetPropertyValueInContainer(defaults);
-        if (!std::isfinite(weight) || weight < 0 || value < 0)
-        {
-            return probe_result(lua, false, cube_status(kind, "invalid_stock_gold_defaults", "invalid_stock_blue_defaults"));
-        }
-        auto* instance = scope.instance.Get();
-        const Unreal::FName carry_name{STR("Calc_CarryWeight")};
-        auto* recalculate = stock_no_args(instance, carry_name);
-        if (!recalculate)
-        {
-            return probe_result(lua, false, "stock_carry_weight_function_unavailable");
-        }
-        const GuidFields fields(match.item);
-        Unreal::FScriptArrayHelper backpack(match.backpack, match.backpack->ContainerPtrToValuePtr<void>(match.save));
-        if (backpack.Num() >= inventory_limit)
-        {
-            return probe_result(lua, false, "stock_inventory_size_out_of_range");
-        }
-        auto* item = backpack.GetRawPtr(backpack.AddValue());
-        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(item), match.cube_class);
-        match.ammo->SetPropertyValueInContainer(item, -1);
-        item_weight->SetPropertyValueInContainer(item, weight);
-        item_value->SetPropertyValueInContainer(item, value);
-        item_never_drop->SetPropertyValueInContainer(item, stock_never_drop->GetPropertyValueInContainer(defaults));
-        item_tag->CopyCompleteValue(item_tag->ContainerPtrToValuePtr<void>(item), stock_tag->ContainerPtrToValuePtr<void>(defaults));
-        item_data->CopyCompleteValue(item_data->ContainerPtrToValuePtr<void>(item), stock_data->ContainerPtrToValuePtr<void>(defaults));
-        fields.write(item, guid);
-        instance->ProcessEvent(recalculate, nullptr);
-        return probe_result(lua, true, "seeded");
+        const auto error = append_stock_transport(kind, match, guid, -1);
+        return error.empty() ? probe_result(lua, true, "seeded") : probe_result(lua, false, error);
     }
 
-    template <CubeKind kind>
-    int lua_probe_cube(const Lua& lua)
+    int lua_inspect_stardust(const Lua& lua)
+    {
+        Guid guid{};
+        TransportInventory match;
+        const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match);
+        if (!error.empty())
+        {
+            stardust_result(lua, false, error);
+            lua.set_string("");
+            return 4;
+        }
+        stardust_result(lua, true, match.record ? "present" : "absent", match.quantity);
+        lua.set_string(stock_stardust(match) ? stock_stardust_payload : std::string_view{});
+        return 4;
+    }
+
+    int lua_seed_stardust(const Lua& lua)
+    {
+        if (!fixtures_enabled())
+        {
+            return stardust_result(lua, false, "native_stardust_fixtures_disabled");
+        }
+        const auto quantity = stardust_quantity_argument(lua);
+        if (!quantity)
+        {
+            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+        }
+        Guid guid{};
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        {
+            return stardust_result(lua, false, error);
+        }
+        if (match.record)
+        {
+            return match.quantity == *quantity ? stardust_result(lua, true, "present", match.quantity) :
+                stardust_result(lua, false, "stardust_seed_quantity_mismatch", match.quantity);
+        }
+        const auto error = append_stock_transport(TransportKind::Stardust, match, guid, *quantity);
+        return error.empty() ? stardust_result(lua, true, "seeded", *quantity) : stardust_result(lua, false, error);
+    }
+
+    int lua_restore_stardust(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 || !lua.is_string(4) ||
+            lua.get_string(4) != stock_stardust_payload)
+        {
+            return stardust_result(lua, false, "stock_stardust_recovery_payload_required_on_game_thread");
+        }
+        const auto quantity = stardust_quantity_argument(lua);
+        if (!quantity)
+        {
+            return stardust_result(lua, false, "positive_stardust_quantity_required_on_game_thread");
+        }
+        Guid guid{};
+        TransportInventory match;
+        if (const auto error = transport_inventory_argument(lua, TransportKind::Stardust, guid, match); !error.empty())
+        {
+            return stardust_result(lua, false, error);
+        }
+        if (match.record)
+        {
+            return match.quantity == *quantity && stock_stardust(match) ? stardust_result(lua, true, "present", match.quantity) :
+                stardust_result(lua, false, "stardust_recovery_item_conflict", match.quantity);
+        }
+
+        // The Lua bridge supplies this only for the persisted residual of a committed debit.
+        const auto error = append_stock_transport(TransportKind::Stardust, match, guid, *quantity);
+        return error.empty() ? stardust_result(lua, true, "restored", *quantity) : stardust_result(lua, false, error);
+    }
+
+    template <TransportKind kind>
+    int lua_probe_transport(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || !fixtures_enabled() || lua.get_stack_size() != 3 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
         {
-            return probe_result(lua, false, cube_status(kind, "gold_probe_fixture_required_on_game_thread",
-                                                       "blue_probe_fixture_required_on_game_thread"));
+            return probe_result(lua, false, transport_status(kind, "gold_probe_fixture_required_on_game_thread",
+                                                              "blue_probe_fixture_required_on_game_thread",
+                                                              "stardust_probe_fixture_required_on_game_thread"));
         }
         Guid guid{};
         if (!parse_guid(lua.get_string(3), guid))
         {
-            return probe_result(lua, false, cube_status(kind, "invalid_gold_guid", "invalid_blue_guid"));
+            return probe_result(lua, false, transport_status(kind, "invalid_gold_guid", "invalid_blue_guid", "invalid_stardust_guid"));
         }
         const auto manager_address = lua.get_integer(2);
         if (manager_address <= 0 || !current_host_argument(lua.get_integer(1)))
@@ -996,18 +1251,19 @@ namespace
             return probe_result(lua, false, "current_local_item_manager_required");
         }
         auto* save = canonical_host_save();
-        CubeInventory match;
-        if (const auto error = locate_cube(save, kind, guid, match); !error.empty())
+        TransportInventory match;
+        if (const auto error = locate_transport(save, kind, guid, match); !error.empty())
         {
             return probe_result(lua, false, error);
         }
         if (!match.record)
         {
-            return probe_result(lua, false, "owned_backpack_cube_required");
+            return probe_result(lua, false, transport_status(kind, "owned_backpack_cube_required", "owned_backpack_cube_required",
+                                                             "owned_backpack_stardust_required"));
         }
-        if (cube_request && request_current(*cube_request, save))
+        if (transport_request && request_current(*transport_request, save))
         {
-            return probe_result(lua, false, pending_conflict(*cube_request, kind));
+            return probe_result(lua, false, pending_conflict(*transport_request, kind));
         }
         auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
         const GuidFields fields(match.item);
@@ -1024,28 +1280,29 @@ namespace
         const RestoreItem restore(held, value);
 
         // First prove this instance's stock entry is intercepted while the GUID is unusable.
-        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.cube_class);
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.transport_class);
         const auto before = receipt.count;
         manager->ProcessEvent(function, nullptr);
-        if (receipt.count != before + 1 || receipt.role != "host" || receipt.item != cube_artifact(kind).name ||
+        if (receipt.count != before + 1 || receipt.role != "host" || receipt.item != transport_artifact(kind).name ||
             receipt.entry != "use_held_item" || receipt.reason != "coordinated_route_required")
         {
             return probe_result(lua, false, "stock_scratch_held_use_did_not_report_expected_denial");
         }
         held->CopyCompleteValue(value, match.record);
         manager->ProcessEvent(function, nullptr);
-        CubeInventory after;
-        const bool intact = locate_cube(canonical_host_save(), kind, guid, after).empty() && after.record &&
+        TransportInventory after;
+        const bool intact = locate_transport(canonical_host_save(), kind, guid, after).empty() && after.record &&
                             after.save == save && held->Identical(value, after.record);
-        const bool queued = receipt.count == before + 2 && receipt.reason == queued_status(kind) && cube_request &&
-                            cube_request->kind == kind && cube_request->guid == guid && request_current(*cube_request, save);
+        const bool queued = receipt.count == before + 2 && receipt.reason == queued_status(kind) && transport_request &&
+                            transport_request->kind == kind && transport_request->guid == guid && request_current(*transport_request, save);
         if (!intact || !queued)
         {
-            cube_request.reset();
-            return probe_result(lua, false, intact ? cube_status(kind, "stock_gold_use_did_not_queue", "stock_blue_use_did_not_queue") :
+            transport_request.reset();
+            return probe_result(lua, false, intact ? transport_status(kind, "stock_gold_use_did_not_queue", "stock_blue_use_did_not_queue",
+                                                                      "stock_stardust_use_did_not_queue") :
                                                     "stock_backpack_item_was_changed");
         }
-        return probe_result(lua, true, cube_status(kind, "stock_gold_use_queued", "stock_blue_use_queued"));
+        return probe_result(lua, true, transport_status(kind, "stock_gold_use_queued", "stock_blue_use_queued", "stock_stardust_use_queued"));
     }
 
     int lua_probe_gold_action(const Lua& lua)
@@ -1079,9 +1336,9 @@ namespace
         }
 
         auto* save = canonical_host_save();
-        constexpr auto kind = CubeKind::Gold;
-        CubeInventory match;
-        if (const auto error = locate_cube(save, kind, guid, match); !error.empty())
+        constexpr auto kind = TransportKind::Gold;
+        TransportInventory match;
+        if (const auto error = locate_transport(save, kind, guid, match); !error.empty())
         {
             return probe_result(lua, false, error);
         }
@@ -1089,9 +1346,9 @@ namespace
         {
             return probe_result(lua, false, "owned_backpack_cube_required");
         }
-        if (cube_request && request_current(*cube_request, save))
+        if (transport_request && request_current(*transport_request, save))
         {
-            return probe_result(lua, false, pending_conflict(*cube_request, kind));
+            return probe_result(lua, false, pending_conflict(*transport_request, kind));
         }
 
         auto* choose_card = field<Unreal::FObjectProperty>(menu, STR("Item Card"));
@@ -1157,12 +1414,12 @@ namespace
         {
             unowned_guid.back() = 1;
         }
-        CubeInventory unowned;
-        if (!locate_cube(save, kind, unowned_guid, unowned).empty() || unowned.record)
+        TransportInventory unowned;
+        if (!locate_transport(save, kind, unowned_guid, unowned).empty() || unowned.record)
         {
             return probe_result(lua, false, "gold_action_canary_guid_not_absent");
         }
-        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.cube_class);
+        match.item_class->SetObjectPropertyValue(match.item_class->ContainerPtrToValuePtr<void>(value), match.transport_class);
         fields.write(value, unowned_guid);
         const auto before = receipt.count;
         manager->ProcessEvent(function, nullptr);
@@ -1174,15 +1431,15 @@ namespace
 
         item->CopyCompleteValue(value, match.record);
         manager->ProcessEvent(function, nullptr);
-        CubeInventory after;
-        const bool intact = locate_cube(canonical_host_save(), kind, guid, after).empty() && after.record &&
+        TransportInventory after;
+        const bool intact = locate_transport(canonical_host_save(), kind, guid, after).empty() && after.record &&
                             after.save == save && item->Identical(value, after.record);
-        const bool queued = receipt.count == before + 2 && receipt.reason == queued_status(kind) && cube_request &&
-                            cube_request->kind == kind && cube_request->entry == "action_use" && cube_request->guid == guid &&
-                            request_current(*cube_request, save);
+        const bool queued = receipt.count == before + 2 && receipt.reason == queued_status(kind) && transport_request &&
+                            transport_request->kind == kind && transport_request->entry == "action_use" && transport_request->guid == guid &&
+                            request_current(*transport_request, save);
         if (!intact || !queued)
         {
-            cube_request.reset();
+            transport_request.reset();
             return probe_result(lua, false, intact ? "stock_gold_action_use_did_not_queue" : "stock_backpack_item_was_changed");
         }
         return probe_result(lua, true, "stock_gold_action_use_queued");
@@ -1293,7 +1550,7 @@ void silverfish::native_transport::clear_scope()
     if (Unreal::IsInGameThreadRaw())
     {
         scope = {};
-        cube_request.reset();
+        transport_request.reset();
     }
 }
 
@@ -1318,19 +1575,25 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);
-        lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_cube_request<CubeKind::Gold>);
-        lua.register_function("SilverfishInspectNativeGoldTransport", lua_inspect_cube<CubeKind::Gold>);
-        lua.register_function("SilverfishCommitNativeGoldTransport", lua_commit_cube<CubeKind::Gold>);
-        lua.register_function("SilverfishTakeNativeBlueTransportRequest", lua_take_cube_request<CubeKind::Blue>);
-        lua.register_function("SilverfishInspectNativeBlueTransport", lua_inspect_cube<CubeKind::Blue>);
-        lua.register_function("SilverfishCommitNativeBlueTransport", lua_commit_cube<CubeKind::Blue>);
+        lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_transport_request<TransportKind::Gold>);
+        lua.register_function("SilverfishInspectNativeGoldTransport", lua_inspect_cube<TransportKind::Gold>);
+        lua.register_function("SilverfishCommitNativeGoldTransport", lua_commit_cube<TransportKind::Gold>);
+        lua.register_function("SilverfishTakeNativeBlueTransportRequest", lua_take_transport_request<TransportKind::Blue>);
+        lua.register_function("SilverfishInspectNativeBlueTransport", lua_inspect_cube<TransportKind::Blue>);
+        lua.register_function("SilverfishCommitNativeBlueTransport", lua_commit_cube<TransportKind::Blue>);
+        lua.register_function("SilverfishTakeNativeStardustTransportRequest", lua_take_transport_request<TransportKind::Stardust>);
+        lua.register_function("SilverfishInspectNativeStardustTransport", lua_inspect_stardust);
+        lua.register_function("SilverfishCommitNativeStardustTransport", lua_commit_stardust);
+        lua.register_function("SilverfishRestoreNativeStardustTransport", lua_restore_stardust);
         if (fixtures_enabled())
         {
-            lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_cube<CubeKind::Gold>);
-            lua.register_function("SilverfishProbeNativeGoldTransport", lua_probe_cube<CubeKind::Gold>);
+            lua.register_function("SilverfishSeedNativeGoldTransport", lua_seed_cube<TransportKind::Gold>);
+            lua.register_function("SilverfishProbeNativeGoldTransport", lua_probe_transport<TransportKind::Gold>);
             lua.register_function("SilverfishProbeNativeGoldActionUse", lua_probe_gold_action);
-            lua.register_function("SilverfishSeedNativeBlueTransport", lua_seed_cube<CubeKind::Blue>);
-            lua.register_function("SilverfishProbeNativeBlueTransport", lua_probe_cube<CubeKind::Blue>);
+            lua.register_function("SilverfishSeedNativeBlueTransport", lua_seed_cube<TransportKind::Blue>);
+            lua.register_function("SilverfishProbeNativeBlueTransport", lua_probe_transport<TransportKind::Blue>);
+            lua.register_function("SilverfishSeedNativeStardustTransport", lua_seed_stardust);
+            lua.register_function("SilverfishProbeNativeStardustTransport", lua_probe_transport<TransportKind::Stardust>);
         }
     }
 }

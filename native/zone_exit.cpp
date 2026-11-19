@@ -40,6 +40,12 @@ namespace
     constexpr auto door_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:SendInteractionToActor");
     constexpr auto door_power_path = STR("/Game/Classes/Actors/Dungeon_TransitionDoor_BP.Dungeon_TransitionDoor_BP_C:Send_PowerSignal");
     constexpr auto exit_power_path = STR("/Game/Classes/ScriptingActors/Level_Exit_BP.Level_Exit_BP_C:Send_PowerSignal");
+    constexpr auto exchange_world = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P");
+    constexpr auto exchange_actor = STR("/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P.Exchange_01_P:PersistentLevel.Dream_CountDown_BP_C_1");
+    constexpr auto dream_power_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:Send_PowerSignal");
+    constexpr auto dream_script_path = STR("/Game/Classes/Actors/Dream_CountDown_BP.Dream_CountDown_BP_C:ExecuteUbergraph_Dream_CountDown_BP");
+    constexpr int exchange_timed_return = 588;
+    constexpr int exchange_signal_return = 15;
     constexpr auto ttl = std::chrono::seconds(2);
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
@@ -73,6 +79,7 @@ namespace
               {STR("Level_Exit_BP_C_181"), STR("Level_Exit_BP_C_182")}},
         Route{STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"), STR("Level_Exit_BP_C_1"),
               STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"), STR("Obsv_Etr")},
+        Route{exchange_world, {}, {}, {}},
     };
 
     std::atomic<std::uint64_t> generation{};
@@ -91,6 +98,7 @@ namespace
         Unreal::FWeakObjectPtr fixture;
         Unreal::FWeakObjectPtr world;
         Unreal::FWeakObjectPtr instance;
+        Unreal::FWeakObjectPtr dream;
         Unreal::UClass* pawn_class{};
         Unreal::UClass* exit_class{};
         Unreal::UFunction* overlap{};
@@ -100,11 +108,16 @@ namespace
         Unreal::UFunction* door{};
         Unreal::UFunction* door_power{};
         Unreal::UFunction* exit_power{};
+        Unreal::UFunction* dream_power{};
+        Unreal::UFunction* dream_script{};
         Unreal::FObjectProperty* door_player{};
         Unreal::FObjectProperty* door_hit{};
         Unreal::FObjectProperty* door_instigator{};
         Unreal::FObjectProperty* exit_instigator{};
         Unreal::FBoolProperty* exit_powered{};
+        Unreal::FBoolProperty* dream_powered{};
+        Unreal::FObjectProperty* dream_instigator{};
+        Unreal::FIntProperty* dream_entry{};
         Unreal::FObjectProperty* overlap_actor{};
         Unreal::FObjectProperty* overlap_component{};
         Unreal::FObjectProperty* fixture_box{};
@@ -117,6 +130,7 @@ namespace
         Unreal::FWeakObjectPtr pending_door;
         Unreal::FWeakObjectPtr pending_child;
         Clock::time_point pending_expires{};
+        bool dream_return_requested{};
     };
 
     thread_local Scope scope;
@@ -277,7 +291,7 @@ namespace
         Scope next;
         next.pawn_class = find<Unreal::UClass>(pawn_path);
         next.exit_class = find<Unreal::UClass>(exit_path);
-        if (!next.pawn_class || !next.exit_class) return false;
+        if (!next.pawn_class || (exit_address && !next.exit_class)) return false;
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
             if (object->HasAnyFlags(Unreal::RF_ClassDefaultObject)) return RC::LoopAction::Continue;
             if (address(object) == local_address && object->GetClassPrivate() == next.pawn_class) next.local = object;
@@ -324,8 +338,24 @@ namespace
         next.fixture_box = field<Unreal::FObjectProperty>(fixture, STR("Box"));
         next.next_level = field<Unreal::FSoftObjectProperty>(fixture, STR("NextLevel"));
         next.entrance_tag = field<Unreal::FStrProperty>(fixture, STR("Entrance Tag"));
-        if (!next.instance.Get() || !next.role || !next.overlap_actor || !next.overlap_component || (fixture && !next.fixture_box) ||
-            !next.activate || !next.prep || !next.load || !next.exit_power || !live_game_roster(next)) return false;
+        if (!next.instance.Get() || !next.role || !next.prep || !next.load || !live_game_roster(next)) return false;
+        if (map == exchange_world)
+        {
+            auto* dream = find<Unreal::UObject>(exchange_actor);
+            next.dream_power = find<Unreal::UFunction>(dream_power_path);
+            next.dream_script = find<Unreal::UFunction>(dream_script_path);
+            next.dream_powered = field<Unreal::FBoolProperty>(next.dream_power, STR("Powered"));
+            next.dream_instigator = field<Unreal::FObjectProperty>(next.dream_power, STR("Instigator"));
+            next.dream_entry = field<Unreal::FIntProperty>(next.dream_script, STR("EntryPoint"));
+            if (!dream || !next.dream_power || !next.dream_script || !next.dream_powered || !next.dream_instigator ||
+                !next.dream_entry || dream->GetClassPrivate() != next.dream_power->GetOuterPrivate() ||
+                dream->GetClassPrivate() != next.dream_script->GetOuterPrivate() || actor_world(dream) != world ||
+                !in_persistent_level(dream, world)) return false;
+            next.dream = dream;
+            next.dream_return_requested = scope.dream.Get() == dream && scope.dream_return_requested;
+        }
+        else if (!next.exit_class || !next.overlap_actor || !next.overlap_component || (fixture && !next.fixture_box) ||
+                 !next.activate || !next.exit_power) return false;
         next.generation = current_generation;
         next.expires = Clock::now() + ttl;
         next.accepting = accepting;
@@ -426,6 +456,29 @@ namespace
     {
         if (!Unreal::IsInGameThreadRaw() || !context || !callee || !installed.load(std::memory_order_acquire) ||
             scope.generation != generation.load(std::memory_order_acquire)) return;
+        if (scope.dream.Get() == context && (callee == scope.dream_power || callee == scope.dream_script) && locals &&
+            !iteration.OriginalFunctionCallPrevented())
+        {
+            if (callee == scope.dream_power)
+            {
+                const auto powered = scope.dream_powered->GetPropertyValueInContainer(locals);
+                auto* instigator = read_object(scope.dream_instigator, locals);
+                auto* local = scope.local.Get();
+                iteration.PreventOriginalFunctionCall();
+                if (powered && iteration.OriginalFunctionCallPrevented() && host_is_ready(local) &&
+                    (!instigator || instigator == local || (instigator->GetClassPrivate() != scope.pawn_class &&
+                                                            actor_world(instigator) == scope.world.Get())))
+                {
+                    scope.dream_return_requested = true;
+                }
+            }
+            else
+            {
+                const auto entry = scope.dream_entry->GetPropertyValueInContainer(locals);
+                if (entry == exchange_timed_return || entry == exchange_signal_return) iteration.PreventOriginalFunctionCall();
+            }
+            return;
+        }
         const bool is_overlap = callee == scope.overlap;
         const bool is_instance = callee == scope.prep || callee == scope.load;
         if (!is_overlap && !is_instance && callee != scope.activate && callee != scope.door &&
@@ -558,6 +611,30 @@ namespace
         }
         return 0;
     }
+
+    int lua_inspect_exchange(const Lua& lua)
+    {
+        const bool match = Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
+            scope.generation == generation.load(std::memory_order_acquire) && scope.dream.Get() &&
+            lua.get_stack_size() == 1 && lua.is_integer(1) &&
+            address(scope.dream.Get()) == static_cast<Address>(lua.get_integer()) && Clock::now() < scope.expires;
+        lua.set_bool(match);
+        lua.set_string(match ? "native_countdown_guard_ready" : "native_countdown_guard_unavailable");
+        return 2;
+    }
+
+    int lua_take_exchange_return(const Lua& lua)
+    {
+        bool requested = false;
+        if (Unreal::IsInGameThreadRaw() && scope.generation == generation.load(std::memory_order_acquire) &&
+            scope.dream.Get() && host_is_ready(scope.local.Get()))
+        {
+            requested = scope.dream_return_requested;
+            scope.dream_return_requested = false;
+        }
+        lua.set_bool(requested);
+        return 1;
+    }
 }
 
 namespace silverfish::native_zone
@@ -595,6 +672,8 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
         lua.register_function("SilverfishTakeNativeDoorEvent", lua_take_door_event);
         lua.register_function("SilverfishReleaseNativeZoneRequest", lua_release_request);
+        lua.register_function("SilverfishInspectNativeExchangeCountdown", lua_inspect_exchange);
+        lua.register_function("SilverfishTakeNativeExchangeReturn", lua_take_exchange_return);
     }
 
     void clear_scope()

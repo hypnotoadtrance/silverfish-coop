@@ -5,6 +5,7 @@ local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 local gold_nexus = "/Game/Classes/Maps/Dreams/GoldNexus_P"
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+local exchange = "/Game/Classes/Maps/Maps_Dungeons/Exchange_01_P"
 
 return {
     [playtest_1] = { fixture = "Level_Exit_BP_C_0", destination = playtest_2 },
@@ -36,4 +37,5 @@ return {
         entrance = "Obsv_Etr", arrival = "LevelExit_Spawn_BP_C_1",
         probe_arrival = "LevelExit_Spawn_BP_C_1", probe_approach = -1,
     },
+    [exchange] = { entrance = "PlayerStart_1", player_start = "PlayerStart_1" },
 }

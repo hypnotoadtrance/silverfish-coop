@@ -1,6 +1,10 @@
 -- Inspect the stock merchants and one staged quest on the authoritative host.
 local native_world = {}
 local routes = require("zone_maps")
+local world_seed = require("world_seed")
+
+native_world.prepare_seed = world_seed.prepare_seed
+native_world.prepare_travel_seed = world_seed.prepare_travel_seed
 
 local playtest_maps = {
     ["/Game/Classes/Maps/PlaytestMap_01"] = true,
@@ -415,7 +419,7 @@ function native_world.command(fields, state, phase)
     return "native quest state verified"
 end
 
-function native_world.rows(state, phase, status_row)
+local function world_rows(state, phase, status_row)
     local pawn = host_pawn(state, phase)
     if not pawn then
         cached_rows = nil
@@ -456,6 +460,12 @@ function native_world.rows(state, phase, status_row)
     end
     cached_rows, cached_time, cached_world = rows, now, world_address
     return rows
+end
+
+function native_world.rows(state, phase, status_row)
+    local proof = world_seed.row(state, phase, status_row)
+    local rows = world_rows(state, phase, status_row)
+    return proof and { proof, table.unpack(rows) } or rows
 end
 
 return native_world
