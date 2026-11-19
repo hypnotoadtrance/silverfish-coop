@@ -1694,28 +1694,36 @@ class Bridge:
             raise ValueError("Invalid stock held-fire command")
         nonce = uuid.uuid4().hex
         fields = (nonce, f"native-guest-smg-hold-{operation}", *arguments)
-        write_text(self.directory / "held-fire-command.tsv", "\t".join(fields) + "\n")
+        command = self.directory / "held-fire-command.tsv"
+        write_text(command, "\t".join(fields) + "\n")
         reply = self.directory / "held-fire-reply.tsv"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 1.2
-        while loop.time() < deadline:
-            if self.process.poll() is not None:
-                raise RuntimeError("The native host exited during a stock held-fire command")
-            try:
-                with reply.open("r", encoding="utf-8") as stream:
-                    raw = stream.read(8193)
-            except (FileNotFoundError, PermissionError):
-                raw = ""
-            if 0 < len(raw) <= 8192 and raw.endswith("\n"):
-                head, *rows = [line.split("\t") for line in raw.splitlines()]
-                if len(head) == 5 and head[:2] == ["held-fire-ack", nonce]:
-                    _, _, result, area, message = head
-                    if result != "accepted":
-                        raise RuntimeError(message or "Stock held fire was refused")
-                    proof = [native_smg_hold.parse(row) for row in rows if row[0] == "native-guest-smg-hold"]
-                    return {"state": "hosting", "map": area, native_smg_hold.ALL: {row["pawn"]: row for row in proof}}
-            await asyncio.sleep(.025)
-        raise TimeoutError("The native game did not acknowledge stock held fire")
+        try:
+            while loop.time() < deadline:
+                if self.process.poll() is not None:
+                    raise RuntimeError("The native host exited during a stock held-fire command")
+                try:
+                    with reply.open("r", encoding="utf-8") as stream:
+                        raw = stream.read(8193)
+                except (FileNotFoundError, PermissionError):
+                    raw = ""
+                if 0 < len(raw) <= 8192 and raw.endswith("\n"):
+                    head, *rows = [line.split("\t") for line in raw.splitlines()]
+                    if len(head) == 5 and head[:2] == ["held-fire-ack", nonce]:
+                        _, _, result, area, message = head
+                        if result != "accepted":
+                            raise RuntimeError(message or "Stock held fire was refused")
+                        proof = [native_smg_hold.parse(row) for row in rows if row[0] == "native-guest-smg-hold"]
+                        return {"state": "hosting", "map": area, native_smg_hold.ALL: {row["pawn"]: row for row in proof}}
+                await asyncio.sleep(.025)
+            raise TimeoutError("The native game did not acknowledge stock held fire")
+        finally:
+            with contextlib.suppress(OSError):
+                with command.open("rb") as stream:
+                    pending = stream.read(33) == nonce.encode("ascii") + b"\t"
+                if pending:
+                    command.unlink()
 
     async def walk(self, x: float, y: float, milliseconds: int) -> None:
         if type(x) not in {int, float} or type(y) not in {int, float}:

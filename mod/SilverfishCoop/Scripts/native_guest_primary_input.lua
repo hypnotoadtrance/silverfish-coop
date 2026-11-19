@@ -117,6 +117,17 @@ function primary.sync(state, phase)
     return emitted, held_emitted, held_last
 end
 
+local function fixture_edge(state, phase, current, edge)
+    local ok, status, sequence, stroke = SilverfishProbeNativeGuestHeldFire(current.pawn:GetAddress(), edge)
+    if ok ~= true or status ~= "stock_" .. edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
+        error("The stock SMG fixture edge was unverified (" .. tostring(status) .. ")", 0)
+    end
+    local taps, held, last = primary.sync(state, phase)
+    if taps ~= 0 or held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
+    held_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = edge}
+    return held_fixture_proof
+end
+
 function primary.command(fields, state, phase)
     local action = fields[2]
     if action == "native-guest-primary-clear" and #fields == 2 then
@@ -131,19 +142,25 @@ function primary.command(fields, state, phase)
         error("Stock primary input requires the exact standing connected guest", 0)
     end
     if action == "native-guest-held-fire-fixture" then
-        local edge = fields[4]
-        if not held_enabled or not fixtures or #fields ~= 4 or fields[3] ~= current.name
+        local edge, duration = fields[4], math.tointeger(fields[5])
+        if not held_enabled or not fixtures or (#fields ~= 4 and #fields ~= 5) or fields[3] ~= current.name
             or not same_context(current, binding) or binding.kind ~= "smg-standard" or (edge ~= "press" and edge ~= "release")
+            or (#fields == 5 and (edge ~= "press" or not duration or duration < 300 or duration > 1800
+                or type(ExecuteInGameThreadWithDelay) ~= "function"))
             or type(SilverfishProbeNativeGuestHeldFire) ~= "function" then
             error("The stock held input fixture requires the exact scoped headless SMG guest", 0)
         end
-        local ok, status, sequence, stroke = SilverfishProbeNativeGuestHeldFire(current.pawn:GetAddress(), edge)
-        if ok ~= true or status ~= "stock_" .. edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
-            error("The stock SMG fixture edge was unverified (" .. tostring(status) .. ")", 0)
+        local press = fixture_edge(state, phase, current, edge)
+        if duration then
+            ExecuteInGameThreadWithDelay(duration, function()
+                if held_fixture_proof ~= press or not same_context(current, binding)
+                    or not standing(current) or binding.guid ~= press.guid then return end
+                local owner_address = current.pawn:GetAddress()
+                local stroke, owner, guid = SilverfishReadNativeGuestHeldFire(owner_address)
+                if stroke ~= press.stroke or owner ~= owner_address or guid ~= press.guid then return end
+                fixture_edge(state, phase, current, "release")
+            end)
         end
-        local taps, held, last = primary.sync(state, phase)
-        if taps ~= 0 or held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
-        held_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = edge}
         return "stock guest SMG " .. edge .. " verified"
     end
     if action == "native-guest-primary-input-fixture" then

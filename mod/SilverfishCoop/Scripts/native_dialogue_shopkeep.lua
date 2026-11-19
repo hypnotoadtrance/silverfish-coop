@@ -39,7 +39,7 @@ end
 
 local function counter(state, phase)
     if not enabled or phase ~= "hosting" or state.map ~= map or state.server ~= false or state.listening ~= true
-        or not valid(state.world) or state.world:GetFullName() ~= "World " .. world then return end
+        or not valid(state.world) or state.world:GetFullName() ~= "World " .. world then return nil, "reception_world_unavailable" end
     local scene = state.world
     local target, npc = StaticFindObject(profile.target), StaticFindObject(profile.npc)
     local actor = StaticFindObject(profile.actor)
@@ -47,32 +47,40 @@ local function counter(state, phase)
     local branch = StaticFindObject(level .. "BasicBranch_BP_C_1")
     local receiver = StaticFindObject(level .. "GlobalPing_ScriptingReciver_BP_C_1")
     if not exact(target, profile.target_class) or not exact(npc, profile.npc_class) or npc.Alive ~= true
-        or not exact(actor, "/Game/Classes/Actors/Shop_BP.Shop_BP_C") or actor.NoInfiniteStock ~= true
+        or not exact(actor, "/Game/Classes/Actors/Shop_BP.Shop_BP_C")
         or not exact(dialogue, "/Game/Classes/ScriptingActors/Dialogue_Controler_BP.Dialogue_Controler_BP_C")
         or not exact(branch, "/Game/Classes/ScriptingActors/BasicBranch_BP.BasicBranch_BP_C")
-        or not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
-        or named(receiver.Ping_ID) ~= ping or not links(receiver, "ActorsToPower", actor)
-        or not links(target, "Actors_ToPower", branch)
-        or not same(actor.MerchantData, StaticFindObject("/Game/Classes/Libraries/DataAssets/Merchants/StrangeJunkShopData.StrangeJunkShopData"))
-        or not exact(target.Box, profile.component_class) or not same(target.Box:GetOwner(), target) then return end
+        or not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C") then
+        return nil, "reception_actors_unavailable"
+    end
+    if named(receiver.Ping_ID) ~= ping or not links(receiver, "ActorsToPower", actor) or not links(target, "Actors_ToPower", branch) then
+        return nil, "reception_signal_unqualified"
+    end
+    if not same(actor.MerchantData, StaticFindObject("/Game/Classes/Libraries/DataAssets/Merchants/StrangeJunkShopData.StrangeJunkShopData"))
+        or not exact(target.Box, profile.component_class) or not same(target.Box:GetOwner(), target) then
+        return nil, "reception_shop_or_box_unqualified"
+    end
     for _, object in ipairs({target, npc, actor, dialogue, branch, receiver}) do
         if not same(object:GetWorld(), scene) or object:IsActorBeingDestroyed() or not object:HasAuthority()
-            or not same(object:GetOuter(), scene.PersistentLevel) then return end
+            or not same(object:GetOuter(), scene.PersistentLevel) then return nil, "reception_actor_world_unqualified" end
     end
     local collision = target.Box:GetCollisionEnabled()
-    if collision ~= 1 and collision ~= 3 then return end
+    if collision ~= 1 and collision ~= 3 then return nil, "reception_collision_unavailable" end
     return target, actor
 end
 
 local function read(context)
-    if not same(context.instance.SaveSlot_Ref, context.stock) or not same(context.host.Save, context.stock)
-        or wire.stock_flag(context.instance, "Gaurd_Shopkeep_Mad") == 1 then refuse("reception_unavailable") end
+    if not same(context.instance.SaveSlot_Ref, context.stock) or not same(context.host.Save, context.stock) then
+        refuse("canonical_save_unavailable")
+    end
+    if wire.stock_flag(context.instance, "Gaurd_Shopkeep_Mad") == 1 then refuse("reception_closed") end
     return {meet = wire.stock_flag(context.instance, profile.first_flag),
         cash = wire.stock_flag(context.instance, "Player_Cash"), xp = wire.stock_flag(context.instance, "Player_Xp")}
 end
 
 function profile.progress(state)
-    if not counter(state, "hosting") then refuse("reception_unavailable") end
+    local reception, reason = counter(state, "hosting")
+    if not reception then refuse(reason) end
     local host = state.local_pawn and state.local_pawn.pawn
     local controller = state.controller
     local instance = state.world.OwningGameInstance
@@ -102,7 +110,8 @@ end
 
 function profile.grant_cash(state, phase, pawn, connection, context)
     local reception, actor = counter(state, phase)
-    if not reception or context.stock.BarterOnly ~= false then refuse("stock_cash_counter_unavailable") end
+    if not reception then refuse(actor) end
+    if context.stock.BarterOnly ~= false then refuse("stock_cash_counter_unavailable") end
     local key = pawn:GetFullName()
     for name, saved in pairs(cash_scopes) do
         if not valid(saved.pawn) or os.time() > saved.expires or not same(saved.world, state.world) then cash_scopes[name] = nil end

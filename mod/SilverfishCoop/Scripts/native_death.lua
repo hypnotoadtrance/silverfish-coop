@@ -85,7 +85,7 @@ local function remember_restored_host(state, phase, record)
     if not authored_routes or not record or record.restored_save or record.emitted then return end
     local pawn = record.pawn
     local save = pawn.Save
-    if pawn.Dead ~= false or not valid(save) or not finite(save.PlayerHealth) or save.PlayerHealth > 0 then return end
+    if pawn.Dead ~= false or not valid(save) or not finite(save.PlayerHealth) then return end
     -- The regular capture replaces the restore receipt. Retain its exact pawn/save identity until revival.
     local restore = host_save.rows(state, phase, function(_, kind, slot, map, owner)
         return kind == "restored" and map == state.map and owner == record.name and slot
@@ -300,7 +300,9 @@ function native_death.project_host(state, phase, next_state)
     local before = save.PlayerHealth
     local restored = not record.emitted
     if restored then
-        if players.is_downed(pawn) ~= true or not finite(before) or before > 0 then return end
+        if players.is_downed(pawn) ~= true or not finite(before) then return end
+        -- Stock host regeneration can raise native HP while the campaign still projects this pawn as downed.
+        if not record.restored_save and before > 0 then return end
         if scope_records["local"] ~= record or not heartbeat_fresh() or not restored_owner(state, record, save) then
             error("native_restored_host_revive_scope_unavailable", 0)
         end

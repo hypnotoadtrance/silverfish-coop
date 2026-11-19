@@ -74,6 +74,9 @@ class Authority:
                 return {"ok": False, "error": "native_guest_held_fire_scope_unavailable"}
             try:
                 reply = await self.request(identity[1], target)
+            except asyncio.CancelledError:
+                self._fail_closed()
+                raise
             except (OSError, RuntimeError, ValueError) as error:
                 return {"ok": False, "error": str(error)}
             return {"ok": True, **reply}

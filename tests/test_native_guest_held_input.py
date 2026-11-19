@@ -121,4 +121,5 @@ class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
                              f"native-guest-smg-hold\t{MAP}\t{PAWN}\t{GUID}\t1\treleased\t5\t3\t2\t2\n",
                              encoding="utf-8")
             self.assertEqual((await pending)[ALL][PAWN]["projectiles"], 2)
+            self.assertFalse(command.exists())
             self.assertEqual(ordinary.read_text(encoding="utf-8"), "checkpoint\n")

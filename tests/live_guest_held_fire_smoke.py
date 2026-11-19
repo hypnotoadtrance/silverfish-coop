@@ -129,13 +129,20 @@ async def verify(work: Path, originals_path: Path):
         assert (loaded["guid"], loaded["before"], loaded["after"]) == (guid, before, after), loaded
         return input_proof, loaded
 
-    async def edge(index, kind):
-        receipt = (await action(client_runs[index], LOCAL_FIXTURE, target=kind))[FIXTURE]
+    async def edge(index, kind, milliseconds=None):
+        delay = {} if milliseconds is None else {"milliseconds": milliseconds}
+        receipt = (await action(client_runs[index], LOCAL_FIXTURE, target=kind, **delay))[FIXTURE]
         expected = members[index]
         assert (receipt["map"], receipt["pawn"], receipt["edge"], receipt["guid"]) == (
             OBSERVATORY, expected["local_pawn"], kind, expected["guid"]
         ), receipt
         return receipt
+
+    async def scheduled_release(index, pressed):
+        frame = await wait(client_runs[index], lambda state: (
+            (proof := state.get("game", {}).get(FIXTURE, {})).get("edge"), proof.get("stroke")
+        ) == ("release", pressed["stroke"]))
+        return frame["game"][FIXTURE]
 
     def hold(state, index):
         return state.get("game", {}).get(ALL, {}).get(members[index]["host_pawn"], {})
@@ -210,18 +217,18 @@ async def verify(work: Path, originals_path: Path):
             await wait(client_runs[index], lambda state: state.get("gameplay_fresh") and
                        state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == member["guid"])
 
-        pressed = await asyncio.gather(edge(0, "press"), edge(1, "press"))
+        pressed = await asyncio.gather(edge(0, "press", 725), edge(1, "press", 1450))
         evidence["press_fixtures"] = pressed
         ongoing = await stock_cycle(lambda rows: all(row.get("status") == "active" and row.get("rounds", 0) >= 1 for row in rows))
         assert len({row["serial"] for row in ongoing}) == 2 and all(row["before"] == 25 for row in ongoing), ongoing
         evidence["overlapping_stock_holds"] = ongoing
-        left_release = await edge(0, "release")
-        assert left_release["stroke"] == pressed[0]["stroke"], left_release
         _, right_after_left = await stock_cycle(lambda rows: rows[0].get("status") == "released"
+                                                and rows[1].get("status") == "active"
                                                 and rows[1].get("rounds", 0) > ongoing[1]["rounds"])
         assert right_after_left["status"] == "active", right_after_left
-        right_release = await edge(1, "release")
-        assert right_release["stroke"] == pressed[1]["stroke"], right_release
+        left_release, right_release = await asyncio.gather(*(
+            scheduled_release(index, press) for index, press in enumerate(pressed)
+        ))
         first_ends = await asyncio.gather(*(committed(index, row["serial"]) for index, row in enumerate(ongoing)))
         assert first_ends[0]["status"] == "released" and first_ends[1]["rounds"] > right_after_left["rounds"], first_ends
         evidence["independent_terminal_frames"] = first_ends

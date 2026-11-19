@@ -20,12 +20,6 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import NORTHEAST_RAIL, SHOPKEEP
 
 
-CONSTANT_OFFERS = {
-    "/Game/Classes/Items/Item_MedSalve.Item_MedSalve_C",
-    "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C",
-}
-
-
 async def verify(work: Path, original: Path):
     name = "shopkeep-" + uuid.uuid4().hex[:8]
     root = work / "campaigns" / name
@@ -135,7 +129,7 @@ async def verify(work: Path, original: Path):
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
         assert 5000 <= listing["merchant_cash_before"] <= 35_000, listing
-        selection = next(index for index, offer in enumerate(listing["offers"]) if offer["class_path"] in CONSTANT_OFFERS)
+        selection = next(index for index, offer in enumerate(listing["offers"]) if 0 < offer["price"] <= 1000)
         offer = listing["offers"][selection]
         sequence = opened["merchant"]["sequence"]
         offset = (selection // 8) * 8

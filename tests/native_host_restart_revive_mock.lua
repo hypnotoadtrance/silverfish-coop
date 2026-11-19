@@ -9,7 +9,8 @@ local environment = {
 }
 local restore_kind, projected, damage_pending = "restored", false, false
 local world, controller, pawn, guest
-local stock_health, damage_events, replications = 0, 0, 0
+local regenerated_health = 1.3552319555
+local stock_health, damage_events, replications = regenerated_health, 0, 0
 local fail_readback = false
 local token = 1
 
@@ -107,7 +108,8 @@ local state = {
 
 local function assert_refused(code)
     local ok, message = pcall(native.project_host, state, "hosting", "standing")
-    assert(not ok and message == code and stock_health == 0 and replications == 0 and damage_events == 0, message)
+    assert(not ok and message == code
+        and stock_health == regenerated_health and replications == 0 and damage_events == 0, message)
 end
 
 native.start("mock")
@@ -120,7 +122,7 @@ native.sync(state, "hosting")
 
 projected = false
 native.project_host(state, "hosting", "standing")
-assert(stock_health == 0 and replications == 0)
+assert(stock_health == regenerated_health and replications == 0)
 projected = true
 
 instance.SaveSlot_Ref = detached

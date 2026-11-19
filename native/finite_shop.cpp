@@ -349,7 +349,7 @@ namespace
                 STR("/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C"));
             if (!exact(context.reception, reception_type) || !authority(context.reception, context.world) ||
                 static_cast<Unreal::AActor*>(context.reception)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
-                !cash_counter_open(context.reception) || !read_bool(context.shop, STR("NoInfiniteStock"), true))
+                !cash_counter_open(context.reception))
                 return "shop_shopkeep_cash_reception_unavailable";
         }
         if (profile->cash_barter_replacement)
@@ -825,7 +825,7 @@ namespace
         Unreal::FArrayProperty* shelf{};
         const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
         const Unreal::UClass* gunsmith_ammo{};
-        if (context.camera_only || context.guards_neutral_purchase)
+        if (context.camera_only || (context.guards_neutral_purchase && !context.reception))
         {
             auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
             if (!limited || (context.camera_only && !camera))

@@ -24,7 +24,7 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
     "Shop_Scientist_01", "Shop_BP_C_2", "Science_ShopData", "Scientist Shop camera", "Barter_BP_C_107")
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
     "Shop_Gunsmith_P", "Shop_BP_C_1", "AmmoShopData", "Gunsmith shop", "Barter_BP_C_1")
-register_merchant(shopkeep.map, "Shop_ShopKeep_P", "Shop_BP_C_1", "StrangeJunkShopData", "ShopKeep", "Barter_BP_C_1")
+register_merchant(shopkeep.map, "Shop_ShopKeep_P", "Shop_BP_C_1", "StrangeJunkShopData", "ShopKeep limited stock", "Barter_BP_C_1")
 profiles[shopkeep.map].reception = shopkeep.target
 
 local actor_path = "/Game/Classes/Actors/Shop_BP.Shop_BP_C"

@@ -38,7 +38,8 @@ def downed_host(state, pawn):
     health = body.get("health")
     return (
         state.get("state") == "hosting" and game.get("map") == OBSERVATORY and body.get("name") == pawn
-        and type(health) in (int, float) and health <= 0 and public.get("wipe") is None
+        and type(health) in (int, float) and math.isfinite(health) and health < body.get("max_health", 0)
+        and public.get("wipe") is None
         and public.get("players", {}).get("host", {}).get("downed") is True
         and game.get("native_dead_flags", {}).get("local") is False
         and effect.get("state") == "downed" and effect.get("crouched") is True and effect.get("jump_velocity") == 0
@@ -158,23 +159,31 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         world = saved["world"]
         game_profile = campaign / "game-user"
         host_frame = native_host_save.verify(game_profile, world)
-        guest_frame = native_host_save.guest_record(
-            game_profile, saved["characters"][character]["state"]["native_guest_save"], character,
-        )
+        guest_saved = saved["characters"][character]["state"]
+        guest_frame = native_host_save.guest_record(game_profile, guest_saved["native_guest_save"], character)
         assert host_frame and (host_frame["map"], guest_frame["map"], world["map"]) == (OBSERVATORY,) * 3
         assert host_frame["slot"] != guest_frame["slot"]
-        assert world["party"]["players"]["host"]["downed"] is True and world["party"]["wipe"] is None
+        assert world["party"]["players"]["host"]["downed"] is True and world["party"]["players"]["host"]["health"] == 0
+        assert world["party"]["wipe"] is None
         assert world["party"]["players"][character]["downed"] is False
         host_hp = saved_health(native_host_save.slot_path(game_profile, host_frame["slot"]).read_bytes())
-        guest_hp = saved_health(native_host_save.slot_path(game_profile, guest_frame["slot"]).read_bytes())
-        assert host_hp <= 0 and guest_hp == initial_guest["health"], (host_hp, guest_hp)
+        assert host_hp < initial_host["max_health"], host_hp
+        guest_payload = native_host_save.slot_path(game_profile, guest_frame["slot"]).read_bytes()
+        if b"PlayerHealth\x00" in guest_payload:
+            guest_hp, guest_hp_encoding = saved_health(guest_payload), "tagged_double"
+        else:
+            # Stock SaveGame omits unmodified defaults. Capture reloaded and verified PlayerHealth in Unreal.
+            guest_hp, guest_hp_encoding = guest_saved["health"], "stock_default_omitted"
+            assert guest_hp == initial_guest["max_health"] == 250, guest_saved
+        assert guest_hp == guest_saved["health"] == initial_guest["health"], guest_saved
         ticket, = world[KEY]["tickets"]
         assert world[KEY]["map"] == OBSERVATORY and (ticket["guest_id"], ticket["character_id"], ticket["slot"]) == (
             guest_id, character, guest_frame["slot"],
         ), world[KEY]
         assert 0 < ticket["expires"] - time.time() <= DEFAULT_RECONNECT_GRACE, ticket
         evidence["paired_checkpoint"] = {"revision": saved["revision"], "host": host_frame, "host_health": host_hp,
-                                         "guest": guest_frame, "guest_health": guest_hp, "ticket": ticket}
+                                         "guest": guest_frame, "guest_health": guest_hp,
+                                         "guest_health_encoding": guest_hp_encoding, "ticket": ticket}
 
         await launch("host", host_owner, "host-restart", "--port", str(port), *HOST_FLAGS)
         restarted = await wait(host_run, lambda state: state.get("state") == "hosting" and state.get("generation") != generation,
