@@ -1203,9 +1203,10 @@ namespace
             inventory.data->Identical(inventory.data->ContainerPtrToValuePtr<void>(row), payload->ContainerPtrToValuePtr<void>(defaults));
     }
 
-    bool read_valve_guids(const Lua& lua, int first, ValveGuids& result)
+    bool read_valve_guids(const Lua& lua, ValveGuids& result)
     {
-        if (!lua.is_string(first) || !lua.is_string(first + 1)) return false;
+        // LuaMadeSimple consumes arguments in order. Earlier addresses are already popped.
+        if (!lua.is_string(1) || !lua.is_string(2)) return false;
         for (auto& guid : result) guid = read_guid(lua.get_string());
         return result[0] != Guid{} && result[1] != Guid{} && result[0] != result[1];
     }
@@ -1245,9 +1246,12 @@ namespace
         ValveGuids ids{};
         Inventory inventory;
         Party party;
-        if (!available(lua, 5) || !read_addresses(lua, args) || !read_valve_guids(lua, 4, ids) ||
-            !inventory.bind(false) || !party.read(args[0], args[1], args[1], false, PartyWorld::borough) || !valve_completed(party))
+        if (!available(lua, 5) || !read_addresses(lua, args) || !read_valve_guids(lua, ids))
+            return reply(lua, false, "subway_valve_reward_capture_arguments_unverified");
+        if (!inventory.bind(false)) return reply(lua, false, "subway_valve_reward_inventory_schema_unverified");
+        if (!party.read(args[0], args[1], args[1], false, PartyWorld::borough))
             return reply(lua, false, "subway_valve_reward_exact_host_required");
+        if (!valve_completed(party)) return reply(lua, false, "subway_valve_reward_completed_recipe_unverified");
         auto* escrow = isolated_save(args[2], inventory);
         if (!escrow || !inventory.same_as_defaults(escrow)) return reply(lua, false, "subway_valve_reward_exact_template_required");
         auto* target = inventory.backpack->ContainerPtrToValuePtr<void>(escrow);
@@ -1277,14 +1281,18 @@ namespace
         ValveGuids ids{};
         ValveRows stored{}, original{};
         Inventory inventory;
-        if (!available(lua, compare ? 4 : 3) || !read_addresses(lua, args) || !read_valve_guids(lua, 2, ids) ||
-            !inventory.bind(false) || !valve_template(inventory, args[0], ids, stored))
+        if (!available(lua, compare ? 4 : 3) || !read_addresses(lua, args) || !read_valve_guids(lua, ids))
+            return reply(lua, false, "subway_valve_reward_verify_arguments_unverified");
+        if (!inventory.bind(false)) return reply(lua, false, "subway_valve_reward_inventory_schema_unverified");
+        if (!valve_template(inventory, args[0], ids, stored))
             return reply(lua, false, "subway_valve_reward_saved_template_unverified");
         if (compare)
         {
-            if (!lua.is_integer(4)) return reply(lua, false, "subway_valve_reward_template_source_unqualified");
-            const auto source = static_cast<Address>(lua.get_integer());
-            if (!source || source == args[0] || !valve_template(inventory, source, ids, original))
+            if (!lua.is_integer(1)) return reply(lua, false, "subway_valve_reward_template_source_unqualified");
+            const auto input = lua.get_integer();
+            if (input <= 0) return reply(lua, false, "subway_valve_reward_template_source_unqualified");
+            const auto source = static_cast<Address>(input);
+            if (source == args[0] || !valve_template(inventory, source, ids, original))
                 return reply(lua, false, "subway_valve_reward_template_source_unqualified");
             for (std::size_t index = 0; index < ids.size(); ++index)
                 if (!inventory.identical(original[index], stored[index]))
@@ -1300,12 +1308,16 @@ namespace
         ValveRows stored{};
         Party party;
         Inventory inventory;
-        if (!available(lua, 8) || !read_addresses(lua, args) || !read_valve_guids(lua, 5, ids) ||
-            !read_valve_guids(lua, 7, assigned) || assigned[0] == ids[0] || assigned[0] == ids[1] ||
-            assigned[1] == ids[0] || assigned[1] == ids[1] || !inventory.bind(false) ||
-            !party.read(args[0], args[1], args[2], true, PartyWorld::current_campaign) || !valve_completed(party) ||
-            !valve_template(inventory, args[3], ids, stored))
+        if (!available(lua, 8) || !read_addresses(lua, args) || !read_valve_guids(lua, ids) ||
+            !read_valve_guids(lua, assigned) || assigned[0] == ids[0] || assigned[0] == ids[1] ||
+            assigned[1] == ids[0] || assigned[1] == ids[1])
+            return reply(lua, false, "subway_valve_reward_grant_arguments_unverified");
+        if (!inventory.bind(false)) return reply(lua, false, "subway_valve_reward_inventory_schema_unverified");
+        if (!party.read(args[0], args[1], args[2], true, PartyWorld::current_campaign))
             return reply(lua, false, "subway_valve_reward_exact_detached_guest_required");
+        if (!valve_completed(party)) return reply(lua, false, "subway_valve_reward_completed_recipe_unverified");
+        if (!valve_template(inventory, args[3], ids, stored))
+            return reply(lua, false, "subway_valve_reward_saved_template_unverified");
         std::array<Value, valve_reward_paths.size()> prepared;
         ValveRows new_rows{};
         int present = 0;
