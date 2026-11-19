@@ -444,9 +444,11 @@ local function place_expanded_overlap(state, details, route, position)
         for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(-depth, offset) end
     elseif floor then
         local distance = inside and 0 or depth + index * 105
-        for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(distance, offset) end
+        local side = (index % 2 == 0 and -1 or 1) * lane_limit
+        local offsets = inside and {assigned, 0, 125, -125} or {side, side * .65, 0, -side}
+        for _, offset in ipairs(offsets) do add_point(distance, offset) end
         if not inside then
-            for _, offset in ipairs({assigned, 0, 125, -125}) do add_point(distance + 75, offset) end
+            for _, offset in ipairs(offsets) do add_point(distance + 75, offset) end
         end
     else
         for _, offset in ipairs({assigned, assigned + 125, assigned - 125, 0, 250, -250}) do add_point(depth, offset) end

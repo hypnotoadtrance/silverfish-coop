@@ -304,6 +304,31 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     failure = table.concat(diagnostics, ", ")
 end
 
+local function nexus_probe_target(pawn, capsule_component, box, start, center)
+    local extent, up = box:GetScaledBoxExtent(), box:GetUpVector()
+    local radius = capsule_component:GetScaledCapsuleRadius()
+    if not finite(radius) or radius < 10 or radius > 100 or not finite(up.Z) or up.Z < .99 then
+        error("The stock Gold Nexus sweep has unqualified capsule or box geometry", 0)
+    end
+    local tangent, length = box:GetForwardVector(), extent.X
+    if extent.Y > extent.X then tangent, length = box:GetRightVector(), extent.Y end
+    local lane = (start.X - center.X) * tangent.X + (start.Y - center.Y) * tangent.Y
+    local limit = length - radius - 5
+    local z = math.min(start.Z + 35, center.Z + extent.Z - 10)
+    if not finite(lane) or math.abs(lane) > limit or not finite(z) or z - start.Z < 20 then
+        error("Position the pawn on a qualified Gold Nexus approach lane before the swept wall probe", 0)
+    end
+    local raised = {X = start.X, Y = start.Y, Z = z}
+    local goal = {X = center.X + lane * tangent.X, Y = center.Y + lane * tangent.Y, Z = z}
+    local rotation = pawn:K2_GetActorRotation()
+    if not pawn:K2_TeleportTo(raised, rotation) then error("The Gold Nexus sweep could not clear its stock floor", 0) end
+    if distance_squared(pawn:K2_GetActorLocation(), raised) > 2^2 or box:IsOverlappingActor(pawn) then
+        if not pawn:K2_TeleportTo(start, rotation) then error("The Gold Nexus sweep could not restore the pawn", 0) end
+        error("The Gold Nexus sweep could not verify clearance on its original lane", 0)
+    end
+    return goal
+end
+
 function wall.command(fields, state, phase)
     if fields[2] ~= "native-exit-wall-probe" then return end
     local selector = fields[3]
@@ -379,14 +404,16 @@ function wall.command(fields, state, phase)
             pawn, slot = current, alias
         end
     end
-    if not valid(pawn) or not same(pawn:GetWorld(), record.world) or not capsule(pawn) then
+    local pawn_capsule = capsule(pawn)
+    if not valid(pawn) or not same(pawn:GetWorld(), record.world) or not pawn_capsule then
         error("The authoritative pawn capsule is unavailable", 0)
     end
     local center = record.component:K2_GetComponentLocation()
     local start = pawn:K2_GetActorLocation()
     local approach = record.approach
     -- Tall authored boxes are entered at terrain height, well below their center.
-    if (approach and approach.probe_arrival) or ((plan or not approach) and record.kind) then
+    local nexus_probe = plan and plan.kind == "overlap" and state.map == "/Game/Classes/Maps/Dreams/GoldNexus_P"
+    if not nexus_probe and ((approach and approach.probe_arrival) or ((plan or not approach) and record.kind)) then
         local extent = record.component:GetScaledBoxExtent()
         if approach and approach.probe_arrival then
             local forward = record.fixture:GetActorForwardVector()
@@ -400,9 +427,14 @@ function wall.command(fields, state, phase)
     if not finite(from) or from > 1250 * 1250 or record.fixture.Box:IsOverlappingActor(pawn) then
         error("Position the pawn near the exit before the swept wall probe", 0)
     end
+    if nexus_probe then
+        center = nexus_probe_target(pawn, pawn_capsule, record.original, start, center)
+        start = pawn:K2_GetActorLocation()
+    end
     local hit = {}
     pawn:K2_SetActorLocation({ X = center.X, Y = center.Y, Z = center.Z }, true, hit, false)
     pawn:ForceNetUpdate()
+    hit = hit.SweepHitResult or hit.OutSweepHitResult or hit
     local component = hit.Component and hit.Component:Get()
     local outcome = hit.bBlockingHit and (same(component, record.component) and "wall" or "other") or "clear"
     local remaining = distance_squared(pawn:K2_GetActorLocation(), center)
@@ -410,8 +442,10 @@ function wall.command(fields, state, phase)
         remaining = finite(remaining) and math.sqrt(remaining) or -1 }
     if outcome == "other" then
         local name = valid(component) and component:GetFullName() or "unknown component"
-        return string.format("native exit sweep other%s (%s, start %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
-            plan and " at stock " .. plan.actor or "", name, start.X, start.Y, start.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
+        local owner = valid(component) and component:GetOwner()
+        return string.format("native exit sweep other%s (%s on %s, start %.1f %.1f %.1f, target %.1f %.1f %.1f, contact at %.3f, initial overlap %s)",
+            plan and " at stock " .. plan.actor or "", name, valid(owner) and owner:GetFullName() or "unknown actor",
+            start.X, start.Y, start.Z, center.X, center.Y, center.Z, hit.Time or 0, tostring(hit.bStartPenetrating))
     end
     return "native exit sweep " .. outcome .. (plan and " at stock " .. plan.actor or "")
 end

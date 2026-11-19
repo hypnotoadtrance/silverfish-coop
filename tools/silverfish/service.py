@@ -2398,7 +2398,9 @@ class Host:
                         result = {"native_zone": snapshot.get("native_zone"), "target": target,
                                   "position": position, "entrance": entrance}
                     else:
-                        result = {"native_zone_wall": snapshot.get("native_zone_wall")}
+                        report = snapshot.get("native_zone_wall")
+                        result = {"native_zone_wall": dict(report, probe=snapshot.get("ack", {}).get("message", ""))
+                                  if report else report}
                     if exit_actor is not None:
                         result["exit_actor"] = exit_actor
                 elif action in ("native-door-position", "native-door-probe") and self.native_zones and self.fixtures:
