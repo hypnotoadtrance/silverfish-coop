@@ -129,6 +129,8 @@ The current stage has qualified stock paths for selected rest points, exits, tra
 
 At a qualified stock container, press Interact to open it. The shared loot panel appears while a player stands within reach. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
 
+At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.
+
 The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
 
 At ShopKeep, use Interact at the reception and choose the cash-shop response to open the finite stock overlay.
@@ -194,6 +196,8 @@ The authored campaign supports local reads for the current native scope. Use the
 ```
 
 Inventory and quest listings expose `next_offset`. To page the guest inventory, pass the offset in `--target`. The host version of `native-inventory-list` uses `--target` for the enrolled role and `--amount` for the offset. For stock quests, use a target such as `stock@8`. For a confirmed merchant quote, use `native-finite-shop-buy --target GUID@PRICE` or `native-finite-shop-sell --target GUID@PRICE`. Use `native-finite-shop-sale-quote --target GUID` before confirming a sale. During a qualified stock wipe, use `native-wipe-items` and `keep --keep GUID=1` for whole-row selection. The owner's `gameplay.native_backpacks` lists exact recovery IDs and death positions for `native-wipe-recover --target BACKPACK_ID`.
+
+At the Observatory workbench, `native-crafting-bench-preflight` returns the guest's eligible `board_guid`. Use `native-crafting-bench --target GUID` to exchange that Board. The receipt's `receive.guid` identifies the resulting stack and `receive.quantity` is the amount added by the exchange.
 
 For a guest ammo split with an explicit count, use `native-inventory-split --target 'GUID|AMOUNT|EXPECTED'`. Read `EXPECTED` from the selected backpack row's current quantity. A successful split returns the original GUID, the new GUID, and both quantities. Reuse the same operation ID to look up that committed result after reconnect. The current split scope covers ordinary 9 mm Ball, .45 Ball, and 12 Gauge Buckshot.
 
