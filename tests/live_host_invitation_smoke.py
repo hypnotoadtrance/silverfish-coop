@@ -38,7 +38,7 @@ async def verify(work: Path, original: Path) -> None:
     port = runtime.spare_udp_port()
     participant, starter, address = "Journal guest", "Journal scout", "127.0.0.1"
     proof = {"verified": False, "build": runtime.staged_build(work)}
-    launch = runtime.launch
+    launch = service.launch
     jobs, host_bridges = [], []
 
     def track(workspace, profile, mailbox, *args, **kwargs):
@@ -47,7 +47,7 @@ async def verify(work: Path, original: Path) -> None:
             host_bridges.append(runtime.Bridge(mailbox, process))
         return process
 
-    with patch.object(runtime, "launch", side_effect=track):
+    with patch.object(service, "launch", side_effect=track):
         try:
             host_job = asyncio.create_task(service.host_game(work, campaign, address, port, True, fixtures=True,
                                                             start_preset="wanderer", **service.MENU_HOST_OPTIONS))
