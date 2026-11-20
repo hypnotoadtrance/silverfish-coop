@@ -524,7 +524,7 @@ namespace
             };
             const auto position = [](U::UObject* actor, const U::TCHAR* type) {
                 if (!exact(actor, type)) return std::string{"-"};
-                const auto p = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+                auto p = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
                 return std::format("{:.2f},{:.2f},{:.2f}", p.GetX(), p.GetY(), p.GetZ());
             };
             auto* pawn = current.pawn.Get();
