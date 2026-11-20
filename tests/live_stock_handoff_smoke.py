@@ -213,7 +213,7 @@ async def _wait(probe, condition, timeout, description):
     raise TimeoutError(f"Timed out waiting for {description}")
 
 
-async def verify(stock_work: Path, work: Path, original: Path):
+async def verify(stock_work: Path, work: Path, original: Path, *, exit_before_ready=False):
     if os.name != "nt":
         raise OSError("This packaged stock handoff proof requires Windows")
     if (any(left.is_relative_to(right) for left in (stock_work, work, original)
@@ -319,25 +319,42 @@ async def verify(stock_work: Path, work: Path, original: Path):
         pending.write_bytes(b"open-coop\n")
         pending.rename(trigger)
 
+        if exit_before_ready:
+            await _wait(waiting_for_offer, lambda report:
+                        "native_launch_started" in report[0], 15, "the coordinator starting")
+            markers, receipt = waiting_for_offer()
+            if "native_launch_ready" in markers or receipt.get("state") == "title_ready":
+                raise AssertionError("The stock title became ready before the early exit fixture")
+            stock.terminate()
+            await asyncio.to_thread(stock.wait, timeout=8)
+            evidence["stock_exited_before_receipt"] = True
+
         def waiting_for_adoption():
             markers, receipt = observe()
             if stock.poll() is None and "native_launch_started" in markers and "native_launch_ready" not in markers:
                 evidence["stock_alive_awaiting_receipt"] = True
             if stock.poll() is not None and "native_launch_ready" not in markers:
                 markers, receipt = observe()
-            if stock.poll() is not None and (stock.returncode != 0 or "native_launch_ready" not in markers):
+            if not exit_before_ready and stock.poll() is not None and (
+                stock.returncode != 0 or "native_launch_ready" not in markers
+            ):
                 raise RuntimeError("The stock title exited outside the verified coordinator handoff")
             return markers, receipt, _new(title_bridges, old_titles)
 
-        markers, receipt, title_dir = await _wait(waiting_for_adoption, lambda report:
-            all(marker in report[0] for marker in TRANSITIONS) and report[1].get("state") == "title_ready"
-            and report[2] is not None and stock.poll() == 0, 125, "stock retirement after the verified coordinator receipt")
-        if ([marker for marker in markers if marker in TRANSITIONS] != list(TRANSITIONS)
-                or not evidence.get("stock_alive_awaiting_receipt")):
-            raise AssertionError("The stock selection, live readiness wait and retirement were not observed in order")
-        if "state=handed_off" in markers and markers.index("state=handed_off") < markers.index(TRANSITIONS[-1]):
-            raise AssertionError("Stock retirement preceded the matching native readiness receipt")
-        handed_off = True
+        if exit_before_ready:
+            markers, receipt, title_dir = await _wait(waiting_for_adoption, lambda report:
+                report[1].get("stock_readiness") == "pipe_closed" and report[1].get("state") == "title_ready"
+                and report[2] is not None, 125, "the isolated title after the stock process exited")
+        else:
+            markers, receipt, title_dir = await _wait(waiting_for_adoption, lambda report:
+                all(marker in report[0] for marker in TRANSITIONS) and report[1].get("state") == "title_ready"
+                and report[2] is not None and stock.poll() == 0, 125, "stock retirement after the verified coordinator receipt")
+            if ([marker for marker in markers if marker in TRANSITIONS] != list(TRANSITIONS)
+                    or not evidence.get("stock_alive_awaiting_receipt")):
+                raise AssertionError("The stock selection, live readiness wait and retirement were not observed in order")
+            if "state=handed_off" in markers and markers.index("state=handed_off") < markers.index(TRANSITIONS[-1]):
+                raise AssertionError("Stock retirement preceded the matching native readiness receipt")
+            handed_off = True
         evidence["stock_returncode"] = stock.returncode
         evidence["stock_handed_off_lua_marker"] = "state=handed_off" in markers
         game_children = descendants.live(game_exe)
@@ -438,5 +455,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-work", type=Path, required=True, help="owned stock-layout replica workspace")
     parser.add_argument("--work", type=Path, required=True, help="matched private embedded stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, required=True, help="original Saved tree for read-only hashes")
+    parser.add_argument("--exit-before-ready", action="store_true", help="close the owned stock replica before the coordinator acknowledges readiness")
     args = parser.parse_args()
-    asyncio.run(verify(args.stock_work.resolve(strict=True), args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(args.stock_work.resolve(strict=True), args.work.resolve(strict=True),
+                       args.vanilla_saved.resolve(strict=True), exit_before_ready=args.exit_before_ready))

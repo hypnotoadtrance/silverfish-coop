@@ -20,6 +20,7 @@ from tools.silverfish.control import NAME
 _REQUEST = re.compile(rb"1\topen-coop\t([0-9a-f]{32})\t([0-9a-f]{32})\n")
 _REQUEST_BYTES = len(b"1\topen-coop\t\t\n") + 64
 _CONFIG_BYTES = 8192
+_DISCONNECTED_PIPE = {109, 232, 233}  # Broken pipe, no data, pipe not connected.
 
 
 @dataclass(frozen=True)
@@ -55,14 +56,23 @@ def read_inherited_receipt() -> Receipt:
         return parse_receipt(stream.read(_REQUEST_BYTES + 1))
 
 
-def write_inherited_ready(receipt: Receipt) -> None:
-    import msvcrt
+def write_inherited_ready(receipt: Receipt) -> bool:
+    import _winapi
 
     row = f"1\tcoop-title-ready\t{receipt.generation}\t{receipt.request_id}\n".encode("ascii")
-    fd = msvcrt.open_osfhandle(_inherited_pipe(-11), os.O_WRONLY | os.O_BINARY)  # STD_OUTPUT_HANDLE
-    with os.fdopen(fd, "wb", buffering=0) as stream:
-        if stream.write(row) != len(row):
-            raise RuntimeError("The windowless title readiness receipt was incomplete")
+    handle = _inherited_pipe(-11)  # STD_OUTPUT_HANDLE
+    try:
+        written, _ = _winapi.WriteFile(handle, row)
+    except OSError as error:
+        if error.winerror not in _DISCONNECTED_PIPE:
+            raise
+        # The stock title may close after issuing an authorized launch request.
+        return False
+    finally:
+        _winapi.CloseHandle(handle)
+    if written != len(row):
+        raise RuntimeError("The windowless title readiness receipt was incomplete")
+    return True
 
 
 def _qualified_path(value: object, *, directory: bool) -> Path:
@@ -132,16 +142,25 @@ async def open_coop(receipt: Receipt, config: Path, *, report_ready=write_inheri
     with lock.open("xb"):
         progress = dict(schema=1, generation=receipt.generation, request_id=receipt.request_id)
         runtime.write_json(status, dict(progress, state="opening"))
+        phase = "starting_title"
 
         def ready():
+            nonlocal phase
+            phase = "reporting_ready"
             runtime.write_json(status, dict(progress, state="title_ready"))
-            report_ready(receipt)
+            if report_ready(receipt) is False:
+                progress["stock_readiness"] = "pipe_closed"
+                runtime.write_json(status, dict(progress, state="title_ready"))
+            phase = "running_title"
 
         try:
             headless = os.environ.get("SILVERFISH_COOP_BOOTSTRAP_HEADLESS") == "1"
             await staged_title_menu(plan, on_title_ready=ready, require_embedded=True, headless=headless)
         except (OSError, ValueError, RuntimeError) as error:
-            runtime.write_json(status, dict(progress, state="failed", error_type=type(error).__name__))
+            codes = {name: value for name in ("errno", "winerror")
+                     if type(value := getattr(error, name, None)) is int}
+            runtime.write_json(status, dict(progress, state="failed", phase=phase,
+                                            error_type=type(error).__name__, **codes))
             raise
         else:
             runtime.write_json(status, dict(progress, state="stopped"))

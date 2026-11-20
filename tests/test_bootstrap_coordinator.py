@@ -41,6 +41,15 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(child.returncode, 0, child.stderr.decode(errors="replace"))
         self.assertEqual(child.stdout, b"1\tcoop-title-ready\t" + ids)
 
+    @unittest.skipUnless(os.name == "nt", "Uses an inherited Windows pipe")
+    def test_readiness_survives_a_disconnected_stock_pipe(self):
+        import _winapi
+
+        reader, writer = _winapi.CreatePipe(None, 0)
+        _winapi.CloseHandle(reader)
+        with patch.object(coordinator, "_inherited_pipe", return_value=writer):
+            self.assertIs(coordinator.write_inherited_ready(coordinator.Receipt("a" * 32, "b" * 32)), False)
+
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -76,7 +85,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
         self.assertEqual(coordinator.runtime.read_json(status), {
             "schema": 1, "generation": receipt.generation, "request_id": receipt.request_id,
-            "state": "failed", "error_type": "RuntimeError",
+            "state": "failed", "phase": "starting_title", "error_type": "RuntimeError",
         })
 
     async def test_publishes_readiness_for_the_exact_title_request(self):
