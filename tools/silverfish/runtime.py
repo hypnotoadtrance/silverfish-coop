@@ -1702,6 +1702,10 @@ class Bridge:
                     if native_authored_pickup.CASH_KEY in data:
                         raise ValueError("Repeated exact authored cash credit")
                     data[native_authored_pickup.CASH_KEY] = native_authored_pickup.parse_cash(fields, data)
+                elif fields[0] == native_authored_pickup.PROTOTYPE_TAG:
+                    if native_authored_pickup.PROTOTYPE_KEY in data:
+                        raise ValueError("Repeated authored Prototype Drill progress")
+                    data[native_authored_pickup.PROTOTYPE_KEY] = native_authored_pickup.parse_prototype(fields, data)
                 elif fields[0] == "native-rest-guard" and len(fields) == 4:
                     data["native_rest_guard"] = {"armed": fields[1] == "1", "status": fields[2],
                                                "guest_denials": int(fields[3])}

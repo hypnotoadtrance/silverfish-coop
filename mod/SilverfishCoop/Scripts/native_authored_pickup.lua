@@ -1,6 +1,7 @@
 local pickup = {}
 local guest_save = require("guest_save")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
+local drill_head = require("native_prototype_drill_pickup")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -30,6 +31,7 @@ local dead_drop = {
 }
 local profiles = {
     dead_drop,
+    drill_head.profile,
     {
         map = observatory,
         source = "observatory-comp-board",
@@ -302,6 +304,15 @@ local function claim(fields, state, phase, profile)
         report.status = "authored_pickup_claimant_or_slot_unavailable"
         return "authored loose pickup reported"
     end
+    local drill_before
+    if profile == drill_head.profile then
+        local checked, scoped = pcall(drill_head.read, state, phase, true)
+        if not checked or not scoped then
+            report.status = "authored_pickup_prototype_drill_inactive"
+            return "authored loose pickup reported"
+        end
+        drill_before = scoped
+    end
     if profile.stock_supply then
         if type(SilverfishMergeNativeAuthoredSupply) ~= "function" then
             report.status = "authored_supply_merge_bridge_unavailable"
@@ -357,6 +368,15 @@ local function claim(fields, state, phase, profile)
     report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
     report.ok = applied == true and status == "recovered" and count == 1
     report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(status))
+    if drill_before then
+        local checked, after = pcall(drill_head.read, state, phase, true)
+        if not checked or not drill_head.unchanged(drill_before, after) then
+            report.ok, report.applied = false, true
+            report.status = "mutation_unverified_authored_prototype_drill_progress"
+        elseif report.ok then
+            report.drill = {before = drill_before.topic, after = after.topic}
+        end
+    end
     return "authored loose pickup reported"
 end
 
@@ -423,8 +443,16 @@ function pickup.command(fields, state, phase)
         local state_word = fields[3]
         if (state_word ~= "available" and state_word ~= "claimed")
             or type(SilverfishProjectNativeAuthoredPickup) ~= "function" then error("authored_pickup_project_arguments", 0) end
+        local progress
+        if profile == drill_head.profile and phase == "hosting" and state_word == "claimed" then
+            progress = drill_head.read(state, phase, false)
+            if not progress then error("authored_prototype_drill_projection_scope_unavailable", 0) end
+        end
         local projected, detail = SilverfishProjectNativeAuthoredPickup(state_word == "claimed", profile.source)
         if not projected then error(detail, 0) end
+        if progress and not drill_head.unchanged(progress, drill_head.read(state, phase, false)) then
+            error("mutation_unverified_authored_prototype_drill_projection", 0)
+        end
         return "authored loose pickup projection verified"
     end
     if not fixtures or (phase == "hosting" and not host_fixtures) then error("authored_pickup_fixture_unavailable", 0) end
@@ -489,6 +517,10 @@ function pickup.rows(state, phase, status_row)
             local cash = report.cash
             rows[#rows + 1] = status_row("native-authored-cash-credit", report.source, state.map, report.pawn, report.slot,
                 cash.amount, cash.before, cash.after, cash.flag)
+        end
+        if report.drill then
+            rows[#rows + 1] = status_row("native-authored-prototype-drill", report.source, state.map, report.pawn, report.slot,
+                report.guid, drill_head.quest, 1, report.drill.before, report.drill.after)
         end
     end
     return rows

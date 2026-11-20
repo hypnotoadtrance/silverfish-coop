@@ -20,15 +20,16 @@ from tools.silverfish import native_authored_pickup as pickup, native_dialogue a
 from tools.silverfish import native_guest_armor as armor
 from tools.silverfish import native_mosby_station_view as station_view
 from tools.silverfish import native_wire_board
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
+from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 TO_MAZE = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (DEAD_BRIDGE, "DB_CR"), (tape.STONE_MAZE, "DB_SM"))
 TO_SCIENTIST = ((DEAD_BRIDGE, "DB_SM"), (CROSSROADS, "DB_CR"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
+TO_DRILL_HEAD = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (CISTERN, "CR_Cstrn"), (SCI_TUNNEL, "Cistern_Sci"))
 
 
 async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
-                   equip_reward=False, prototype_dialogue=False):
+                   equip_reward=False, prototype_dialogue=False, prototype_pickup=False):
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -92,18 +93,41 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
 
     async def cross(host, destination, portal):
         source = host["game"]["map"]
-        door = portal == "Market_Flood"
+        door = portal in ("Market_Flood", "CR_Cstrn", "Cistern_Sci")
         recipe = "native-door-position" if door else "native-exit-position"
         evidence["pending_route"] = {"source": source, "destination": destination, "entrance": portal}
         for role in ("host", "guest"):
             await action(authority, recipe, "--target", role, "--exit-position", "near", "--entrance", portal)
         if door:
+            if (source, destination) == (CISTERN, SCI_TUNNEL):
+                locked = (await action(authority, "native-door-probe", "--target", "host", "--entrance", portal))["native_door"]
+                assert locked["decision"] == "host_locked", locked
+                attempts = []
+                for number in (10, 0, 11, 10, 7, 1, 0, 3, 8, 11):
+                    press = (await action(authority, "native-cistern-keypad", "--amount", str(number)))["native_cistern_keypad"]
+                    attempts.append(press)
+                    changed = len(attempts) == 10
+                    assert (press["locked"], press["unlocked"]) == (not changed, changed), press
+                    await asyncio.sleep(.25)
+                evidence["prototype_pickup"]["stock_keypad"] = attempts
             await action(authority, "native-door-probe", "--target", "host", "--entrance", portal)
         else:
             await action(authority, recipe, "--target", "host", "--exit-position", "inside", "--entrance", portal)
         arrived = await enrolled(destination, (host["generation"], host["zone_epoch"]))
         evidence["routes"].append({**evidence.pop("pending_route"), "zone_epoch": arrived["zone_epoch"]})
         return arrived
+
+    async def restart_pair(host_process, guest_process, previous, area, *, label="restart"):
+        await stop(host_process, authority)
+        await stop(guest_process, client)
+        next_host = await launch("host", authority, "host-" + label, "--port", str(port), *host_flags)
+        await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != previous["generation"], timeout=75)
+        renewed = await action(authority, "refresh-invite", "--target", invite["guest_id"])
+        assert (renewed["guest_id"], renewed["character_id"]) == (invite["guest_id"], character)
+        next_guest = await launch("join", client, "guest-" + label, "--invite", renewed["invite_file"], *guest_flags)
+        frame = await enrolled(area, (previous["generation"], previous["zone_epoch"]))
+        assert frame["endpoint"]["port"] == port
+        return next_host, next_guest, frame
 
     async def inventory(owner, expected_owner):
         items, offset = {}, 0
@@ -121,11 +145,11 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
     def saved():
         return json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
 
-    def flags(data):
+    def flags(data, area=SCIENTIST_SHOP):
         root = campaign / "game-user" / "Saved" / "SaveGames"
         frames = {"host": data["world"]["native_host_save"], "guest": data["characters"][character]["state"]["native_guest_save"]}
         assert frames["host"]["slot"] != frames["guest"]["slot"]
-        return {role: stock_flags(root, frame, SCIENTIST_SHOP) for role, frame in frames.items()}
+        return {role: stock_flags(root, frame, area) for role, frame in frames.items()}
 
     async def identify_board():
         placed = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
@@ -190,6 +214,60 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert effects == [("readings_opened", character), ("prototype_drill_issued", character)]
         evidence["prototype_dialogue"].update(issued=record, sibling=replay["effect"], committed=effects)
         await stop(sibling_process, sibling)
+
+    async def collect_prototype(initial, host_process, guest_process, host_items, guest_items):
+        await action(authority, dialogue.APPROACH, "--target", "guest")
+        scene = (await action(client, dialogue.OPEN, "--target", dialogue.MOSBY))["native_dialogue"]
+        assert (scene["row"], scene["effect"], scene["progress"]["topic_micro_drill"]) == (
+            dialogue.READINGS, "readings_opened", 1), scene
+        for ordinal in (1, 2):
+            scene = (await action(client, dialogue.CHOOSE, "--target", f"{scene['token']}@{ordinal}"))["native_dialogue"]
+        assert (scene["effect"], scene["progress"]["prototype_step"]) == ("prototype_drill_issued", 1), scene
+        evidence["prototype_pickup"] = {"issued": scene["progress"]}
+        current = initial
+        for destination, portal in TO_DRILL_HEAD:
+            current = await cross(current, destination, portal)
+
+        source = pickup.PROTOTYPE_DRILL
+        _, actor, item_class = pickup.SOURCES[source]
+        await action(authority, "checkpoint")
+        before = flags(saved(), SCI_TUNNEL)
+        assert before["host"].get("Topic_MicroDrill") == 1
+
+        def projected(state, word):
+            return state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(source, {}).get("state") == word
+
+        approach = await action(authority, pickup.APPROACH, "--target", "guest", "--pickup-source", source)
+        await wait(run, lambda state: projected(state, "available"))
+        await wait(client_run, lambda state: projected(state, "available"))
+        press = (await action(client, pickup.STOCK_FIXTURE, "--pickup-source", source))["native_authored_pickup_interaction"]
+        assert (press["source"], press["map"], press["entry"]) == (source, SCI_TUNNEL, "stock"), press
+        committed = await wait(run, lambda state: source in state.get("gameplay", {}).get(pickup.STATE_KEY, {})
+                               and projected(state, "claimed"))
+        claimed = committed["gameplay"][pickup.STATE_KEY][source]
+        assert (claimed["actor"], claimed["class_path"], claimed["owner"], claimed["topic_micro_drill"]) == (
+            actor, item_class, character, 1), claimed
+        await wait(client_run, lambda state: projected(state, "claimed"))
+        denied = await action(authority, pickup.ACTION, "--target", source, expected=False)
+        assert denied["error"] == "native_authored_pickup_already_claimed", denied
+        expected_items = {**guest_items, claimed["guid"]: (item_class, "backpack", 1)}
+        assert await inventory(authority, "host") == host_items and await inventory(client, character) == expected_items
+        after = flags(saved(), SCI_TUNNEL)
+        for role in ("host", "guest"):
+            for key in ("Player_Cash", "Player_Xp", "Topic_MicroDrill", "Mosby_DrillTest"):
+                assert after[role].get(key) == before[role].get(key), (before, after)
+        evidence["prototype_pickup"].update(stock_press=press, headless_approach=approach, claim=claimed,
+                                            rival=denied["error"], stock_flags=after)
+
+        _, _, restored = await restart_pair(host_process, guest_process, current, SCI_TUNNEL, label="drill-restart")
+        await wait(run, lambda state: projected(state, "claimed"))
+        await wait(client_run, lambda state: projected(state, "claimed"))
+        assert await inventory(authority, "host") == host_items and await inventory(client, character) == expected_items
+        durable = saved()
+        assert durable["world"]["party"][pickup.STATE_KEY][source] == claimed
+        assert durable["world"]["party"]["native_quests"][pickup.PROTOTYPE_QUEST]["step"] == 1
+        assert flags(durable, SCI_TUNNEL)["host"].get("Topic_MicroDrill") == 1
+        evidence["prototype_pickup"]["restart"] = {"port": port, "epoch": restored["zone_epoch"], "guid": claimed["guid"]}
 
     async def exercise_reward_armor(reward_guid, original_inventory):
         backpack = (armor.HAZOP_CLASS_PATH, "backpack", 1)
@@ -389,15 +467,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         if prototype_dialogue:
             await accept_prototype()
 
-        await stop(host_process, authority)
-        await stop(guest_process, client)
-        await launch("host", authority, "host-restart", "--port", str(port), *host_flags)
-        await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != current["generation"], timeout=75)
-        renewed = await action(authority, "refresh-invite", "--target", invite["guest_id"])
-        assert (renewed["guest_id"], renewed["character_id"]) == (invite["guest_id"], character)
-        await launch("join", client, "guest-restart", "--invite", renewed["invite_file"], *guest_flags)
-        restarted = await enrolled(SCIENTIST_SHOP, (current["generation"], current["zone_epoch"]))
-        assert restarted["endpoint"]["port"] == port
+        host_process, guest_process, restarted = await restart_pair(host_process, guest_process, current, SCIENTIST_SHOP)
         assert await inventory(authority, "host") == host_items and await inventory(client, character) == guest_items
         if equip_reward:
             def native_hazop(state):
@@ -419,6 +489,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
                     progress["topic_micro_drill"], progress["prototype_step"]) == (dialogue.GREET, -10, 2, 1, 1), recovered
             assert saved()["world"]["party"]["native_quests"][dialogue.PROTOTYPE_QUEST] == evidence["prototype_dialogue"]["issued"]
             evidence["prototype_dialogue"]["restarted"] = progress
+        if prototype_pickup:
+            await collect_prototype(restarted, host_process, guest_process, host_items, guest_items)
         evidence.update(restart={"port": port, "generation": restarted["generation"], "quest": restored}, verified=True)
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
@@ -448,8 +520,10 @@ if __name__ == "__main__":
     parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
     parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
     parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
-    parser.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
+    prototype = parser.add_mutually_exclusive_group()
+    prototype.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
+    prototype.add_argument("--prototype-pickup", action="store_true", help="unlock the stock Sci Tunnel and claim the exact placed drill head")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
                          stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
-                         prototype_dialogue=args.prototype_dialogue))
+                         prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup))

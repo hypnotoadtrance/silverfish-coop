@@ -5,6 +5,7 @@ local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
+local drill_head = "scientist-tunnel-drill-head"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
@@ -21,6 +22,7 @@ local sources = {
     ["fort-leto-locker-key-543"] = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P",
     ["forest-brokers-artifacts-bag"] = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
     ["gorge-insurrectionist-recorder"] = "/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P",
+    [drill_head] = "/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P",
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -42,6 +44,7 @@ local precise_distances = {
     [stolen_bag] = {85, 115, 145, 175, 210},
     [dead_drop] = {85, 115, 145, 175, 210},
     [black_box] = {65, 85, 110, 140, 175, 205},
+    [drill_head] = {85, 115, 145, 175, 210},
 }
 local supplies, shelf_source = {}, nil
 for _, profile in ipairs(supply_profiles) do

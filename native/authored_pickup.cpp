@@ -75,6 +75,8 @@ namespace
         .item_type = 1, .dead_drop = true,
     };
 
+    constexpr std::string_view drill_head_source = "scientist-tunnel-drill-head";
+
     constexpr std::array profiles{
         dead_drop_profile,
         Profile{
@@ -118,6 +120,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3"),
             STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
             7580.6051850203, 5202.1434900782, -642.6426753447, 9,
+        },
+        Profile{
+            drill_head_source,
+            STR("/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P.Sci_Tunnel_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/Sci_Tunnel_01_P.Sci_Tunnel_01_P:PersistentLevel.Art_DrillHead_C_1"),
+            STR("/Game/Classes/Items/Artifacts/Art_DrillHead.Art_DrillHead_C"),
+            57699.99999938153, -10649.999999703614, -3036.2649490925587, 0,
         },
         Profile{
             "crossroads-pocket-watch",
@@ -477,6 +486,24 @@ namespace
             silverfish::stock_cash::qualified_value(type, amount, actor) ? amount : 0;
     }
 
+    bool drill_head_payload(U::UObject* actor)
+    {
+        auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
+        auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        auto* units = field<U::FIntProperty>(actor, STR("Ammo"));
+        auto* effects = field<U::FArrayProperty>(actor, STR("PassiveEffects"));
+        auto* name = effects ? U::CastField<U::FStrProperty>(effects->GetInner()) : nullptr;
+        auto* pickup = field<U::FMulticastInlineDelegateProperty>(actor, STR("Item_PickedUp"));
+        if (!actor->HasAnyFlags(U::RF_WasLoaded) || !weight || weight->GetPropertyValueInContainer(actor) != 10.0 ||
+            !value || value->GetPropertyValueInContainer(actor) != 32000 || !units || units->GetPropertyValueInContainer(actor) != 0 ||
+            !name || !pickup || pickup->GetSize() != sizeof(U::FMulticastScriptDelegate) ||
+            pickup->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound()) return false;
+        U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(actor));
+        if (passives.Num() != 1) return false;
+        const auto passive = name->GetPropertyValue(passives.GetRawPtr(0));
+        return passive.Len() == 14 && std::wstring_view{*passive} == STR("EatherAffinity");
+    }
+
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
@@ -496,6 +523,8 @@ namespace
             return "authored_pickup_stock_world_unqualified";
         if (!category || category->GetPropertyValueInContainer(actor) != profile.item_type)
             return "authored_pickup_stock_category_unqualified";
+        if (profile.source == drill_head_source && !drill_head_payload(actor))
+            return "authored_pickup_stock_drill_head_payload_unqualified";
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
         if (const auto* fault = profile.stock_bandage ? stock_bandage_fault(actor, profile) : nullptr) return fault;

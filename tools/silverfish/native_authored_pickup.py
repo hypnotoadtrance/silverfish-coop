@@ -6,8 +6,9 @@ import time
 from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
+from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
-from .travel import BOROUGH, CITY, CROSSROADS, FOREST, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP
+from .travel import BOROUGH, CITY, CROSSROADS, FOREST, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 SOURCE = "observatory-comp-board"
@@ -20,6 +21,7 @@ DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
 SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
+PROTOTYPE_DRILL = "scientist-tunnel-drill-head"
 POCKET_WATCH = "crossroads-pocket-watch"
 OLD_PIPE = "crossroads-old-pipe"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
@@ -47,6 +49,8 @@ SOURCES = {
                       "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
     SCIENTIST_BLANK_TAPE: (SCIENTIST_SHOP, f"DataTape_Blank_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3",
                            "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
+    PROTOTYPE_DRILL: (SCI_TUNNEL, f"Art_DrillHead_C {SCI_TUNNEL}.Sci_Tunnel_01_P:PersistentLevel.Art_DrillHead_C_1",
+                      "/Game/Classes/Items/Artifacts/Art_DrillHead.Art_DrillHead_C"),
     POCKET_WATCH: (CROSSROADS, f"Item_PocketWatch_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1",
                    "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
     OLD_PIPE: (CROSSROADS, f"MeleeWep_OldPipe_C {CROSSROADS}.CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1",
@@ -81,6 +85,8 @@ MERGE_TAG = "native-authored-supply-merge"
 MERGE_KEY = "native_authored_supply_merge"
 CASH_TAG = "native-authored-cash-credit"
 CASH_KEY = "native_authored_cash_credit"
+PROTOTYPE_TAG = "native-authored-prototype-drill"
+PROTOTYPE_KEY = "native_authored_prototype_drill"
 APPROACH = "native-authored-pickup-approach"
 FIXTURE = "native-authored-pickup-fixture"
 STOCK_FIXTURE = "native-authored-pickup-stock-fixture"
@@ -90,7 +96,8 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE) and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
+        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL)
+                    and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
     if isinstance(requested, str) and requested in sources:
@@ -127,8 +134,12 @@ async def project(service, bridge, pickups: dict) -> None:
         service.last_game = snapshot
 
 
+def _needs_epoch(source: str) -> bool:
+    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL)
+
+
 def request_target(target: str | None, epoch: str | None) -> str | None:
-    if isinstance(target, str) and (target in STOCK_SUPPLIES or target in STOCK_CASH or target == DEAD_DROP):
+    if isinstance(target, str) and _needs_epoch(target):
         if not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
             raise party.RuleError("native_authored_pickup_stale_zone")
         return f"{target}@{epoch}"
@@ -199,13 +210,38 @@ def parse_cash(fields: list[str], snapshot: dict) -> dict:
     return credit
 
 
+def _matches_prototype(claim: dict, proof: dict) -> bool:
+    before, after = proof.get("topic_before"), proof.get("topic_after")
+    pawn, slot = proof.get("pawn"), proof.get("slot")
+    return ((proof.get("source"), proof.get("map"), proof.get("quest"), proof.get("step")) ==
+            (PROTOTYPE_DRILL, SCI_TUNNEL, PROTOTYPE_QUEST, 1)
+            and claim.get("ok") is True and claim.get("applied") is True and claim.get("status") == "claimed"
+            and all(claim.get(key) == proof.get(key) for key in ("source", "map", "pawn", "slot", "guid"))
+            and isinstance(pawn, str) and pawn.startswith("Player_FP_C ") and len(pawn) <= 512
+            and isinstance(slot, str) and native_host_save.SLOT.fullmatch(slot) is not None
+            and type(proof.get("step")) is int and valid_guid(proof.get("guid"))
+            and type(before) is int and type(after) is int and 1 <= before == after < 2**31)
+
+
+def parse_prototype(fields: list[str], snapshot: dict) -> dict:
+    if len(fields) != 10:
+        raise ValueError("Invalid authored Prototype Drill progress")
+    (_, source, area, pawn, slot, guid, quest, step, topic_before, topic_after) = fields
+    proof = dict(source=source, map=area, pawn=pawn, slot=slot, guid=guid, quest=quest, step=int(step),
+                 topic_before=int(topic_before), topic_after=int(topic_after))
+    if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", SCI_TUNNEL)
+            or not _matches_prototype(snapshot.get("native_authored_pickup_claim", {}), proof)):
+        raise ValueError("Invalid authored Prototype Drill progress")
+    return proof
+
+
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
     if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
     target, has_epoch, epoch = target.partition("@")
     is_supply = target in STOCK_SUPPLIES
     is_cash = target in STOCK_CASH
-    bound_epoch = is_supply or is_cash or target == DEAD_DROP
+    bound_epoch = _needs_epoch(target)
     if target not in SOURCES or (has_epoch and not bound_epoch):
         raise party.RuleError("invalid_authored_pickup_request")
     if bound_epoch:
@@ -275,6 +311,11 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         elif (credit is not None or not report["ok"] or not report["applied"] or report["status"] not in ("claimed", "merged")
                 or not valid_guid(report["guid"])):
             raise RuntimeError(f"The authored pickup did not verify ({report['status']})")
+        prototype = snapshot.get(PROTOTYPE_KEY)
+        if target == PROTOTYPE_DRILL and (not isinstance(prototype, dict) or not _matches_prototype(report, prototype)):
+            raise RuntimeError("The exact Prototype Drill quest and preserved stock topic did not verify")
+        if target != PROTOTYPE_DRILL and prototype is not None:
+            raise RuntimeError("Another authored pickup reported an unexpected Prototype Drill change")
         merge = snapshot.get(MERGE_KEY)
         if report["status"] == "merged":
             if not is_supply or not isinstance(merge, dict) or not _matches_merge(report, merge):
@@ -289,6 +330,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             row["wallet_credit"] = {key: credit[key] for key in ("amount", "before", "after", "stock_flag")}
         else:
             row["guid"] = report["guid"]
+        if prototype is not None:
+            row["topic_micro_drill"] = prototype["topic_after"]
         if merge is not None:
             row.update(guid=merge["stack_guid"], source_guid=report["guid"],
                        stack_before=merge["before"], stack_after=merge["after"])
