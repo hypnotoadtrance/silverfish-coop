@@ -20,7 +20,8 @@ if str(REPO) not in sys.path:
 from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK, OFFICE_DESK_PROFILE,
                                            SMALL_CABINET, SMALL_CABINET_PROFILE, full_name)
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, OBSERVATORY, RAIL_YARD
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -41,6 +42,13 @@ GUARANTEED_SCENES = {
 SCENES.update(GUARANTEED_SCENES)
 CABINET_SCENE = "lab-small-cabinet"
 SCENES[CABINET_SCENE] = (SMALL_CABINET_PROFILE[0], (SMALL_CABINET_PROFILE[1],))
+LAB_WANDERER_SEED = 964155
+LAB_STATIC_WORLD_SEED = 1443576583
+LAB_ROUTE = (
+    (OBSERVATORY, CROSSROADS, "Obsv_Etr", "Level_Exit_BP_C_1", "overlap"),
+    (CROSSROADS, RAIL_YARD, "Depot_Cross_Rail", "Level_Exit_BP_C_1", "overlap"),
+    (RAIL_YARD, LAB_E206, "RY_Lab206", "Dungeon_TransitionDoor_BP_C_2", "door"),
+)
 DESK_SCENE = "lake-office-desk"
 SCENES[DESK_SCENE] = (OFFICE_DESK_PROFILE[0], (OFFICE_DESK_PROFILE[1],))
 FISH_CANNERY_ITEMS = {
@@ -95,9 +103,11 @@ def stock_input_result(run: Path, crate: str, sequence: int) -> dict | None:
 
 
 async def exercise(work: Path, name: str, original_save: Path | None, baseline: str | None = None,
-                   force_stock_roll: bool = False, require_cash: bool = False) -> None:
+                   force_stock_roll: bool = False, require_cash: bool = False, natural_lab_roll: bool = False) -> None:
     if force_stock_roll and (name != "rail-yard" or original_save is None):
         raise ValueError("The exact Rail Yard forced stock draw requires single-player save verification")
+    if natural_lab_roll and (name != CABINET_SCENE or baseline or force_stock_roll):
+        raise ValueError("The seeded Lab roll needs its fresh Wanderer route")
     area, actors = SCENES[name]
     guaranteed = name in GUARANTEED_SCENES
     cabinet = name == CABINET_SCENE
@@ -123,6 +133,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     evidence = {"map": area, "stock_interactions": []}
     if force_stock_roll:
         evidence["force_stock_roll"] = True
+    if natural_lab_roll:
+        evidence["wanderer_route"] = []
     processes = []
     cash_requests = []
     exhaustion_flags = {crate: f"{actor}-{area.rsplit('/', 1)[1]}-" for crate, actor in zip(targets, actors)} if permanent else {}
@@ -162,10 +174,62 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         native_host_save.verify_checkpoint(campaign / "game-user", saved)
         return saved
 
+    def canonical_flags(saved, map_name):
+        return stock_flags(native_host_save.directory(campaign / "game-user"), saved["world"]["native_host_save"], map_name)
+
     def permanent_flags(saved):
-        found = stock_flags(native_host_save.directory(campaign / "game-user"), saved["world"]["native_host_save"], area)
+        found = canonical_flags(saved, area)
         assert sibling_flags.isdisjoint(found), found
         return {flag: found.get(flag) for flag in exhaustion_flags.values()}
+
+    async def route_pair(map_name, character, prior_epoch=None):
+        authority = await wait(run, lambda state: state.get("state") == "hosting" and state.get("link_connected")
+                               and state.get("game", {}).get("map") == map_name and state.get("zone_epoch")
+                               and state["zone_epoch"] != prior_epoch
+                               and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=70)
+        await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
+                   and state.get("gameplay_fresh") and state.get("game", {}).get("map") == map_name
+                   and state.get("character_id") == character and state.get("host_session") == authority["generation"]
+                   and state.get("zone_epoch") == authority["zone_epoch"], timeout=70)
+        return authority
+
+    async def verify_lab_seed(authority, map_name):
+        observed = authority["game"]["native_scene"]
+        assert observed["instance_seed"] == LAB_WANDERER_SEED and observed["game_seconds"] // 86400 == 1, observed
+        await command("action", *host, "checkpoint")
+        saved = saved_checkpoint()
+        frame = saved["world"]["native_observation"]["native_scene"]
+        assert frame["instance_seed"] == LAB_WANDERER_SEED and frame["game_seconds"] // 86400 == 1, frame
+        flags = canonical_flags(saved, map_name)
+        assert flags.get("Static_WorldSeed") == LAB_STATIC_WORLD_SEED, flags
+        return {"map": map_name, "epoch": authority["zone_epoch"], "day": 1, "game_seconds": frame["game_seconds"],
+                "instance_seed": LAB_WANDERER_SEED, "static_world_seed": LAB_STATIC_WORLD_SEED,
+                "loot_karma": flags.get("Loot_Karma", 0)}
+
+    async def reach_lab(character):
+        authority = await route_pair(OBSERVATORY, character)
+        evidence["wanderer_start"] = await verify_lab_seed(authority, OBSERVATORY)
+        for source, destination, entrance, actor, kind in LAB_ROUTE:
+            assert sum((route.source, route.destination, route.entrance, route.actor, route.kind) ==
+                       (source, destination, entrance, actor, kind) for route in AUTHORED_ROUTES) == 1
+            assert authority["game"]["map"] == source
+            pending = {"source": source, "destination": destination, "entrance": entrance, "actor": actor, "kind": kind}
+            evidence["pending_route"] = pending
+            endpoint = ("--entrance", entrance)
+            epoch = authority["zone_epoch"]
+            if kind == "door":
+                for role in ("host", "guest"):
+                    await command("action", *host, "native-door-position", "--target", role, "--exit-position", "near", *endpoint)
+                await command("action", *host, "native-door-probe", "--target", "host", *endpoint)
+            else:
+                endpoint += ("--exit-actor", actor)
+                for role in ("host", "guest"):
+                    await command("action", *host, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
+                await command("action", *host, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
+            authority = await route_pair(destination, character, epoch)
+            seeded = await verify_lab_seed(authority, destination)
+            evidence["wanderer_route"].append({**evidence.pop("pending_route"), **seeded})
+        assert evidence["wanderer_route"][-1]["loot_karma"] == 0, evidence["wanderer_route"][-1]
 
     async def typed_inventory_item(character, guid):
         offset = 0
@@ -184,22 +248,28 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         if baseline:
             evidence["baseline_seed"] = seed
         start_zone = () if baseline else ("--start-zone", area)
+        if natural_lab_roll:
+            start_zone = ("--native-start-preset", "wanderer", "--native-world-seed", str(LAB_WANDERER_SEED))
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", *start_zone)
         opening = await wait(run, lambda state: state.get("state") == "hosting"
-                             and all(status_of(state, crate) == "ready" for crate in targets))
+                             and (state.get("game", {}).get("native_fresh_campaign", {}).get("state") == "verified"
+                                  if natural_lab_roll else all(status_of(state, crate) == "ready" for crate in targets)))
         if baseline:
             live_seed = opening["game"]["native_scene"]["instance_seed"]
             assert live_seed == seed, (seed, live_seed)
         invitation = await command("invite", *host, "--name", f"{name} crate runner", "--character", "Crate runner")
-        await start("guest", guest, "join", *guest, "--headless", "--invite", invitation["invite_file"])
+        character = invitation["character_id"]
+        join_zones = ("--native-zones",) if natural_lab_roll else ()
+        await start("guest", guest, "join", *guest, "--headless", *join_zones, "--invite", invitation["invite_file"])
+        if natural_lab_roll:
+            await reach_lab(character)
         ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
                            and all(status_of(state, crate) == "ready" for crate in targets))
         assert sibling_names.isdisjoint(scene(opening)) and sibling_names.isdisjoint(scene(ready))
         pawn = ready["game"]["pawns"]["local"]["name"]
         bound = await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
-        character = invitation["character_id"]
         await command("action", *host, "native-loot-seed", "--target", targets[0])
         if permanent:
             await command("action", *host, "checkpoint")
@@ -240,6 +310,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
             elif cabinet:
                 assert roll["trait_calls"] == 5 and len(roll["items"]) <= 4, roll
+                if natural_lab_roll and not roll["items"]:
+                    evidence["unexpected_empty_stock_roll"] = {"receipt": pressed, "roll": roll}
+                    raise AssertionError("The seeded stock Lab cabinet returned an empty roll")
             else:
                 assert 1 <= roll["trait_calls"] <= 3, roll
             if name == "guaranteed-docks":
@@ -312,7 +385,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                                  and (not require_cash or state.get("game", {}).get("native_wallet") == expected)
                                  and (not permanent or all(status_of(state, crate) == "exhausted" for crate in targets)))
             fresh = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
-            await start("guest-restart", guest, "join", *guest, "--headless", "--invite", fresh["invite_file"])
+            await start("guest-restart", guest, "join", *guest, "--headless", *join_zones, "--invite", fresh["invite_file"])
             peer = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
                               and state.get("generation") != ready["generation"] and state.get("character_id") == character
                               and state.get("host_session") == resumed["generation"] and state.get("zone_epoch") == resumed["zone_epoch"]
@@ -335,6 +408,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 persisted = permanent_flags(saved_checkpoint())
                 assert persisted == dict.fromkeys(exhaustion_flags.values(), 1), persisted
                 evidence["stock_persistent_flags_restart"] = {"same_port": True, "flags": persisted}
+                if natural_lab_roll:
+                    evidence["wanderer_restart"] = await verify_lab_seed(resumed, area)
     except BaseException as error:
         evidence.setdefault("failure", str(error))
         raise
@@ -360,7 +435,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 async def main(arguments):
     for name in arguments.area or DEFAULT_SCENES:
         await exercise(arguments.work.resolve(), name, arguments.vanilla_saved, arguments.baseline,
-                       arguments.force_stock_roll, arguments.require_cash)
+                       arguments.force_stock_roll, arguments.require_cash, arguments.natural_lab_roll)
 
 
 if __name__ == "__main__":
@@ -371,6 +446,8 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", help="resume a copy of a matching crate smoke checkpoint in this lab")
     parser.add_argument("--force-stock-roll", action="store_true", help="use the scoped Rail Yard stock stream fixture")
     parser.add_argument("--require-cash", action="store_true", help="require a stock cash roll and verify its shared balance after restart")
+    parser.add_argument("--natural-lab-roll", action="store_true",
+                        help="start a seeded Wanderer campaign, take the stock route into Lab E206, and require a nonempty cabinet")
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
@@ -382,4 +459,6 @@ if __name__ == "__main__":
         arguments.area = ["rail-yard"]
     if arguments.baseline and (not arguments.area or len(arguments.area) != 1):
         parser.error("--baseline requires exactly one --area")
+    if arguments.natural_lab_roll and (arguments.area != [CABINET_SCENE] or arguments.baseline or arguments.force_stock_roll):
+        parser.error("--natural-lab-roll requires --area lab-small-cabinet and a fresh campaign")
     asyncio.run(main(arguments))

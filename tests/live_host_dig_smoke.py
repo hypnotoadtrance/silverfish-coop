@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import uuid
@@ -113,10 +114,18 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
         assert (package["class_path"], package["source"], package["quantity"], package["stackable"]) == (
             dig.PACKAGE_CLASS, "backpack", 1, False), package
         assert await rows(guest_run) == guest_items
-        settled = flags(invitation["character_id"])
-        assert settled == (dict(after_spade, **{dig.FLAG: 1}), baseline[1]), (settled, after_spade)
         evidence["stock_dig"] = found
         evidence["package"] = package
+        package_name = found["actor"].rsplit(".", 1)[-1]
+        assert re.fullmatch(r"Package_Item_FarmHouse_C_[0-9]+", package_name), found
+        # Destroyed mode-2 actors record Calc_UniqueID, including this dynamic package.
+        package_flag = f"{package_name}-CrossRoads_P-"
+        assert package_flag not in after_spade
+        # The sealed stock package is an artifact with inherited CDO Value=50.
+        expected_flags = {dig.FLAG: 1, package_flag: 1, "Artifact_Value": after_spade.get("Artifact_Value", 0) + 50}
+        settled = flags(invitation["character_id"])
+        assert settled == (dict(after_spade, **expected_flags), baseline[1]), (settled, expected_flags, after_spade)
+        evidence["stock_package_flags"] = expected_flags
 
         await stop(run, authority)
         await stop(guest_run, peer)
@@ -134,6 +143,7 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
         assert denied["error"] == "stock_host_dig_source_already_secured", denied
         assert await rows(guest_run) == guest_items
         assert (await rows(run))[found["package_guid"]] == package
+        assert flags(invitation["character_id"]) == settled
         evidence.update(verified=True, restart=restored)
     except BaseException as error:
         evidence["failure"] = str(error)
