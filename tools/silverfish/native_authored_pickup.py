@@ -106,7 +106,7 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL)
+        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK)
                     and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
