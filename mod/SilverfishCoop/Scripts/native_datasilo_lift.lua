@@ -25,6 +25,8 @@ local west_waypoint = {X = -2132.16, Y = 1053.62, Z = 2400}
 local route_targets = {
     ["route-west-landing"] = {X = -1990, Y = 64, Z = 2400},
     ["route-east-stairs"] = {X = 2217.16, Y = -2277.82, Z = 2410},
+    ["route-upper-stairs"] = {X = 1550, Y = 2150, Z = 4510},
+    ["route-control-room"] = {X = -534, Y = -1, Z = 5410},
     ["route-catwalk"] = {X = 0, Y = 4810, Z = 6610},
 }
 local actor_scope, is_client, cargo

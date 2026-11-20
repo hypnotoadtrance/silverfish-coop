@@ -21,6 +21,8 @@ STATES = {"active", "guarded", "awaiting_replica", "replication_unverified", "gu
 ROUTE_TARGETS = {
     "route-west-landing": [-1990, 64, 2400],
     "route-east-stairs": [2217.16, -2277.82, 2410],
+    "route-upper-stairs": [1550, 2150, 4510],
+    "route-control-room": [-534, -1, 5410],
     "route-catwalk": [0, 4810, 6610],
 }
 
