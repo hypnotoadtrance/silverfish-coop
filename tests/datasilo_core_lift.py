@@ -277,12 +277,19 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     guest_local_pawn = proof["lower"]["guest_local"]["name"]
     if fixture_loose_cargo:
         proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD)
-        guest = await action(run, lift.STAGE_RIDER, target="guest-clear-corner")
-        host = await action(run, lift.STAGE_RIDER, target="host-clear-corner")
-        assert (guest["pawn"], host["pawn"]) == (guest_pawn, host_pawn)
-        carrier_can_be_downed = True
         proof["lower_parked"] = await observe_parked_core()
-        await ride_lift(proof["lower_parked"])
+        pressed = await action(run, lift.FIXTURE, target="power")
+        assert (pressed["input"], pressed["source_stop"]) == ("power", "lower"), pressed
+        proof["stock_lift_power"] = pressed
+        proof["ascending"] = await at_stop("moving stock lift with loose cargo", "moving")
+        proof["upper"] = await at_stop("upper stock lift with loose cargo", "upper")
+        lower_position = proof["lower_parked"]["prop"]["position"]
+        upper_position = proof["upper"]["prop"]["position"]
+        if upper_position[2] - lower_position[2] <= 2250:
+            raise RuntimeError(
+                f"Loose Core did not reach the upper deck. Lower position {lower_position}, "
+                f"Core position at the upper lift stop {upper_position}"
+            )
         return
     await action(run, carry.APPROACH_FIXTURE, target=character)
     proof["approach"] = await observe("checked stock Core approach", lambda row, *_: (

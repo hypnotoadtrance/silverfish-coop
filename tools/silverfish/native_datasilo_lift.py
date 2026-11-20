@@ -71,7 +71,6 @@ async def stage_rider(host, bridge, target):
         "host": ("host", [-1672.0, -49.0, 160.0]),
         "guest": ("guest", [-1672.0, 49.0, 160.0]),
         "host-clear-corner": ("host", [-1720.0, 97.0, 160.0]),
-        "guest-clear-corner": ("guest", [-1648.0, 85.0, 160.0]),
     }
     if (not host.fixtures or host.stopping or host.transitioning or game.get("map") != core.MAP
             or lift.get("state") != "active" or lift.get("stop") != "lower"
