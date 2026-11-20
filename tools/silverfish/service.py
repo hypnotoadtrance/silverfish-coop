@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import os
 import secrets
 import time
 import uuid
@@ -24,6 +25,7 @@ from . import native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
+from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
@@ -36,9 +38,10 @@ from . import native_borough_barter, native_dust_cabinet, native_mosby_station_v
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
-from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
+from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, game_environment, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_guest_controls,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
+from .udp_ownership import owns_udp_port
 
 
 PROTOCOL = 2
@@ -3186,6 +3189,30 @@ class Host:
                             link_connected=self.game_link_connected(transport))
 
 
+async def _acquire_embedded_game(work: Path, directory: Path, role: str, headless: bool,
+                                 internal_port: int | None, options: dict) -> EmbeddedEngine:
+    expected = game_environment(work, headless, internal_port, embedded_engine=True, **options)
+    conditions = {name: expected.get(name) for name in os.environ.keys() | expected.keys()
+                  if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
+    return await EmbeddedEngine.acquire(work, directory, role=role, internal_port=internal_port,
+                                        required_env=conditions)
+
+
+async def _stop_session_game(transport, process, embedded: EmbeddedEngine | None) -> None:
+    try:
+        if transport:
+            await transport.close()
+    finally:
+        if embedded is not None:
+            await embedded.release()
+            if embedded.internal_port is not None:
+                async with asyncio.timeout(5):
+                    while await asyncio.to_thread(owns_udp_port, embedded.pid, embedded.internal_port):
+                        await asyncio.sleep(0.1)
+        elif process:
+            await stop_game(process)
+
+
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
                     fixtures: bool = False, death_rules: dict | None = None, *,
                     native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
@@ -3195,7 +3222,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None, guest_mre: bool = False,
                     difficulty: str | None = None,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
-                    guest_melee_canary: bool = False, host_dig_live_fixture: bool = False) -> None:
+                    guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
+                    embedded_port: int | None = None) -> None:
+    if embedded_port is not None and (type(embedded_port) is not int or not 1 <= embedded_port <= 65535
+                                      or port == embedded_port or not (native_events and native_guest and native_zones)):
+        raise ValueError("Embedded hosting requires a staged native campaign and a distinct private game port")
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -3296,23 +3327,27 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("The campaign's Stardust visit does not match its saved zone")
         if dream and dream["effects"] != "legacy" and (not native_profile or not native_record):
             raise ValueError("The campaign's Stardust visit is missing its paired stock host save")
-        process = transport = None
+        process = transport = embedded = None
         controller = None
         result = "stopped"
         try:
             control.status(active=True, role="host", state="starting")
             identity = _identity(directory / "save")
-            internal_port = spare_udp_port()
-            bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
-            process = launch(work, profile, bridge_directory, headless, internal_port,
-                             native_events=native_events, native_guest=native_guest, native_zones=native_zones,
-                             native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
-                             native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                             guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input, guest_mre=guest_mre,
-                             native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
-                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary,
-                             host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture)
-            bridge = Bridge(bridge_directory, process)
+            internal_port = embedded_port if embedded_port is not None else spare_udp_port()
+            game_options = dict(native_events=native_events, native_guest=native_guest, native_zones=native_zones,
+                                native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
+                                native_shop_view=native_shop_view, native_loot_input=native_loot_input,
+                                guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
+                                guest_mre=guest_mre, native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
+                                native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary,
+                                host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture)
+            if embedded_port is not None:
+                embedded = await _acquire_embedded_game(work, directory, "host", headless, embedded_port, game_options)
+                process, bridge = embedded, embedded.bridge
+            else:
+                bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
+                process = launch(work, profile, bridge_directory, headless, internal_port, **game_options)
+                bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
             if host_dig_live and not ready.get("native_host_dig_live_capability"):
                 raise RuntimeError("The staged native add-on is missing its live dig bridge")
@@ -3462,22 +3497,27 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             control.event("host_stopping", outcome=result, error_type=type(error).__name__)
             raise
         finally:
-            if controller:
-                controller.stopping = True
-                if (result == "stopped" and not controller.native_checkpoint_unsafe
-                        and controller.last_game.get("state") == "hosting" and process.poll() is None):
-                    with contextlib.suppress(CampaignError, OSError, RuntimeError):
-                        if controller.smg_holds:
-                            await controller.smg_holds.settle(bridge, stop_all=True)
-                        await controller.checkpoint_native(bridge)
-                if native_guest and process.poll() is None:
-                    with contextlib.suppress(OSError, RuntimeError):
-                        await bridge.command("native-guest-clear", timeout=2)
-            if transport:
-                await transport.close()
-            if process:
-                await stop_game(process)
-            control.status(active=False, role="host", state=result, campaign=store.status())
+            try:
+                try:
+                    if controller:
+                        controller.stopping = True
+                        if (result == "stopped" and not controller.native_checkpoint_unsafe
+                                and controller.last_game.get("state") == "hosting" and process.poll() is None):
+                            with contextlib.suppress(CampaignError, OSError, RuntimeError):
+                                if controller.smg_holds:
+                                    await controller.smg_holds.settle(bridge, stop_all=True)
+                                await controller.checkpoint_native(bridge)
+                        if native_guest and process.poll() is None:
+                            with contextlib.suppress(OSError, RuntimeError):
+                                await bridge.command("native-guest-clear", timeout=2)
+                finally:
+                    await _stop_session_game(transport, process, embedded)
+            except (Exception, asyncio.CancelledError) as error:
+                result = "failed"
+                control.event("host_cleanup_failed", error_type=type(error).__name__)
+                raise
+            finally:
+                control.status(active=False, role="host", state=result, campaign=store.status())
 
 
 async def probe_transport(bridge: Bridge, item: str) -> dict:
@@ -4390,7 +4430,8 @@ class Client:
 async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,
                     character_id: str | None = None, *, native_zones: bool = False,
                     native_zone_walls: bool = False, guest_reload_input: bool = False,
-                    guest_inventory_view: bool = False, guest_primary_input: bool = False) -> None:
+                    guest_inventory_view: bool = False, guest_primary_input: bool = False,
+                    embedded_engine: bool = False) -> None:
     invite = load_invite(invitation, staged_build(work))
     native_zones = native_zones or invite.get("native_zones", False)
     native_zone_walls = native_zone_walls or invite.get("native_zone_walls", False)
@@ -4435,21 +4476,26 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             raise ValueError("Supply a character ID from the host catalog") from None
         invite["character_id"] = character_id
     with Control(directory / "run") as control:
-        process = transport = None
+        process = transport = embedded = None
         result = "stopped"
         try:
             control.status(active=True, role="client", state="starting")
-            transport = await link.start_client()
-            bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
             guest_clock = native_zones and staged_script(work, "native_guest_clock.lua")
-            process = launch(work, directory / "game-user", bridge_directory, headless,
-                             native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
-                             guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
-                             native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
-                             native_loot_input=native_loot_input, broker_input=broker_input,
-                             native_wipe_view=wipe_view_enabled, guest_clock=guest_clock, guest_held_fire=guest_held_fire,
-                             native_mosby_station=mosby_station_enabled, guest_mre=invite.get("native_guest_mre", False))
-            bridge = Bridge(bridge_directory, process)
+            game_options = dict(native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
+                                guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
+                                native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
+                                native_loot_input=native_loot_input, broker_input=broker_input, native_wipe_view=wipe_view_enabled,
+                                guest_clock=guest_clock, guest_held_fire=guest_held_fire, native_mosby_station=mosby_station_enabled,
+                                guest_mre=invite.get("native_guest_mre", False))
+            if embedded_engine:
+                embedded = await _acquire_embedded_game(work, directory, "client", headless, None, game_options)
+                process, bridge = embedded, embedded.bridge
+                transport = await link.start_client()
+            else:
+                transport = await link.start_client()
+                bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
+                process = launch(work, directory / "game-user", bridge_directory, headless, **game_options)
+                bridge = Bridge(bridge_directory, process)
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
             if expanded_zones:
                 maps |= EXPANDED_MAPS
@@ -4478,8 +4524,11 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             control.event("client_stopping", outcome=result, error_type=type(error).__name__)
             raise
         finally:
-            if transport:
-                await transport.close()
-            if process:
-                await stop_game(process)
-            control.status(active=False, role="client", state=result, character_id=invite["character_id"])
+            try:
+                await _stop_session_game(transport, process, embedded)
+            except (Exception, asyncio.CancelledError) as error:
+                result = "failed"
+                control.event("client_cleanup_failed", error_type=type(error).__name__)
+                raise
+            finally:
+                control.status(active=False, role="client", state=result, character_id=invite["character_id"])

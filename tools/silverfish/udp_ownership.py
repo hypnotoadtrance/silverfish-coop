@@ -59,12 +59,24 @@ def verify_loopback_socket(pid: int, port: int) -> None:
     """Require an explicit IPv4 loopback bind for the requested PID and UDP port."""
     if type(pid) is not int or not 1 <= pid <= 0xFFFFFFFF or type(port) is not int or not 1 <= port <= 65535:
         raise RuntimeError(_REFUSAL)
+    ipv4, ipv6 = _bound_addresses(pid, port)
+    if ipv4 != {_LOOPBACK_V4} or ipv6:
+        raise RuntimeError(_REFUSAL)
+
+
+def owns_udp_port(pid: int, port: int) -> bool:
+    """Check both complete owner tables for this process, including wildcard binds."""
+    if type(pid) is not int or not 1 <= pid <= 0xFFFFFFFF or type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("Expected a Windows process and UDP port")
+    ipv4, ipv6 = _bound_addresses(pid, port)
+    return bool(ipv4 or ipv6)
+
+
+def _bound_addresses(pid: int, port: int) -> tuple[set[int], set[bytes]]:
     api = _get_extended_udp_table()
     network_port = socket.htons(port)
     ipv4 = {row.address for row in _owner_rows(api, socket.AF_INET, _Udp4Owner)
             if row.pid == pid and row.port & 0xFFFF == network_port}
-    if ipv4 != {_LOOPBACK_V4} or any(
-        row.pid == pid and row.port & 0xFFFF == network_port
-        for row in _owner_rows(api, socket.AF_INET6, _Udp6Owner)
-    ):
-        raise RuntimeError(_REFUSAL)
+    ipv6 = {bytes(row.address) for row in _owner_rows(api, socket.AF_INET6, _Udp6Owner)
+            if row.pid == pid and row.port & 0xFFFF == network_port}
+    return ipv4, ipv6

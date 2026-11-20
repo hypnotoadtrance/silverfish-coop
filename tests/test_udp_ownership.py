@@ -63,8 +63,10 @@ class WindowsUdpOwnerTests(unittest.TestCase):
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
             runtime.verify_loopback_socket(pid, port)
+            self.assertTrue(udp_ownership.owns_udp_port(pid, port))
             with self.assertRaisesRegex(RuntimeError, "loopback-only UDP socket"):
                 runtime.verify_loopback_socket(pid + 1, port)
+        self.assertFalse(udp_ownership.owns_udp_port(pid, port))
         with self.assertRaisesRegex(RuntimeError, "loopback-only UDP socket"):
             runtime.verify_loopback_socket(pid, port)
 

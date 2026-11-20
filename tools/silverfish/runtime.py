@@ -300,8 +300,8 @@ def verify_loopback_socket(pid: int, port: int) -> None:
     udp_ownership.verify_loopback_socket(pid, port)
 
 
-def launch(work: Path, profile: Path, bridge: Path, headless: bool,
-           port: int | None = None, *, native_events: bool = False, native_guest: bool = False,
+def game_environment(work: Path, headless: bool, port: int | None = None, *,
+           native_events: bool = False, native_guest: bool = False,
            native_zones: bool = False, native_zone_walls: bool = False, native_fixtures: bool = False,
            expanded_zones: bool = False, guest_reload_input: bool = False, guest_inventory_view: bool = False,
            native_shop_view: bool = False, guest_primary_input: bool = False, native_loot_input: bool = False,
@@ -310,14 +310,9 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
-           embedded_engine: bool = False):
-    """Launch the staged executable with a dedicated Unreal user directory."""
-    game = (work / "stage" / SHIPPING).resolve(strict=True)
-    if not game.is_relative_to(work.resolve() / "stage"):
-        raise ValueError("The staged shipping executable points outside the stage")
-    profile.mkdir(parents=True, exist_ok=True)
-    bridge.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, SILVERFISH_COOP_BRIDGE=str(bridge))
+           embedded_engine: bool = False) -> dict[str, str]:
+    """Derive the same validated native options for launched and embedded sessions."""
+    env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
@@ -468,13 +463,29 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_wipe_view:
         env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"
+    if headless:
+        env["SILVERFISH_COOP_HEADLESS"] = "1"
+    return env
+
+
+def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | None = None, **options):
+    """Launch the staged executable with a dedicated Unreal user directory."""
+    game = (work / "stage" / SHIPPING).resolve(strict=True)
+    if not game.is_relative_to(work.resolve() / "stage"):
+        raise ValueError("The staged shipping executable points outside the stage")
+    env = game_environment(work, headless, port, **options)
+    if options.get("embedded_engine"):
+        from .embedded_engine import assert_private_saved_tree
+        assert_private_saved_tree(profile)
+    profile.mkdir(parents=True, exist_ok=True)
+    bridge.mkdir(parents=True, exist_ok=True)
+    env["SILVERFISH_COOP_BRIDGE"] = str(bridge)
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -MULTIHOME=127.0.0.1 -unattended -NoSplash -windowed'
     if port is not None:
         arguments += f" -port={port}"
     info = None
     if headless:
-        env["SILVERFISH_COOP_HEADLESS"] = "1"
         arguments += (" -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
                       " -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,"
                       "[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock")
