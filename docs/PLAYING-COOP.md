@@ -2,7 +2,13 @@
 
 Use Direct IP on Windows. The installed title entry opens the matched private co-op stage. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
 
-## Stage the same build on each PC
+## Install and open the Windows trial
+
+Close the game on both PCs. Use the same Steam game build and the same trial ZIP, and follow the one-time setup from the extracted ZIP. Setup uses the pinned UE4SS release and Project Silverfish signatures. A fresh workspace needs roughly 5.2 GB for the private game copy. After setup, start Project Silverfish through Steam and press **F7** for **Open Co-op** on the stock title. [Trial ZIP setup](../bootstrap/README.md#install-from-a-trial-zip)
+
+For two PCs on a LAN, enter the host PC's LAN IP and a UDP port in **Host** settings. Allow inbound UDP on that port on the host PC and use that LAN address in the invitation. The default `127.0.0.1` address works for a host and guest running on the same PC.
+
+## Stage the development build
 
 Open PowerShell in the mod repository. Use Python 3.11 or later, a Steam installation of Project Silverfish, and the extracted [UE4SS v4.0.0 release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0). Point the launcher at the release folder that contains `dwmapi.dll` and `ue4ss`.
 
@@ -28,7 +34,7 @@ After the [stock title setup](../bootstrap/README.md#install-the-stock-title-ent
 
 ## Create an invitation while hosting
 
-Open the stock **Journal** in the active co-op campaign. Press **F7** to open the invite form. Enter the participant's name, their starter character's name, and the address they can reach. Use **F8** to advance through the fields. Leave the address blank to use the configured host address. On the review screen, press **F7** to create the invitation, then press **F7** again to copy it once it is ready. Share the invitation privately. It contains the guest credential. **F9** returns to the Journal.
+Open the stock **Journal** in the active co-op campaign with **J** or your configured key. Press **F7** to open the invite form. Enter the participant's name, their starter character's name, and the address they can reach. Use **F8** to advance through the fields. Leave the address blank to use the configured host address. On the review screen, press **F7** to create the invitation, then press **F7** again to copy it once it is ready. Share the invitation privately. It contains the guest credential. **F9** returns to the Journal. The host can also share the private invitation file from the campaign's `run\invites` directory.
 
 ## Join from the co-op title
 
@@ -78,6 +84,8 @@ Reuse the invitation and character selection for a later session. Keep the host 
 The invitation fingerprint covers the game, the staged Lua scripts, the co-op launcher code, and the native add-on when enabled. After both PCs update to the same mod revision, the host can run `action --campaign expedition refresh-invite --target GUEST_ID` to refresh the existing invitation. The guest and selected character IDs stay the same.
 
 Use the guest's `stop` action to close that guest instance. Use the host's `checkpoint` and `stop` actions for a saved shutdown.
+
+In sessions opened from the in-game co-op title, automation can use `action --profile NAME leave-session` for an acknowledged guest save and departure, or `action --campaign NAME leave-session` to save and end the host's session. A successful response reports the checkpoint revision. Watch the role's status for `state: stopped` and a `stop_reason` of `guest_left` or `host_session_ended`.
 
 ## Optional stock campaign mode
 

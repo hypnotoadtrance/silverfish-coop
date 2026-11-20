@@ -11,9 +11,13 @@ local prompt_press = "BndEvt__Menu_Pause_Widget_Button_Continue_1_K2Node_Compone
 local save_press = "BndEvt__Menu_Pause_Widget_Button_SaveAndQuit_K2Node_ComponentBoundEvent_5_Pressed__DelegateSignature"
 local confirm_press = "BndEvt__ConfirmationScreen_Button_Confirm_K2Node_ComponentBoundEvent_2_Pressed__DelegateSignature"
 local cancel_press = "BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature"
+local fixture_command = "native-coop-pause-fixture"
+local fixture_actions = {open = true, prompt = true, cancel = true, confirm = true, save_and_quit = true}
 local reasons = {quit_to_menu = true, save_and_quit = true}
 
 local offer_path, eligibility_path, input_path, request_path
+local fixture_command_path, fixture_reply_path, fixture_previous, fixture_pending
+local fixture_seen, fixture_count = {}, 0
 local bound, written_eligibility, requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
 
 local function valid(object) return object and object:IsValid() end
@@ -138,14 +142,47 @@ local function consume(scene)
     end
 end
 
+local function fixture_reply(nonce, ok, message)
+    local bounded = tostring(message):gsub("[^ -~]", "?"):sub(1, 512)
+    return table.concat({"1", nonce, ok and "ok" or "error", bounded}, "\t") .. "\n"
+end
+
+local function service_fixture(state, phase)
+    if not fixture_command_path then return end
+    if fixture_pending then
+        if not publish(fixture_reply_path, fixture_pending, true) then return end
+        fixture_pending = nil
+    end
+    local data = read(fixture_command_path, 128)
+    if data == fixture_previous then return end
+    fixture_previous = data
+    if not data then return end
+    local nonce = data:match("^1\t([0-9a-f]+)\t")
+    if not token(nonce) then return end
+    local action = data:match("^1\t[0-9a-f]+\t([a-z_]+)\n$")
+    local ok, message = false, "native_coop_pause_fixture_duplicate_nonce"
+    if not fixture_seen[nonce] then
+        if fixture_count >= 128 then
+            message = "native_coop_pause_fixture_nonce_limit"
+        else
+            fixture_seen[nonce], fixture_count = true, fixture_count + 1
+            if fixture_actions[action] then
+                ok, message = pcall(pause.command, {nonce, fixture_command, action}, state, phase)
+                if type(message) ~= "string" then ok, message = false, "native_coop_pause_fixture_unverified_reply" end
+            else
+                message = "native_coop_pause_fixture_arguments"
+            end
+        end
+    end
+    fixture_pending = fixture_reply(nonce, ok, message)
+    if publish(fixture_reply_path, fixture_pending, true) then fixture_pending = nil end
+end
+
 function pause.sync(state, phase)
     if not offer_path then return end
     local scene = qualified(state, phase)
-    if not scene then
-        pause.clear()
-        return
-    end
-    consume(scene)
+    if scene then consume(scene) else pause.clear() end
+    service_fixture(state, phase)
 end
 
 local function reject(reason) error("native_coop_pause_fixture_" .. reason, 0) end
@@ -188,11 +225,10 @@ local function confirmation(stack, scene)
 end
 
 function pause.command(fields, state, phase)
-    if fields[2] ~= "native-coop-pause-fixture" then return end
+    if fields[2] ~= fixture_command then return end
     if not embedded or not fixtures then reject("unavailable") end
     local action = fields[3]
-    if #fields ~= 3 or (action ~= "open" and action ~= "prompt" and action ~= "cancel"
-        and action ~= "confirm" and action ~= "save_and_quit") then reject("arguments") end
+    if #fields ~= 3 or not fixture_actions[action] then reject("arguments") end
     local scene = qualified(state, phase)
     if not scene or requested then reject("scope_unavailable") end
     local stack = scene.controller.MenuStack
@@ -254,6 +290,12 @@ function pause.start(bridge)
     request_path = bridge .. "/native-coop-pause-request.tsv"
     os.remove(eligibility_path)
     os.remove(input_path)
+    if fixtures then
+        fixture_command_path = bridge .. "/native-coop-pause-fixture-command.tsv"
+        fixture_reply_path = bridge .. "/native-coop-pause-fixture-reply.tsv"
+        os.remove(fixture_command_path)
+        os.remove(fixture_reply_path)
+    end
 end
 
 return pause

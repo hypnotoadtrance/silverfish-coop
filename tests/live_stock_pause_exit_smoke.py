@@ -44,8 +44,26 @@ def paired_checkpoint(directory, character):
 
 
 async def stock_pause(bridge, action):
-    frame = await bridge.command(FIXTURE, action, timeout=8)
-    assert frame["ack"]["message"] == "exact stock co-op pause " + action
+    operation = uuid.uuid4().hex
+    expected = f"1\t{operation}\t"
+    request = bridge.directory / f"{FIXTURE}-command.tsv"
+    reply = bridge.directory / f"{FIXTURE}-reply.tsv"
+    runtime.write_text(request, expected + action + "\n", newline="\n")
+    try:
+        async with asyncio.timeout(12):
+            while bridge.process.poll() is None:
+                with suppress(OSError):
+                    result = reply.read_text(encoding="utf-8")
+                    if result.startswith(expected) and result.endswith("\n"):
+                        status, message = result[len(expected):-1].split("\t", 1)
+                        if status == "error":
+                            raise RuntimeError(message)
+                        assert (status, message) == ("ok", "exact stock co-op pause " + action), result
+                        return
+                await asyncio.sleep(.1)
+    except TimeoutError as error:
+        raise TimeoutError(f"The stock Pause fixture did not acknowledge {action}") from error
+    raise RuntimeError(f"The staged game exited while performing stock Pause {action}")
 
 
 async def verify(work: Path, original: Path):

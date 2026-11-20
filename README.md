@@ -6,6 +6,10 @@ The launcher copies the stock game into a separate runtime, installs a small UE4
 
 ## Setup
 
+For the in-game trial, use the Windows trial ZIP and its one-time setup. Open the installed co-op menu from the Steam game title. [Windows trial instructions](docs/PLAYING-COOP.md#install-and-open-the-windows-trial)
+
+### Development checkout
+
 Use Python 3.11 or later, a Steam installation of Project Silverfish, and an extracted [UE4SS v4.0.0 release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0). Stage the same game build and mod revision on each PC.
 
 ```powershell

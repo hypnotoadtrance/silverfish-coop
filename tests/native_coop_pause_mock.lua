@@ -142,3 +142,45 @@ local standalone = assert(loadfile(script, "t", env))()
 standalone.start(prefix)
 standalone.sync(state, "connected")
 assert(fs[eligible] == nil and #standalone.rows(state, "connected", row) == 0)
+
+local command_path = prefix .. "/native-coop-pause-fixture-command.tsv"
+local reply_path = prefix .. "/native-coop-pause-fixture-reply.tsv"
+local gameplay_path = prefix .. "/command.tsv"
+local raised, count, blocked = false, 0, false
+env.io.open = function(path, mode)
+    if blocked and path == reply_path .. ".new" then return end
+    return fake_open(path, mode)
+end
+embedded, fixture_enabled = true, true
+local gated = assert(loadfile(script, "t", env))()
+gated.start(prefix)
+gated.command = function(fields, observed, phase)
+    assert(fields[2] == "native-coop-pause-fixture" and fields[3] == "open" and observed == state and phase == "connected")
+    count = count + 1
+    if raised then error("stock callback\tfailed\n", 0) end
+    return "exact stock co-op pause open"
+end
+descriptor(third, "guest", 109)
+fs[gameplay_path] = "unrelated gameplay command"
+fs[command_path] = row(1, first, "open") .. "\n"
+blocked = true
+gated.sync(state, "connected")
+assert(count == 1 and fs[reply_path] == nil)
+gated.sync(state, "connected")
+assert(count == 1 and fs[reply_path] == nil)
+blocked = false
+gated.sync(state, "connected")
+assert(count == 1 and fs[reply_path] == row(1, first, "ok", "exact stock co-op pause open") .. "\n")
+assert(fs[gameplay_path] == "unrelated gameplay command")
+fs[command_path] = nil
+gated.sync(state, "connected")
+fs[command_path] = row(1, first, "open") .. "\n"
+gated.sync(state, "connected")
+assert(count == 1 and fs[reply_path] == row(1, first, "error", "native_coop_pause_fixture_duplicate_nonce") .. "\n")
+fs[command_path] = row(1, second, "unsupported") .. "\n"
+gated.sync(state, "connected")
+assert(count == 1 and fs[reply_path] == row(1, second, "error", "native_coop_pause_fixture_arguments") .. "\n")
+raised = true
+fs[command_path] = row(1, third, "open") .. "\n"
+gated.sync(state, "connected")
+assert(count == 2 and fs[reply_path] == row(1, third, "error", "stock callback?failed?") .. "\n")
