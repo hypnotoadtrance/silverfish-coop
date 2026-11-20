@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, party
 from tools.silverfish import native_guest_drop_projection as projection
@@ -16,7 +16,7 @@ ID, OPERATION = "a" * 32, "b" * 32
 
 class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
     def client(self):
-        game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}}
+        game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN, "location": [0., 0., 40.]}}}
         row = record.visible(dict(owner="owner", map=MAP, class_path=record.ITEM, guid="D" * 32, quantity=9,
                                   location=[10., 20., 40.]), ID)
         client = SimpleNamespace(last_game=game.copy(), gameplay={record.STATE: {ID: row}},
@@ -42,7 +42,8 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         epoch = "c" * 32
         row = [projection.ROW, MAP, epoch, ID, PAWN, ACTOR, "124"]
         self.assertEqual(projection.parse(row, "connected", MAP)["sequence"], 124)
-        for state, changed in (("hosting", row), ("connected", [*row[:5], "Item_9mm_C Fake", "124"]),
+        self.assertEqual(projection.parse(row, "hosting", MAP)["sequence"], 124)
+        for state, changed in (("opening", row), ("connected", [*row[:5], "Item_9mm_C Fake", "124"]),
                                ("connected", [*row[:-1], str(2**53)]),
                                ("connected", [*row[:4], PAWN.replace("Observitory", "CrossRoads"), *row[5:]])):
             with self.assertRaises(ValueError):
@@ -50,20 +51,47 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projection.target_parts(f"stack-drop:{epoch}:{ID}"), (epoch, ID))
         self.assertIsNone(projection.target_parts(f"stack-drop:{epoch}:{ID.upper()}"))
 
-    async def test_only_matching_authenticated_owner_has_a_stock_projection(self):
+    async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()
         row = client.gameplay[record.STATE][ID]
         row["owner"] = "other-guest"
-        await view.sync(client, True)
-        client.bridge.command.assert_not_awaited()
-        row["owner"] = "owner"
+        client.gameplay[record.STATE][OPERATION] = dict(row, owner="owner", drop_id=OPERATION, location=[40., 40., 40.])
+        client.gameplay_action.return_value = {drop.RESULT: dict(row, state="reclaimed", claimed_by="owner")}
         await view.sync(client, True)
         self.assertEqual(client.last_game[projection.KEY]["actor"], ACTOR)
         self.assertEqual(client.bridge.command.await_args.args[3:], (ID, "10.0", "20.0", "40.0"))
+        target = client.last_game[projection.KEY]["epoch"], ID
+        receipt = (await view.reclaim(client, OPERATION, target))[drop.RESULT]
+        self.assertEqual((receipt["owner"], receipt["claimed_by"]), ("other-guest", "owner"))
+        client.gameplay_action.assert_awaited_once_with(drop.RECLAIM, OPERATION, ID)
         client.suspended = True
         await view.sync(client, False)
         client.bridge.command.assert_awaited_with(projection.CLEAR, timeout=2)
         self.assertNotIn(projection.KEY, client.last_game)
+
+    async def test_host_uses_exact_local_projection_and_claims_through_the_ledger(self):
+        view = projection.Projection()
+        row = dict(owner="guest", map=MAP, class_path=record.ITEM, guid="D" * 32, quantity=9,
+                   location=[10., 20., 40.], claim_id=None)
+        game = {"state": "hosting", "map": MAP, record.CAPABILITY: 1,
+                "pawns": {"local": {"name": PAWN, "location": [0., 0., 40.]}}}
+        host = SimpleNamespace(last_game=game, last_seen=time.monotonic(), native_guest=True, native_zones=True,
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party={record.STATE: {ID: row}}, zone_epoch="1" * 32,
+                               control=SimpleNamespace(generation="host-generation"))
+
+        async def sync(command, area, epoch, drop_id, *coords, timeout):
+            self.assertEqual((command, area, drop_id, coords), (projection.SYNC, MAP, ID, ("10.0", "20.0", "40.0")))
+            return dict(game, **{projection.KEY: projection.parse([projection.ROW, MAP, epoch, ID, PAWN, ACTOR, "0"],
+                                                                 "hosting", MAP)})
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=sync))
+        await view.sync_host(host, bridge)
+        target = host.last_game[projection.KEY]["epoch"], ID
+        result = {drop.RESULT: dict(record.visible(row, ID), state="reclaimed", claimed_by="host")}
+        with patch.object(drop, "perform", AsyncMock(return_value=result)) as perform:
+            self.assertEqual(await view.reclaim_host(host, bridge, OPERATION, target), result)
+            perform.assert_awaited_once_with(host, bridge, "host", drop.RECLAIM, ID, OPERATION)
 
     async def test_stale_authenticated_snapshot_pauses_projection_without_retiring_its_identity(self):
         client, view = self.client(), projection.Projection()

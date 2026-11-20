@@ -24,7 +24,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 9. **Shared wallet.** Every player draws from the same money pool. The host owns the balance and validates changes to it.
 
-10. **Independent inventories.** Each character has their own inventory. The host tracks and saves it with that character.
+10. **Independent inventories.** Each character has their own inventory. The host tracks and saves it with that character. Any nearby party member can collect an item deliberately dropped in the world. The host settles the first valid pickup exactly once and saves the item with the recipient.
 
 11. **Host-only zone transitions.** Only the host can initiate zone transitions. Zone boundaries block guests. Interacting with a transition door is also host-only. The host still has to meet the door's normal requirements. The host is blocked when any active character is more than 15 meters from the host. Party travel follows rule 18.
 

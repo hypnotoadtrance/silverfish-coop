@@ -1,4 +1,4 @@
-"""Validate the scoped durable owner-claim ledger for native stock 9mm stacks."""
+"""Validate the durable ledger for shared native stock 9mm stacks."""
 
 import math
 import re
@@ -64,6 +64,13 @@ def parse_view(fields: list[str], state: str, area: str) -> dict:
     return dict(sequence=int(number), map=area, pawn=pawn, guid=guid, class_path=item, state=phase, count=int(quantity))
 
 
+def claimed_by(row: dict) -> str | None:
+    if row["claim_id"] is None:
+        return None
+    # Earlier campaign saves only allowed the original dropper to reclaim.
+    return row.get("claimed_by", row["owner"])
+
+
 def active_frames(data: dict, members) -> list[dict]:
     """Return only unclaimed escrow generations and validate durable operation identities."""
     drops = data.get(STATE, {})
@@ -75,17 +82,23 @@ def active_frames(data: dict, members) -> list[dict]:
         if not valid_id(drop_id) or type(row) is not dict or not isinstance(row.get("owner"), str) or row["owner"] not in members:
             raise ValueError("Invalid stock stack drop identity or owner")
         owner, claim_id = row["owner"], row.get("claim_id")
+        fields = _RECORD_FIELDS | ({"escrow"} if claim_id is None else set())
+        if claim_id is not None and "claimed_by" in row:
+            fields |= {"claimed_by"}
         if ((owner, drop_id) in operations or (claim_id is not None and not valid_id(claim_id))
-                or set(row) != (_RECORD_FIELDS | ({"escrow"} if claim_id is None else set()))
+                or row.keys() != fields
                 or not valid_guid(row.get("guid")) or type(row.get("quantity")) is not int
                 or not 1 <= row["quantity"] <= MAX_QUANTITY or row.get("class_path") != ITEM
                 or not supported_map(row.get("map")) or not valid_position(row.get("location"))):
             raise ValueError("Invalid stock stack drop payload")
         operations.add((owner, drop_id))
         if claim_id is not None:
-            if (owner, claim_id) in operations:
+            claimant = claimed_by(row)
+            if not isinstance(claimant, str) or (claimant != "host" and claimant not in members):
+                raise ValueError("Invalid stock stack drop claimant")
+            if (claimant, claim_id) in operations:
                 raise ValueError("Repeated stock stack drop operation identity")
-            operations.add((owner, claim_id))
+            operations.add((claimant, claim_id))
             continue
         frame = row["escrow"]
         if (len(frames) >= MAX_ACTIVE or type(frame) is not dict or frame.get("map") != row["map"]

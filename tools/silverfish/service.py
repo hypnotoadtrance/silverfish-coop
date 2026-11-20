@@ -225,6 +225,7 @@ class Host:
         self.smg_holds = native_smg_hold.Authority(self) if guest_held_fire and self.native_guest_controls else None
         self.mindcore_carry = (native_mindcore_carry.Authority(self)
                                if native_guest and native_zones and native_backend == "cpp" else None)
+        self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -746,6 +747,9 @@ class Host:
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
+        if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
+            view[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(
+                self.party, "host", self.last_game.get("map"))
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
@@ -2409,6 +2413,9 @@ class Host:
                 elif action == "native-interaction-fixture":
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
+                elif action == native_guest_drop_projection.FIXTURE and self.fixtures:
+                    proof = await self.stack_drop_projection.fixture_host(self, bridge, request.get("target"))
+                    result = {native_guest_drop_projection.KEY: proof}
                 elif action == native_kill_volume.FIXTURE and self.fixtures:
                     result = await native_kill_volume.fixture(self, bridge, request.get("target"))
                 elif (action == "native-finite-shop-approach" and self.fixtures
@@ -2606,6 +2613,10 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_stack_drop.perform(self, bridge, character, request.get("item_guid"),
                                                                    request.get("amount"))
+                elif action == native_guest_drop.HOST_RECLAIM:
+                    async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                        result = await native_guest_drop.perform(self, bridge, "host", native_guest_drop.RECLAIM,
+                                                                request.get("target"), request.get("operation_id") or path.stem)
                 elif action in native_guest_drop.ACTIONS and self.fixtures:
                     character = self.roles().get("guest")
                     async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
@@ -3429,11 +3440,22 @@ class Host:
                     self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
+            try:
+                await self.stack_drop_projection.sync_host(self, bridge)
+            except (OSError, RuntimeError) as error:
+                reason = str(error)
+                if self.stack_drop_projection.last_error != reason:
+                    self.stack_drop_projection.last_error = reason
+                    self.control.event("stock_drop_projection_unavailable", reason=reason)
             for operation_id, target in bridge.interactions():
                 if self.stopping or self.native_checkpoint_unsafe:
                     break
                 try:
-                    if target in native_authored_pickup.SOURCES:
+                    if stack_drop := native_guest_drop_projection.target_parts(target):
+                        async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                            result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
                     elif target == native_subway_valve.INPUT:
                         await native_subway_valve.activate(self, bridge, "host", self.zone_epoch)

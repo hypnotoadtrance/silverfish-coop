@@ -1,4 +1,4 @@
-"""Verify one scoped, durable native guest stock 9mm drop and reclaim."""
+"""Verify a durable native guest stock 9mm drop and authenticated party pickup."""
 
 import argparse
 import asyncio
@@ -23,20 +23,21 @@ EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
 
 
-async def verify(work: Path, originals_path: Path, *, visible_projection=False):
-    name = "manual-stack-drop-" + uuid.uuid4().hex[:8]
+async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner"):
+    name = f"manual-stack-drop-{claimant}-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     run = campaign / "run"
     run.mkdir(parents=True)
     print(run, flush=True)
     host = ("--campaign", name)
     owner, other = ("--profile", name), ("--profile", name + "-other")
-    clients = {target: work / "clients" / target[1] / "run" for target in (owner, other)}
+    guests = (owner,) if claimant == "host" else (owner, other)
+    clients = {target: work / "clients" / target[1] / "run" for target in guests}
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones",
              "--max-guests", "2", "--start-zone", record.OBSERVATORY)
     originals = saved_hashes(originals_path)
-    evidence, jobs = {}, []
+    evidence, jobs = {"claimant": claimant}, []
 
     async def command(*arguments, success=True):
         process = await asyncio.create_subprocess_exec(*cli, *arguments, cwd=REPO, stdout=asyncio.subprocess.PIPE,
@@ -84,35 +85,42 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
         native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
         return checkpoint["world"]["party"][record.STATE]
 
-    async def projected(owner_id, drop_id):
+    async def projected(viewer, viewer_id, drop_id, dropper):
         def predicate(frame):
             game = frame.get("game", {})
             proof = game.get(projection.KEY, {})
+            if (proof.get("map"), proof.get("drop_id"), proof.get("pawn")) != (
+                    record.OBSERVATORY, drop_id, game.get("pawns", {}).get("local", {}).get("name")):
+                return False
+            if viewer == host:
+                return frame.get("state") == "hosting"
             row = frame.get("gameplay", {}).get(record.STATE, {}).get(drop_id, {})
-            return (frame.get("state"), frame.get("character_id"), frame.get("gameplay_fresh"),
-                    proof.get("map"), proof.get("drop_id"), proof.get("pawn"), row.get("owner")) == (
-                        "connected", owner_id, True, record.OBSERVATORY, drop_id,
-                        game.get("pawns", {}).get("local", {}).get("name"), owner_id)
+            return (frame.get("state"), frame.get("character_id"), frame.get("gameplay_fresh"), row.get("owner")) == (
+                "connected", viewer_id, True, dropper)
 
-        frame = await wait(clients[owner], predicate)
+        frame = await wait(run if viewer == host else clients[viewer], predicate)
         proof = frame["game"][projection.KEY]
         assert proof["pawn"] and proof["actor"].startswith("Ammo_Pistol_BP_C "), proof
         return proof
 
-    def exact_position(frame, character):
+    def exact_position(frame, character, role):
         game, gameplay = frame.get("game", {}), frame.get("gameplay", {})
-        pawn = gameplay.get("native_pawns", {}).get("guest")
-        if (frame.get("state") != "hosting" or game.get("map") != record.OBSERVATORY or not pawn
-                or gameplay.get("players", {}).get("guest", {}).get("character_id") != character
-                or game.get("native_guest_save_members", {}).get(pawn, {}).get("state") != "bound"):
+        pawn = gameplay.get("native_pawns", {}).get(role)
+        if frame.get("state") != "hosting" or game.get("map") != record.OBSERVATORY or not pawn:
+            return None
+        if role == "host":
+            if character != "host" or game.get("pawns", {}).get("local", {}).get("name") != pawn:
+                return None
+        elif (gameplay.get("players", {}).get(role, {}).get("character_id") != character
+              or game.get("native_guest_save_members", {}).get(pawn, {}).get("state") != "bound"):
             return None
         return next((row["location"] for row in game.get("pawns", {}).values()
                      if row.get("name") == pawn and record.valid_position(row.get("location"))), None)
 
-    async def place(character, position, anchor=None, preferred_lane=None):
-        start = await wait(run, lambda frame: exact_position(frame, character) is not None)
-        prior = exact_position(start, character)
-        pawn = start["gameplay"]["native_pawns"]["guest"]
+    async def place(character, position, anchor=None, preferred_lane=None, *, role="guest"):
+        start = await wait(run, lambda frame: exact_position(frame, character, role) is not None)
+        prior = exact_position(start, character, role)
+        pawn = start["gameplay"]["native_pawns"][role]
         generation, epoch = start["generation"], start["zone_epoch"]
         attempts = []
         result = {"pawn": pawn, "attempts": attempts}
@@ -120,8 +128,8 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
 
         def placement_point(frame):
             if ((frame.get("generation"), frame.get("zone_epoch")) == (generation, epoch)
-                    and frame.get("gameplay", {}).get("native_pawns", {}).get("guest") == pawn):
-                return exact_position(frame, character)
+                    and frame.get("gameplay", {}).get("native_pawns", {}).get(role) == pawn):
+                return exact_position(frame, character, role)
             return None
 
         if position == "far":
@@ -134,7 +142,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
             before = await wait(run, lambda frame: placement_point(frame) is not None, timeout=8)
             sequence = before["game"]["sequence"]
             flags = ("--amount", str(lane)) if lane is not None else ()
-            placed = await action(host, "native-exit-position", "--target", "guest", "--exit-position", where,
+            placed = await action(host, "native-exit-position", "--target", role, "--exit-position", where,
                                   "--entrance", EXIT_TAG, "--exit-actor", EXIT_ACTOR, *flags, success=None)
             attempt = {"requested": where, "lane": lane, "response": placed}
             attempts.append(attempt)
@@ -143,7 +151,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
                     continue
                 raise RuntimeError(f"The exact Observatory stock exit fixture declined placement: {attempts}")
             assert (placed["target"], placed["position"], placed["entrance"], placed["exit_actor"]) == (
-                "guest", where, EXIT_TAG, EXIT_ACTOR), placed
+                role, where, EXIT_TAG, EXIT_ACTOR), placed
 
             samples = attempt["samples"] = []
 
@@ -181,14 +189,18 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
         owner_id = invite["character_id"]
         player = await start("owner", "join", owner, "--invite", invite["invite_file"], "--headless", "--native-zones")
         initial = await bound(1)
-        spare = await command("invite", *host, "--name", "Non-owner", "--character", "Non-owner")
-        outsider = await start("non-owner", "join", other, "--invite", spare["invite_file"], "--headless", "--native-zones")
-        await bound(2)
+        if other in clients:
+            spare = await command("invite", *host, "--name", "Teammate", "--character", "Teammate")
+            other_id = spare["character_id"]
+            teammate = await start("teammate", "join", other, "--invite", spare["invite_file"], "--headless", "--native-zones")
+            await bound(2)
         for target in clients:
             await wait(clients[target], lambda state: state.get("state") == "connected")
 
         source, attempt, claim_id = uuid.uuid4().hex.upper(), uuid.uuid4().hex, uuid.uuid4().hex
-        host_items, other_items = await inventory(host, "host"), await inventory(other, spare["character_id"])
+        host_items = await inventory(host, "host")
+        if other in clients:
+            other_items = await inventory(other, other_id)
         await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", source)
         initial_items = await inventory(owner, owner_id)
         typed, = (item for item in initial_items if item["guid"] == source)
@@ -205,20 +217,62 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
         assert all(item["guid"] != source for item in await inventory(owner, owner_id))
         committed = evidence["durable_escrow"] = saved()[attempt]
         assert "escrow" in committed and committed["claim_id"] is None and "actor" not in committed, committed
-        assert (await action(other, drop.RECLAIM, "--target", attempt, success=False))["error"] == "native_guest_stack_drop_not_owned"
-        assert await inventory(other, spare["character_id"]) == other_items
+        if other in clients:
+            assert await inventory(other, other_id) == other_items
         assert await inventory(host, "host") == host_items
+
+        if claimant != "owner":
+            if claimant == "host":
+                recipient, recipient_id, role, before = host, "host", "host", host_items
+            else:
+                recipient, recipient_id, role, before = other, other_id, "guest2", other_items
+            evidence["owner_projection"] = await projected(owner, owner_id, attempt, owner_id)
+            anchor = dropped["location"]
+            near = await place(recipient_id, "near", anchor, preferred_lane=drop_site["lane"], role=role)
+            unclaimed = await projected(recipient, recipient_id, attempt, owner_id)
+            if recipient == host:
+                assert unclaimed["pawn"] == near["pawn"], unclaimed
+            press = (await action(recipient, projection.FIXTURE, "--target", attempt))[projection.KEY]
+            assert press == {**unclaimed, "sequence": unclaimed["sequence"] + 1}, (unclaimed, press)
+            evidence["stock_projection_interact"] = press
+            evidence["reclaim_position"] = near["location"]
+            for target in clients:
+                await wait(clients[target], lambda state: state.get("gameplay_fresh")
+                           and attempt not in state.get("gameplay", {}).get(record.STATE, {})
+                           and projection.KEY not in state.get("game", {}))
+            await wait(run, lambda state: projection.KEY not in state.get("game", {}))
+            events = (await command("events", *recipient, "--tail", "50"))["events"]
+            event, = [item for item in events if item["event"] == "local_interaction"
+                      and item.get(drop.RESULT, {}).get("drop_id") == attempt]
+            claim_id, reclaimed = event["operation_id"], event[drop.RESULT]
+            assert reclaimed == {**dropped, "state": "reclaimed", "claimed_by": recipient_id}, reclaimed
+            evidence["reclaim"] = reclaimed
+            evidence["stock_projection_reclaim_operation"] = claim_id
+            after = await inventory(recipient, recipient_id)
+            inserted, = (item for item in after if item["guid"] == source)
+            assert {key: val for key, val in inserted.items() if key != "index"} == {
+                key: val for key, val in typed.items() if key != "index"}
+            assert [item for item in after if item["guid"] != source] == before
+            assert await inventory(owner, owner_id) == [item for item in initial_items if item["guid"] != source]
+            if recipient != host:
+                assert await inventory(host, "host") == host_items
+            replay = await action(recipient, drop.HOST_RECLAIM if recipient == host else drop.RECLAIM,
+                                  "--target", attempt, "--operation-id", claim_id)
+            assert replay[drop.RESULT] == reclaimed, replay
+            duplicate = await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id, success=False)
+            assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
+            durable = {key: value for key, value in committed.items() if key != "escrow"}
+            assert saved()[attempt] == dict(durable, claim_id=claim_id, claimed_by=recipient_id)
+            evidence["verified"] = True
+            return
+
         if visible_projection:
-            evidence["projection_before_restart"] = await projected(owner_id, attempt)
-            observed = await wait(clients[other], lambda state: state.get("state") == "connected" and state.get("gameplay_fresh"))
-            assert observed.get("gameplay", {}).get(record.STATE) == {} and projection.KEY not in observed["game"]
-            refused = await action(other, projection.FIXTURE, "--target", attempt, success=False)
-            assert refused["error"] == "stock_drop_projection_fixture_scope_unavailable", refused
-            evidence["wrong_owner_projection_rejected"] = True
+            evidence["projection_before_restart"] = await projected(owner, owner_id, attempt, owner_id)
+            evidence["teammate_projection_before_restart"] = await projected(other, other_id, attempt, owner_id)
 
         await stop(host, server)
         await stop(owner, player)
-        await stop(other, outsider)
+        await stop(other, teammate)
         await start("host-restart", "host", host, "--port", str(initial["endpoint"]["port"]), *flags)
         await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != initial["generation"])
         renewed = await action(host, "refresh-invite", "--target", invite["guest_id"])
@@ -237,7 +291,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
         refused = await action(owner, drop.RECLAIM, "--target", attempt, success=False)
         assert refused["error"] == "native_guest_stack_drop_out_of_range", refused
         if visible_projection:
-            after_restart = await projected(owner_id, attempt)
+            after_restart = await projected(owner, owner_id, attempt, owner_id)
             assert after_restart["epoch"] != evidence["projection_before_restart"]["epoch"], after_restart
             evidence["projection_after_restart"] = after_restart
             assert (await action(owner, "drop-link"))["link_connected"] is False
@@ -247,14 +301,14 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
             assert refused["error"] == "stock_drop_projection_fixture_scope_unavailable", refused
             assert (await action(owner, "reconnect"))["resumed"] is True
             await bound(1)
-            after_reconnect = await projected(owner_id, attempt)
+            after_reconnect = await projected(owner, owner_id, attempt, owner_id)
             assert after_reconnect["epoch"] != after_restart["epoch"], after_reconnect
             evidence["projection_after_reconnect"] = after_reconnect
         near = await place(owner_id, "near", anchor, preferred_lane=drop_site["lane"])
         assert near["pawn"] == far["pawn"], (far, near)
         evidence["reclaim_position"] = near["location"]
         if visible_projection:
-            unclaimed = await projected(owner_id, attempt)
+            unclaimed = await projected(owner, owner_id, attempt, owner_id)
             assert (await inventory(owner, owner_id)) == [item for item in initial_items if item["guid"] != source]
             press = (await action(owner, projection.FIXTURE, "--target", attempt))[projection.KEY]
             assert press == {**unclaimed, "sequence": unclaimed["sequence"] + 1}, (unclaimed, press)
@@ -272,8 +326,9 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False):
             reclaimed = (await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id))[drop.RESULT]
         recover = (drop.RECLAIM, "--target", attempt, "--operation-id", claim_id)
         evidence["reclaim"] = reclaimed
-        assert reclaimed == {**dropped, "state": "reclaimed"}, reclaimed
-        assert saved()[attempt] == {key: value if key != "claim_id" else claim_id for key, value in committed.items() if key != "escrow"}
+        assert reclaimed == {**dropped, "state": "reclaimed", "claimed_by": owner_id}, reclaimed
+        durable = {key: value for key, value in committed.items() if key != "escrow"}
+        assert saved()[attempt] == dict(durable, claim_id=claim_id, claimed_by=owner_id)
         assert await inventory(owner, owner_id) == initial_items and await inventory(host, "host") == host_items
         assert (await action(owner, *recover))[drop.RESULT] == reclaimed
         assert (await action(owner, drop.RECLAIM, "--target", attempt, success=False))["error"] == "native_guest_stack_drop_already_reclaimed"
@@ -299,7 +354,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--visible-projection", action="store_true", help="verify the owner-only stock display and F reclaim")
+    parser.add_argument("--visible-projection", action="store_true", help="verify shared stock display and the owner's stock Interact")
+    parser.add_argument("--claimant", choices=("owner", "host", "teammate"), default="owner",
+                        help="verify the owner after restart, or run a short stock Interact pickup as host or teammate")
     settings = parser.parse_args()
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
-                       visible_projection=settings.visible_projection))
+                       visible_projection=settings.visible_projection, claimant=settings.claimant))

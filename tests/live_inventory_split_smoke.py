@@ -176,7 +176,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                           and event.get(drop.RESULT, {}).get("drop_id") == operation]
                 assert len(claims) == 1, claims
                 claim, = claims
-                assert claim[drop.RESULT] == {**replay, "state": "reclaimed"}, claim
+                assert claim[drop.RESULT] == {**replay, "state": "reclaimed", "claimed_by": character}, claim
                 checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
                 native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
                 tombstone = checkpoint["world"]["party"][drop_record.STATE][operation]

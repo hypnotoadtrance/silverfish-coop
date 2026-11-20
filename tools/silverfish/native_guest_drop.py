@@ -1,4 +1,4 @@
-"""Settle a scoped native guest stack drop or reclaim in one paired checkpoint."""
+"""Settle a native guest drop or teammate pickup in one paired checkpoint."""
 
 import asyncio
 from contextlib import suppress
@@ -14,21 +14,27 @@ from .native_gold import valid_guid
 
 DROP = "native-guest-stack-drop"
 RECLAIM = "native-guest-stack-reclaim"
+HOST_RECLAIM = "native-host-stack-reclaim"
 ACTIONS = (DROP, RECLAIM)
 RESULT = "native_guest_stack_drop"
 _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
-def visible_drops(state: dict, owner: str, area: str | None) -> dict:
+def visible_drops(state: dict, _viewer: str, area: str | None) -> dict:
     return {drop_id: record.visible(row, drop_id) for drop_id, row in state.get(record.STATE, {}).items()
-            if row["owner"] == owner and row["map"] == area and row["claim_id"] is None}
+            if row["map"] == area and row["claim_id"] is None}
 
 
 def _result(row: dict, drop_id: str, action: str) -> dict:
-    return {RESULT: {**record.visible(row, drop_id), "state": "reclaimed" if action == RECLAIM else "dropped"}}
+    result = record.visible(row, drop_id)
+    if action == RECLAIM:
+        result.update(state="reclaimed", claimed_by=record.claimed_by(row))
+    else:
+        result["state"] = "dropped"
+    return {RESULT: result}
 
 
-def _owner(host, character: str) -> str:
+def _participant(host, character: str, action: str) -> str:
     game = host.last_game
     area = game.get("map")
     if (not host.native_guest or not host.native_zones or host.native_profile is None
@@ -36,13 +42,21 @@ def _owner(host, character: str) -> str:
             or (game.get("state"), game.get(record.CAPABILITY)) != ("hosting", 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
-    owner = host.native_recipients().get(character, {})
-    pawn = owner.get("pawn")
+    if character == "host" and action == RECLAIM:
+        local = game.get("pawns", {}).get("local", {})
+        health, pawn = local.get("health"), local.get("name")
+        eligible = type(health) in (int, float) and math.isfinite(health) and health > 0
+        refusal = "native_guest_stack_drop_exact_standing_host_required"
+    else:
+        guest = host.native_recipients().get(character, {})
+        pawn = guest.get("pawn")
+        eligible = character != "host" and guest.get("connected")
+        refusal = "native_guest_stack_drop_exact_standing_guest_required"
     player = host.party["players"].get(character)
-    if (not owner.get("connected") or not record.pawn_matches(area, pawn)
+    if (not eligible or not record.pawn_matches(area, pawn)
             or not player or player["downed"] or host.party["wipe"]
             or character in host.party["pending_spawns"]):
-        raise party.RuleError("native_guest_stack_drop_exact_standing_guest_required")
+        raise party.RuleError(refusal)
     if host.smg_holds is not None and host.smg_holds.strokes:
         raise party.RuleError("native_guest_stack_drop_combat_busy")
     return pawn
@@ -132,7 +146,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, prepared)
     else:
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, source)
-    if host.last_game.get("map") != area or host.zone_epoch != epoch or _owner(host, character) != pawn:
+    if host.last_game.get("map") != area or host.zone_epoch != epoch or _participant(host, character, action) != pawn:
         raise party.RuleError("native_guest_stack_drop_scope_changed")
     if not _near(host, character, row):
         raise party.RuleError("native_guest_stack_drop_out_of_range")
@@ -153,7 +167,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
                 or tuple(proof.get(key) for key in ("map", "operation", "pawn", "drop_id", "source", "replacement")) != (
                     area, verb, pawn, drop_id, source["slot"], replacement)
                 or type(proof.get("ok")) is not bool):
-            raise RuntimeError("The native stack drop settlement did not verify its exact owner and frames")
+            raise RuntimeError("The native stack drop settlement did not verify its exact recipient and frames")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         status = proof.get("status", "")
         if not proof["ok"] and proof.get("count") == 0 and status.startswith("native_inventory_wipe_"):
@@ -165,7 +179,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": [action, request, None], "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -178,7 +192,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     if action not in ACTIONS or not record.valid_id(operation):
         raise party.RuleError("invalid_operation_id")
-    pawn = _owner(host, character)
+    pawn = _participant(host, character, action)
     area, epoch = host.last_game["map"], host.zone_epoch
     scope = area, epoch, pawn
     drops = host.party.get(record.STATE, {})
@@ -186,13 +200,18 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         if receipt["id"] == operation:
             if receipt["request"] != [action, target, None]:
                 raise party.RuleError("operation_id_conflict")
+            if action == RECLAIM:
+                row = drops.get(target) if record.valid_id(target) else None
+                if not row or row["claim_id"] != operation or record.claimed_by(row) != character:
+                    raise party.RuleError("operation_id_conflict")
+                return _result(row, target, RECLAIM)
             return receipt["result"]
     # Durable operation identities remain replayable after the ordinary recent receipt cache rolls over.
     for drop_id, row in drops.items():
-        if row["owner"] != character:
-            continue
-        if drop_id == operation or row["claim_id"] == operation:
-            old_action = DROP if drop_id == operation else RECLAIM
+        debit = row["owner"] == character and drop_id == operation
+        reclaim = row["claim_id"] == operation and record.claimed_by(row) == character
+        if debit or reclaim:
+            old_action = DROP if debit else RECLAIM
             old_target = f"{row['guid']}|{row['quantity']}" if old_action == DROP else drop_id
             if (action, target) != (old_action, old_target):
                 raise party.RuleError("operation_id_conflict")
@@ -200,18 +219,18 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
 
     if action == RECLAIM:
         original = drops.get(target) if record.valid_id(target) else None
-        if not original or original["owner"] != character:
-            raise party.RuleError("native_guest_stack_drop_not_owned")
+        if not original:
+            raise party.RuleError("native_guest_stack_drop_unavailable")
         if original["claim_id"] is not None:
             raise party.RuleError("native_guest_stack_drop_already_reclaimed")
         if not _near(host, character, original):
             raise party.RuleError("native_guest_stack_drop_out_of_range")
         escrow = original["escrow"]
-        await host.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+        await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
         await _escrow_item(host, bridge, escrow, original["guid"], original["quantity"])
         candidate = party.load_party(host.party)
         row = candidate[record.STATE][target]
-        row["claim_id"] = operation
+        row.update(claim_id=operation, claimed_by=character)
         row.pop("escrow")
         return await _settle(host, bridge, character, action, target, target, operation, escrow, None, candidate, scope)
 
