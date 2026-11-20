@@ -8,6 +8,7 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local flayer_fixture = fixtures and headless and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer"
     and require("native_campaign_npc")
+local spratt_fixture = fixtures and headless and require("native_spratt_fixture")
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
@@ -101,10 +102,19 @@ function guest_weapon.command(fields, state, phase)
     local pawn_address, save_address = pawn:GetAddress(), detached:GetAddress()
     local seed_variant = seed_profile and { fields[5] } or {}
     local restore, refusal
-    if action == "fire" and flayer_fixture then
+    local spratt = spratt_fixture and state.map == spratt_fixture.map
+    local shot_fixture = spratt and spratt_fixture or flayer_fixture
+    local shot_tag = spratt and "spratt" or "flayer"
+    if action == "fire" and shot_fixture then
         local checked
-        checked, restore, refusal = pcall(flayer_fixture.before_guest_fire, state, phase, name, guid)
-        if not checked then restore, refusal = nil, "stock_flayer_shot_ticket_check_failed" end
+        checked, restore, refusal = pcall(shot_fixture.before_guest_fire, state, phase, name, guid)
+        if not checked then
+            local reason = tostring(restore)
+            restore = nil
+            local scoped_reason = reason:match("^mutation_unverified_") or reason:match("^stock_spratt_")
+                or reason:match("^stock_flood_jammer_aim_")
+            refusal = spratt and scoped_reason and reason or ("stock_" .. shot_tag .. "_shot_ticket_check_failed")
+        end
     end
     local ok, status, first, second, fifth, sixth
     if refusal then
@@ -112,9 +122,9 @@ function guest_weapon.command(fields, state, phase)
     elseif restore then
         local result = table.pack(pcall(invoke, pawn_address, save_address, guid))
         if not pcall(restore) then
-            ok, status = false, "mutation_unverified_stock_flayer_shot_pose_restore"
+            ok, status = false, "mutation_unverified_stock_" .. shot_tag .. "_shot_pose_restore"
         elseif not result[1] then
-            ok, status = false, "mutation_unverified_stock_flayer_shot_native_fire"
+            ok, status = false, "mutation_unverified_stock_" .. shot_tag .. "_shot_native_fire"
         else
             ok, status, first, second, fifth, sixth = table.unpack(result, 2, result.n)
         end

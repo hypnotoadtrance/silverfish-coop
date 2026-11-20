@@ -16,6 +16,15 @@ local function rotation(r)
         return {Pitch = r.Pitch, Yaw = r.Yaw, Roll = r.Roll}
     end
 end
+
+local function rotation_matches(current, expected)
+    current = rotation(current)
+    if not current then return false end
+    for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+        if math.abs((current[axis] - expected[axis] + 180) % 360 - 180) > 1 then return false end
+    end
+    return true
+end
 local function look(origin, target)
     local x, y, z = target.X - origin.X, target.Y - origin.Y, target.Z - origin.Z
     local horizontal = math.sqrt(x * x + y * y)
@@ -97,7 +106,7 @@ local function align(context, center)
     end
 end
 
-function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule, target_mesh)
+function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule, target_mesh, temporary)
     last = nil
     if not enabled or phase ~= "hosting" or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^A-F0-9]") then
         refuse("headless_fixture_and_guid_required")
@@ -122,6 +131,21 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         or radius < 10 or radius > height or height > 150 then refuse("geometry_unqualified") end
 
     local moved = false
+    local function restore_pose()
+        if not same(context.pawn:GetWorld(), state.world) or not same(context.pawn.Controller, context.controller)
+            or not same(context.pawn.EquipedItem, context.weapon) or not same(context.pawn.Camera, context.camera)
+            or not same(context.weapon.Arrow_Muzzle, context.muzzle) then return false end
+        local position = not moved or context.pawn:K2_TeleportTo(original.point, original.actor)
+        context.controller:SetControlRotation(original.control)
+        context.camera:K2_SetRelativeRotation(original.camera, false, {}, true)
+        context.muzzle:K2_SetRelativeRotation(original.muzzle, false, {}, true)
+        context.pawn:ForceNetUpdate()
+        if not position or select(2, look(original.point, context.pawn:K2_GetActorLocation())) > 20 then return false end
+        return not temporary or rotation_matches(context.pawn:K2_GetActorRotation(), original.actor)
+            and rotation_matches(context.controller:GetControlRotation(), original.control)
+            and rotation_matches(context.camera.RelativeRotation, original.camera)
+            and rotation_matches(context.muzzle.RelativeRotation, original.muzzle)
+    end
     local checked, distance, hit = pcall(function()
         local current_distance, exact_hit = align(context, center)
         if exact_hit then return current_distance, exact_hit end
@@ -146,20 +170,18 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         end
     end)
     if not checked or not hit then
-        local restored, exact = pcall(function()
-            local position = not moved or context.pawn:K2_TeleportTo(original.point, original.actor)
-            context.controller:SetControlRotation(original.control)
-            context.camera:K2_SetRelativeRotation(original.camera, false, {}, true)
-            context.muzzle:K2_SetRelativeRotation(original.muzzle, false, {}, true)
-            context.pawn:ForceNetUpdate()
-            return position and select(2, look(original.point, context.pawn:K2_GetActorLocation())) <= 20
-        end)
+        local restored, exact = pcall(restore_pose)
         if not restored or not exact then error("mutation_unverified_stock_flood_jammer_aim_pose", 0) end
         refuse(checked and "no_stock_sight_line" or "geometry_call_failed")
     end
     if not pcall(function() context.pawn:ForceNetUpdate() end) then error("mutation_unverified_stock_flood_jammer_aim_net_update", 0) end
     last = {world = state.world, map = state.map, pawn = name, target = actor:GetFullName(), tag = tag, guid = guid,
         distance = distance, component = hit}
+    if temporary then
+        return function()
+            if not restore_pose() then error("mutation_unverified_stock_spratt_shot_pose_restore", 0) end
+        end
+    end
     return "verified stock line of fire to the authored target"
 end
 

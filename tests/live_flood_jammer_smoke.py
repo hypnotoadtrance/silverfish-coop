@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY, SPRATT
-from tools.silverfish import native_lenny, native_spratt
+from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from tools.silverfish.travel import CROSSROADS
 
@@ -188,13 +188,18 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         try:
             aim = (await action(host, spec.command("aim"), "--target", "guest", "--item-guid", guid))[f"{spec.key}_aim"]
         except RuntimeError:
-            if lenny and guest_downed(status(run)):
+            if assassination and guest_downed(status(run)):
                 return None
             raise
         target = evidence["stock_watch"]["target"] if assassination else spec.jammer
         assert (aim["map"], aim["target" if assassination else "jammer"], aim["guid"]) == (area, target, guid), aim
         assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(target.split(" ", 1)[-1] + "."), aim
-        press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+        try:
+            press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+        except RuntimeError:
+            if spratt and guest_downed(status(run)):
+                return None
+            raise
         attempt = {"aim": aim, "press": press}
         evidence["shots"].append(attempt)
         assert (press["map"], press["guid"], press["stock_wrappers"]) == (area, guid, 2), press
@@ -205,7 +210,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                           and row.get("generation") == status(client_run).get("generation")), None)
             if event:
                 attempt["receipt"] = event
-                if lenny and event["event"] == "native_guest_primary_input_rejected" and event.get("reason") == "downed":
+                if (assassination and event["event"] == "native_guest_primary_input_rejected"
+                        and event.get("reason") in ("downed", "stock_flood_jammer_aim_standing_guest_required")
+                        and guest_downed(status(run))):
                     return None
                 assert event["event"] == "native_guest_primary_input", event
                 shot = event["native_guest_weapon"]
@@ -213,6 +220,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                     area, aim["pawn"], guid, magazine, magazine - 1, ammo.projectile_count,
                 ), shot
                 return shot
+            if spratt and guest_downed(status(run)):
+                attempt["blocked"] = "canonical_guest_downed"
+                return None
             await asyncio.sleep(.1)
         raise RuntimeError(f"No authoritative stock primary-input receipt for sequence {press['sequence']}")
 
@@ -222,20 +232,28 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
     def objective_committed(state):
         return quest_record(state.get("campaign", {}), quest).get("step") == 2
 
-    async def revive_lenny_guest():
+    async def revive_assassination_guest():
         armed = await wait(run, lambda state: objective_committed(state) or (
             guest_downed(state) and state.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
         ), timeout=5)
         if objective_committed(armed):
             return
-        approach = (await action(host, native_lenny.REVIVE_APPROACH, "--target", "guest"))["native_lenny_revive_approach"]
+        route = native_spratt_fixture.REVIVE if spratt else native_lenny.REVIVE_APPROACH
+        key = native_spratt_fixture.REVIVE_KEY if spratt else "native_lenny_revive_approach"
+        approach = (await action(host, route, "--target", "guest"))[key]
         assert (approach["map"], approach["target"]) == (area, evidence["stock_watch"]["target"]), approach
-        recovered = await action(host, "interact", "--target", character)
-        assert (recovered["effect"], recovered["target"]) == ("revive", character), recovered
+        if spratt:
+            recovered = await action(host, "native-interaction-fixture")
+            assert recovered["native_interaction_fixture"] is True, recovered
+        else:
+            recovered = await action(host, "interact", "--target", character)
+            assert (recovered["effect"], recovered["target"]) == ("revive", character), recovered
         settled = await wait(run, lambda state: objective_committed(state) or (
             state.get("game", {}).get("native_guest_revivals", {}).get(approach["pawn"])
         ), timeout=6)
         native = settled["game"].get("native_guest_revivals", {}).get(approach["pawn"])
+        if spratt:
+            assert native and native["map"] == area and native["pawn"] == approach["pawn"], native
         if native:
             assert native["owner"] == character and math.isclose(native["health"], native["maximum"] * .10, abs_tol=.01), native
         evidence["ordinary_guest_revivals"].append({"approach": approach, "interaction": recovered, "native": native})
@@ -349,24 +367,22 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             evidence["stock_buckshot_reserve"] = shells
         magazine = 7
         max_shots = 12 if assassination else 3
-        if lenny:
+        if assassination:
             evidence["ordinary_guest_revivals"] = []
         fired = 0
         observed = None
-        for _ in range(max_shots + (8 if lenny else 0)):
+        for _ in range(max_shots + (8 if assassination else 0)):
             present = status(run)
             if objective_committed(present):
                 observed = present
                 break
-            if lenny and guest_downed(present):
+            if assassination and guest_downed(present):
                 if len(evidence["ordinary_guest_revivals"]) >= 4:
-                    raise RuntimeError("Lenny downed the guest through four ordinary revives")
-                await revive_lenny_guest()
+                    raise RuntimeError(f"{quest} downed the guest through four ordinary revives")
+                await revive_assassination_guest()
                 continue
             if fired >= max_shots:
                 break
-            if spratt and guest_downed(present):
-                raise RuntimeError("Spratt downed the guest before the stock objective completed")
             if magazine == 0 and assassination:
                 reload = (await action(client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
                 magazine = reload["after"]

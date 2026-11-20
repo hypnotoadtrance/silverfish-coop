@@ -2537,6 +2537,9 @@ class Host:
                 elif action == native_spratt_fixture.AIM:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_spratt_fixture.aim(self, bridge, actor, request.get("item_guid"))
+                elif action == native_spratt_fixture.REVIVE:
+                    actor = self.roles().get(request.get("target") or "guest")
+                    result = await native_spratt_fixture.revive(self, bridge, actor)
                 elif action == native_lenny.REVIVE_APPROACH:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_lenny.revive_approach(self, bridge, actor)
