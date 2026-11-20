@@ -1,0 +1,190 @@
+"""One-shot stock title selection over an isolated staged bridge."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+import secrets
+import stat
+from tempfile import NamedTemporaryFile
+import time
+
+from . import native_title_entry
+
+
+DESCRIPTOR_FILE = "title-handoff-session.tsv"
+REQUEST_FILE = "title-handoff-request.tsv"
+ACTIONS = ("host", "join")
+LEASE_SECONDS = 10
+_REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(host|join)\r?\n")
+_MAX_REQUEST_BYTES = len(b"1\t" + b"0" * 32 + b"\t" + b"0" * 32 + b"\thost\r\n")
+
+
+@dataclass(frozen=True)
+class Claim:
+    action: str
+    request_id: str
+    generation: str
+    binding: object = field(repr=False)
+
+
+def _stock_title(snapshot):
+    if (not isinstance(snapshot, dict)
+            or (snapshot.get("schema"), snapshot.get("mode"), snapshot.get("state"), snapshot.get("map"))
+            != (1, "idle", "ready", native_title_entry.MAP)
+            or snapshot.get("remote_clients") != 0 or snapshot.get("server_connection") is not False):
+        return None
+    sequence = snapshot.get("sequence")
+    row = snapshot.get(native_title_entry.KEY)
+    if type(sequence) is not int or sequence <= 0 or not isinstance(row, dict):
+        return None
+    if ((row.get("map"), row.get("state"), row.get("reason")) != (native_title_entry.MAP, "ready", None)
+            or any(row.get(field) is not True for field in ("top", "mounted", "visible"))):
+        return None
+    count = row.get("menu_stack")
+    if type(count) is not int or not 1 <= count <= 32:
+        return None
+    names = tuple(row.get(field) for field in ("controller", "widget", "viewport"))
+    for name, label in zip(names, ("PlayerControler_FP_C", "MainMenu_Widget_C", "GameViewportClient"), strict=True):
+        if not isinstance(name, str) or not name.isprintable() or len(name) > 512:
+            return None
+        actual, space, path = name.partition(" ")
+        if actual != label or not space or not path:
+            return None
+    return sequence, names
+
+
+def _unlink(path: Path) -> bool:
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        return False
+    return True
+
+
+class TitleHandoff:
+    """Use one instance per private bridge. Call refresh and poll on the owning supervisor.
+
+    Snapshot values come from that bridge's stock-title status. Bindings are
+    supervisor-owned choices, held privately for the lifetime of each offer.
+    A claimed handoff stays spent even after closing it.
+    """
+
+    def __init__(self, directory: Path, *, clock=time.time):
+        directory = directory.resolve(strict=True)
+        if not directory.is_dir():
+            raise NotADirectoryError(directory)
+        self.descriptor_path = directory / DESCRIPTOR_FILE
+        self.request_path = directory / REQUEST_FILE
+        self._clock = clock
+        self._claim = None
+        self.last_refusal = None
+        self.close()
+
+    def close(self) -> None:
+        """Disarm the offer immediately, even if the game is reading its descriptor."""
+        self._generation = None
+        self._expires = 0
+        self._bindings = {}
+        self._title = None
+        self._publish_sequence = 0
+        self._pending = None
+        _unlink(self.descriptor_path)
+
+    def refresh(self, snapshot: dict | None, bindings: Mapping[str, object]) -> bool:
+        """Publish or renew usable actions on the current exact stock title screen."""
+        choices = dict(bindings)
+        if any(type(action) is not str or action not in ACTIONS or binding is None
+               for action, binding in choices.items()):
+            self.close()
+            raise ValueError("Unsupported title handoff binding")
+        if self._claim is not None or not choices:
+            self.close()
+            return False
+        now = int(self._clock())
+        if self._generation and not 0 <= self._expires - now <= LEASE_SECONDS:
+            self.close()
+        if snapshot is None:
+            return bool(self._generation)
+        frame = _stock_title(snapshot)
+        if frame is None:
+            self.close()
+            return False
+        sequence, title = frame
+        if (title != self._title or choices != self._bindings) and self._generation:
+            self.close()
+        generation = self._generation
+        if generation and (sequence <= self._publish_sequence or self._expires - now > LEASE_SECONDS // 2):
+            return True
+
+        generation = generation or secrets.token_hex(16)
+        advertised = ",".join(action for action in ACTIONS if action in choices)
+        expires = now + LEASE_SECONDS
+        row = f"1\t{generation}\t{advertised}\t{expires}\n".encode("ascii")
+        with NamedTemporaryFile(dir=self.descriptor_path.parent, prefix=".title-handoff-", delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(row)
+                stream.close()
+                temporary.replace(self.descriptor_path)
+            except PermissionError:
+                return bool(self._generation)
+            finally:
+                _unlink(temporary)
+        self._generation = generation
+        self._bindings = choices
+        self._title = title
+        self._expires = expires
+        self._publish_sequence = sequence
+        return True
+
+    def poll(self, snapshot: dict | None) -> Claim | None:
+        """Claim a complete request once, after a later frame confirms the same title."""
+        try:
+            if not stat.S_ISREG(self.request_path.lstat().st_mode):
+                self.last_refusal = "request_file_unqualified"
+                return None
+            with self.request_path.open("rb") as stream:
+                data = stream.read(_MAX_REQUEST_BYTES + 1)
+        except (FileNotFoundError, PermissionError):
+            return None
+
+        match = _REQUEST.fullmatch(data)
+        if not match:
+            return self._refuse("malformed_request")
+        generation, request_id, action = (field.decode("ascii") for field in match.groups())
+        if self._claim is not None:
+            code = "duplicate_request" if request_id == self._claim.request_id else "handoff_consumed"
+            return self._refuse(code)
+        if generation != self._generation:
+            return self._refuse("stale_generation")
+        if not 0 <= self._expires - int(self._clock()) <= LEASE_SECONDS:
+            self.close()
+            return self._refuse("expired_generation")
+        if action not in self._bindings:
+            return self._refuse("unadvertised_action")
+        if snapshot is None:
+            return None
+        frame = _stock_title(snapshot)
+        if frame is None or frame[1] != self._title:
+            self.close()
+            return self._refuse("stock_title_unready")
+        sequence, _ = frame
+        if self._pending is None or self._pending[0] != data:
+            self._pending = data, sequence
+            return None
+        if sequence <= max(self._pending[1], self._publish_sequence):
+            return None
+
+        if not _unlink(self.request_path):
+            return None
+        claim = Claim(action, request_id, generation, self._bindings[action])
+        self._claim = claim
+        self.last_refusal = None
+        self.close()
+        return claim
+
+    def _refuse(self, code: str) -> None:
+        self.last_refusal = code
+        self._pending = None
+        _unlink(self.request_path)

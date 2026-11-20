@@ -319,7 +319,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
-           host_dig_live: bool = False, host_dig_live_fixture: bool = False):
+           host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -339,6 +339,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_TRANSPORT", None)
     env.pop("SILVERFISH_COOP_NATIVE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_HEADLESS", None)
+    env.pop("SILVERFISH_COOP_TITLE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_CQC_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
@@ -453,6 +454,10 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_HOST_DIG"] = "1"
         if host_dig_live_fixture and headless and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES"] = "1"
+    if title_fixture:
+        if not headless or port is not None:
+            raise ValueError("The co-op title input fixture requires an isolated headless title process")
+        env["SILVERFISH_COOP_TITLE_FIXTURES"] = "1"
     if guest_inventory_view:
         env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
     if native_shop_view:
@@ -914,6 +919,10 @@ class Bridge:
                     if native_title_entry.KEY in data:
                         raise ValueError("Repeated stock title report")
                     data[native_title_entry.KEY] = native_title_entry.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_title_entry.PANEL_TAG:
+                    if native_title_entry.PANEL_KEY in data:
+                        raise ValueError("Repeated co-op title panel report")
+                    data[native_title_entry.PANEL_KEY] = native_title_entry.parse_panel(fields, data.get("state"), data.get("map"))
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",

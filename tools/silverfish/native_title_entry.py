@@ -5,6 +5,8 @@ import re
 
 TAG = "native-title-entry"
 KEY = "native_title_entry"
+PANEL_TAG = "native-title-panel"
+PANEL_KEY = "native_title_panel"
 MAP = "/Game/Classes/Maps/MainMenu_P"
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -32,4 +34,16 @@ def parse(fields: list[str], phase: str, area: str) -> dict:
     return dict(map=area, state=state, controller=names[0], widget=names[1], viewport=names[2],
                 menu_stack=None if count == "-" else int(count), top=None if top == "-" else top == "1",
                 mounted=None if mounted == "-" else mounted == "1", visible=None if visible == "-" else visible == "1",
+                reason=None if reason == "-" else reason)
+
+
+def parse_panel(fields: list[str], phase: str, area: str) -> dict:
+    if len(fields) != 6 or (fields[0], fields[1], phase, area) != (PANEL_TAG, MAP, "ready", MAP):
+        raise ValueError("Unexpected co-op title panel report")
+    _, _, state, actions, mounted, reason = fields
+    if (state not in ("ready", "hidden", "pending", "unavailable") or actions not in ("host", "join", "host,join")
+            or mounted not in ("0", "1") or (reason != "-" and not _REASON.fullmatch(reason))
+            or (state == "ready" and (mounted != "1" or reason != "-"))):
+        raise ValueError("Unexpected co-op title panel state")
+    return dict(map=area, state=state, actions=actions.split(","), mounted=mounted == "1",
                 reason=None if reason == "-" else reason)

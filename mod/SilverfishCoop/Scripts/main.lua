@@ -56,6 +56,7 @@ local native_broker_input = require("native_broker_input")
 local native_wipe_view = require("native_wipe_view")
 local native_fresh_campaign = require("native_fresh_campaign")
 local native_title_entry = require("native_title_entry")
+local native_title_panel = require("native_title_panel")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -870,6 +871,7 @@ local function run_command(fields, state, current_phase)
         or native_host_landmine.command(fields, state, current_phase)
         or native_host_dig.command(fields, state, current_phase)
         or native_host_dig_live.command(fields, state, current_phase)
+        or native_title_panel.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -993,6 +995,7 @@ local function write_status(state, current_phase, failure)
     end
     if not failure then
         for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_title_panel.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local vitals_ok, vitals_row = pcall(vitals.row, state, current_phase, status_row)
@@ -1201,6 +1204,7 @@ end
 local function tick()
     local state, current_phase = observe_session()
     if not state then return end
+    native_title_panel.sync(state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
@@ -1299,6 +1303,7 @@ native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
 native_host_camera.start(bridge, players.is_downed)
 native_host_dig_live.start(bridge)
+native_title_panel.start(bridge)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)
