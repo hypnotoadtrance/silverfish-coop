@@ -70,7 +70,7 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
                            raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False,
-                           fixture_passengers=False, west_walkway=False):
+                           fixture_passengers=False, west_walkway=False, east_stairs=False):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -324,6 +324,30 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         assert regrouped["hold"]["lease"] == proof["landing"]["hold"]["lease"]
         proof["west_walkway"] = regrouped
 
+    async def climb_first_east_stair():
+        if not east_stairs:
+            return
+        route = proof["east_stair_path"] = await action(run, lift.FIXTURE, target="route-east-stairs")
+        if route.get("complete") is not True:
+            raise RuntimeError("The stock east-stair path is incomplete")
+        base = proof["west_walkway"]
+        facing = base["hold"]["yaw"]
+        for index, (x, y, floor) in enumerate(route["points"][1:], 1):
+            outward = math.degrees(math.atan2(y, x))
+            if abs((outward - facing + 180) % 360 - 180) > 28:
+                await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
+                facing = outward
+            for seat in ("carrier", "lead"):
+                frame = await walk_to(f"follow the east stair path point {index} with the {seat}",
+                                      (x, y), 25, seat=seat,
+                                      reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
+            proof["east_stair_progress"] = {"point": index, "frame": frame}
+        finish = await observe("both players stand on the lower east stairs with the same Core", lambda row, *_: (
+            all(row[seat]["location"][2] > base[seat]["location"][2] + 30 for seat in ("lead", "carrier"))
+            and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 55))
+        assert finish["hold"]["lease"] == base["hold"]["lease"]
+        proof["east_stair"] = finish
+
     async def disembark():
         def above_west_rail(row, *_):
             return row["prop"]["position"][2] >= UPPER_LANDING_Z + 154
@@ -350,6 +374,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         pickup = proof.get("upper_regrip") or proof["grab"]
         assert landed["hold"]["sequence"] > pickup["hold"]["sequence"]
         await cross_west_walkway()
+        await climb_first_east_stair()
 
     proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
 
