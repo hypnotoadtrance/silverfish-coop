@@ -1,4 +1,4 @@
-"""Follow the enrolled guest's stock Core hold from the floor onto the upper lift landing."""
+"""Follow the exact stock Core with its enrolled guest from the floor to the upper lift landing."""
 
 import asyncio
 import math
@@ -10,6 +10,7 @@ from tools.silverfish import native_mindcore as core, native_mindcore_carry as c
 
 
 EXIT_Y = 64.0
+UPPER_LANDING_Z = 2400.0
 # Stock HoldObject uses the camera's horizontal heading above level pitch.
 CARRY_PITCH = 3
 
@@ -234,41 +235,47 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     await walk_to("cross above the second pile face", (-795, 465), 16)
     await walk_to("clear the far side of the second pile", (-900, 450), 20)
     await walk_to("reach the west side of the lower lift", (-1900, 170), 17)
-    await walk_to("reach the west wall beside the lift", (-1941, 183), 12)
-    await turn("swing the Core north in the clear west approach", 90)
-    proof["north_turn"] = await observe("allow the Core to clear the north side of the carrier", lambda row, *_: (
-        row["prop"]["position"][1] > row["carrier"]["location"][1] + 65), timeout=5)
-    await turn("turn the Core away from the lift before lining up", 180)
-    proof["west_turn"] = await observe("allow the stock Core to swing behind the carrier outside the lift", lambda row, *_: (
-        row["prop"]["position"][0] < row["carrier"]["location"][0] - 75), timeout=5)
-    await walk_to("west approach to the lower lift", (-1900, EXIT_Y), 9)
-    await walk_to("align with the lower lift opening", (-1900, EXIT_Y), 3.5)
-    proof["preboard_hold"] = await observe("verify the trailing prop before entering the west opening", lambda row, *_: (
-        row["prop"]["position"][0] < row["carrier"]["location"][0] - 75
-        and abs(row["prop"]["position"][1] - EXIT_Y) < 35), timeout=5)
-    boarded = await walk_to("walk the held Core onto the lower deck", (-1672, EXIT_Y), 13, reached=on_deck)
-    proof["carrier_boarded"] = boarded
-
-    staged = await action(run, lift.STAGE_RIDER, target="host")
+    await walk_to("bring the Core beside the west opening", (-1939, 126), 13)
+    proof["before_regrip"] = await observe("place the Core north of the west opening", lambda row, *_: (
+        row["prop"]["position"][0] < -1760 and row["prop"]["position"][1] > 118), timeout=3)
+    released_lease, lease = lease, None
+    await action(guest_run, carry.FIXTURE, target="release")
+    proof["stock_set_down"] = await observe("observe the exact Core after stock release", lambda row, *_: (
+        tuple(row["hold"].get(key) for key in ("lease", "core", "state", "reason"))
+        == (released_lease, core.CORE, "released", "stock_core_released")
+        and row["guest_hold"].get("state") == "ready"), timeout=8)
+    await walk_to("align the unladen guest with the west opening", (-1900, EXIT_Y), 6.4)
+    staged, proof["deck_regrip_position"] = await asyncio.gather(
+        action(run, lift.STAGE_RIDER, target="host"),
+        walk_to("walk past the Core to the lower deck rider position", (-1672, EXIT_Y), 11, reached=on_deck),
+    )
     assert staged["pawn"] == host_pawn, staged
+    await action(guest_run, carry.FIXTURE, target="grab")
+    proof["stock_regrip"] = await observe("verify a fresh stock hold on the same Core from the deck", lambda row, *_: (
+        (row["hold"].get("state"), row["hold"].get("pawn"), row["hold"].get("core")) == ("held", guest_pawn, core.CORE)
+        and row["hold"].get("lease") not in (None, released_lease) and row["guest_hold"].get("state") == "held"), timeout=8)
+    lease = proof["stock_regrip"]["hold"]["lease"]
     ready = await at_stop("both exact riders on the lower deck", "lower", riders=True)
-    assert math.dist(ready["carrier"]["location"], boarded["carrier"]["location"]) < 20
-    assert math.dist(ready["prop"]["position"], boarded["prop"]["position"]) < 35
+    assert math.dist(ready["carrier"]["location"], proof["stock_regrip"]["carrier"]["location"]) < 20
     proof["both_boarded"] = ready
     pressed = await action(run, lift.FIXTURE, target="button")
     assert (pressed["input"], pressed["source_stop"]) == ("button", "lower"), pressed
     proof["stock_lift_button"] = pressed
     proof["ascending"] = await at_stop("moving stock lift with the Core", "moving", riders=True)
     upper = await at_stop("upper stock lift with the Core", "upper", riders=True)
-    assert upper["prop"]["position"][2] - boarded["prop"]["position"][2] > 2250
-    assert upper["carrier"]["location"][2] - boarded["carrier"]["location"][2] > 2250
+    assert upper["prop"]["position"][2] - ready["prop"]["position"][2] > 2250
+    assert upper["carrier"]["location"][2] - ready["carrier"]["location"][2] > 2250
     proof["upper"] = upper
 
     await walk_to("align with the upper lift opening", (-1672, EXIT_Y), 3.5)
-    await turn("trail the Core toward the west landing", 0)
-    landed = await walk_to("carry the Core onto the west landing", (-2010, EXIT_Y), 19, reached=lambda row: not on_deck(row))
+    await turn("line up the Core with the upper west opening", 172)
+    proof["upper_aligned"] = await observe("verify the Core is raised and centered before exiting", lambda row, *_: (
+        row["prop"]["position"][0] < row["carrier"]["location"][0] - 75
+        and abs(row["prop"]["position"][1] - EXIT_Y) < 12
+        and row["prop"]["position"][2] >= UPPER_LANDING_Z), timeout=6)
+    landed = await walk_to("carry the Core onto the west landing", (-1990, EXIT_Y), 18, reached=lambda row: not on_deck(row))
+    proof["landing"] = landed
     assert "guest" not in landed["bases"][0] and "local" not in landed["bases"][1]
     assert 2470 < landed["carrier"]["location"][2] < 2520
-    assert landed["prop"]["position"][0] < -1820
+    assert landed["prop"]["position"][0] < -1820 and landed["prop"]["position"][2] >= UPPER_LANDING_Z
     assert landed["hold"]["sequence"] > proof["grab"]["hold"]["sequence"]
-    proof["landing"] = landed
