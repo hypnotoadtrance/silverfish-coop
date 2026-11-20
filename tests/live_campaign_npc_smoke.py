@@ -401,7 +401,10 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH"] = "1"
         if flayer_veto:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
-    if family == "notdeer":
+    default_not_deer = family == "notdeer" and not combat
+    if default_not_deer:
+        environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC")
+    elif family == "notdeer":
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
@@ -412,7 +415,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 "verification_scope": ("join" if join_only else "combat" if combat
                                        else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
-                "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat}
+                "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat,
+                "stock_not_deer_launch_defaults": default_not_deer}
     replay_key = family + "_replay"
     if prepared:
         evidence[replay_key] = {"prepared": prepared}

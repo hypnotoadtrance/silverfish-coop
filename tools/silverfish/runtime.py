@@ -410,6 +410,11 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
         env["SILVERFISH_COOP_NATIVE_ZONE"] = "1"
         env["SILVERFISH_COOP_NATIVE_TRANSPORT"] = "1"
         env["SILVERFISH_COOP_NATIVE_INTERACT_INPUT"] = "1"
+        if (backend == "cpp" and (native_guest or guest_inventory_view)
+                and "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC" not in env
+                and staged_script(work, "native_campaign_npc.lua", "NPC_NotDeer_C")):
+            env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1",
+                       SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW="notdeer")
         if port is not None and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
