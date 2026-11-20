@@ -1,6 +1,6 @@
 # Project Silverfish Co-op
 
-A Windows Direct IP prototype with an optional native campaign lab. The native lab has been tested on loopback with one host and two guests. See the [18 locked rules](docs/DESIGN.md) for the full design.
+A Windows Direct IP prototype with a native campaign stage. The largest loopback test used one host and four guests. [18 locked rules](docs/DESIGN.md) · [In-game integration plan](docs/IN-GAME-INTEGRATION.md)
 
 The launcher copies the stock game into a separate runtime, installs a small UE4SS bridge in the copy, and starts Unreal with a separate user-data directory. Players connect directly to the host's UDP port using an authenticated, encrypted QUIC connection. The launcher relays game packets to Unreal over loopback. [Player and automation guide](docs/PLAYING-COOP.md)
 
