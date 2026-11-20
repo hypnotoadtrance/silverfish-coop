@@ -37,6 +37,7 @@ from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_melee import parse as parse_guest_melee
 from . import native_host_dig, native_host_dig_live
+from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity
@@ -909,6 +910,10 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields[0] == native_title_entry.TAG:
+                    if native_title_entry.KEY in data:
+                        raise ValueError("Repeated stock title report")
+                    data[native_title_entry.KEY] = native_title_entry.parse(fields, data.get("state"), data.get("map"))
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",

@@ -55,6 +55,7 @@ local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_broker_input = require("native_broker_input")
 local native_wipe_view = require("native_wipe_view")
 local native_fresh_campaign = require("native_fresh_campaign")
+local native_title_entry = require("native_title_entry")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -991,6 +992,7 @@ local function write_status(state, current_phase, failure)
             last_guest_xp.before, last_guest_xp.after)
     end
     if not failure then
+        for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local vitals_ok, vitals_row = pcall(vitals.row, state, current_phase, status_row)
