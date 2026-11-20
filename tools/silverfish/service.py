@@ -2669,6 +2669,12 @@ class Host:
                     result = await native_datasilo_lift.exercise_fixture(self, bridge, request.get("target"))
                 elif action == native_datasilo_lift.STAGE_RIDER and self.fixtures:
                     result = await native_datasilo_lift.stage_rider(self, bridge, request.get("target"))
+                elif action == native_authored_pickup.CISTERN_LOCKER_FIXTURE and self.fixtures:
+                    if self.last_game.get("map") != CISTERN or request.get("target") is not None:
+                        raise ValueError("The isolated Cistern locker fixture requires the exact host world")
+                    self.last_game = await bridge.command(action, timeout=7)
+                    self.last_seen = time.monotonic()
+                    result = {"locker": self.last_game["ack"]["message"]}
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
                                 native_mindcore_fixture.CARRY) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))

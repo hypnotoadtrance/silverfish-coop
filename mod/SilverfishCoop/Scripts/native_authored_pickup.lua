@@ -408,6 +408,9 @@ local arguments = {
 
 function pickup.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-cistern-nfta-locker-fixture" then
+        return stock_input_fixture.cistern_nfta_locker(fields, state, phase)
+    end
     if action == "native-dead-drop-project" then
         local detail = state.local_pawn
         if #fields ~= 4 or phase ~= "connected" or not state.listening or state.server ~= true

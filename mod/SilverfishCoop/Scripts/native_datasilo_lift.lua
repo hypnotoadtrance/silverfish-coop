@@ -247,14 +247,9 @@ local function rider(current, pawn, slot, row)
     end
 end
 
-local function guest_pawn(state, phase)
-    if state.clients ~= 1 then return end
-    for _, detail in ipairs(state.pawns) do
-        if (detail.slot or detail.kind) == "guest" then
-            local pawn, detached = guest_save.exact_item_context(state, phase, detail.name)
-            if same(pawn, detail.pawn) and same(pawn.Save, detached) then return pawn end
-        end
-    end
+local function guest_pawn(state, phase, detail)
+    local pawn, detached = guest_save.exact_item_context(state, phase, detail.name)
+    if same(pawn, detail.pawn) and same(pawn.Save, detached) then return pawn end
 end
 
 local function append_rider(rows, current, slot, row, find)
@@ -279,8 +274,10 @@ function lift.rows(state, phase, row)
             current.actor.bReplicates and 1 or 0, current.actor.bReplicateMovement and 1 or 0,
             current.deck_collision, current.button_collision, current.stop, x, y, z, dx, dy, dz, coordinates(button))}
         append_rider(rows, current, "local", row, function() return local_pawn(state, peer) end)
-        if peer == "host" and state.clients == 1 then
-            append_rider(rows, current, "guest", row, function() return guest_pawn(state, phase) end)
+        if peer == "host" then
+            for _, guest in ipairs(state.guests) do
+                append_rider(rows, current, guest.slot, row, function() return guest_pawn(state, phase, guest) end)
+            end
         end
         return rows
     end)

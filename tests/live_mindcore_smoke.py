@@ -414,7 +414,16 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
 
         authority = await traverse(authority, path)
         source = pickup.CISTERN_OLD_NFTA_KEYCARD
-        staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
+        opened = await action(run, pickup.CISTERN_LOCKER_FIXTURE)
+        proof["lift_key_locker"] = opened["locker"]
+        for attempt in range(4):
+            try:
+                staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
+                break
+            except RuntimeError as error:
+                if attempt == 3 or "no_clear_sight" not in str(error):
+                    raise
+                await asyncio.sleep(.4)
         assert staged["actor"] == pickup.SOURCES[source][1]
         receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
         assert (receipt["entry"], receipt["source"], receipt["pawn"]) == (

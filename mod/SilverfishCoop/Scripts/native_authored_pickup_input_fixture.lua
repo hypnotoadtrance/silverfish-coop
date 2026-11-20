@@ -5,9 +5,11 @@ local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
+local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 local drill_head = "scientist-tunnel-drill-head"
 local lab_blank_tape = "lab-e206-blank-data-tape"
 local cistern_keycard = "cistern-old-nfta-keycard"
+local cistern_locker = "cistern-old-nfta-locker"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
@@ -21,7 +23,8 @@ local sources = {
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
     ["northeast-rail-molasses"] = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P",
     ["trench-savlo-keycard"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
-    [cistern_keycard] = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P",
+    [cistern_keycard] = cistern,
+    [cistern_locker] = cistern,
     ["trench-savlo-locker"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
     ["fort-leto-locker-key-543"] = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P",
     ["forest-brokers-artifacts-bag"] = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
@@ -45,6 +48,7 @@ local precise_distances = {
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
     [cistern_keycard] = {55, 80, 105, 125, 160, 195},
+    [cistern_locker] = {95, 125, 150, 185},
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
@@ -69,11 +73,11 @@ for _, profile in ipairs(cash_profiles) do
     sources[profile.source] = profile.map
     precise_distances[profile.source] = {95, 125, 155, 190}
 end
-local approach_front = {[dust_filter] = 0, [molasses] = 180, [stolen_bag] = -90}
+local approach_front = {[dust_filter] = 0, [molasses] = 180, [stolen_bag] = -90, [cistern_locker] = -90}
 -- The exact City stack sits in the low wall shelf at yaw -105 degrees.
 if shelf_source then approach_front[shelf_source] = 75 end
 local cabinet_labels = {[dust_filter] = "authored_dust_cabinet", [molasses] = "authored_molasses_cabinet",
-    [savlo_locker] = "authored_savlo_locker"}
+    [savlo_locker] = "authored_savlo_locker", [cistern_locker] = "stock_cistern_nfta_locker"}
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 local function valid(object)
@@ -466,6 +470,39 @@ function input.open_cabinet(state, phase, pawn, actor, box, source)
     end
     if not ok then error(receipt, 0) end
     return receipt
+end
+
+function input.cistern_nfta_locker(fields, state, phase)
+    local world_path = cistern .. ".Cistern_P"
+    local path = world_path .. ":PersistentLevel.LootLocker_Small_BP_C_6"
+    local class = "/Game/Classes/Actors/Lootables/LootLocker_Small_BP.LootLocker_Small_BP_C"
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    local actor = state.map == cistern and StaticFindObject(path)
+    if #fields ~= 2 or not valid(pawn) or not valid(actor) or not approach_scope(state, phase, pawn, actor, cistern)
+        or state.world:GetFullName() ~= "World " .. world_path or not pawn:IsLocallyControlled()
+        or actor:GetFullName() ~= "LootLocker_Small_BP_C " .. path or not same(actor:GetClass(), StaticFindObject(class))
+        or not same(actor:GetOuter(), state.world.PersistentLevel) or not actor:HasAuthority()
+        or actor:IsActorBeingDestroyed() or actor.SpawnSalt ~= -1065462208 or type(actor.Locked) ~= "boolean" then
+        error("stock_cistern_nfta_locker_fixture_scope_unavailable", 0)
+    end
+    local location, facing = vector(actor:K2_GetActorLocation()), rotation(actor:K2_GetActorRotation())
+    local door, timeline = actor.SM_Prop_Cabinet_Small_Door_01, actor.Timeline
+    if not location or square(location, {X = 5109.10794, Y = 11363.25031, Z = -2250}) > 1
+        or not facing or math.abs(math.abs(facing.Yaw) - 180) > .2
+        or not owned(door, actor, "StaticMeshComponent") or not owned(timeline, actor, "TimelineComponent") then
+        error("stock_cistern_nfta_locker_fixture_geometry_unavailable", 0)
+    end
+    local function opened()
+        local angle = rotation(door.RelativeRotation)
+        return actor.Locked == false and (timeline:IsPlaying() == true or angle and math.abs(angle.Yaw) > 1)
+    end
+    if opened() then return "stock_cistern_nfta_locker_already_open" end
+    local box = actor.Box
+    if not owned(box, actor, "BoxComponent") then error("stock_cistern_nfta_locker_fixture_box_unavailable", 0) end
+    input.open_cabinet(state, phase, pawn, actor, box, cistern_locker)
+    if actor.Locked then error("stock_cistern_nfta_locker_locked", 0) end
+    if not opened() then error("mutation_unverified_stock_cistern_nfta_locker_open", 0) end
+    return "stock_cistern_nfta_locker_opening"
 end
 
 function input.approach_cabinet_guest(state, phase, pawn, actor, box, source)
