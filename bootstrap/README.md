@@ -14,6 +14,18 @@ Build the test coordinator with a matching Windows x64 Python environment, the r
 
 Build the [native title bridge](native/README.md) with the coordinator's SHA-256 pin. Run `python bootstrap/package.py <new-archive.zip> --native-dll <main.dll> --coordinator <SilverfishCoopCoordinator.exe>` to package the matching pair beside the three Lua scripts. The same opt-in UE4SS mod entry loads the complete bootstrap.
 
+## Install from a trial ZIP
+
+Extract the matched Windows trial ZIP. Run the one-time setup from its extracted directory. Set the game path to the local Steam installation, the workspace path to a separate storage location, and the last two paths to the extracted UE4SS v4.0.0 release and its Project Silverfish signature folder.
+
+```powershell
+.\Setup.ps1 -Game $steamGame -Work $workspace -Ue4ss $ue4ssRelease -Signatures $silverfishSignatures
+```
+
+The ZIP supplies the isolated Python runtime for setup. It includes the coordinator, both title and gameplay modules, and version-matched Lua scripts. Creating a private stage needs space for a full copy of the stock game files. Setup can also reuse a complete stage from the same release. It installs the title entry and configures **Host** and **Join**. Start the game with Steam **Play** and choose **Open Co-op** on the title.
+
+To assemble the ZIP from validated local artifacts, use `python -m bootstrap.release_bundle --help`. The recipe checks the versioned dependency lock, the native manifest and coordinator pins, and the game worker sources before writing the archive.
+
 ## Install the stock title entry
 
 Prepare the matched private embedded stage first. Close both the stock game and the private stage before setup. From the matched checkout, use the pinned UE4SS release, the Project Silverfish signature folder, and the full bootstrap archive.
