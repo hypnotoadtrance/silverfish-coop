@@ -20,7 +20,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
-from . import native_mindcore, native_mindcore_view
+from . import native_mindcore, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
@@ -1192,6 +1192,20 @@ class Bridge:
                     if native_mindcore.PROOF in data or native_mindcore.SCENE not in data:
                         raise ValueError("Invalid Data Silo Results proof scope")
                     data[native_mindcore.PROOF] = native_mindcore.parse_proof(fields)
+                elif fields[0] in (native_mindcore_fixture.CARRY_TAG, native_mindcore_fixture.CARRY_DIAGNOSTIC):
+                    key, parse = (
+                        (native_mindcore_fixture.CARRY_KEY, native_mindcore_fixture.parse_carry)
+                        if fields[0] == native_mindcore_fixture.CARRY_TAG else
+                        (native_mindcore_fixture.CARRY_DIAGNOSTIC_KEY, native_mindcore_fixture.parse_carry_diagnostic)
+                    )
+                    if key in data or (data.get("state"), data.get("map")) != ("hosting", native_mindcore.MAP):
+                        raise ValueError("Invalid Data Silo Core carry scope")
+                    data[key] = parse(fields)
+                elif fields[0] == native_mindcore_fixture.POSE_TAG:
+                    role = {"hosting": "host", "connected": "guest"}.get(data.get("state"))
+                    if role is None or data.get("map") != native_mindcore.MAP or native_mindcore_fixture.POSE_KEY in data:
+                        raise ValueError("Invalid Data Silo Core pose scope")
+                    data[native_mindcore_fixture.POSE_KEY] = native_mindcore_fixture.parse_pose(fields, role)
                 elif fields[0] == "native-mindcore-view":
                     if native_mindcore_view.KEY in data or (data.get("state"), data.get("map")) != ("connected", native_mindcore.MAP):
                         raise ValueError("Invalid Data Silo local input scope")

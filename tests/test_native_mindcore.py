@@ -191,3 +191,36 @@ class MindCoreFixtureTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(enabled=enabled, guest=guest, target=target), self.assertRaises(party.RuleError):
                 await fixture.perform(self.host, game, fixture.INSTALL, target)
         game.command.assert_not_awaited()
+
+    async def test_carry_step_requires_a_fresh_exact_pawn_and_stock_handle_report(self):
+        def carrying(state, sequence, pawn=self.local):
+            row = fixture.parse_carry([fixture.CARRY_TAG, mindcore.MAP, pawn, mindcore.CORE, state, "72.0", "62.0"])
+            return {**self.frame(0), "sequence": sequence, fixture.CARRY_KEY: row}
+
+        game = SimpleNamespace(command=AsyncMock(return_value=carrying("carrying", 19)), wait_for=AsyncMock())
+
+        async def advanced(predicate, *, timeout):
+            self.assertEqual(timeout, 9)
+            self.assertFalse(predicate(carrying("carried", 19)))
+            self.assertFalse(predicate(carrying("carried", 20, PAWN)))
+            observed = carrying("carried", 20)
+            self.assertTrue(predicate(observed))
+            return observed
+
+        game.wait_for.side_effect = advanced
+        observed = await fixture.perform(self.host, game, fixture.CARRY, "step")
+        self.assertEqual(observed[fixture.CARRY_KEY]["core_movement_uu"], 62)
+        game.command.assert_awaited_once_with(fixture.CARRY, self.local, "step", timeout=7)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    def test_pose_reports_keep_the_exact_authored_core_and_local_role(self):
+        row = [fixture.POSE_TAG, mindcore.MAP, "guest", mindcore.CORE, "714.39", "-1686.95", "118.37",
+               "1", "1", "0", "0", "3"]
+        pose = fixture.parse_pose(row, "guest")
+        self.assertEqual(pose["position"], [714.39, -1686.95, 118.37])
+        self.assertFalse(pose["replicate_movement"])
+        with self.assertRaises(ValueError):
+            fixture.parse_pose(row, "host")
+        row[3] = row[3].removesuffix("_1") + "_2"
+        with self.assertRaises(ValueError):
+            fixture.parse_pose(row, "guest")

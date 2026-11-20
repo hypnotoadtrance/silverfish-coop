@@ -203,7 +203,7 @@ def parser() -> argparse.ArgumentParser:
         "native-drill-test-results-preflight", "native-drill-test-results-convert", "native-drill-test-results-approach",
         "native-drill-instructions-preflight", "native-drill-instructions-convert", "native-drill-instructions-approach",
         "native-mindcore-preflight", "native-mindcore-upload", "native-mindcore-install-fixture", "native-mindcore-approach-fixture",
-        "native-mindcore-interact-fixture",
+        "native-mindcore-interact-fixture", "native-mindcore-carry-fixture",
         "native-prototype-drill-preflight",
         "native-pump-room-preflight", "native-pump-room-approach", "native-pump-room-xp-fixture",
         "native-mosby-station-fixture",

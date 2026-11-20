@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
@@ -104,15 +105,19 @@ def baseline_inputs(work, baseline, *, resume=False):
     return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
-async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False):
+async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False, carry_only=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
+    if carry_only and instructions:
+        raise ValueError("Run the Core handling proof separately from the Instructions exchange")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
         raise ValueError("Use the matched isolated native stage with the stock overlap fixture")
     if stock_input and not runtime.staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"):
         raise ValueError("Use a matched stage with the ordinary MindCore Interact adapter")
+    if carry_only and not runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.CARRY):
+        raise ValueError("Use the matched stock Core handling fixture")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -214,6 +219,21 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                     raise
                 await asyncio.sleep(.05)
         raise RuntimeError("Could not verify the paired Data Silo stock checkpoint")
+
+    async def core_poses(previous=None):
+        async def observe(directory, role):
+            def ready(state):
+                game = state.get("game", {})
+                row = game.get(fixture.POSE_KEY, {})
+                if row.get("role") != role or previous and game.get("sequence", 0) < previous[role]["sequence"] + 4:
+                    return False
+                return {**row, "sequence": game["sequence"]}
+
+            state = await wait(directory, ready, timeout=12)
+            return ready(state)
+
+        host_pose, guest_pose = await asyncio.gather(observe(run, "host"), observe(guest_run, "guest"))
+        return {"host": host_pose, "guest": guest_pose}
 
     async def inventory(directory, owner):
         items, offset = {}, 0
@@ -338,8 +358,35 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             dormant_f = await action(guest_run, console.FIXTURE, success=False)
             assert dormant_f["error"] == "The exact stock MindCore upload is unavailable", dormant_f
         await action(run, "checkpoint")
-        _, dormant_flags = await flags()
+        dormant_checkpoint, dormant_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
+        if carry_only:
+            proof["stock_carry"] = {}
+            poses = proof["core_poses"] = {"before": await core_poses()}
+            previous = poses["before"]
+            for step, expected in (("grab", "held"), ("step", "carried"), ("release", "released")):
+                result = await action(run, fixture.CARRY, target=step)
+                observed = result[fixture.CARRY_KEY]
+                assert (observed["map"], observed["core"], observed["state"]) == (core.MAP, core.CORE, expected)
+                assert (result[core.SCENE]["status"], result[core.SCENE]["installed"]) == (0, False)
+                proof["stock_carry"][step] = observed
+                poses[step] = previous = await core_poses(previous)
+            movement = proof["stock_carry"]["step"]
+            assert movement["pawn_movement_uu"] >= 20 and movement["core_movement_uu"] >= 20, movement
+            assert all(row["pawn"] == movement["pawn"] for row in proof["stock_carry"].values())
+            proof["core_displacement"] = {role: round(math.dist(poses["before"][role]["position"],
+                                                               poses["release"][role]["position"]), 2)
+                                          for role in ("host", "guest")}
+            await paired(core.MAP)
+            await action(run, "checkpoint")
+            saved, held_flags = await flags()
+            assert saved["revision"] > dormant_checkpoint["revision"]
+            assert tuple(row.get(core.FLAG, 0) for row in held_flags) == (0, 0)
+            assert core.LEDGER not in saved["world"]["party"]
+            proof.update(verified=True, carry_checkpoint=saved["revision"],
+                         carry_stock_flags=[0, 0], physical_test="stock_grab_short_carry_release")
+            return proof
+
         installed = (await action(run, fixture.INSTALL))[core.SCENE]
         _, mounted_flags = await flags()
         assert (installed["status"], installed["installed"]) == (1, True), installed
@@ -454,6 +501,8 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
     parser.add_argument("--stock-input", action="store_true", help="confirm the upload with two genuine stock Interact presses")
     parser.add_argument("--instructions", action="store_true", help="buy a second blank and use the compiled console's stock exchange")
+    parser.add_argument("--carry-only", action="store_true", help="grab, move, and release the Core with stock gameplay")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
-    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions, instructions=options.instructions))
+    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
+                         instructions=options.instructions, carry_only=options.carry_only))

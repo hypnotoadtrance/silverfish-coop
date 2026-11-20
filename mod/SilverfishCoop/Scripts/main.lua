@@ -456,6 +456,7 @@ local function run_command(fields, state, current_phase)
     if command == "travel" or command == "leave" or command == "join" then
         native_mosby_station.clear()
         native_mindcore.clear()
+        native_mindcore_fixture.clear()
         native_mindcore_view.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
@@ -1061,6 +1062,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1307,6 +1309,7 @@ local function tick()
         native_wire_board.sync(state, current_phase)
         native_dialogue.sync(state, current_phase)
         native_mosby_station.sync(state, current_phase)
+        native_mindcore_fixture.sync(state, current_phase)
         native_mindcore_view.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
         return native_guest_regen.sync(state, current_phase, players.is_standing_guest)

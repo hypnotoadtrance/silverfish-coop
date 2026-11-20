@@ -2644,7 +2644,8 @@ class Host:
                     target = request.get("target") or "guest"
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
                                                            profile=native_mosby_tape.APPROACHES[action])
-                elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH) and self.fixtures:
+                elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
+                                native_mindcore_fixture.CARRY) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))
                 elif action in (native_mosby_tape.READINGS_PREFLIGHT, native_mosby_tape.DRILL.verb("preflight")):
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
