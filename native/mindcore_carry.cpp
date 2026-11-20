@@ -50,6 +50,8 @@ namespace
     constexpr auto overlap_event =
         STR("BndEvt__MindCore_Cradle_BP_Capsule_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto timeout = std::chrono::milliseconds(950);
+    // Authority updates pass through the authenticated link and the game-thread mailbox.
+    constexpr auto authority_timeout = std::chrono::seconds(2);
     constexpr auto max_serial = (std::uint64_t{1} << 53) - 1;
 
     enum class Input { none, interact, pickup };
@@ -449,10 +451,15 @@ namespace
             holder.reset();
             return;
         }
-        if (Clock::now() >= holder->expires || !scene.dormant() || !standing(pawn) || !living_save(holder->save.Get()) ||
-            !silverfish::native_guest_regen::qualifies_detached_guest(pawn, holder->save.Get(), holder->canonical.Get()))
+        std::string_view release_reason;
+        if (!scene.dormant()) release_reason = "stock_core_scene_changed";
+        else if (!standing(pawn) || !living_save(holder->save.Get())) release_reason = "stock_core_holder_incapacitated";
+        else if (!silverfish::native_guest_regen::qualifies_detached_guest(pawn, holder->save.Get(), holder->canonical.Get()))
+            release_reason = "stock_core_holder_unqualified";
+        else if (Clock::now() >= holder->expires) release_reason = "stock_core_lease_expired";
+        if (!release_reason.empty())
         {
-            release(scene, "stock_core_lease_expired");
+            release(scene, release_reason);
             return;
         }
         Functions functions;
@@ -724,7 +731,7 @@ namespace
         {
             if (!holder || !holder->held(scene)) return report(false, "stock_core_carry_owner");
             holder->look = look;
-            holder->expires = Clock::now() + timeout;
+            holder->expires = Clock::now() + authority_timeout;
             status(pawn, "held", "stock_core_renewed");
             return report(true, "stock_core_renewed");
         }
@@ -738,7 +745,7 @@ namespace
             !free_hands(pawn) || !flags.bind(scene.game) || flags.flag_value(scene.game, STR("MC_007_Console")).first != 0)
             return report(false, "stock_core_carry_grab_unqualified");
         Holder next{pawn, detached, canonical, scene.core, scene.cradle, object(pawn, STR("PhysicsHandle")),
-            object(pawn, STR("Camera")), Clock::now() + timeout, look};
+            object(pawn, STR("Camera")), Clock::now() + authority_timeout, look};
         Functions functions;
         if (!next.exact_seat(scene) || !functions.bind()) return report(false, "stock_core_carry_schema");
         const bool invoked = run_stock(functions, next, Action::grab);
