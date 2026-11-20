@@ -20,7 +20,7 @@ from . import (link, matrix_service, native_authored_pickup, native_blue, native
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
-from . import native_spratt
+from . import native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
@@ -2516,12 +2516,17 @@ class Host:
                     result = await native_computer_board.approach(self, bridge, actor)
                 elif action in native_flood_jammer.PREFLIGHTS and request.get("target") is None:
                     result = await native_flood_jammer.preflight(self, bridge, "host", native_flood_jammer.COMMANDS[action])
+                elif action in native_flood_jammer.XP_FIXTURES and request.get("target") is None:
+                    result = await native_flood_jammer.xp_fixture(self, bridge, native_flood_jammer.XP_FIXTURES[action])
                 elif action in native_flood_jammer.APPROACHES and self.fixtures:
                     actor = self.roles().get(request.get("target") or "host")
                     result = await native_flood_jammer.approach(self, bridge, actor, native_flood_jammer.COMMANDS[action])
                 elif action == native_lenny.AIM:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_lenny.aim_fixture(self, bridge, actor, request.get("item_guid"))
+                elif action == native_spratt_fixture.AIM:
+                    actor = self.roles().get(request.get("target") or "guest")
+                    result = await native_spratt_fixture.aim(self, bridge, actor, request.get("item_guid"))
                 elif action == native_lenny.REVIVE_APPROACH:
                     actor = self.roles().get(request.get("target") or "guest")
                     result = await native_lenny.revive_approach(self, bridge, actor)

@@ -10,7 +10,8 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_EVENTS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
-local commands = {preflight = true, approach = true, start = true, ["turn-in"] = true}
+local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local commands = {preflight = true, approach = true, start = true, ["turn-in"] = true, ["xp-fixture"] = true}
 local keys = {
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
     final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B",
@@ -165,18 +166,43 @@ local function redeem(context, before)
     return after
 end
 
+local function xp_fixture(context, before)
+    local profile = context.jammer_profile
+    if not profile.xp_fixture or not fixtures or not same(context.interactor, context.host)
+        or before.step ~= "-" or before.xp ~= 0 or not context.save.ActiveQuests or #context.save.ActiveQuests ~= 0 then
+        refuse(profile, "xp_fixture_fresh_host_required")
+    end
+    context.board:Configure_Stock()
+    if wire_check(profile, wire.stock_row, context.board.Contracts, context.key) then
+        refuse(profile, "xp_fixture_quest_already_offered")
+    end
+    local checked, after = pcall(function()
+        context.instance:GivePlayer_XP(profile.xp_fixture)
+        context.board:Configure_Stock()
+        local offered = wire.stock_row(context.board.Contracts, context.key)
+        if not offered or offered[keys.step] ~= 1 then return end
+        recipe(profile, offered)
+        local observed = progress(context)
+        if unchanged(context) and #context.save.ActiveQuests == 0
+            and transition(profile, before, observed, "-", 0, profile.xp_fixture) then return observed end
+    end)
+    if not checked or not after then error("mutation_unverified_" .. profile.error_tag .. "xp_fixture", 0) end
+    return after
+end
+
 function quest.command(fields, state, phase)
     local full_operation = fields[2]
     if type(full_operation) ~= "string" then return end
     local tag, operation = full_operation:match("^(native%-%l+%-jammer)%-(.+)$")
     if not tag then tag, operation = full_operation:match("^(native%-lenny)%-(.+)$") end
+    if not tag then tag, operation = full_operation:match("^(native%-spratt)%-(.+)$") end
     local profile = profiles.by_tag[tag]
     if not profile then return end
     if operation == "aim" and profile.objective_map then
         if #fields ~= 4 or state.map ~= profile.objective_map then refuse(profile, "aim_arguments_unqualified") end
         return aim_fixture.aim(state, phase, fields[3], fields[4], profile)
     end
-    if not commands[operation] then return end
+    if not commands[operation] or operation == "xp-fixture" and not profile.xp_fixture then return end
     last = nil
     local pawn = fields[3]
     if #fields ~= 3 or state.map ~= profile.map then refuse(profile, "arguments_unqualified") end
@@ -187,11 +213,13 @@ function quest.command(fields, state, phase)
     recipe(profile, template)
     if template[keys.step] ~= 1 then refuse(profile, "quest_template_step_unqualified") end
     local before = progress(context)
+    if profile.xp_fixture and context.board.ShowAllContracts ~= false then refuse(profile, "board_stock_filter_unqualified") end
     if profile.completion_flag then
         local wanted = (before.step == 2 or before.step == -10) and 1 or 0
         if before.completion ~= wanted then refuse(profile, "stock_completion_flag_changed") end
     end
-    if before.step == "-" and operation ~= "turn-in" then
+    if before.step == "-" and operation ~= "turn-in" and operation ~= "xp-fixture" then
+        if profile.xp_fixture and before.xp < profile.difficulty then refuse(profile, "quest_not_offered") end
         context.board:Configure_Stock()
         local offered = wire_check(profile, wire.stock_row, context.board.Contracts, context.key)
         if not offered or offered[keys.step] ~= 1 then refuse(profile, "quest_not_offered") end
@@ -199,7 +227,9 @@ function quest.command(fields, state, phase)
     end
 
     local after = before
-    if operation == "start" then
+    if operation == "xp-fixture" then
+        after = xp_fixture(context, before)
+    elseif operation == "start" then
         if before.step ~= "-" then refuse(profile, "quest_already_started_or_completed") end
         local checked, observed = pcall(function()
             context.instance:AddQuest_ByName(context.key)
@@ -214,7 +244,7 @@ function quest.command(fields, state, phase)
         after = redeem(context, before)
     end
     last = {operation = full_operation, pawn = pawn, context = context, before = before, after = after}
-    return "verified stock Signal Jammer contract"
+    return "verified stock " .. (profile.title or "Signal Jammer contract")
 end
 
 local function objective_row(state, phase, status_row)

@@ -31,8 +31,15 @@ local lenny = {
     cash = 2500, penalty = 300, difficulty = 4, factions = {8, 5},
     reward_rep = {[8] = 15, [5] = 50}, completion_flag = "LennyDead",
 }
+local spratt = {
+    tag = "native-spratt", error_tag = "stock_spratt_", quest_id = "Asn_Spratt", title = "Kill Spratt",
+    map = lake.map, world_path = lake.world_path, board_path = lake.board_path, board_name = lake.board_name,
+    board_id = lake.board_id, global_contracts = true, board_order = {0, 1, 2, 7},
+    cash = 5000, penalty = 500, difficulty = 7, xp_fixture = 7, factions = {8, 5},
+    reward_rep = {[8] = 30, [5] = 50},
+}
 
 return {
-    by_tag = {[flood.tag] = flood, [lake.tag] = lake, [lenny.tag] = lenny},
+    by_tag = {[flood.tag] = flood, [lake.tag] = lake, [lenny.tag] = lenny, [spratt.tag] = spratt},
     by_map = {[flood.objective_map] = flood, [lake.objective_map] = lake},
 }

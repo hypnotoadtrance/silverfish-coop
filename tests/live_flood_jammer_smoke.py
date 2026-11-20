@@ -20,9 +20,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY
-from tools.silverfish import native_lenny
+from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY, SPRATT
+from tools.silverfish import native_lenny, native_spratt
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
+from tools.silverfish.travel import CROSSROADS
 
 
 def quest_record(campaign, quest):
@@ -31,14 +32,16 @@ def quest_record(campaign, quest):
 
 async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
     lake, lenny = spec == BLACK_LAKE, spec == LENNY
-    stock_board_input = lake or lenny
-    weapon = "sg-71-a" if lenny else "light-pistol"
-    weapon_label = "shotgun" if lenny else "pistol"
-    ammo = TWELVE_GAUGE_BUCK if lenny else NINE_MM_BALL
+    spratt = spec == SPRATT
+    assassination = lenny or spratt
+    stock_board_input = lake or assassination
+    weapon = "sg-71-a" if assassination else "light-pistol"
+    weapon_label = "shotgun" if assassination else "pistol"
+    ammo = TWELVE_GAUGE_BUCK if assassination else NINE_MM_BALL
     quest, board_map, area = spec.quest, spec.board_map, spec.objective_map
     level = area + "." + area.rsplit("/", 1)[1] + ":PersistentLevel."
     objective_key = f"{spec.key}_objective"
-    objective_flags = ("Adv_Freelancer", "Adv_Coup") if lake else ("LennyDead", "Player_Kills") if lenny else ()
+    objective_flags = ("Adv_Freelancer", "Adv_Coup") if lake else ("LennyDead", "Player_Kills") if assassination else ()
     faction = "8" if stock_board_input else "2"
     outbound = ((area, "BlackMarket"),) if lake else ((CITY, "City_Borough"), (RAIL, "Rail_City"), (RUINS, "Ry_Rf"))
     returning = ((board_map, "BlackMarket"),) if lake else ((RAIL, "Ry_Rf"), (CITY, "Rail_City"), (BOROUGH, "City_Borough"))
@@ -47,6 +50,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         outbound = ((lake_area, "BlackMarket"), (area, "Depot_Lake"))
         returning = ((lake_area, "Depot_Lake"), (board_map, "BlackMarket"))
         qualification_route = ((CITY, "City_Borough"), (RAIL, "Rail_City"), *returning)
+    elif spratt:
+        lake_area = BLACK_LAKE.objective_map
+        outbound = ((lake_area, "BlackMarket"), (CROSSROADS, "Lake_Cave"), (area, "CR_Cstrn"))
+        returning = ((CROSSROADS, "CR_Cstrn"), (lake_area, "Lake_Cave"), (board_map, "BlackMarket"))
+        qualification_route = (*outbound, *returning)
     name = spec.command().removeprefix("native-") + "-" + uuid.uuid4().hex[:8]
     host, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -183,8 +191,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             if lenny and guest_downed(status(run)):
                 return None
             raise
-        target = evidence["stock_watch"]["target"] if lenny else spec.jammer
-        assert (aim["map"], aim["target" if lenny else "jammer"], aim["guid"]) == (area, target, guid), aim
+        target = evidence["stock_watch"]["target"] if assassination else spec.jammer
+        assert (aim["map"], aim["target" if assassination else "jammer"], aim["guid"]) == (area, target, guid), aim
         assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(target.split(" ", 1)[-1] + "."), aim
         press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         attempt = {"aim": aim, "press": press}
@@ -244,19 +252,28 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         visitor = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         current = await enrolled(start_map)
         port = current["endpoint"]["port"]
-        if lenny:
+        if spratt:
+            await action(host, spec.command("approach"), "--target", "host")
+            hidden = await action(host, spec.command("preflight"), expected=False)
+            assert hidden["error"] == "stock_spratt_quest_not_offered", hidden
+            eligibility = (await action(host, spec.command("xp-fixture")))[spec.key]
+            assert (eligibility["step_before"], eligibility["step_after"], eligibility["xp_before"], eligibility["xp_after"]) == (
+                None, None, 0, 7), eligibility
+            evidence["stock_xp_eligibility_fixture"] = eligibility
+            evidence["stock_ineligible"] = hidden
+        if assassination:
             for destination, tag in qualification_route:
                 current = await cross(current, destination, tag)
                 if destination == area:
                     report = await wait(run, lambda frame: frame.get("game", {}).get(objective_key, {}).get("state")
-                                        == "stock_lenny_target_unavailable")
+                                        == f"stock_{spec.key.removeprefix('native_')}_target_unavailable")
                     evidence["stock_precontract_spawn"] = report["game"][objective_key]
 
         offer = await board()
         evidence["stock_offer"] = offer
         assert offer["step_before"] is None and offer["step_after"] is None, offer
         if stock_board_input:
-            assert offer["xp_before"] == (4 if lenny else 0), offer
+            assert offer["xp_before"] == (7 if spratt else 4 if lenny else 0), offer
             offset = 0
             while offset is not None:
                 catalog = (await action(client, "native-bounty-board-list", "--target", str(offset)))["native_bounty_board"]
@@ -287,7 +304,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         evidence["early_turn_in"] = premature["error"]
 
         guid = uuid.uuid4().hex.upper()
-        seed_command = ("native-guest-weapon-seed", "--kind", weapon) if lenny else ("native-guest-weapon-seed-light-pistol",)
+        seed_command = ("native-guest-weapon-seed", "--kind", weapon) if assassination else ("native-guest-weapon-seed-light-pistol",)
         seeded = (await action(host, *seed_command, "--target", "guest", "--item-guid", guid))["native_guest_weapon"]
         evidence[f"stock_{weapon_label}_seed"] = seeded
         assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
@@ -296,17 +313,21 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
 
         watcher = await wait(run, lambda state: state.get("game", {}).get(objective_key, {}).get("state") == "watching")
         watched = watcher["game"][objective_key]
-        if lenny:
+        if assassination:
+            spawner = native_spratt.SPAWNER if spratt else native_lenny.SPAWNER
+            exact_target = native_spratt.TARGET.fullmatch if spratt else native_lenny.exact_target
+            client_key = native_spratt.CLIENT_KEY if spratt else "native_lenny_client"
+            authority_key = "authority" if spratt else "local"
             assert (watched["map"], watched["spawner"], watched["replicated"], watched["health"]) == (
-                area, native_lenny.SPAWNER, True, 300), watched
-            assert native_lenny.exact_target(watched["target"]), watched
-            visible = await wait(client_run, lambda frame: (row := frame.get("game", {}).get("native_lenny_client", {}))
-                                 and row.get("local") == 0 and row.get("simulated") == 1, timeout=45)
-            evidence["client_target"] = visible["game"]["native_lenny_client"]
+                area, spawner, True, 300), watched
+            assert exact_target(watched["target"]), watched
+            visible = await wait(client_run, lambda frame: (row := frame.get("game", {}).get(client_key, {}))
+                                 and row.get(authority_key) == 0 and row.get("simulated") == 1, timeout=45)
+            evidence["client_target"] = visible["game"][client_key]
         else:
             assert (watched["map"], watched["jammer"], watched["trigger"]) == (area, spec.jammer, spec.trigger), watched
         evidence["stock_watch"] = watched
-        if client_projection and not lenny:
+        if client_projection and not assassination:
             visible = await projected("present")
             evidence["client_projection_before"] = visible
             assert visible["audio"] == "-", visible
@@ -318,7 +339,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         await wait(client_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
                    and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, weapon))
 
-        if lenny:
+        if assassination:
             reserve = uuid.uuid4().hex.upper()
             seeded = (await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", reserve))["native_guest_weapon"]
             assert seeded["guid"] == reserve, seeded
@@ -327,7 +348,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             assert (shells["class_path"], shells["quantity"], shells["source"]) == (ammo.item_path, ammo.fixture_units, "backpack"), shells
             evidence["stock_buckshot_reserve"] = shells
         magazine = 7
-        max_shots = 12 if lenny else 3
+        max_shots = 12 if assassination else 3
         if lenny:
             evidence["ordinary_guest_revivals"] = []
         fired = 0
@@ -344,7 +365,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
                 continue
             if fired >= max_shots:
                 break
-            if magazine == 0 and lenny:
+            if spratt and guest_downed(present):
+                raise RuntimeError("Spratt downed the guest before the stock objective completed")
+            if magazine == 0 and assassination:
                 reload = (await action(client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
                 magazine = reload["after"]
                 assert (reload["guid"], reload["before"], magazine, reload["reserve_before"], reload["reserve_after"]) == (
@@ -358,13 +381,13 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             magazine = shot["after"]
             fired += 1
             try:
-                observed = await wait(run, objective_committed, timeout=.8 if lenny else 10)
+                observed = await wait(run, objective_committed, timeout=.8 if assassination else 10)
                 break
             except RuntimeError:
                 last_observer = status(run).get("game", {}).get(objective_key, {})
                 evidence["shots"][-1]["last_objective"] = last_observer
                 remaining_hp = last_observer.get("health")
-                if lenny and (last_observer.get("state") == "stock_objective_verified"
+                if assassination and (last_observer.get("state") == "stock_objective_verified"
                               or isinstance(remaining_hp, (int, float)) and remaining_hp <= 0):
                     observed = await wait(run, objective_committed, timeout=9)
                     break
@@ -379,15 +402,19 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         assert completed["actor"] == character and (
             proof["map"], proof["state"], proof["step_before"], proof["step_after"], proof["shooter_role"], proof["shooter"]
         ) == (area, "stock_objective_verified", 1, 2, "guest", shot["pawn"]), completed
-        if lenny:
+        if spratt:
+            assert (proof["spawner"], proof["target"], proof["callback_count"], proof["cash_before"]) == (
+                native_spratt.SPAWNER, watched["target"], 1, proof["cash_after"]), proof
+        elif lenny:
             assert (proof["spawner"], proof["target"], proof["flag_before"], proof["flag_after"]) == (
                 native_lenny.SPAWNER, watched["target"], 0, 1), proof
         else:
             assert (proof["jammer"], proof["trigger"]) == (spec.jammer, spec.trigger), proof
-        assert proof["xp_before"] == proof["xp_after"] and proof["projectile"].split(" ", 1)[-1].startswith(level), proof
-        if lenny:
-            assert proof["projectile"].startswith(f"{ammo.projectile}_C "), proof
-        if client_projection and not lenny:
+        projectile = proof["shot" if spratt else "projectile"]
+        assert proof["xp_before"] == proof["xp_after"] and projectile.split(" ", 1)[-1].startswith(level), proof
+        if assassination:
+            assert projectile.startswith(f"{ammo.projectile}_C "), proof
+        if client_projection and not assassination:
             concealed = await projected("hidden", "absent")
             evidence["client_projection_after"] = concealed
             assert (concealed["state"], concealed["audio"]) in {("hidden", "muted"), ("absent", "none")}, concealed
@@ -398,7 +425,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         before = await balances()
         evidence["stock_redemption_ready"], evidence["native_balances_before"] = ready, before
         assert ready["step_after"] == 2 and ready["xp_after"] == offer["xp_after"], ready
-        if not lenny:
+        if spratt:
+            assert ready["objective_qualified"] is True, ready
+        elif not lenny:
             assert ready["reputation"][faction]["after"] == offer["reputation"][faction]["after"] + 10, (offer, ready)
             assert ready["reputation"]["5"]["after"] == offer["reputation"]["5"]["after"], (offer, ready)
         if stock_board_input:
@@ -406,9 +435,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             if lake:
                 assert before["host"]["Adv_Freelancer"] == baseline["host"]["Adv_Freelancer"] + 50, (baseline, before)
                 assert before["host"]["Adv_Coup"] == baseline["host"]["Adv_Coup"] - 10, (baseline, before)
-            else:
+            elif lenny:
                 assert before["host"]["LennyDead"] == 1 and baseline["host"]["LennyDead"] == 0, (baseline, before)
                 assert before["host"]["Player_Kills"] == baseline["host"]["Player_Kills"] + 1, (baseline, before)
+            else:
+                assert before["host"] == baseline["host"], (baseline, before)
             assert before["guest"] == baseline["guest"], (baseline, before)
             await board_state("armed", "focused", selected=False)
             await board_press("loading")
@@ -429,7 +460,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         ), settled
         assert settled["objective"] == proof, settled
         assert (reputation[faction]["after"] - reputation[faction]["before"],
-                reputation["5"]["after"] - reputation["5"]["before"]) == ((15, 50) if lenny else (50, -40)), reputation
+                reputation["5"]["after"] - reputation["5"]["before"]) == (
+                    (30, 50) if spratt else (15, 50) if lenny else (50, -40)), reputation
 
         def reward_materialized(state):
             players = state.get("campaign", {}).get("world", {}).get("party", {}).get("players", {})
@@ -501,6 +533,7 @@ if __name__ == "__main__":
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
     profiles.add_argument("--lenny", action="store_true", help="run Lenny's House and its stock quest-gated NPC spawn")
+    profiles.add_argument("--spratt", action="store_true", help="run Kill Spratt through its stock board, Cistern spawn, and redemption")
     arguments = parser.parse_args()
     asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection,
-                         spec=LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake else FLOOD))
+                         spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake else FLOOD))

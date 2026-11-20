@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import time
 
-from . import native_loot, native_rewards, native_wire_quest, party
+from . import native_loot, native_rewards, native_spratt, native_wire_quest, party
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, LAKE, RAIL_YARD
 
@@ -17,6 +17,7 @@ class StockKillContract:
     objective_map: str
     cash: int
     factions: frozenset[str]
+    fixture_xp: int | None = None
 
     def command(self, verb=""):
         base = self.key.replace("_", "-")
@@ -43,7 +44,9 @@ FLOOD = JammerProfile("Jmr_FloodPlains", "native_flood_jammer", BOROUGH, native_
 BLACK_MARKET_BOARD = f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"
 BLACK_LAKE = JammerProfile("Jmr_Lake", "native_lake_jammer", BLACK_MARKET, BLACK_MARKET_BOARD, LAKE, 400, frozenset({"5", "8"}))
 LENNY = StockKillContract("Asn_Lenny_01", "native_lenny", BLACK_MARKET, BLACK_MARKET_BOARD, RAIL_YARD, 2500, frozenset({"5", "8"}))
-CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, LENNY)}
+SPRATT = StockKillContract(native_spratt.QUEST, "native_spratt", BLACK_MARKET, BLACK_MARKET_BOARD,
+                           native_spratt.AREA, 5000, frozenset({"5", "8"}), fixture_xp=7)
+CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, LENNY, SPRATT)}
 OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE)}
 COMMANDS = {
     spec.command(verb): spec
@@ -53,6 +56,7 @@ COMMANDS.update((spec.command("aim"), spec) for spec in OBJECTIVES.values())
 PREFLIGHTS = frozenset(spec.command("preflight") for spec in CONTRACTS.values())
 APPROACHES = frozenset(spec.command("approach") for spec in CONTRACTS.values())
 AIMS = frozenset(spec.command("aim") for spec in OBJECTIVES.values())
+XP_FIXTURES = {spec.command("xp-fixture"): spec for spec in CONTRACTS.values() if spec.fixture_xp is not None}
 
 QUEST_ID, JAMMER, TRIGGER = FLOOD.quest, FLOOD.jammer, FLOOD.trigger
 PREFLIGHT, APPROACH, AIM, START, TURN_IN = map(FLOOD.command, ("preflight", "approach", "aim", "start", "turn-in"))
@@ -100,6 +104,8 @@ async def preflight(host, bridge, actor, spec=FLOOD):
     if (any(proof[f"{field}_before"] != proof[f"{field}_after"] for field in ("step", "cash", "xp"))
             or any(row["before"] != row["after"] for row in proof["reputation"].values())):
         raise RuntimeError("The stock jammer preflight changed campaign state")
+    if spec is SPRATT:
+        proof = dict(proof, objective_qualified=_objective_ready(host.party.get("native_quests", {}).get(spec.quest, {}), spec))
     return {spec.key: proof}
 
 
@@ -112,6 +118,27 @@ async def approach(host, bridge, actor, spec=FLOOD):
         raise RuntimeError("The stock jammer board approach left the qualified world")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return {f"{spec.key}_approach": {"pawn": pawn, "board": spec.board}}
+
+
+async def xp_fixture(host, bridge, spec):
+    pawn = _pawn(host, "host", spec)
+    if not host.fixtures or spec.fixture_xp is None or host.party.get("native_quests"):
+        raise party.RuleError(f"{spec.key}_xp_fixture_unavailable")
+    await host.checkpoint_native(bridge)
+    host.native_checkpoint_unsafe = True
+    try:
+        proof = await _command(host, bridge, spec.command("xp-fixture"), pawn, spec)
+        if ((proof["step_before"], proof["step_after"], proof["xp_before"], proof["xp_after"])
+                != (None, None, 0, spec.fixture_xp) or proof["cash_before"] != proof["cash_after"]
+                or any(row["before"] != row["after"] for row in proof["reputation"].values())):
+            raise RuntimeError("The stock Spratt fixture did not verify XP-only eligibility")
+        revision = await host.checkpoint_native(bridge)
+        host.native_checkpoint_unsafe = False
+        return {spec.key: proof, "revision": revision}
+    except (OSError, RuntimeError, ValueError, KeyError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
 
 
 async def aim_fixture(host, bridge, actor, guid, spec=FLOOD):
@@ -146,6 +173,22 @@ def _credit(host, candidate, amount):
     return recipients
 
 
+def _objective_ready(record, spec):
+    if record.get("step") != 2 or "objective" not in record:
+        return False
+    if spec is not SPRATT:
+        return True
+    proof = record["objective"]
+    if not isinstance(proof, dict) or not isinstance(proof.get("target"), str):
+        return False
+    return (record.get("quest_id") == spec.quest and native_spratt.TARGET.fullmatch(proof["target"]) is not None
+            and (proof.get("map"), proof.get("spawner"), proof.get("state"), proof.get("step_before"),
+                 proof.get("step_after"), proof.get("callback_count")) ==
+                (spec.objective_map, native_spratt.SPAWNER, native_spratt.VERIFIED, 1, 2, 1)
+            and all(type(proof.get(field)) is int for field in ("cash_before", "cash_after", "xp_before", "xp_after"))
+            and proof["cash_before"] == proof["cash_after"] and proof["xp_before"] == proof["xp_after"])
+
+
 async def act(host, bridge, actor, action):
     spec = COMMANDS.get(action)
     if not spec or action not in (spec.command("start"), spec.command("turn-in")):
@@ -158,13 +201,15 @@ async def act(host, bridge, actor, action):
     if not starting and current.get("step") == -10:
         return {"effect": "native_quest_already_settled", **current}
     expected = (None, 1, 0, 0) if starting else (2, -10, spec.cash, 1)
-    if not starting and (current.get("step") != 2 or "objective" not in current):
+    if not starting and not _objective_ready(current, spec):
         raise party.RuleError(f"{spec.key}_objective_incomplete")
     host.transitioning = True
     try:
         before = await _command(host, bridge, spec.command("preflight"), pawn, spec)
         if before["step_after"] != expected[0]:
             raise party.RuleError(f"{spec.key}_stock_step_changed")
+        if spec is SPRATT and starting and before["xp_after"] < spec.fixture_xp:
+            raise party.RuleError("stock_spratt_quest_not_offered")
         await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, action, pawn, spec)

@@ -19,6 +19,7 @@ COUP_REPORT = native_computer_board.COUP_REPORT
 DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
 LENNY = native_flood_jammer.LENNY
+SPRATT = native_flood_jammer.SPRATT
 QUESTS = {
     SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
     OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id, native_computer_board.DEAD_DROP.quest_id,
@@ -31,18 +32,20 @@ QUESTS = {
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
                             native_computer_board.STOLEN_BAG.quest_id, native_computer_board.DEAD_DROP.quest_id,
                             native_computer_board.BLACK_BOX.quest_id, native_computer_board.MISSING_CONTACT.quest_id,
-                            LAKE_JAMMER.quest, LENNY.quest}),
+                            LAKE_JAMMER.quest, LENNY.quest, SPRATT.quest}),
 }
 PREFLIGHTS = {
     native_subway_valve.QUEST: (native_subway_valve.PREFLIGHT, native_subway_valve.BOARD_KEY),
     LAKE_JAMMER.quest: (LAKE_JAMMER.command("preflight"), LAKE_JAMMER.key),
     LENNY.quest: (LENNY.command("preflight"), LENNY.key),
+    SPRATT.quest: (SPRATT.command("preflight"), SPRATT.key),
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
     native_mosby_tape.MOSBY_QUEST: (native_mosby_tape.READINGS_PREFLIGHT, "native_mosby_readings"),
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
+                 "stock_spratt_quest_not_offered",
                  "stock_subway_valve_quest_not_offered",
                  *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
 
@@ -168,6 +171,8 @@ class WireBoardView:
             return "offer"
         if step == -10:
             return "completed"
+        if quest == SPRATT.quest:
+            return "ready" if step == 2 and proof.get("objective_qualified") is True else "missing"
         if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, LENNY.quest, native_subway_valve.QUEST):
             return "ready" if step == last else "missing"
         spec = native_computer_board.CONTRACTS[quest]

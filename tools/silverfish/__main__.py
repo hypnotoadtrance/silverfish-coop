@@ -201,6 +201,7 @@ def parser() -> argparse.ArgumentParser:
         "native-flood-jammer-preflight", "native-flood-jammer-approach", "native-flood-jammer-aim",
         "native-lake-jammer-preflight", "native-lake-jammer-approach", "native-lake-jammer-aim",
         "native-lenny-preflight", "native-lenny-approach", "native-lenny-aim", "native-lenny-revive-approach",
+        "native-spratt-preflight", "native-spratt-approach", "native-spratt-xp-fixture", "native-spratt-aim",
         "native-inventory-list", "native-inventory-split", "native-inventory-sort",
         "native-guest-stack-drop-probe", "native-guest-stack-drop", "native-guest-stack-reclaim",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",

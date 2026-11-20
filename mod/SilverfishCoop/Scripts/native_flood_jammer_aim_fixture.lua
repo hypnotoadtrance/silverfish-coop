@@ -32,7 +32,8 @@ local function equipped(state, phase, name, guid, tag)
     if not valid(pawn) or not valid(save) or pawn.Dead ~= false or pawn.IsWeaponBlocked ~= false
         or not finite(save.PlayerHealth) or save.PlayerHealth <= 0 then refuse("standing_guest_required") end
     local weapon, camera, capsule, controller = pawn.EquipedItem, pawn.Camera, pawn.CapsuleComponent, pawn.Controller
-    local path = firearms.paths[tag == "native-lenny" and "sg-71-a" or "light-pistol"]
+    local assassination = tag == "native-lenny" or tag == "native-spratt"
+    local path = firearms.paths[assassination and "sg-71-a" or "light-pistol"]
     if not valid(weapon) or not valid(controller) or not weapon:HasAuthority() or weapon:IsActorBeingDestroyed()
         or not same(weapon:GetWorld(), state.world) or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path
         or not same(weapon:GetOwner(), pawn) or not same(weapon:GetInstigator(), pawn)
@@ -104,7 +105,8 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     if not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
         or actor:IsActorBeingDestroyed() or not finite(actor.Health) or actor.Health <= 0
         or not component(target_capsule, actor, "CapsuleComponent") then refuse("living_authored_target_required") end
-    local mesh_class = tag == "native-lenny" and "SkeletalMeshComponent" or "StaticMeshComponent"
+    local assassination = tag == "native-lenny" or tag == "native-spratt"
+    local mesh_class = assassination and "SkeletalMeshComponent" or "StaticMeshComponent"
     if not component(target_mesh, actor, mesh_class) then target_mesh = nil end
 
     local context = equipped(state, phase, name, guid, tag)

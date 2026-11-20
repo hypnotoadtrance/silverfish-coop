@@ -22,6 +22,7 @@ local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
 local lake_jammer = "Jmr_Lake"
 local lenny = "Asn_Lenny_01"
+local spratt = "Asn_Spratt"
 local readings = "Clt_Tape_StoneMaze_01"
 local flood_control = "Sub_Valve"
 local function board_profile(area, level, suffix, id, quests, display_global)
@@ -37,13 +38,14 @@ local profiles = {
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
     [black_market] = board_profile(black_market, "Shop_BlackMarket_01", "0", 1, {brandy, pump_room, lake_jammer, lenny,
-        stolen_bag, dead_drop, black_box, missing_contact}, true),
+        stolen_bag, dead_drop, black_box, missing_contact, spratt}, true),
 }
 local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "Copper Stop", [computer] = "Find a Computer Board", [photo] = "Dead Bridge Turret Photos",
     [report] = "Northern Passage", [depot] = "Depot Documents", [brandy] = "Fine Vintage", [readings] = "Stone Maze Readings",
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
     [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
-    [dead_drop] = "CrossRoads Dead Drop", [black_box] = "Black Box", [missing_contact] = "Missing Contact"}
+    [dead_drop] = "CrossRoads Dead Drop", [black_box] = "Black Box", [missing_contact] = "Missing Contact",
+    [spratt] = "Kill Spratt"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -152,6 +154,11 @@ local contract_prompt = {
         offer = "Find Lenny in the Rail Yard.\nInteract again to accept the contract.",
         missing = "Take out Lenny in the Rail Yard.\nInteract to check the contract again.",
         ready = "Turn in the contract for 2,500 shared cash.\nInteract again to turn it in.",
+    },
+    [spratt] = {
+        offer = "Find Spratt in the Cistern.\nInteract again to accept the contract.",
+        missing = "Take out Spratt in the Cistern.\nInteract to check the contract again.",
+        ready = "Turn in the contract for 5,000 shared cash.\nInteract again to turn it in.",
     },
     [readings] = {
         not_offered = "Speak to Dr. Mosby to start this contract.",
