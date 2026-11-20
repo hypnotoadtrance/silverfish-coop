@@ -53,13 +53,14 @@ def angles(pitch, yaw):
 
 
 def parse_authority(fields):
-    if len(fields) != 8:
+    if len(fields) != 10:
         raise ValueError("Invalid authoritative Core carry report")
-    tag, area, actor, pawn, lease, state, number, reason = fields
+    tag, area, actor, pawn, lease, state, number, reason, pitch, yaw = fields
     if ((tag, area, actor) != (AUTHORITY_TAG, core.MAP, core.CORE) or not valid_pawn(pawn)
             or not token(lease) or state not in _STATES or not _REASON.fullmatch(reason)):
         raise ValueError("Invalid authoritative Core carry report")
-    return dict(pawn=pawn, core=actor, lease=lease, state=state, sequence=serial(number), reason=reason)
+    pitch, yaw = angles(pitch, yaw)
+    return dict(pawn=pawn, core=actor, lease=lease, state=state, sequence=serial(number), reason=reason, pitch=pitch, yaw=yaw)
 
 
 def _guest_scope(fields):

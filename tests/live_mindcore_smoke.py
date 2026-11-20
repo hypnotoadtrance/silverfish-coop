@@ -415,10 +415,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                        and state["game"][carry.AUTHORITY]["sequence"] > held["sequence"], timeout=14)
             after_grab = await shared_core_at(0, label="guest_held")
             guest_pawn = readied["game"]["pawns"]["local"]["name"]
-            await action(guest_run, carry.FIXTURE, target="turn")
+            turn = await action(guest_run, carry.FIXTURE, target="turn")
+            aim = turn["aim"]
+            assert abs((aim["yaw"] - held["yaw"] + 180) % 360 - 180) >= 15
             turned = await wait(run, lambda state: active_carry(state)
-                                and math.dist(state["game"][core.REPLICATION]["position"],
-                                              after_grab["host"]["position"]) >= 20, timeout=18)
+                                and (row := state["game"][carry.AUTHORITY])["sequence"] > held["sequence"]
+                                and row["reason"] == "stock_core_renewed"
+                                and abs((row["yaw"] - aim["yaw"] + 180) % 360 - 180) <= 1, timeout=5)
             assert turned["game"][carry.AUTHORITY]["lease"] == held["lease"]
             turned_scene = await shared_core_at(0, label="guest_turned_core")
             before_walk = runtime.read_json(guest_run / "status.json")["game"]["pawns"]["local"]["location"]
@@ -430,7 +433,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             assert walked["game"][carry.VIEW]["state"] == "held"
             await wait(run, lambda state: active_carry(state)
                        and math.dist(state["game"][core.REPLICATION]["position"],
-                                     turned_scene["host"]["position"]) >= 20, timeout=14)
+                                     turned_scene["host"]["position"]) >= 20, timeout=6)
             await shared_core_at(0, label="guest_walked_with_core")
             await action(guest_run, carry.FIXTURE, target="release")
             released = await wait(run, lambda state: (

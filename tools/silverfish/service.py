@@ -4597,7 +4597,7 @@ class Client:
                     if self.last_game.get("map") != native_mindcore.MAP or not pawn or target not in ("grab", "release", "turn"):
                         raise ValueError("Select an exact staged guest Core carry input")
                     self.last_game = await self.bridge.command(action, pawn, target, timeout=6)
-                    result = {"input": target}
+                    result = {"input": target, "aim": self.last_game.get(native_mindcore_carry.AIM)}
                 elif action == native_mindcore_view.FIXTURE and self.mindcore_view:
                     if not self.mindcore_stage_ready() or request.get("target") is not None:
                         raise ValueError("The exact stock MindCore upload is unavailable")

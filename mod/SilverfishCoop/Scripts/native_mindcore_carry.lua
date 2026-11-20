@@ -132,7 +132,7 @@ end
 
 local function report(context, state, reason)
     last = {world = context.scene.world, name = context.name, lease = context.lease, sequence = context.sequence,
-        state = state, reason = reason}
+        state = state, reason = reason, pitch = context.pitch, yaw = context.yaw}
 end
 
 local function fault(context, reason)
@@ -248,7 +248,7 @@ function carry.command(fields, state, phase)
     if not range then refuse("stock_body_unqualified") end
     local distance = stock_sight(context, range, pitch, yaw)
     if not distance then refuse("stock_core_not_first_visible_hit") end
-    context.lease, context.sequence = lease, number
+    context.lease, context.sequence, context.pitch, context.yaw = lease, number, pitch, yaw
     address_scope(context)
     local ok, reason = focused_grab(context, pitch, yaw, distance)
     local checked, held = pcall(holding, context)
@@ -299,7 +299,7 @@ function carry.sync(state, phase)
     if not number then return end
     local ok, reason = mutate(context, "hold", pitch, yaw)
     if ok and reason == "stock_core_renewed" then
-        context.sequence = number
+        context.sequence, context.pitch, context.yaw = number, pitch, yaw
         report(context, "held", reason)
     elseif update_native() and active == context then
         release(context, context.sequence)
@@ -314,7 +314,7 @@ function carry.rows(state, phase, row)
     end
     if last and same(last.world, state.world) then
         rows[#rows + 1] = row("native-mindcore-authority-carry", map, core_name, last.name, last.lease,
-            last.state, last.sequence, last.reason)
+            last.state, last.sequence, last.reason, string.format("%.3f", last.pitch), string.format("%.3f", last.yaw))
     end
     return rows
 end
