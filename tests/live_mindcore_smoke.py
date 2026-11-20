@@ -148,9 +148,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
-                   raise_before_ascent=False):
+                   raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False):
     upper_door = upper_door or upper_door_keycard
-    core_lift_carry = core_lift_carry or raise_before_ascent
+    if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
+        raise ValueError("Choose one lower deck positioning scenario")
+    core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -260,7 +262,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
 
     def start_host(port):
         task = asyncio.create_task(service.host_game(work, campaign, "127.0.0.1", port, True, True,
-            native_events=True, native_guest=True, native_zones=True, expanded_zones=True, guest_regen=raise_before_ascent))
+            native_events=True, native_guest=True, native_zones=True, expanded_zones=True,
+            guest_regen=raise_before_ascent or park_on_deck or fixture_loose_cargo))
         jobs.append((run, task))
         return task
 
@@ -717,7 +720,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             route_proof = proof["core_lift_carry"] = {"cards": [await assert_key_custody(claim) for claim in cards]}
             await verify_core_lift(run, guest_run, action, inactive, character, route_proof,
                                    lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match,
-                                   raise_before_ascent=raise_before_ascent)
+                                   raise_before_ascent=raise_before_ascent, park_on_deck=park_on_deck,
+                                   fixture_loose_cargo=fixture_loose_cargo)
             await action(run, "checkpoint")
             saved, lift_flags = await flags()
             assert tuple(row.get(core.FLAG, 0) for row in lift_flags) == (0, 0)
@@ -1063,6 +1067,10 @@ if __name__ == "__main__":
                         help="regrip the exact stock Core and carry it through the lift to the upper west landing")
     parser.add_argument("--core-lift-raise-before-ascent", action="store_true",
                         help="try raising the held Core before the lower lift starts moving")
+    parser.add_argument("--core-lift-park-on-deck", action="store_true",
+                        help="use stock carry and release to park the Core on the lower deck before ascent")
+    parser.add_argument("--core-lift-fixture-loose-cargo", action="store_true",
+                        help="use an isolated fixture to load the Core and test only the stock loose-cargo ascent")
     parser.add_argument("--guest-hazard-authority", action="store_true",
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
@@ -1074,4 +1082,6 @@ if __name__ == "__main__":
                          upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe,
                          prepare_core_carry=options.prepare_core_carry, core_lift_carry=options.core_lift_carry,
                          guest_hazard_authority=options.guest_hazard_authority,
-                         raise_before_ascent=options.core_lift_raise_before_ascent))
+                         raise_before_ascent=options.core_lift_raise_before_ascent,
+                         park_on_deck=options.core_lift_park_on_deck,
+                         fixture_loose_cargo=options.core_lift_fixture_loose_cargo))

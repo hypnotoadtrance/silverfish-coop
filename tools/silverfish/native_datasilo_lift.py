@@ -67,15 +67,21 @@ async def exercise_fixture(host, bridge, target):
 async def stage_rider(host, bridge, target):
     game = host.last_game
     lift = game.get(KEY, {})
+    seats = {
+        "host": ("host", [-1672.0, -49.0, 160.0]),
+        "guest": ("guest", [-1672.0, 49.0, 160.0]),
+        "host-clear-corner": ("host", [-1720.0, 97.0, 160.0]),
+        "guest-clear-corner": ("guest", [-1648.0, 85.0, 160.0]),
+    }
     if (not host.fixtures or host.stopping or host.transitioning or game.get("map") != core.MAP
-            or lift.get("state") != "active" or lift.get("stop") != "lower" or target not in {"host", "guest"}):
+            or lift.get("state") != "active" or lift.get("stop") != "lower"
+            or target not in seats):
         raise party.RuleError("The isolated lower lift approach is unavailable")
-    alias, binding = host.role_pawn(target)
+    role, location = seats[target]
+    alias, binding = host.role_pawn(role)
     pawn = game.get("pawns", {}).get(alias, {}).get("name")
     if not alias or not valid_pawn(pawn):
         raise party.RuleError("The isolated lift approach requires the exact active pawn")
-    # These points are above the two seats on the stock deck's collision box.
-    location = [-1672.0, -49.0 if target == "host" else 49.0, 160.0]
     frame = await bridge.restore(alias, {"location": location}, binding=binding)
     restored = frame.get("pawns", {}).get(alias, {})
     if (frame.get("map"), restored.get("name")) != (core.MAP, pawn):

@@ -2780,7 +2780,7 @@ class Host:
                 elif action == native_cistern_lockpick.FIXTURE and self.fixtures:
                     result = await native_cistern_lockpick.perform(self, bridge, request.get("target"))
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
-                                native_mindcore_fixture.CARRY) and self.fixtures:
+                                native_mindcore_fixture.CARRY, native_mindcore_fixture.DECK_LOAD) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))
                 elif action in (native_mosby_tape.READINGS_PREFLIGHT, native_mosby_tape.DRILL.verb("preflight")):
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))

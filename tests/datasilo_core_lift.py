@@ -7,6 +7,7 @@ import uuid
 from live_ai_smoke import status
 from tools.silverfish import native_datasilo_lift as lift, native_guest_armor as armor
 from tools.silverfish import native_mindcore as core, native_mindcore_carry as carry
+from tools.silverfish import native_mindcore_fixture as fixture
 
 
 EXIT_Y = 64.0
@@ -67,12 +68,13 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 
 
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
-                           raise_before_ascent=False):
+                           raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
     proof["walks"] = []
     lease = guest_local_pawn = None
+    carrier_can_be_downed = False
 
     def sample(label):
         host, peer = status(run), status(guest_run)
@@ -108,8 +110,13 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         if not paired:
             return None
         parked_above = root.get("stop") == "upper"
-        required_seats = (guest, local) if parked_above else (lead, guest, local)
-        required_effects = effects[1:] if parked_above else effects
+        if carrier_can_be_downed:
+            if effects[1:] not in (["standing", "standing"], ["downed", "downed"]):
+                return None
+            required_seats, required_effects = (lead,), effects[:1]
+        else:
+            required_seats = (guest, local) if parked_above else (lead, guest, local)
+            required_effects = effects[1:] if parked_above else effects
         if "downed" in required_effects or any(type(body.get("health")) in (int, float) and body["health"] <= 0
                                                for body in required_seats):
             raise RuntimeError(f"Stock damage downed a required rider during {label}")
@@ -213,10 +220,70 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                 return False
         return True
 
+    async def set_down(label):
+        nonlocal lease
+        released_lease, lease = lease, None
+        await action(guest_run, carry.FIXTURE, target="release")
+        return await observe(label, lambda row, *_: (
+            tuple(row["hold"].get(key) for key in ("lease", "core", "state", "reason"))
+            == (released_lease, core.CORE, "released", "stock_core_released")
+            and (row["guest_hold"].get("state") == "ready" or carrier_can_be_downed and row["effects"][1] == "downed")), timeout=8)
+
+    async def regrip(label, released):
+        nonlocal lease
+        await action(guest_run, carry.FIXTURE, target="grab")
+        held = await observe(label, lambda row, *_: (
+            (row["hold"].get("state"), row["hold"].get("pawn"), row["hold"].get("core")) == ("held", guest_pawn, core.CORE)
+            and row["hold"].get("lease") not in (None, released["hold"]["lease"])
+            and row["guest_hold"].get("state") == "held"), timeout=8)
+        lease = held["hold"]["lease"]
+        return held
+
+    async def observe_parked_core():
+        previous = None
+
+        def settled_inside_deck(row, *_):
+            nonlocal previous
+            position = row["prop"]["position"]
+            x, y, z = position
+            if row["hold"].get("state") == "held" or not (-1697 < x < -1642 and abs(y) < 48 and 22 < z < 160):
+                previous = None
+                return False
+            if previous and not all(a > b for a, b in zip(row["sequences"], previous["sequences"], strict=True)):
+                return False
+            settled = previous and math.dist(position, previous["prop"]["position"]) < 1.5
+            previous = row
+            return settled
+
+        return await observe("verify the loose Core settles inside the lift cabin", settled_inside_deck, timeout=7)
+
+    async def ride_lift(boarding):
+        ready = await at_stop("both exact riders on the lower deck", "lower", riders=True)
+        assert math.dist(ready["carrier"]["location"][:2], boarding["carrier"]["location"][:2]) < 20
+        proof["both_boarded"] = ready
+        pressed = await action(run, lift.FIXTURE, target="button")
+        assert (pressed["input"], pressed["source_stop"]) == ("button", "lower"), pressed
+        proof["stock_lift_button"] = pressed
+        proof["ascending"] = await at_stop("moving stock lift with the Core", "moving", riders=True)
+        upper = await at_stop("upper stock lift with the Core", "upper", riders=True)
+        proof["upper"] = upper
+        assert upper["prop"]["position"][2] - ready["prop"]["position"][2] > 2250
+        assert upper["carrier"]["location"][2] - ready["carrier"]["location"][2] > 2250
+        return upper
+
     proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
 
     proof["lower"] = await at_stop("lower stock lift", "lower")
     guest_local_pawn = proof["lower"]["guest_local"]["name"]
+    if fixture_loose_cargo:
+        proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD)
+        guest = await action(run, lift.STAGE_RIDER, target="guest-clear-corner")
+        host = await action(run, lift.STAGE_RIDER, target="host-clear-corner")
+        assert (guest["pawn"], host["pawn"]) == (guest_pawn, host_pawn)
+        carrier_can_be_downed = True
+        proof["lower_parked"] = await observe_parked_core()
+        await ride_lift(proof["lower_parked"])
+        return
     await action(run, carry.APPROACH_FIXTURE, target=character)
     proof["approach"] = await observe("checked stock Core approach", lambda row, *_: (
         row["guest_hold"].get("state") == "ready"
@@ -243,37 +310,47 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     await walk_to("bring the Core beside the west opening", (-1939, 126), 13)
     proof["before_regrip"] = await observe("place the Core north of the west opening", lambda row, *_: (
         row["prop"]["position"][0] < -1760 and row["prop"]["position"][1] > 118), timeout=3)
-    released_lease, lease = lease, None
-    await action(guest_run, carry.FIXTURE, target="release")
-    proof["stock_set_down"] = await observe("observe the exact Core after stock release", lambda row, *_: (
-        tuple(row["hold"].get(key) for key in ("lease", "core", "state", "reason"))
-        == (released_lease, core.CORE, "released", "stock_core_released")
-        and row["guest_hold"].get("state") == "ready"), timeout=8)
+    proof["stock_set_down"] = await set_down("observe the exact Core after stock release")
     await walk_to("align the unladen guest with the west opening", (-1900, EXIT_Y), 6.4)
     proof["deck_regrip_position"] = await walk_to("walk past the Core to the lower deck rider position",
                                                   (-1672, EXIT_Y), 11, reached=on_deck)
-    staged, _ = await asyncio.gather(action(run, lift.STAGE_RIDER, target="host"),
-                                    action(guest_run, carry.FIXTURE, target="grab"))
+    if park_on_deck:
+        proof["stock_regrip"] = await regrip("verify a fresh stock hold from the lower deck", proof["stock_set_down"])
+        await turn("lift the Core above the west railing", 180, pitch=68)
+        await walk_to("move the held Core inward from the west rail", (-1654, EXIT_Y), 8, reached=on_deck)
+        proof["above_lower_rail"] = await observe("verify the Core is above the rail and inside the cabin", lambda row, *_: (
+            row["prop"]["position"][0] > -1720 and row["prop"]["position"][2] >= 154), timeout=5)
+        await turn("rotate the raised Core along the longer side of the cabin", -90, pitch=52)
+        proof["inside_lower_rail"] = await observe("let the Core clear the west rail before moving the carrier", lambda row, *_: (
+            row["prop"]["position"][0] > -1705 and row["prop"]["position"][1] < 55
+            and row["prop"]["position"][2] >= 148), timeout=5)
+        await walk_to("center the Core lengthwise over the deck", (-1672, 68), 6, reached=on_deck)
+        await turn("lower the Core into the deck's free space", -90, pitch=28)
+        proof["before_deck_release"] = await observe("verify the Core is inside the lower deck footprint", lambda row, *_: (
+            -1697 < row["prop"]["position"][0] < -1642 and -48 < row["prop"]["position"][1] < -8), timeout=5)
+        carrier_can_be_downed = True
+        proof["deck_release"] = await set_down("release the Core over the stock deck")
+        proof["lower_parked"] = await observe_parked_core()
+        staged = await action(run, lift.STAGE_RIDER, target="host-clear-corner")
+    else:
+        staged, proof["stock_regrip"] = await asyncio.gather(
+            action(run, lift.STAGE_RIDER, target="host"),
+            regrip("verify a fresh stock hold on the same Core from the deck", proof["stock_set_down"]),
+        )
     assert staged["pawn"] == host_pawn, staged
-    proof["stock_regrip"] = await observe("verify a fresh stock hold on the same Core from the deck", lambda row, *_: (
-        (row["hold"].get("state"), row["hold"].get("pawn"), row["hold"].get("core")) == ("held", guest_pawn, core.CORE)
-        and row["hold"].get("lease") not in (None, released_lease) and row["guest_hold"].get("state") == "held"), timeout=8)
-    lease = proof["stock_regrip"]["hold"]["lease"]
     if raise_before_ascent:
         await turn("raise the regripped Core before the lower deck starts moving", 178, pitch=14)
         proof["lower_aligned"] = await observe("verify the Core is above the lower deck before ascent", lambda row, *_: (
             row["prop"]["position"][2] >= 65 and abs(row["prop"]["position"][1] - EXIT_Y) < 38), timeout=4)
-    ready = await at_stop("both exact riders on the lower deck", "lower", riders=True)
-    assert math.dist(ready["carrier"]["location"], proof["stock_regrip"]["carrier"]["location"]) < 20
-    proof["both_boarded"] = ready
-    pressed = await action(run, lift.FIXTURE, target="button")
-    assert (pressed["input"], pressed["source_stop"]) == ("button", "lower"), pressed
-    proof["stock_lift_button"] = pressed
-    proof["ascending"] = await at_stop("moving stock lift with the Core", "moving", riders=True)
-    upper = await at_stop("upper stock lift with the Core", "upper", riders=True)
-    assert upper["prop"]["position"][2] - ready["prop"]["position"][2] > 2250
-    assert upper["carrier"]["location"][2] - ready["carrier"]["location"][2] > 2250
-    proof["upper"] = upper
+    upper = await ride_lift(proof.get("lower_parked", proof["stock_regrip"]))
+    if park_on_deck:
+        if upper["effects"][1] == "downed":
+            revival = await action(run, "interact", target=character)
+            assert revival["effect"] == "revive", revival
+            proof["upper_revive"] = await observe("verify the revived guest remains aboard", lambda row, *_: (
+                row["effects"][1:] == ["standing", "standing"] and on_deck(row)), timeout=10)
+        carrier_can_be_downed = False
+        proof["upper_regrip"] = await regrip("pick up the same Core from the parked upper deck", proof["deck_release"])
 
     await walk_to("align just inside the west edge of the upper deck", (-1720, EXIT_Y), 2.5, reached=on_deck)
     await turn("raise the Core outside the upper deck lip", 180, pitch=24)

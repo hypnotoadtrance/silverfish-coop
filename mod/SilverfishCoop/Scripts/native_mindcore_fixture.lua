@@ -6,6 +6,7 @@ local players = require("players")
 local enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local install = "native-mindcore-install-fixture"
+local deck_load = "native-mindcore-deck-load-fixture"
 local approach = "native-mindcore-approach-fixture"
 local carry_verb = "native-mindcore-carry-fixture"
 local input_fixture = enabled or os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -386,6 +387,26 @@ local function move_core(scene, pawn)
     return "headless exact stock Core moved into authored Capsule overlap"
 end
 
+local function place_loose_core_on_lower_deck(scene, state, name)
+    if name ~= scene.host:GetFullName() or scene.status ~= 0 or scene.installed
+        or not within(scene.core:K2_GetActorLocation(), core_origin, 300)
+        or not simulating(scene.frame) or not scene.core:GetActorEnableCollision() then refuse("deck_load_core_scope") end
+    for _, info in ipairs(state.pawns) do
+        if valid(info.pawn) and same(info.pawn.HeldObject, scene.core) then refuse("deck_load_core_held") end
+    end
+    local lift = StaticFindObject(map .. ".DataSilo_01_P:PersistentLevel.RailLift_BP_C_1")
+    if not exact(lift, "/Game/Classes/Actors/RailLift_BP.RailLift_BP_C") or not lift:HasAuthority()
+        or not same(lift:GetWorld(), state.world) or not within(lift:K2_GetActorLocation(), {X=-1780, Y=0, Z=0}, 2)
+        or not component(lift.SM_Prop_Elevator_01, lift, "StaticMeshComponent") then refuse("deck_load_lift_scope") end
+    local target = {X = -1672, Y = -27, Z = 118}
+    if scene.core:K2_SetActorLocationAndRotation(target, {Pitch = 0, Yaw = -90, Roll = 0}, false, {}, true) ~= true
+        or not within(scene.core:K2_GetActorLocation(), target, 4) then
+        error("mutation_unverified_native_mindcore_fixture_deck_load", 0)
+    end
+    scene.core:ForceNetUpdate()
+    return "headless loose stock Core placed above the lower deck"
+end
+
 local function place_guest(scene, state, phase, name, variant)
     local pawn, detached = guest_save.exact_item_context(state, phase, name)
     if not valid(pawn) or not valid(detached) or same(detached, scene.canonical)
@@ -435,7 +456,7 @@ end
 
 function fixture.command(fields, state, phase)
     local verb, name = fields[2], fields[3]
-    if verb ~= install and verb ~= approach and verb ~= carry_verb then return end
+    if verb ~= install and verb ~= approach and verb ~= carry_verb and verb ~= deck_load then return end
     if not enabled then refuse("not_enabled") end
     if verb == carry_verb then
         local operation = fields[4]
@@ -458,6 +479,7 @@ function fixture.command(fields, state, phase)
     end
     local scene = mindcore.scene(state, phase)
     if verb == install then return move_core(scene, name) end
+    if verb == deck_load then return place_loose_core_on_lower_deck(scene, state, name) end
     return place_guest(scene, state, phase, name, variant)
 end
 

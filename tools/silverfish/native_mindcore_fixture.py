@@ -9,6 +9,7 @@ from .native_mosby_tape import _scope
 
 
 INSTALL = "native-mindcore-install-fixture"
+DECK_LOAD = "native-mindcore-deck-load-fixture"
 APPROACH = "native-mindcore-approach-fixture"
 CARRY = "native-mindcore-carry-fixture"
 CARRY_TAG = "native-mindcore-carry"
@@ -61,7 +62,7 @@ def _same_participants(host, owner, guest_pawn, host_pawn):
 
 
 async def perform(host, bridge, action, target, variant=None):
-    if not host.fixtures or action not in (INSTALL, APPROACH, CARRY):
+    if not host.fixtures or action not in (INSTALL, APPROACH, CARRY, DECK_LOAD):
         raise party.RuleError("native_mindcore_fixture_refused_arguments")
     invalid_target = (not isinstance(target, str) or target not in _CARRY_RESULT) if action == CARRY else target is not None
     if invalid_target:
@@ -94,6 +95,15 @@ async def perform(host, bridge, action, target, variant=None):
 
     if not dormant(host.last_game) or mindcore.LEDGER in host.party:
         raise party.RuleError("native_mindcore_fixture_refused_console_used")
+    if action == DECK_LOAD:
+        snapshot = await bridge.command(action, host_pawn, timeout=7)
+        pose = snapshot.get(POSE_KEY, {})
+        if not dormant(snapshot) or pose.get("core") != mindcore.CORE or not pose.get("simulating"):
+            raise RuntimeError("The isolated lift load lost the exact loose stock Core")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if not _same_participants(host, owner, guest_pawn, host_pawn):
+            raise RuntimeError("The exact pair changed during the isolated lift load")
+        return {POSE_KEY: pose, mindcore.SCENE: snapshot[mindcore.SCENE]}
     if action == CARRY:
         def expected(snapshot):
             report = snapshot.get(CARRY_KEY, {})
