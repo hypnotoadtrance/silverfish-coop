@@ -152,11 +152,24 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             assert active["host"] == before["host"] and active["guest"]["configured"] == 4, active
             assert (active["guest"]["recognized"], active["guest"]["compromised"]) == (4, False), active
             assert active["guest"]["relation"] != active["host"]["relation"], active
+            assert active["npc"] == armor_only["npc"] == before["npc"] and active["pawn"] == before["pawn"]
             saved = await inventory(client, character)
             gear_row(saved, uniform, "armor", CONSCRIPT_UNIFORM_PATH)
             gear_row(saved, helmet, "helmet", STANDARD_INFANTRY_HELMET_PATH)
             assert await inventory(host, "host") == host_before
             evidence["stock_recognition"] = {"before": before, "armor_only": armor_only, "active": active}
+
+            await act(client, "drop-link")
+            await wait(run, lambda s: any(
+                lease.get("character_id") == character and lease.get("state") == "reserved"
+                for lease in s.get("campaign", {}).get("leases", ())
+            ))
+            reconnected = await act(client, "reconnect")
+            assert reconnected["resumed"] and reconnected["link_connected"], reconnected
+            await enroll()
+            resumed = await recognition()
+            assert resumed == active, resumed
+            evidence["stock_recognition"]["brief_reconnect"] = resumed
 
             await stop(host, authority)
             await stop(client, guest)
@@ -168,10 +181,16 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             await wait(run, lambda s: projection(s, helmet, head=True, torso="conscript-uniform"))
             restored = await recognition()
             assert (restored["guest"], restored["host"]) == (active["guest"], active["host"]), restored
+            assert restored["npc"] == active["npc"] and restored["pawn"] != active["pawn"], restored
             assert await inventory(client, character) == saved and await inventory(host, "host") == host_before
             await equip_from_overlay(goggles, "native_guest_helmet")
             broken = await recognition()
             assert (broken["guest"], broken["host"]) == (before["guest"], before["host"]), broken
+            assert (broken["npc"], broken["pawn"]) == (restored["npc"], restored["pawn"]), broken
+            swapped = await inventory(client, character)
+            gear_row(swapped, helmet, "backpack", STANDARD_INFANTRY_HELMET_PATH)
+            gear_row(swapped, goggles, "helmet", GOGGLES_PATH)
+            assert gear_row(swapped, uniform, "armor", CONSCRIPT_UNIFORM_PATH) == saved[uniform]
             evidence["stock_recognition"].update(restored=restored, incompatible_helmet=broken)
             evidence["verified"] = True
             return
