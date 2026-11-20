@@ -7,18 +7,26 @@ local function object(properties)
 end
 
 local function run()
-    local exact, center = object({}), {X = 0, Y = 6750, Z = 6600}
+    local exact, origin = object({}), {X = 0, Y = 6750, Z = 6600}
+    local center = {X = 0, Y = 6662.06, Z = 6719.47}
     local scene = {status = 0, installed = false}
     local encountered_overlap, moves = false, 0
     scene.host = object({Dead = false, GetFullName = function() return pawn end})
-    scene.cradle = setmetatable(object({K2_GetActorLocation = function() return center end}), {
+    scene.cradle = setmetatable(object({K2_GetActorLocation = function() return origin end}), {
         __index = function(_, property)
             assert(property ~= "Powered", "Powered is a stock signal argument rather than a cradle property")
         end,
     })
+    scene.cradle.RootComponent = object({})
+    scene.cradle.SM_MindCoffin_Socket = object({
+        GetOwner = function() return scene.cradle end,
+        GetAttachParent = function() return scene.cradle.RootComponent end,
+    })
+    scene.mount = object({GetAttachParent = function() return scene.cradle.SM_MindCoffin_Socket end})
     scene.cradle.Capsule = object({
         GetClass = function() return exact end,
         GetOwner = function() return scene.cradle end,
+        GetAttachParent = function() return scene.mount end,
         GetGenerateOverlapEvents = function() return true end,
         IsOverlappingActor = function(_, core) assert(core == scene.core); return encountered_overlap end,
         K2_GetComponentLocation = function() return center end,
@@ -71,6 +79,12 @@ local function run()
     scene.frame.GetGenerateOverlapEvents = function() return false end
     refused(pawn, "stock_core_overlap_disabled")
     scene.frame.GetGenerateOverlapEvents = function() return true end
+    scene.cradle.Capsule.GetAttachParent = function() return scene.cradle.RootComponent end
+    refused(pawn, "stock_capsule_attachment_changed")
+    scene.cradle.Capsule.GetAttachParent = function() return scene.mount end
+    scene.cradle.Capsule.K2_GetComponentLocation = function() return origin end
+    refused(pawn, "stock_capsule_displaced:cradle=0.0,6750.0,6600.0:capsule=0.0,6750.0,6600.0")
+    scene.cradle.Capsule.K2_GetComponentLocation = function() return center end
     enabled = false
     local disabled = assert(loadfile(path, "t", env))()
     local ok, result = pcall(disabled.command, {"1", install, pawn}, scene, "hosting")

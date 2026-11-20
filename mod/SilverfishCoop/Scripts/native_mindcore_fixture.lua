@@ -7,6 +7,10 @@ local enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local install = "native-mindcore-install-fixture"
 local approach = "native-mindcore-approach-fixture"
+local cradle_origin = {X = 0, Y = 6750, Z = 6600}
+-- The stock capsule sits on the pitched mount, which is attached to the raised socket.
+local capsule_center = {X = 0, Y = 6662.06, Z = 6719.47}
+local core_origin = {X = 714.3901, Y = -1686.9511, Z = 118.3686}
 
 local function refuse(reason) error("native_mindcore_fixture_refused_" .. reason, 0) end
 local function valid(value) return value and value:IsValid() end
@@ -15,6 +19,9 @@ local function finite(n) return type(n) == "number" and n == n and math.abs(n) <
 local function point(p) return p and finite(p.X) and finite(p.Y) and finite(p.Z) end
 local function within(a, b, distance)
     return point(a) and point(b) and (a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2 <= distance^2
+end
+local function coordinates(value)
+    return point(value) and string.format("%.1f,%.1f,%.1f", value.X, value.Y, value.Z) or "unavailable"
 end
 
 local function move_core(scene, pawn)
@@ -29,6 +36,10 @@ local function move_core(scene, pawn)
     if not valid(cap) or not same(cap:GetClass(), capsule_class) or not same(cap:GetOwner(), scene.cradle) then
         refuse("stock_capsule_unavailable")
     end
+    local socket = scene.cradle.SM_MindCoffin_Socket
+    if not valid(socket) or not same(socket:GetOwner(), scene.cradle)
+        or not same(cap:GetAttachParent(), scene.mount) or not same(scene.mount:GetAttachParent(), socket)
+        or not same(socket:GetAttachParent(), scene.cradle.RootComponent) then refuse("stock_capsule_attachment_changed") end
     if cap:GetGenerateOverlapEvents() ~= true then refuse("stock_capsule_overlap_disabled") end
     if scene.core:GetActorEnableCollision() ~= true then refuse("stock_core_collision_disabled") end
     if scene.frame:GetGenerateOverlapEvents() ~= true then refuse("stock_core_overlap_disabled") end
@@ -36,10 +47,13 @@ local function move_core(scene, pawn)
     if scene.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= true then refuse("stock_core_not_simulating") end
 
     local center, source = cap:K2_GetComponentLocation(), scene.core:K2_GetActorLocation()
-    if not within(source, {X = 714.3901, Y = -1686.9511, Z = 118.3686}, 300) then
-        refuse("stock_core_displaced" .. (point(source) and string.format(":%.1f,%.1f,%.1f", source.X, source.Y, source.Z) or ""))
+    if not within(source, core_origin, 300) then
+        refuse("stock_core_displaced:" .. coordinates(source))
     end
-    if not within(center, scene.cradle:K2_GetActorLocation(), 100) then refuse("stock_capsule_displaced") end
+    local anchor = scene.cradle:K2_GetActorLocation()
+    if not within(anchor, cradle_origin, 3) or not within(center, capsule_center, 3) then
+        refuse("stock_capsule_displaced:cradle=" .. coordinates(anchor) .. ":capsule=" .. coordinates(center))
+    end
     local moved, result = pcall(function()
         return scene.core:K2_SetActorLocation({X = center.X, Y = center.Y, Z = center.Z}, false, {}, true)
     end)
