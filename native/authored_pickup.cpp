@@ -188,6 +188,13 @@ namespace
             30714.073646980298, -137718.5051940477, 2043.691163490359, 0,
         },
         Profile{
+            "cistern-old-nfta-keycard",
+            STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.KeyCard_Refinery_Sec_BP_C_1"),
+            STR("/Game/Classes/Items/Key_Items/KeyCard_NFTA_Old_BP.KeyCard_NFTA_Old_BP_C"),
+            5092.807753005069, 11380.813008214138, -2153.364919590843, 0,
+        },
+        Profile{
             "fort-leto-locker-key-543",
             STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P"),
             STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1"),

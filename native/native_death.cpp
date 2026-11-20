@@ -42,6 +42,7 @@
 #include "authored_pickup.hpp"
 #include "mindcore.hpp"
 #include "mindcore_carry.hpp"
+#include "datasilo_lift.hpp"
 #include "broker_menu.hpp"
 #include "broker_input.hpp"
 #include "campaign_npc.hpp"
@@ -1237,6 +1238,7 @@ namespace
             silverfish::native_transport::uninstall_hooks();
             silverfish::native_stock_rest::uninstall_hooks();
             silverfish::native_session_exit_input::uninstall_hooks();
+            silverfish::native_datasilo_lift::uninstall_hooks();
             silverfish::native_mindcore_carry::uninstall_hooks();
             silverfish::native_guest_npc::uninstall_hooks();
             silverfish::native_guest_reload_input::uninstall_hooks();
@@ -1283,6 +1285,7 @@ namespace
             silverfish::native_stock_rest::install_hooks();
             silverfish::native_session_exit_input::install_hooks();
             silverfish::native_mindcore_carry::install_hooks();
+            silverfish::native_datasilo_lift::install_hooks();
             silverfish::native_guest_npc::install_hooks();
             silverfish::native_guest_reload_input::install_hooks();
             silverfish::native_inventory_view::install_hooks();
@@ -1380,6 +1383,7 @@ namespace
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_mindcore::register_lua(lua);
             silverfish::native_mindcore_carry::register_lua(lua);
+            silverfish::native_datasilo_lift::register_lua(lua);
             silverfish::native_broker_menu::register_lua(lua);
             silverfish::native_broker_input::register_lua(lua);
             silverfish::campaign_npc::register_lua(lua);
