@@ -359,13 +359,9 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof["above_lower_rail"] = await observe("verify the Core is above the rail and inside the cabin", lambda row, *_: (
             row["prop"]["position"][0] > LOWER_DECK_WEST_EDGE_X and row["prop"]["position"][2] >= 154), timeout=5)
         await turn("rotate the raised Core along the longer side of the cabin", -90, pitch=52)
-        proof["inside_lower_rail"] = await observe("let the Core clear the west rail before moving the carrier", lambda row, *_: (
-            row["prop"]["position"][0] > -1705 and row["prop"]["position"][1] < 55
-            and row["prop"]["position"][2] >= 148), timeout=5)
-        await walk_to("center the Core lengthwise over the deck", (-1672, 68), 6, reached=on_deck)
-        await turn("lower the Core into the deck's free space", -90, pitch=28)
-        proof["before_deck_release"] = await observe("verify the Core is inside the lower deck footprint", lambda row, *_: (
-            -1697 < row["prop"]["position"][0] < -1642 and -48 < row["prop"]["position"][1] < -8), timeout=5)
+        proof["before_deck_release"] = await observe("verify the raised Core is over the middle of the lower deck", lambda row, *_: (
+            -1697 < row["prop"]["position"][0] < -1642 and abs(row["prop"]["position"][1]) < 23
+            and row["prop"]["position"][2] >= 148 and on_deck(row)), timeout=5)
         carrier_can_be_downed = True
         proof["deck_release"] = await set_down("release the Core over the stock deck")
         proof["lower_parked"] = await observe_parked_core()
