@@ -9,6 +9,8 @@ local messages = {
     ready = "F7   Open Co-op",
     unavailable = "Open Co-op\nCoordinator unavailable",
     queued = "Opening Co-op…",
+    started = "Opening the co-op title…",
+    failed = "Open Co-op\nThe coordinator could not start",
     refused = "Open Co-op\nThe coordinator could not accept the request",
 }
 local shown, attempt, input_key, report
@@ -61,6 +63,16 @@ local function request_id()
     if id:find("[^0]") then return id end
 end
 
+local function observe_attempt()
+    local read = SilverfishReadCoopBootstrapLaunchStatus
+    if type(read) ~= "function" or (attempt.state ~= "queued" and attempt.state ~= "started") then return end
+    local ok, version, state, generation, id = pcall(read)
+    if ok and math.type(version) == "integer" and version == 1
+        and generation == attempt.generation and id == attempt.id and (state == "started" or state == "failed") then
+        attempt.state = state
+    end
+end
+
 local function publish(state)
     if report == state then return end
     report = state
@@ -98,7 +110,8 @@ local function tick()
 
     local generation, submit = offer()
     local state = generation and "ready" or "unavailable"
-    if attempt and (attempt.generation == generation or not generation and same_title(attempt.context, context)) then
+    if attempt and (not generation or attempt.generation == generation) and same_title(attempt.context, context) then
+        observe_attempt()
         state = attempt.state
     end
     show(context, generation, state)
@@ -119,7 +132,7 @@ local function tick()
     if refreshed ~= generation or next_submit ~= submit or not same_title(context, stock_title()) then return end
     local id = request_id()
     if not id then error("open_coop_request_id_unavailable", 0) end
-    attempt = {generation = generation, context = context, state = "refused"}
+    attempt = {generation = generation, context = context, state = "refused", id = id}
     local ok, queued = pcall(submit, generation, id)
     if ok and queued == true then attempt.state = "queued" end
     show(context, generation, attempt.state)

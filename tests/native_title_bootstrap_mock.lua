@@ -150,6 +150,15 @@ assert(not widget:IsInViewport() and #requests == 1)
 world.NetDriver = nil
 press()
 assert(text():find("Opening Co-op", 1, true) and #requests == 1)
+env.SilverfishReadCoopBootstrapLaunchStatus = function() return 1, "failed", requests[1][1], ("f"):rep(32) end
+tick()
+assert(text():find("Opening Co-op", 1, true))
+env.SilverfishReadCoopBootstrapLaunchStatus = function() return 1, "started", table.unpack(requests[1]) end
+tick()
+assert(notices[#notices] == "started" and text():find("Opening the co-op title", 1, true))
+env.SilverfishReadCoopBootstrapLaunchStatus = function() return 1, "failed", table.unpack(requests[1]) end
+tick()
+assert(notices[#notices] == "failed" and text():find("could not start", 1, true))
 
 generation = ("b"):rep(32)
 env.SilverfishRequestCoopBootstrapOpen = function(...)

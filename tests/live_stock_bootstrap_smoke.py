@@ -19,7 +19,7 @@ BOOTSTRAP = "SilverfishCoopBootstrap"
 STATE = re.compile(r"\[SilverfishCoopBootstrap\] state=([a-z_]+)\b")
 
 
-async def verify(work: Path, original: Path) -> None:
+async def verify(work: Path, original: Path, *, coordinator_ready: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The stock-layout title proof requires Windows")
     from tools.silverfish.win_job import GameProcess
@@ -31,6 +31,10 @@ async def verify(work: Path, original: Path) -> None:
         raise ValueError("Use the dedicated replica with only the title bootstrap installed")
     if (mods / "mods.txt").read_text(encoding="utf-8").strip() != f"{BOOTSTRAP} : 1":
         raise ValueError("The isolated stock title must load only the bootstrap")
+    native = mods / BOOTSTRAP / "dlls"
+    files = {entry.name for entry in native.iterdir()} if native.is_dir() else set()
+    if files != ({"main.dll", "SilverfishCoopCoordinator.exe"} if coordinator_ready else set()):
+        raise ValueError("The replica's coordinator package must match the requested check")
 
     root = Path(__file__).resolve().parents[1]
     shared = root / "mod" / "SilverfishCoop" / "Scripts"
@@ -63,6 +67,7 @@ async def verify(work: Path, original: Path) -> None:
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = subprocess.SW_HIDE
     baseline = log.stat().st_mtime_ns if log.is_file() else None
+    expected_state = "ready" if coordinator_ready else "unavailable"
     try:
         process = GameProcess(arguments, executable=game, cwd=game.parent, env=environment, startupinfo=startup)
         async with asyncio.timeout(30):
@@ -73,12 +78,12 @@ async def verify(work: Path, original: Path) -> None:
                     evidence["states"] = states
                     if "error" in states:
                         raise RuntimeError("The stock title bootstrap reported an error")
-                    if "unavailable" in states:
+                    if expected_state in states:
                         break
                 await asyncio.sleep(0.1)
             else:
                 raise RuntimeError("The stock-layout game exited before the bootstrap mounted")
-        assert states in (["unavailable"], ["waiting_title", "unavailable"]), states
+        assert states[-1] == expected_state and set(states) <= {"waiting_title", "unavailable", expected_state}, states
         saves = {path.relative_to(profile).as_posix() for path in profile.rglob("*.sav")}
         assert saves == {"Saved/SaveGames/Config.sav"}, saves
         evidence.update(verified=True, loaded_mod=BOOTSTRAP, isolated_title_files=sorted(saves))
@@ -98,5 +103,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--coordinator-ready", action="store_true")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
+                       coordinator_ready=options.coordinator_ready))
