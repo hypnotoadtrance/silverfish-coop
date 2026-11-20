@@ -163,11 +163,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("The west walkway requires a stock pickup at the upper stop")
     if east_stairs and not west_walkway:
         raise ValueError("The east stairs require the west walkway carry")
-    if route_probe and not resume:
-        raise ValueError("The stock navigation probe requires the dormant Data Silo checkpoint")
     if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
         raise ValueError("Choose one lower deck positioning scenario")
     core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo
+    if route_probe and (not resume or core_lift_carry or stock_input or instructions or carry_only
+                        or shared_core or guest_carry or lift_ride or upper_door or stock_hazard_wipe
+                        or prepare_core_carry or guest_hazard_authority):
+        raise ValueError("Run the stock navigation survey separately from the dormant Data Silo checkpoint")
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
