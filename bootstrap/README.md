@@ -14,6 +14,18 @@ Build the test coordinator with a matching Windows x64 Python environment, the r
 
 Build the [native title bridge](native/README.md) with the coordinator's SHA-256 pin. Run `python bootstrap/package.py <new-archive.zip> --native-dll <main.dll> --coordinator <SilverfishCoopCoordinator.exe>` to package the matching pair beside the three Lua scripts. The same opt-in UE4SS mod entry loads the complete bootstrap.
 
+## Install the stock title entry
+
+Prepare the matched private embedded stage first. Close both the stock game and the private stage before setup. From the matched checkout, use the pinned UE4SS release, the Project Silverfish signature folder, and the full bootstrap archive.
+
+```powershell
+python -m bootstrap.install_stock --game $steamGame --work $workspace --ue4ss $ue4ssRelease --signatures $silverfishSignatures --bootstrap $archive --host-campaign $campaign --bind $listenAddress --port $udpPort
+```
+
+To configure Join, import the host invitation into the private workspace and supply `--join-profile $profile --invite $invitation`. Add `--character $characterId` to select the invited character explicitly. You can configure Host, Join, or both. The installer checks that the stock game and private stage match, preserves compatible existing loader settings and other mods, and enables the entry after it writes the matched bootstrap and the local coordinator configuration. Repeating the same setup verifies the installed files and keeps the existing activation.
+
+Open the game with **Play** in Steam, then use **Open Co-op** on the title to reach the isolated Host and Join controls. The interactive Steam startup and handoff still need foreground verification. [Private stage setup](../native/embedded_runtime/README.md)
+
 ## Coordinator calls
 
 - `SilverfishReadCoopBootstrapOffer()` returns integer protocol version `1` and the current generation. A generation is a nonzero string of 32 lowercase hexadecimal characters. The coordinator issues a new ID for each new offer.
