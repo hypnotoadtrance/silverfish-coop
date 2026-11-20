@@ -154,10 +154,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
-                   raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False, fixture_passengers=False):
+                   raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False, fixture_passengers=False,
+                   west_walkway=False):
     upper_door = upper_door or upper_door_keycard
     if fixture_passengers and not fixture_loose_cargo:
         raise ValueError("Fixture passengers require the isolated loose-cargo setup")
+    if west_walkway and not (park_on_deck or fixture_passengers):
+        raise ValueError("The west walkway requires a stock pickup at the upper stop")
     if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
         raise ValueError("Choose one lower deck positioning scenario")
     core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo
@@ -729,7 +732,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             await verify_core_lift(run, guest_run, action, inactive, character, route_proof,
                                    lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match,
                                    raise_before_ascent=raise_before_ascent, park_on_deck=park_on_deck,
-                                   fixture_loose_cargo=fixture_loose_cargo, fixture_passengers=fixture_passengers)
+                                   fixture_loose_cargo=fixture_loose_cargo, fixture_passengers=fixture_passengers,
+                                   west_walkway=west_walkway)
             await action(run, "checkpoint")
             saved, lift_flags = await flags()
             assert tuple(row.get(core.FLAG, 0) for row in lift_flags) == (0, 0)
@@ -1081,6 +1085,8 @@ if __name__ == "__main__":
                         help="use an isolated fixture to load the Core and test only the stock loose-cargo ascent")
     parser.add_argument("--core-lift-fixture-passengers", action="store_true",
                         help="stage both riders for the loose-cargo test and continue to stock pickup and disembark")
+    parser.add_argument("--core-lift-west-walkway", action="store_true",
+                        help="continue the parked-Core test from the landing along the stock west walkway")
     parser.add_argument("--guest-hazard-authority", action="store_true",
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
@@ -1095,4 +1101,5 @@ if __name__ == "__main__":
                          raise_before_ascent=options.core_lift_raise_before_ascent,
                          park_on_deck=options.core_lift_park_on_deck,
                          fixture_loose_cargo=options.core_lift_fixture_loose_cargo,
-                         fixture_passengers=options.core_lift_fixture_passengers))
+                         fixture_passengers=options.core_lift_fixture_passengers,
+                         west_walkway=options.core_lift_west_walkway))

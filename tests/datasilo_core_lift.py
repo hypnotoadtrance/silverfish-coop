@@ -70,7 +70,7 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
                            raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False,
-                           fixture_passengers=False):
+                           fixture_passengers=False, west_walkway=False):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -300,6 +300,30 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         carrier_can_be_downed = False
         proof["upper_regrip"] = await regrip("pick up the same Core from the parked upper deck", proof.get("deck_release"))
 
+    async def cross_west_walkway():
+        if not west_walkway:
+            return
+
+        def on_floor(row, seat):
+            return 2470 < row[seat]["location"][2] < 2530
+
+        await walk_to("leave the lift along the west floor", (-2110, 450), 27,
+                      reached=lambda row: on_floor(row, "carrier"))
+        proof["west_waypoint"] = await walk_to(
+            "carry the same Core to stock Waypoint 25", (-2132, 1054), 28,
+            reached=lambda row: on_floor(row, "carrier") and row["prop"]["position"][1] > 925,
+        )
+        await walk_to("bring the host to the west opening", (-1720, EXIT_Y), 5, seat="lead")
+        await walk_to("walk the host onto the west floor", (-1990, EXIT_Y), 18, seat="lead",
+                      reached=lambda row: on_floor(row, "lead"))
+        await walk_to("leave the lift along the west floor with the host", (-2110, 450), 28, seat="lead",
+                      reached=lambda row: on_floor(row, "lead"))
+        regrouped = await walk_to("regroup with the Core at stock Waypoint 25", (-2110, 910), 28, seat="lead",
+                                  reached=lambda row: on_floor(row, "lead"))
+        assert math.dist(regrouped["prop"]["position"], regrouped["guest_prop"]["position"]) < 55
+        assert regrouped["hold"]["lease"] == proof["landing"]["hold"]["lease"]
+        proof["west_walkway"] = regrouped
+
     async def disembark():
         def above_west_rail(row, *_):
             return row["prop"]["position"][2] >= UPPER_LANDING_Z + 154
@@ -325,6 +349,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         assert landed["prop"]["position"][0] < -1820 and landed["prop"]["position"][2] >= UPPER_LANDING_Z
         pickup = proof.get("upper_regrip") or proof["grab"]
         assert landed["hold"]["sequence"] > pickup["hold"]["sequence"]
+        await cross_west_walkway()
 
     proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
 
