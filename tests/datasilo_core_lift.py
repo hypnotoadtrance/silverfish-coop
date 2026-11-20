@@ -346,12 +346,23 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
         base = proof["west_walkway"]
         facing = base["hold"]["yaw"]
+        south_doorway_was_crossed = False
         for index, (x, y, floor) in enumerate(points[1:corridor + 1], 1):
-            outward = math.degrees(math.atan2(y, x))
-            if abs((outward - facing + 180) % 360 - 180) > 28:
-                await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
-                facing = outward
-            frame = await follow("carrier", index, (x, y, floor))
+            south_doorway = 500 < x < 760 and -2490 < y < -2400 and points[index - 1][1] > -2400
+            if south_doorway:
+                await walk_to("line up the Core with the south doorway", (625, -2320), 20)
+                await turn("aim the Core down the south doorway", -90, pitch=8)
+                frame = await walk_to("move the Core beyond the south wall before turning east", (625, -2535), 20,
+                                      reached=lambda row: row["prop"]["position"][1] < -2475)
+                proof["south_doorway"] = frame
+                facing = -90
+            else:
+                outward = math.degrees(math.atan2(y, x))
+                if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
+                    await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
+                    facing = outward
+                frame = await follow("carrier", index, (x, y, floor))
+            south_doorway_was_crossed = south_doorway
             proof["east_stair_progress"] = {"point": index, "frame": frame}
             if index > 1:
                 await follow("lead", index - 1, points[index - 1])
