@@ -111,7 +111,7 @@ local function camera_aim(current)
     local length = math.sqrt(horizontal * horizontal + v.Z * v.Z)
     if length < .98 or length > 1.02 then return end
     local pitch, yaw = math.deg(math.atan(v.Z, horizontal)), math.deg(math.atan(v.Y, v.X))
-    if bounded(pitch, 89.9) and bounded(yaw, 180) then return pitch, yaw end
+    if bounded(pitch, 89.9) and bounded(yaw, 180) then return pitch, yaw, v end
 end
 
 local function degrees(n)
@@ -121,10 +121,16 @@ end
 local function sample_aim(current)
     sample = nil
     if current.state ~= "held" or aim_sequence + 1 >= sequence_limit then return end
-    local pitch, yaw = camera_aim(current)
+    local pitch, yaw, look = camera_aim(current)
     if not pitch then return end
+    local eye = current.camera:K2_GetComponentLocation()
+    local horizontal = look.Z > 0 and look or current.pawn:GetActorForwardVector()
+    if not point(eye) or not point(horizontal) then return end
+    -- Stock HoldObject places the grip 110 units from the carrier's camera.
+    local grip = {X = eye.X + 110 * horizontal.X, Y = eye.Y + 110 * horizontal.Y, Z = eye.Z + 110 * look.Z}
+    if not point(grip) then return end
     aim_sequence = aim_sequence + 1
-    sample = {sequence = aim_sequence, pitch = pitch, yaw = yaw}
+    sample = {sequence = aim_sequence, pitch = pitch, yaw = yaw, grip = grip}
     return sample
 end
 
@@ -302,7 +308,8 @@ function view.rows(state, phase, row)
     rows[#rows + 1] = row("native-mindcore-guest-carry", map, binding.name, core_name, binding.session, binding.epoch, binding.state)
     if sample then
         rows[#rows + 1] = row("native-mindcore-carry-aim", map, binding.name, core_name, binding.session, binding.epoch,
-            sample.sequence, degrees(sample.pitch), degrees(sample.yaw))
+            sample.sequence, degrees(sample.pitch), degrees(sample.yaw),
+            string.format("%.3f", sample.grip.X), string.format("%.3f", sample.grip.Y), string.format("%.3f", sample.grip.Z))
     end
     return rows
 end

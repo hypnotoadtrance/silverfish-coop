@@ -44,10 +44,10 @@ local function run()
     local state = {map = map, world = scene.world}
     local actions, native_state, native_reason, native_address = {}, nil, nil, nil
     local aim, allowed, fail_release = nil, true, false
-    local function mock_native(pawn_address, save, stock, core, cradle, action, pitch, yaw)
+    local function mock_native(pawn_address, save, stock, core, cradle, action, pitch, yaw, x, y, z)
         assert(pawn_address == pawn:GetAddress() and save == detached:GetAddress() and stock == scene.canonical:GetAddress()
             and core == scene.core:GetAddress() and cradle == scene.cradle:GetAddress())
-        actions[#actions + 1] = {action, pitch, yaw}
+        actions[#actions + 1] = {action, pitch, yaw, x, y, z}
         native_address = pawn_address
         if action == "grab" then
             assert(pawn.ActorBeingLookedAt == scene.core and pawn.ActorLookedAt_Distance == 100)
@@ -143,6 +143,13 @@ local function run()
         and report()[6] == "released" and report()[7] == 3 and report()[8] == "stock_core_released")
     refuses(owner_name, lease, "grab", "4", "holder_or_sequence_changed", "0", "0")
     assert(request(owner_name, next_lease, "grab", "7", "0", "0"))
+    aim = "1\t" .. next_lease .. "\t8\t14.5\t-29.25\t376\t0\t0\n"
+    carry.sync(state, "hosting")
+    assert(#actions == 4)
+    aim = "1\t" .. next_lease .. "\t8\t14.5\t-29.25\t110\t-20\t55\n"
+    carry.sync(state, "hosting")
+    assert(#actions == 5 and actions[5][1] == "hold" and actions[5][4] == 110
+        and actions[5][5] == -20 and actions[5][6] == 55 and report()[11] == "110.000")
     mock_native(pawn:GetAddress(), detached:GetAddress(), scene.canonical:GetAddress(),
         scene.core:GetAddress(), scene.cradle:GetAddress(), "release")
     native_reason = "stock_core_capsule_release"

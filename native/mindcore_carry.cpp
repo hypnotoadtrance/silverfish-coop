@@ -34,6 +34,7 @@ namespace
     using Address = std::uintptr_t;
     using Clock = std::chrono::steady_clock;
     using Rotator = std::array<double, 3>;
+    using Point = std::array<double, 3>;
 
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto world_path = STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P");
@@ -44,6 +45,8 @@ namespace
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto handle_class = STR("/Script/Engine.PhysicsHandleComponent");
+    constexpr auto primitive_class = STR("/Script/Engine.PrimitiveComponent");
+    constexpr auto vector_location = STR("/Script/CoreUObject.Vector");
     constexpr auto vector_rotation = STR("/Script/CoreUObject.Rotator");
     constexpr auto pickup_action = STR("/Game/Classes/Player/Player_Inputs/IA_PickUp.IA_PickUp");
     constexpr auto pickup_event = STR("InpActEvt_IA_PickUp_K2Node_EnhancedInputActionEvent_6");
@@ -53,6 +56,7 @@ namespace
     // Authority updates pass through the authenticated link and the game-thread mailbox.
     constexpr auto authority_timeout = std::chrono::seconds(2);
     constexpr auto max_serial = (std::uint64_t{1} << 53) - 1;
+    constexpr double carrier_reach = 375;
 
     enum class Input { none, interact, pickup };
     enum class Action { grab, release, hold };
@@ -324,6 +328,97 @@ namespace
         return true;
     }
 
+    bool carrier_target_in_range(U::UObject* pawn, const Point& target)
+    {
+        const auto origin = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
+        const auto x = target[0] - origin.GetX(), y = target[1] - origin.GetY(), z = target[2] - origin.GetZ();
+        return x * x + y * y + z * z <= carrier_reach * carrier_reach;
+    }
+
+    bool set_carrier_target(U::UObject* handle, const Point& position, double yaw)
+    {
+        auto* set = find<U::UFunction>(STR("/Script/Engine.PhysicsHandleComponent:SetTargetLocationAndRotation"));
+        auto* get = find<U::UFunction>(STR("/Script/Engine.PhysicsHandleComponent:GetTargetLocationAndRotation"));
+        const auto schema = [](U::UFunction* function, const U::TCHAR* location_name, const U::TCHAR* rotation_name,
+                               bool output) {
+            auto* location = parameter<U::FStructProperty>(function, location_name, 0);
+            auto* rotation = parameter<U::FStructProperty>(function, rotation_name, sizeof(Point));
+            return location && rotation && function->GetOuterPrivate() == find<U::UClass>(handle_class) &&
+                function->HasAnyFunctionFlags(U::FUNC_Native) && function->GetNumParms() == 2 &&
+                !function->GetReturnProperty() && function->GetParmsSize() == sizeof(Point) + sizeof(Rotator) &&
+                location->GetStruct().Get() == find<U::UScriptStruct>(vector_location) &&
+                rotation->GetStruct().Get() == find<U::UScriptStruct>(vector_rotation) &&
+                location->GetSize() == sizeof(Point) && rotation->GetSize() == sizeof(Rotator) &&
+                location->HasAnyPropertyFlags(U::CPF_OutParm) == output &&
+                rotation->HasAnyPropertyFlags(U::CPF_OutParm) == output;
+        };
+        if (!schema(set, STR("NewLocation"), STR("NewRotation"), false) ||
+            !schema(get, STR("TargetLocation"), STR("TargetRotation"), true)) return false;
+
+        struct Target
+        {
+            Point position;
+            Rotator rotation;
+        };
+        const Rotator upright{0, yaw, 0};
+        Target args{position, upright};
+        handle->ProcessEvent(set, &args);
+        Target actual{};
+        handle->ProcessEvent(get, &actual);
+        for (std::size_t axis = 0; axis < position.size(); ++axis)
+            if (!std::isfinite(actual.position[axis]) || std::abs(actual.position[axis] - position[axis]) > .05)
+                return false;
+        for (const auto angle : actual.rotation) if (!std::isfinite(angle)) return false;
+        return same_rotation(actual.rotation, upright);
+    }
+
+    struct CollisionChannels
+    {
+        U::UFunction* get{};
+        U::UFunction* set{};
+
+        static U::UFunction* function(const U::TCHAR* path, const U::TCHAR* name, bool returns)
+        {
+            auto* fn = find<U::UFunction>(path);
+            auto* channel = parameter<U::FByteProperty>(fn, STR("Channel"), 0);
+            auto* response = parameter<U::FByteProperty>(fn, name, 1);
+            return channel && response && channel->GetSize() == 1 && response->GetSize() == 1 &&
+                fn->GetOuterPrivate() == find<U::UClass>(primitive_class) && fn->HasAnyFunctionFlags(U::FUNC_Native) &&
+                fn->GetNumParms() == 2 && fn->GetParmsSize() == 2 && response->HasAnyPropertyFlags(U::CPF_ReturnParm) == returns
+                ? fn : nullptr;
+        }
+
+        bool bind()
+        {
+            get = function(STR("/Script/Engine.PrimitiveComponent:GetCollisionResponseToChannel"), STR("ReturnValue"), true);
+            set = function(STR("/Script/Engine.PrimitiveComponent:SetCollisionResponseToChannel"), STR("NewResponse"), false);
+            return get && set;
+        }
+
+        std::uint8_t read(U::UObject* mesh, std::uint8_t index) const
+        {
+            std::array args{index, std::uint8_t{0xff}};
+            mesh->ProcessEvent(get, args.data());
+            return args[1];
+        }
+
+        void write(U::UObject* mesh, std::uint8_t index, std::uint8_t response) const
+        {
+            std::array args{index, response};
+            mesh->ProcessEvent(set, args.data());
+        }
+    };
+
+    struct CarrierCollision
+    {
+        U::FWeakObjectPtr mesh{};
+        std::uint32_t blocked{};
+    };
+
+    constexpr std::uint8_t overlap_response = 1;
+    constexpr std::uint8_t block_response = 2;
+    constexpr std::uint8_t collision_channel_count = 32;
+
     struct GuestInput
     {
         U::FWeakObjectPtr pawn{}, core{};
@@ -341,6 +436,7 @@ namespace
         U::FWeakObjectPtr pawn{}, save{}, canonical{}, core{}, cradle{}, handle{}, camera{};
         Clock::time_point expires{};
         Rotator look{};
+        std::optional<CarrierCollision> collision{};
 
         bool same_scene(const Scene& scene) const
         {
@@ -385,6 +481,70 @@ namespace
         latest_reason = reason;
     }
 
+    bool enable_carrier_collision(const Scene& scene)
+    {
+        if (!holder) return false;
+        if (holder->collision) return holder->collision->mesh.Get() == scene.mesh;
+        CollisionChannels channels;
+        if (!channels.bind()) return false;
+        std::uint32_t blocked{};
+        for (std::uint8_t index = 0; index < collision_channel_count; ++index)
+        {
+            // Leave visibility and camera traces alone. Physical contacts become
+            // overlaps, so the normal Cradle sensor still sees the moving Core.
+            if (index == 3 || index == 4) continue;
+            const auto response = channels.read(scene.mesh, index);
+            if (response > block_response) return false;
+            if (response == block_response) blocked |= std::uint32_t{1} << index;
+        }
+        auto* pawn = holder->pawn.Get();
+        holder->collision = CarrierCollision{scene.mesh, blocked};
+        for (std::uint8_t index = 0; index < collision_channel_count; ++index)
+        {
+            if (!(blocked & (std::uint32_t{1} << index))) continue;
+            channels.write(scene.mesh, index, overlap_response);
+            // Updating overlap filters may synchronously mount and release it.
+            if (!holder || holder->pawn.Get() != pawn || !holder->same_scene(scene)) return false;
+            if (channels.read(scene.mesh, index) != overlap_response) return false;
+        }
+        return true;
+    }
+
+    bool restore_carrier_collision(const Holder& current)
+    {
+        if (!current.collision || !current.collision->blocked) return true;
+        auto* mesh = current.collision->mesh.Get();
+        auto* core = current.core.Get();
+        if (!live(mesh)) return true;
+        if (!exact(core, core_class) || !component(mesh, core, STR("/Script/Engine.StaticMeshComponent")) ||
+            object(core, STR("RootComponent")) != mesh || !role(core, 3)) return false;
+        CollisionChannels channels;
+        if (!channels.bind()) return false;
+        bool restored = true;
+        for (std::uint8_t index = 0; index < collision_channel_count; ++index)
+        {
+            if (!(current.collision->blocked & (std::uint32_t{1} << index))) continue;
+            const auto response = channels.read(mesh, index);
+            if (response == block_response) continue;
+            if (response == overlap_response) channels.write(mesh, index, block_response);
+            if (channels.read(mesh, index) != block_response) restored = false;
+        }
+        return restored;
+    }
+
+    bool forget_holder(U::UObject* pawn, std::string_view state, std::string_view reason)
+    {
+        const auto previous = holder;
+        holder.reset();
+        if (previous && !restore_carrier_collision(*previous))
+        {
+            status(pawn, "fault", "mutation_unverified_stock_core_collision_restore");
+            return false;
+        }
+        status(pawn, state, reason);
+        return true;
+    }
+
     bool run_stock(const Functions& functions, const Holder& current, Action action)
     {
         auto* pawn = current.pawn.Get();
@@ -419,12 +579,10 @@ namespace
         if (!holder->held(scene) || !schema.bind() ||
             !run_stock(schema, *holder, Action::release) || !free_hands(pawn))
         {
-            status(pawn, "fault", "mutation_unverified_stock_core_release");
+            forget_holder(pawn, "fault", "mutation_unverified_stock_core_release");
             return false;
         }
-        holder.reset();
-        status(pawn, "released", reason);
-        return true;
+        return forget_holder(pawn, "released", reason);
     }
 
     void frame_tick()
@@ -434,21 +592,18 @@ namespace
         Scene scene;
         if (!scene.bind() || !holder->same_scene(scene) || (!pawn && !holder->handle.Get()))
         {
-            holder.reset();
-            status(pawn, "released", "stock_core_scope_ended");
+            forget_holder(pawn, "released", "stock_core_scope_ended");
             return;
         }
         if (!holder->exact_seat(scene))
         {
-            holder.reset();
-            status(pawn, "fault", "stock_core_holder_scope_lost");
+            forget_holder(pawn, "fault", "stock_core_holder_scope_lost");
             return;
         }
         if (!holder->held(scene))
         {
-            if (free_hands(pawn)) status(pawn, "released", "stock_core_released_by_engine");
-            else status(pawn, "fault", "mutation_unverified_stock_core_holder");
-            holder.reset();
+            if (free_hands(pawn)) forget_holder(pawn, "released", "stock_core_released_by_engine");
+            else forget_holder(pawn, "fault", "mutation_unverified_stock_core_holder");
             return;
         }
         std::string_view release_reason;
@@ -462,18 +617,18 @@ namespace
             release(scene, release_reason);
             return;
         }
+        if (holder->collision) return; // The accepted carrier target drives the handle.
         Functions functions;
         if (!functions.bind() || !run_stock(functions, *holder, Action::hold))
         {
-            const bool released = holder->held(scene) ? release(scene, "stock_core_watchdog_release") : free_hands(pawn);
-            if (released) holder.reset();
-            status(pawn, "fault", "mutation_unverified_stock_core_hold_pose");
+            if (holder && holder->held(scene) && !release(scene, "stock_core_watchdog_release")) return;
+            if (holder) forget_holder(pawn, "fault", "mutation_unverified_stock_core_hold_pose");
+            else status(pawn, "fault", "mutation_unverified_stock_core_hold_pose");
             return;
         }
         if (free_hands(pawn))
         {
-            holder.reset();
-            status(pawn, "released", "stock_core_released_by_engine");
+            forget_holder(pawn, "released", "stock_core_released_by_engine");
         }
     }
 
@@ -680,8 +835,12 @@ namespace
     int run_authority(const Lua& lua)
     {
         const auto report = [&](bool ok, std::string_view reason) { lua.set_bool(ok); lua.set_string(reason); return 2; };
-        if (!available() || bracket_pawn || lua.get_stack_size() != 8 || !lua.is_string(6) ||
-            !lua.is_number(7) || !lua.is_number(8)) return report(false, "stock_core_carry_arguments");
+        const int count = lua.get_stack_size();
+        const bool posed = count == 11;
+        if (!available() || bracket_pawn || (count != 8 && !posed) || !lua.is_string(6) ||
+            !lua.is_number(7) || !lua.is_number(8) ||
+            (posed && (!lua.is_number(9) || !lua.is_number(10) || !lua.is_number(11))))
+            return report(false, "stock_core_carry_arguments");
         std::array<Address, 5> addresses{};
         for (auto& value : addresses)
         {
@@ -693,9 +852,19 @@ namespace
         const auto verb = lua.get_string();
         const auto pitch = lua.get_number();
         const auto yaw = lua.get_number();
-        if ((verb != "grab" && verb != "hold" && verb != "release") ||
+        if ((verb != "grab" && verb != "hold" && verb != "release") || (posed && verb != "hold") ||
             !std::isfinite(pitch) || std::abs(pitch) > 89.9 || !std::isfinite(yaw) || std::abs(yaw) > 180)
             return report(false, "stock_core_carry_arguments");
+        Point target{};
+        if (posed)
+        {
+            for (auto& axis : target)
+            {
+                axis = lua.get_number();
+                if (!std::isfinite(axis) || std::abs(axis) > 10000000)
+                    return report(false, "stock_core_carry_arguments");
+            }
+        }
         Scene scene;
         if (!scene.bind() || !scene.authority() || address(scene.core) != addresses[3] || address(scene.cradle) != addresses[4])
             return report(false, "stock_core_carry_scene");
@@ -730,6 +899,27 @@ namespace
         if (verb == "hold")
         {
             if (!holder || !holder->held(scene)) return report(false, "stock_core_carry_owner");
+            if (posed && !carrier_target_in_range(pawn, target))
+            {
+                release(scene, "stock_core_carrier_target_out_of_range");
+                return report(false, latest_reason);
+            }
+            if (posed)
+            {
+                if (!enable_carrier_collision(scene) || !holder || !holder->held(scene) ||
+                    !set_carrier_target(holder->handle.Get(), target, yaw))
+                {
+                    if (holder && free_hands(pawn)) forget_holder(pawn, "released", "stock_core_released_by_engine");
+                    else if (holder) release(scene, "stock_core_carrier_target_unavailable");
+                    return report(false, latest_reason);
+                }
+                if (!holder || !holder->held(scene)) return report(false, latest_reason);
+            }
+            else if (holder->collision)
+            {
+                release(scene, "stock_core_carrier_target_missing");
+                return report(false, latest_reason);
+            }
             holder->look = look;
             holder->expires = Clock::now() + authority_timeout;
             status(pawn, "held", "stock_core_renewed");
@@ -814,6 +1004,13 @@ namespace silverfish::native_mindcore_carry
 
     void uninstall_hooks()
     {
+        if (available() && holder)
+        {
+            auto* pawn = holder->pawn.Get();
+            Scene scene;
+            if (scene.bind() && holder->held(scene)) release(scene, "stock_core_scope_ended");
+            else forget_holder(pawn, "released", "stock_core_scope_ended");
+        }
         installed.store(false, std::memory_order_release);
         for (auto& hook : hooks)
         {

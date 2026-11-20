@@ -1,4 +1,4 @@
-"""Transport exact Data Silo carry edges and authenticated camera samples."""
+"""Transport exact Data Silo carry edges and authenticated carrier samples."""
 
 from contextlib import suppress
 from dataclasses import dataclass
@@ -31,10 +31,13 @@ PUBLIC = "native_mindcore_carry"
 _TOKEN = re.compile(r"[a-f0-9]{32}")
 _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 _ANGLE = re.compile(r"-?(?:0|[1-9][0-9]{0,2})(?:\.[0-9]{1,4})?")
+_COORDINATE = re.compile(r"-?(?:0|[1-9][0-9]{0,7})(?:\.[0-9]{1,4})?")
 _REASON = re.compile(r"[a-z0-9_]{1,96}")
 _STATES = {"held", "released", "mount_released", "failure"}
 _GAMEPLAY_FRESH_FOR = 2.0
 _NATIVE_HOLD_FOR = 2.0
+_GRIP_RANGE = 375.0
+_GRIP_OUT_OF_RANGE = "native_mindcore_carry_grip_out_of_range"
 
 
 def token(value):
@@ -56,15 +59,33 @@ def angles(pitch, yaw):
     return pitch, yaw
 
 
+def _valid_position(position):
+    return (isinstance(position, (list, tuple)) and len(position) == 3
+            and all(type(value) in (int, float) and -10_000_000 <= value <= 10_000_000 for value in position))
+
+
+def _grip_position(fields):
+    if len(fields) != 3 or not all(isinstance(value, str) and _COORDINATE.fullmatch(value) for value in fields):
+        raise ValueError("Invalid Core grip position")
+    position = tuple(float(value) for value in fields)
+    if not _valid_position(position):
+        raise ValueError("Core grip position is out of bounds")
+    return position
+
+
 def parse_authority(fields):
-    if len(fields) != 10:
+    if len(fields) not in (10, 13):
         raise ValueError("Invalid authoritative Core carry report")
-    tag, area, actor, pawn, lease, state, number, reason, pitch, yaw = fields
+    tag, area, actor, pawn, lease, state, number, reason, pitch, yaw = fields[:10]
     if ((tag, area, actor) != (AUTHORITY_TAG, core.MAP, core.CORE) or not valid_pawn(pawn)
             or not token(lease) or state not in _STATES or not _REASON.fullmatch(reason)):
         raise ValueError("Invalid authoritative Core carry report")
     pitch, yaw = angles(pitch, yaw)
-    return dict(pawn=pawn, core=actor, lease=lease, state=state, sequence=serial(number), reason=reason, pitch=pitch, yaw=yaw)
+    observed = dict(pawn=pawn, core=actor, lease=lease, state=state, sequence=serial(number), reason=reason,
+                    pitch=pitch, yaw=yaw)
+    if len(fields) == 13:
+        observed["grip_position"] = _grip_position(fields[10:])
+    return observed
 
 
 def _guest_scope(fields):
@@ -82,11 +103,14 @@ def parse_view(fields):
 
 
 def parse_aim(fields):
-    if len(fields) != 9 or fields[0] != AIM_TAG:
+    if len(fields) not in (9, 12) or fields[0] != AIM_TAG:
         raise ValueError("Invalid local Core camera report")
     pawn, session, epoch = _guest_scope(fields[1:6])
-    pitch, yaw = angles(*fields[7:])
-    return dict(pawn=pawn, session=session, epoch=epoch, sequence=serial(fields[6]), pitch=pitch, yaw=yaw)
+    pitch, yaw = angles(*fields[7:9])
+    observed = dict(pawn=pawn, session=session, epoch=epoch, sequence=serial(fields[6]), pitch=pitch, yaw=yaw)
+    if len(fields) == 12:
+        observed["grip_position"] = _grip_position(fields[9:])
+    return observed
 
 
 def parse_view_scope(fields):
@@ -150,20 +174,25 @@ class Request:
     edge: str
     sequence: int
     aim: tuple[float, float] | None = None
+    grip_position: tuple[float, float, float] | None = None
 
     @classmethod
     def parse(cls, target):
-        values = target.split("@") if isinstance(target, str) and len(target) <= 110 else []
-        if len(values) not in (4, 6):
+        values = target.split("@") if isinstance(target, str) and len(target) <= 160 else []
+        if len(values) not in (4, 6, 9):
             raise ValueError("Invalid Core carry request")
-        epoch, lease, edge, number, *aim = values
-        if not token(epoch) or not token(lease) or not (edge == "drop" and not aim or edge in ("grab", "aim") and aim):
+        epoch, lease, edge, number, *payload = values
+        if (not token(epoch) or not token(lease)
+                or len(payload) not in {"drop": (0,), "grab": (2,), "aim": (2, 5)}.get(edge, ())):
             raise ValueError("Invalid Core carry request")
-        return cls(epoch, lease, edge, serial(number), angles(*aim) if aim else None)
+        aim = angles(*payload[:2]) if payload else None
+        grip_position = _grip_position(payload[2:]) if len(payload) == 5 else None
+        return cls(epoch, lease, edge, serial(number), aim, grip_position)
 
     def target(self):
         values = (self.epoch, self.lease, self.edge, str(self.sequence))
-        return "@".join((*values, *(f"{value:.3f}" for value in (self.aim or ()))))
+        payload = (*(self.aim or ()), *(self.grip_position or ()))
+        return "@".join((*values, *(f"{value:.3f}" for value in payload)))
 
 
 @dataclass
@@ -252,10 +281,18 @@ class Authority:
                 or self._pawn(character) != holder.pawn or request.sequence <= holder.sequence
                 or time.monotonic() - holder.renewed_at >= 1.7):
             return {"ok": False, "error": "native_mindcore_carry_aim_expired"}
-        pitch, yaw = request.aim
+        grip = request.grip_position
+        if grip is not None:
+            alias = self.host.native_recipients().get(character, {}).get("alias")
+            pawn = self.host.last_game.get("pawns", {}).get(alias, {})
+            origin = pawn.get("location")
+            if (pawn.get("name") != holder.pawn or not _valid_position(origin) or not _valid_position(grip)
+                    or math.dist(origin, grip) > _GRIP_RANGE):
+                return {"ok": False, "error": _GRIP_OUT_OF_RANGE}
+        payload = "\t".join(f"{value:.3f}" for value in (*request.aim, *(grip or ())))
         try:
             write_text(self.bridge.directory / AUTHORITY_AIM,
-                       f"1\t{holder.token}\t{request.sequence}\t{pitch:.3f}\t{yaw:.3f}\n", newline="\n")
+                       f"1\t{holder.token}\t{request.sequence}\t{payload}\n", newline="\n")
         except OSError:
             return {"ok": False, "error": "native_mindcore_carry_aim_unavailable"}
         holder.sequence, holder.renewed_at = request.sequence, time.monotonic()
@@ -468,10 +505,17 @@ class GuestInput:
                     and aim["sequence"] > self.sample_sequence and now >= self.aim_at):
                 self.sample_sequence, self.aim_at = aim["sequence"], now + .12
                 self.sequence += 1
-                request = Request(self.scope[2], self.lease, "aim", self.sequence, (aim["pitch"], aim["yaw"]))
+                request = Request(self.scope[2], self.lease, "aim", self.sequence,
+                                  (aim["pitch"], aim["yaw"]), aim.get("grip_position"))
                 operation = uuid.uuid5(self.client.bridge.input_namespace, f"mindcore:{self.lease}:aim:{self.sequence}").hex
-                await self.client.gameplay_action(ACTION, operation, request.target())
-                self.last_renewal_at = time.monotonic()
+                try:
+                    await self.client.gameplay_action(ACTION, operation, request.target())
+                except ValueError as error:
+                    if str(error) != _GRIP_OUT_OF_RANGE:
+                        raise
+                    # Let a fresh local sample retry without renewing the rejected pose.
+                else:
+                    self.last_renewal_at = time.monotonic()
             if self.scope and self.heartbeat_at <= now:
                 self._heartbeat(now)
         except (OSError, ValueError, RuntimeError) as error:

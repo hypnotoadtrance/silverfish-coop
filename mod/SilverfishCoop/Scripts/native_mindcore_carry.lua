@@ -118,9 +118,11 @@ local function stock_sight(context, range, pitch, yaw)
     if squared > 1 and squared < range^2 then return math.sqrt(squared) end
 end
 
-local function run(context, action, pitch, yaw)
+local function run(context, action, pitch, yaw, grip)
+    local coordinates = grip and {grip.X, grip.Y, grip.Z} or {}
     return SilverfishRunNativeMindCoreCarry(context.pawn_address, context.save_address,
-        context.canonical_address, context.core_address, context.cradle_address, action, pitch, yaw)
+        context.canonical_address, context.core_address, context.cradle_address, action, pitch, yaw,
+        table.unpack(coordinates))
 end
 
 local function address_scope(context)
@@ -132,7 +134,7 @@ end
 
 local function report(context, state, reason)
     last = {world = context.scene.world, name = context.name, lease = context.lease, sequence = context.sequence,
-        state = state, reason = reason, pitch = context.pitch, yaw = context.yaw}
+        state = state, reason = reason, pitch = context.pitch, yaw = context.yaw, grip = context.grip}
 end
 
 local function fault(context, reason)
@@ -140,8 +142,8 @@ local function fault(context, reason)
     report(context, "failure", reason)
 end
 
-local function mutate(context, action, pitch, yaw)
-    local invoked, ok, reason = pcall(run, context, action, pitch, yaw)
+local function mutate(context, action, pitch, yaw, grip)
+    local invoked, ok, reason = pcall(run, context, action, pitch, yaw, grip)
     if not invoked then reason = "mutation_unverified_native_mindcore_carry_call" end
     return invoked and ok == true, reason_token(reason, "mutation_unverified_native_mindcore_carry_reply")
 end
@@ -279,9 +281,16 @@ local function read_control(context)
     local number = sequence(raw_sequence)
     if not number or number <= context.sequence then return end
     if payload == "drop" then return "drop", number end
-    local raw_pitch, raw_yaw = payload:match("^([^\t]+)\t([^\t]+)$")
+    local raw_pitch, raw_yaw, x, y, z = payload:match("^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+    local grip
+    if raw_pitch then
+        grip = {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
+        if not point(grip) then return end
+    else
+        raw_pitch, raw_yaw = payload:match("^([^\t]+)\t([^\t]+)$")
+    end
     local pitch, yaw = angle(raw_pitch, 89.9), angle(raw_yaw, 180)
-    if pitch and yaw then return "hold", number, pitch, yaw end
+    if pitch and yaw then return "hold", number, pitch, yaw, grip end
 end
 
 function carry.sync(state, phase)
@@ -299,15 +308,20 @@ function carry.sync(state, phase)
         release(context, context.sequence)
         return
     end
-    local action, number, pitch, yaw = read_control(context)
+    local action, number, pitch, yaw, grip = read_control(context)
     if not action then return end
     if action == "drop" then
         release(context, number)
         return
     end
-    local ok, reason = mutate(context, "hold", pitch, yaw)
+    if grip then
+        local body = current.pawn:K2_GetActorLocation()
+        if not point(body) or length_squared(body, grip) > 375 ^ 2 then return end
+    end
+    local ok, reason = mutate(context, "hold", pitch, yaw, grip)
     if ok and reason == "stock_core_renewed" then
         context.sequence, context.pitch, context.yaw = number, pitch, yaw
+        context.grip = grip
         report(context, "held", reason)
     elseif update_native() and active == context then
         release(context, context.sequence)
@@ -321,8 +335,11 @@ function carry.rows(state, phase, row)
         rows[#rows + 1] = row("native-mindcore-carry-capability", map, core_name)
     end
     if last and same(last.world, state.world) then
+        local coordinates = last.grip and {string.format("%.3f", last.grip.X),
+            string.format("%.3f", last.grip.Y), string.format("%.3f", last.grip.Z)} or {}
         rows[#rows + 1] = row("native-mindcore-authority-carry", map, core_name, last.name, last.lease,
-            last.state, last.sequence, last.reason, string.format("%.3f", last.pitch), string.format("%.3f", last.yaw))
+            last.state, last.sequence, last.reason, string.format("%.3f", last.pitch), string.format("%.3f", last.yaw),
+            table.unpack(coordinates))
     end
     return rows
 end

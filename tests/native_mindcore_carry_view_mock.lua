@@ -39,6 +39,7 @@ local aim = {Pitch = 0, Yaw = 160, Roll = 0}
 local pawn = object({
     name = pawn_name, Dead = false, InteractionRange = 400,
     IsLocallyControlled = function() return true end, HasAuthority = function() return false end,
+    GetActorForwardVector = function() return position(0, 1, 0) end,
     GetWorld = function() return world end,
 }, "/Game/Classes/Player/Player_FP.Player_FP_C")
 local controller = object({
@@ -146,10 +147,16 @@ assert(#sync() == 1 and #event_lines == 1)
 
 mode = "held"
 local held = sync()
-assert(#held == 2 and held[2]:match("\t1\t3%.691\t0%.000$"))
+local hypotenuse = math.sqrt(155 ^ 2 + 10 ^ 2)
+assert(#held == 2 and held[2]:sub(-#row(1, "3.691", "0.000",
+    string.format("%.3f", 110 * 155 / hypotenuse), "0.000", string.format("%.3f", 110 * 10 / hypotenuse)))
+    == row(1, "3.691", "0.000", string.format("%.3f", 110 * 155 / hypotenuse), "0.000", string.format("%.3f", 110 * 10 / hypotenuse)))
 assert(command("turn") and math.abs(aim.Yaw - 25) < .001)
 held = view.rows(state, "connected", row)
-assert(held[2]:match("\t2\t3%.691\t25%.000$"))
+assert(held[2]:match("\t2\t3%.691\t25%.000\t"))
+assert(view.command({"1", verb, pawn_name, "turn", "-30", "25"}, state, "connected"))
+held = view.rows(state, "connected", row)
+assert(held[2]:match("\t3\t%-30%.000\t25%.000\t0%.000\t110%.000\t%-55%.000$"))
 assert(command("release") and probes == 2 and event_lines[2]:find(event("release", "interact", 2), 1, true) == 1)
 mode = "ready"
 latest = {3, "grab", "pickup"}

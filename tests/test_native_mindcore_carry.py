@@ -18,11 +18,12 @@ class AuthorityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         path = Path(self.enterContext(TemporaryDirectory()))
         base = {"state": "hosting", "map": core.MAP, carry.CAPABILITY: core.CORE,
-                core.SCENE: {"status": 0, "installed": False}, core.REPLICATION: {"state": "active"}}
+                core.SCENE: {"status": 0, "installed": False}, core.REPLICATION: {"state": "active"},
+                "pawns": {"guest": {"name": PAWN, "location": [100, -70, 41]}}}
         self.host = SimpleNamespace(last_game=base, last_seen=time.monotonic(), stopping=False, transitioning=False,
                                     native_checkpoint_unsafe=False, zone_epoch=EPOCH, control=Mock(),
                                     party={"players": {CHARACTER: {"downed": False}}})
-        self.native = {CHARACTER: {"pawn": PAWN, "connected": True}}
+        self.native = {CHARACTER: {"pawn": PAWN, "alias": "guest", "connected": True}}
         self.host.native_recipients = lambda: self.native
         self.authority = carry.Authority(self.host)
         self.authority.bridge = SimpleNamespace(directory=path, command=AsyncMock(), wait_for=AsyncMock())
@@ -75,6 +76,26 @@ class AuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.authority.maintain()
         self.assertIsNone(self.authority.holder)
 
+    async def test_grip_uses_the_same_lease_and_exact_authority_pawn_range(self):
+        await self.authority.operate(CHARACTER, carry.Request(EPOCH, LEASE, "grab", 1, (3, 24)))
+        grip = carry.Request(EPOCH, LEASE, "aim", 2, (2.5, -15.1), (475, -70, 41))
+        self.assertFalse(self.authority.aim(OTHER, grip)["ok"])
+        self.assertFalse(self.aim_path.exists())
+        self.assertTrue(self.authority.aim(CHARACTER, grip)["ok"])
+        accepted = f"1\t{LEASE}\t2\t2.500\t-15.100\t475.000\t-70.000\t41.000\n".encode()
+        self.assertEqual(self.aim_path.read_bytes(), accepted)
+        self.assertFalse(self.authority.aim(CHARACTER, grip)["ok"])
+
+        out_of_range = carry.Request(EPOCH, LEASE, "aim", 3, (2.5, -15.1), (475.001, -70, 41))
+        self.assertEqual(self.authority.aim(CHARACTER, out_of_range)["error"], "native_mindcore_carry_grip_out_of_range")
+        unobserved = carry.Request(EPOCH, LEASE, "aim", 3, (2.5, -15.1), (150, -70, 41))
+        pawn = self.host.last_game["pawns"]["guest"]
+        with patch.dict(pawn, name=PAWN + "7"):
+            self.assertFalse(self.authority.aim(CHARACTER, unobserved)["ok"])
+        self.assertEqual(self.authority.holder.sequence, 2)
+        self.assertEqual(self.aim_path.read_bytes(), accepted)
+        self.assertTrue(self.authority.aim(CHARACTER, unobserved)["ok"])
+
     async def test_unverified_stock_effect_on_initial_grab_stops_checkpointing(self):
         self.authority.bridge.command.side_effect = RuntimeError("mutation_unverified_stock_core_grab")
         with self.assertRaisesRegex(RuntimeError, "mutation_unverified"):
@@ -88,6 +109,25 @@ class AuthorityTests(unittest.IsolatedAsyncioTestCase):
                        valid.replace("-125.960", "-189"), valid + "@714", valid.replace("@aim@", "@drop@")):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 carry.Request.parse(target)
+
+    def test_only_aim_requests_may_include_a_bounded_grip_position(self):
+        valid = carry.Request(EPOCH, LEASE, "aim", 2, (1.25, -125.96), (714.35, -1205.6, 78))
+        self.assertEqual(carry.Request.parse(valid.target()), valid)
+        for target in (valid.target().replace("@aim@", "@grab@"), valid.target().replace("@aim@", "@drop@"),
+                       valid.target().replace("714.350", "inf"), valid.target().replace("714.350", "10000000.001")):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                carry.Request.parse(target)
+
+    def test_aim_and_authority_rows_can_report_a_grip_position(self):
+        aim = [carry.AIM_TAG, core.MAP, PAWN, core.CORE, "c" * 32, EPOCH, "2", "3.000", "-7.500"]
+        authority = [carry.AUTHORITY_TAG, core.MAP, core.CORE, PAWN, LEASE, "held", "2", "stock_core_renewed",
+                     "3.000", "-7.500"]
+        for parse, fields in ((carry.parse_aim, aim), (carry.parse_authority, authority)):
+            self.assertNotIn("grip_position", parse(fields))
+            self.assertEqual(parse([*fields, "714.350", "-1205.600", "78.000"])["grip_position"],
+                             (714.35, -1205.6, 78))
+            with self.assertRaises(ValueError):
+                parse([*fields, "714.350", "-1205.600", "nan"])
 
 
 class GuestInputTests(unittest.IsolatedAsyncioTestCase):
@@ -115,9 +155,11 @@ class GuestInputTests(unittest.IsolatedAsyncioTestCase):
         self.input.holder_seen = True
         self.input.sequence = 1
 
-    def sample(self, sequence):
+    def sample(self, sequence, grip_position=None):
         self.game[carry.AIM] = dict(pawn=PAWN, session=self.session, epoch=EPOCH,
                                     sequence=sequence, pitch=3.0, yaw=0.0)
+        if grip_position is not None:
+            self.game[carry.AIM]["grip_position"] = grip_position
 
     async def poll_at(self, timestamp):
         with patch.object(carry.time, "monotonic", return_value=timestamp):
@@ -156,6 +198,21 @@ class GuestInputTests(unittest.IsolatedAsyncioTestCase):
         await self.poll_at(102.52)
         self.assertIsNone(self.input.lease)
         self.assertEqual(self.client.gameplay_action.await_count, 1)
+
+    async def test_a_rejected_grip_does_not_renew_and_a_fresh_sample_can_retry(self):
+        self.client.gameplay_action.side_effect = [ValueError("native_mindcore_carry_grip_out_of_range"), {}]
+        self.sample(16, (714.35, -1205.6, 78))
+        await self.poll_at(100.5)
+        self.assertEqual((self.input.lease, self.input.last_renewal_at), (LEASE, 100.0))
+        _, _, target = self.client.gameplay_action.await_args.args
+        self.assertEqual(carry.Request.parse(target),
+                         carry.Request(EPOCH, LEASE, "aim", 2, (3, 0), (714.35, -1205.6, 78)))
+
+        self.sample(17, (725, -1205.6, 78))
+        await self.poll_at(100.7)
+        self.assertEqual(self.input.last_renewal_at, 100.7)
+        _, _, target = self.client.gameplay_action.await_args.args
+        self.assertEqual(carry.Request.parse(target).grip_position, (725, -1205.6, 78))
 
     async def test_known_scope_loss_revokes_immediately_while_gameplay_is_stale(self):
         changes = (
