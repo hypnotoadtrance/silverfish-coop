@@ -30,7 +30,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-After the [stock title setup](../bootstrap/README.md#install-the-stock-title-entry), open co-op from the title. In the isolated title, press **F7** to open Host settings. Edit the campaign, UDP port, and numeric listening address. Use **F8** to move between fields, **F7** to start, or **F9** to return to the title panel. A blank field uses its configured default. The headless trial verified the fields and selected endpoint. Foreground keyboard and focus still need a live check.
+After the [stock title setup](../bootstrap/README.md#install-the-stock-title-entry), open co-op from the title. In the isolated title, press **F7** to open Host settings. Edit the campaign, UDP port, and numeric listening address. Use **F8** to move between fields, **F7** to start, or **F9** to return to the title panel. A blank field uses its configured default. Up to four guests can join the campaign. The headless trial verified the fields and selected endpoint. Foreground keyboard and focus still need a live check.
 
 ## Create an invitation while hosting
 

@@ -338,7 +338,7 @@ async def _run(*, timeout: float = 15) -> None:
         accept()
         await service.host_game(
             work, directory, selection.bind, selection.public_port, headless, embedded_port=selection.private_port,
-            **service.MENU_HOST_OPTIONS, **options,
+            max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS, **options,
         )
     else:
         with _pinned_invite(bridge / INVITE_FILE, selection.invite_sha256) as invitation:

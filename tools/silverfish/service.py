@@ -49,6 +49,7 @@ from .udp_ownership import owns_udp_port
 
 
 PROTOCOL = 2
+MENU_HOST_GUEST_LIMIT = 4
 MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0

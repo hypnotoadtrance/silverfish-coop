@@ -292,7 +292,7 @@ def _events(directory: Path, limit: int) -> dict:
 async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False, headless=False,
                             pause_fixture=False) -> dict:
     from . import embedded_title_plan, runtime
-    from .service import MENU_HOST_OPTIONS, menu_host_start
+    from .service import MENU_HOST_GUEST_LIMIT, MENU_HOST_OPTIONS, menu_host_start
     from .title_session import SessionPlan, TitleSession, host_plan, join_plan
 
     join_offered = bool(opts.invite or getattr(opts, "interactive_join", False))
@@ -318,7 +318,7 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
                 return embedded_title_plan.host_plan(opts.work, campaign, bind, port, mode, expected,
                                                      headless=headless, pause_fixture=pause_fixture)
             return host_plan(opts.work, campaign, bind, port, headless=headless, expected_map=expected,
-                             **MENU_HOST_OPTIONS, **starting)
+                             max_guests=MENU_HOST_GUEST_LIMIT, **MENU_HOST_OPTIONS, **starting)
 
         configured = make_host_plan(opts.campaign, opts.bind, default_port)
 

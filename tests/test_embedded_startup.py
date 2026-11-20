@@ -107,6 +107,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         await startup._run()
         self.host_game.assert_awaited_once_with(
             self.work, self.host, "127.0.0.1", PUBLIC_PORT, False, embedded_port=PRIVATE_PORT,
+            max_guests=4,
             native_events=True, native_guest=True, native_zones=True, native_zone_walls=True,
             expanded_zones=True, start_preset="wanderer",
         )
@@ -131,6 +132,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         await startup._run()
         self.host_game.assert_awaited_once()
         self.assertNotIn("start_preset", self.host_game.await_args.kwargs)
+        self.assertEqual(self.host_game.await_args.kwargs["max_guests"], 4)
 
     async def test_aborted_first_launch_still_starts_a_fresh_wanderer_campaign(self):
         self.assertEqual(service.menu_host_start(self.host), ("wanderer", OBSERVATORY))

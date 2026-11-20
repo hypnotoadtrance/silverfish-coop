@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.party_members import PartyMemberError, PartyMembers
+from tools.silverfish.service import MENU_HOST_GUEST_LIMIT
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -88,6 +89,28 @@ class PartyMembersTests(unittest.TestCase):
         self.assertEqual({entry["guest_id"] for entry in self.store.status()["leases"]},
                          {self.first["guest_id"], self.second["guest_id"]})
         self.assertEqual(self.party.roles(), {"host": "host", "guest": self.first["character_id"]})
+
+    def test_title_capacity_keeps_the_first_guest_role_and_binds_four_independent_seats(self):
+        self.party = PartyMembers(self.store, max_guests=MENU_HOST_GUEST_LIMIT, clock=lambda: self.now)
+        invitations = [self.first, self.second, self.third, self.store.issue_invitation("Fourth guest", "Fourth")]
+        expected_roles = {"host": "host"}
+        stock_connections = []
+        game = snapshot(1)
+        for index, invitation in enumerate(invitations, 1):
+            admission = self.admit(invitation, game)
+            row = connection(index)
+            stock_connections.append(row)
+            game = snapshot(index + 1, *stock_connections)
+            binding = self.party.observe(game).assignment
+            self.assertEqual(binding.connection_id, row["id"])
+            self.party.mark_ready(invitation["guest_id"], binding)
+            role = "guest" if index == 1 else f"guest{index}"
+            self.assertEqual(admission.member.role, role)
+            expected_roles[role] = invitation["character_id"]
+            self.assertEqual(self.party.roles(), expected_roles)
+        extra = self.store.issue_invitation("Fifth guest", "Fifth")
+        with self.assertRaisesRegex(PartyMemberError, "^party_full$"):
+            self.admit(extra, game)
 
     def test_native_pawns_match_exact_identity_when_bridge_aliases_reverse(self):
         first, second = self.enroll_two()
