@@ -29,7 +29,7 @@ BALANCES = ("Player_Cash", "Player_Xp", "Rep_Freelancer", "Rep_State", "Adv_Free
 ROUTE = (BLACK_MARKET, LAKE, CROSSROADS, LAKE, BLACK_MARKET)
 
 
-async def exercise(work: Path, vanilla_saved: Path) -> None:
+async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = False) -> None:
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original single-player Saved directory")
@@ -42,7 +42,7 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
     host_options = ("--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest",
                     "--native-zones", "--native-expanded-zones", "--native-host-dig-live-fixtures")
     guest_options = ("--profile", name, "--headless", "--native-zones")
-    jobs, evidence = [], {"verified": False, "routes": [], "board_input": []}
+    jobs, evidence = [], {"verified": False, "guest_turnin": guest_turnin, "routes": [], "board_input": []}
 
     async def action(directory, verb, *, accepted=True, **request):
         reply = await submit(directory, verb, **request)
@@ -107,7 +107,13 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
     async def inventory(directory):
         page = (await action(directory, "native-inventory-list"))["native_inventory"]
         assert page["next_offset"] is None, page
-        return {item["guid"]: item for item in page["items"]}
+        return {item["guid"]: {key: value for key, value in item.items() if key != "index"} for item in page["items"]}
+
+    async def settlement_replay(directory, receipt):
+        replay = await action(directory, "native-quest-turnin", target=SPEC.quest_id)
+        assert replay["effect"] == "native_quest_already_settled", replay
+        assert {field: replay[field] for field in receipt} == receipt, replay
+        return replay
 
     async def balances(character):
         await action(run, "checkpoint")
@@ -179,24 +185,50 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         assert wrong_owner["error"] == "stock_missing_contact_objective_required", wrong_owner
         evidence["wrong_owner_refusal"] = wrong_owner["error"]
         await action(run, SPEC.command("approach"), target="host")
-        active = (await action(run, SPEC.command("preflight")))[SPEC.key]
+        redeemer, redeem_run, owner_kind = (character, guest_run, "guest") if guest_turnin else ("host", run, "host")
+        if guest_turnin:
+            host_items, guest_items = await inventory(run), await inventory(guest_run)
+            assert package not in guest_items, guest_items
+            guest_items[package] = host_items.pop(package)
+            handoff = (await action(run, "native-missing-contact-handoff", target=character))[custody.CUSTODY]
+            assert (handoff["owner"], handoff["package_guid"]) == (character, package), handoff
+            assert await inventory(run) == host_items and await inventory(guest_run) == guest_items, handoff
+            same_handoff = (await action(run, "native-missing-contact-handoff", target=character))[custody.CUSTODY]
+            assert same_handoff == handoff, (handoff, same_handoff)
+            former_owner = await action(run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)
+            assert former_owner["error"] == "stock_missing_contact_objective_required", former_owner
+            assert await inventory(run) == host_items and await inventory(guest_run) == guest_items, former_owner
+            evidence.update(stock_handoff=handoff, handoff_replay=same_handoff, former_owner_refusal=former_owner["error"])
+
+        active = (await action(redeem_run, SPEC.command("preflight")))[SPEC.key]
         assert (active["step_after"], active["objective_guid"], active["objective_owner"], active["objective_qualified"]) == (
-            1, package, "host", True), active
+            1, package, owner_kind, True), active
         before = await balances(character)
         assert before[0][dig.FLAG] == 1 and before[1][dig.FLAG] == 0
         effective_reputation = {key: active["reputation"][key]["before"] for key in ("8", "4")}
         evidence["effective_reputation_before"] = effective_reputation
-        await board_state(run, "armed", "focused")
-        await press(run, "loading")
-        await board_state(run, "ready")
-        await press(run, "redeeming")
+        await board_state(redeem_run, "armed", "focused")
+        await press(redeem_run, "loading")
+        await board_state(redeem_run, "ready")
+        await press(redeem_run, "redeeming")
         done = await committed(-10)
-        assert (done["cash"], done["xp"], done[SPEC.consumed_field], done["objective_owner"]) == (450, 1, package, "host"), done
+        assert (done["cash"], done["xp"], done[SPEC.consumed_field], done["objective_owner"], done["actor"]) == (
+            450, 1, package, redeemer, redeemer), done
         assert set(done["recipients"]) == {"host", character}, done
         assert done["wallet"] == before[0]["Player_Cash"] + 450, done
         expected_reputation = {"8": effective_reputation["8"] + 40, "4": effective_reputation["4"] - 5}
         assert done["reputation"] == expected_reputation, done
+        if guest_turnin:
+            completed = await action(run, "native-missing-contact-handoff", accepted=False, target=character)
+            assert completed["error"] == "stock_missing_contact_handoff_quest_already_completed", completed
+            evidence.update(completed_handoff_refusal=completed["error"], duplicate_turn_in=await settlement_replay(redeem_run, done))
         assert package not in await inventory(run) and package not in await inventory(guest_run), done
+
+        def guest_reward_applied(status):
+            player = party_state(status).get("players", {}).get(character, {})
+            return player.get("quest_xp") == 1 and not player.get("native_quest_xp_pending")
+
+        await wait(run, guest_reward_applied)
         expected_host = dict(before[0], Player_Cash=done["wallet"], Player_Xp=before[0]["Player_Xp"] + 1,
                              Rep_Freelancer=expected_reputation["8"], Rep_State=expected_reputation["4"])
         expected_guest = dict(before[1], Player_Xp=before[1]["Player_Xp"] + 1)
@@ -212,8 +244,7 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         await launch(guest_run, "guest-restart", "join", *guest_options, "--invite", renewed["invite_file"])
         restarted = await paired(BLACK_MARKET, character, (current["generation"], current["zone_epoch"]))
         assert restarted["endpoint"]["port"] == first["endpoint"]["port"], restarted["endpoint"]
-        replay = await action(run, "native-quest-turnin", target=SPEC.quest_id)
-        assert (replay["effect"], replay[SPEC.consumed_field]) == ("native_quest_already_settled", package), replay
+        replay = await settlement_replay(redeem_run, done)
         assert await balances(character) == after
         assert package not in await inventory(run) and package not in await inventory(guest_run)
         evidence.update(verified=True, restart=replay)
@@ -240,5 +271,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--guest-turnin", action="store_true", help="Hand the stock package to the guest for board redemption")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), guest_turnin=args.guest_turnin))

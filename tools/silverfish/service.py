@@ -2750,6 +2750,8 @@ class Host:
                     from . import native_host_dig_live_fixture
                     result = await native_host_dig_live_fixture.perform(
                         self, bridge, request.get("target"), request.get("operation_id") or path.stem)
+                elif action == native_host_dig_live.HANDOFF:
+                    result = await native_host_dig_live.handoff(self, bridge, request.get("target"))
                 elif action in native_host_landmine.ACTIONS and self.fixtures:
                     result = await native_host_landmine.perform(self, bridge, action, request.get("target"),
                                                                  request.get("operation_id") or path.stem)

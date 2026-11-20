@@ -1,9 +1,13 @@
 local dig = {}
 local wire = require("native_wire_quest")
+local guest_save = require("guest_save")
+local host_save = require("native_host_save")
+local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_HOST_DIG") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
 local world_name = "World " .. map .. ".CrossRoads_P"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -131,7 +135,26 @@ local function require_true(value, reason)
     return value
 end
 
+local function handoff(fields, state, phase)
+    local refused = "stock_missing_contact_handoff_"
+    local guest_name, character, identity = fields[4], fields[5], fields[6]
+    require_true(enabled and #fields == 6 and guid(identity) and type(SilverfishTransferMissingContactPackage) == "function"
+        and (state.map == map or state.map == black_market), refused .. "unavailable")
+    local instance, pawn = host_save.canonical_host(state, phase)
+    require_true(instance and valid(pawn) and pawn:GetFullName() == fields[3] and pawn.Dead == false
+        and players.is_downed(pawn) == false, refused .. "host_unavailable")
+    local bound, guest, save, owner = pcall(guest_save.exact_item_context, state, phase, guest_name)
+    require_true(bound and valid(guest) and valid(save) and owner == character and guest.Dead == false
+        and players.is_standing_guest(guest, guest_name), refused .. "guest_unavailable")
+    local accepted, reason = SilverfishTransferMissingContactPackage(state.world:GetAddress(), pawn:GetAddress(),
+        guest:GetAddress(), save:GetAddress(), identity)
+    require_true(accepted == true and reason == "transferred", accepted == false and reason
+        or "mutation_unverified_missing_contact_handoff_readback")
+    return "stock sealed package handed off " .. identity
+end
+
 function dig.command(fields, state, phase)
+    if fields[2] == "native-missing-contact-handoff" then return handoff(fields, state, phase) end
     local operation = commands[fields[2]]
     if not operation then return end
     local ctx = require_true(scope(state, phase), "stock_live_dig_owner_unqualified")

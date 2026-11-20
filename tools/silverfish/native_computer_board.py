@@ -159,7 +159,8 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
     if spec is MISSING_CONTACT:
         durable = host.party.get(DIG_CUSTODY)
         dug = durable if durable is not None else host.party.get(DIG_RECORD)
-        return (actor == "host" and isinstance(dug, dict) and type(dug.get("flag_value")) is int and
+        return (isinstance(dug, dict) and actor == (dug.get("owner", "host") if durable is not None else "host")
+                and type(dug.get("flag_value")) is int and
                 tuple(dug.get(field) for field in ("state", "map", "source", "flag", "flag_value", "package_guid"))
                 == ("owned" if durable is not None else "collected", CROSSROADS, DIG_SOURCE, DIG_FLAG, 1, guid))
     if profile := spec.exchange:

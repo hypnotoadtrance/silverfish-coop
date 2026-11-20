@@ -1,4 +1,5 @@
 #include "quest_rewards.hpp"
+#include "loot_escrow.hpp"
 #include "stock_wallet.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -53,6 +55,7 @@ namespace
     constexpr auto savlo_keycard_item_path = STR("/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C");
     constexpr auto pump_tape_item_path = STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C");
     constexpr auto brandy_item_path = STR("/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C");
+    constexpr auto missing_contact_package = STR("/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C");
     constexpr auto dead_drop_item_path = STR("/Game/Classes/Items/Key_Items/Bag_DeadDrop_CrossRoads.Bag_DeadDrop_CrossRoads_C");
     constexpr auto dead_drop_quest_id = STR("DeadDrop_CrossRoads");
     constexpr auto stolen_bag_item_path = STR("/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C");
@@ -317,7 +320,8 @@ namespace
 
     bool objective_recipe(U::UObject* stock, const U::TCHAR* quest, U::UClass* wanted, int expected_cash,
                           U::UClass* first_reward, U::UClass* second_reward, WirePhase phase,
-                          int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0)
+                          int expected_final_step = 2, int expected_xp = 1, int exact_active_step = 0,
+                          const U::TCHAR* display_alias = nullptr)
     {
         auto* type = find<U::UScriptStruct>(quest_path);
         auto* map = field<U::FMapProperty>(stock, STR("ActiveQuests"));
@@ -334,8 +338,9 @@ namespace
         auto* cash = field<U::FIntProperty>(type, STR("Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"));
         const U::FName id{quest, U::FNAME_Find};
         if (!type || !key || !row || row->GetStruct().Get() != type || key->GetOffset_Internal() != 0 ||
-            !step || !final_step || !objective || !consumed || !item || !xp || !cash ||
-            id.IsNone() || id.ToString() != quest) return false;
+            !step || !final_step || !objective || !consumed || !item || !xp || !cash || id.IsNone()) return false;
+        const auto display = id.ToString();
+        if (display != quest && (!display_alias || display != display_alias)) return false;
         const auto layout = U::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
         if (row->GetOffset_Internal() != layout.ValueOffset) return false;
@@ -682,6 +687,7 @@ namespace
         const U::TCHAR* reward{};
         int xp = 1;
         bool stackable_unit{};
+        const U::TCHAR* display_alias{};
     };
 
     constexpr ObjectiveQuest copper_stop_objective{"wire", PartyWorld::borough, STR("Clt_Wire"), wire_path, 0};
@@ -689,6 +695,9 @@ namespace
     constexpr ObjectiveQuest coup_report_objective{"coup_report", PartyWorld::borough, STR("Clt_CoupReport_01"), coup_report_item_path, 1200};
     constexpr ObjectiveQuest depot_documents_objective{"depot_documents", PartyWorld::scav_bar, STR("DepotDocs"), depot_documents_item_path, 1300};
     constexpr ObjectiveQuest brandy_objective{"brandy", PartyWorld::black_market, STR("Clt_Brandy"), brandy_item_path, 900};
+    constexpr ObjectiveQuest missing_contact_objective{
+        .fault = "missing_contact", .world = PartyWorld::black_market, .id = STR("Note_Farmhouse"),
+        .item = missing_contact_package, .cash = 450, .display_alias = STR("Note_FarmHouse")};
     constexpr ObjectiveQuest dead_drop_objective{"dead_drop", PartyWorld::black_market, dead_drop_quest_id,
         dead_drop_item_path, 300};
     constexpr ObjectiveQuest stolen_bag_objective{"stolen_bag", PartyWorld::black_market, STR("Clt_StolenBag"),
@@ -737,7 +746,7 @@ namespace
                 return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
             auto* reward = Quest.reward ? find<U::UClass>(Quest.reward) : nullptr;
             return (!Quest.reward || reward) && objective_recipe(party.stock, Quest.id, wanted, Quest.cash, reward,
-                nullptr, WirePhase::active, 2, Quest.xp);
+                nullptr, WirePhase::active, 2, Quest.xp, 0, Quest.display_alias);
         };
         if (!inventory.bind(copper_stop) || !matches_recipe())
             return fail("wire_objective_active_recipe_required");
@@ -753,6 +762,12 @@ namespace
             !is_objective(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(source.row);
         if (ammo < (Quest.stackable_unit ? 1 : 0) || ammo > 1) return fail("wire_objective_single_item_required");
+        if constexpr (&Quest == &missing_contact_objective)
+        {
+            std::string stock_guid;
+            if (!silverfish::loot_escrow::sealed_package_guid(party.detached, stock_guid) ||
+                read_guid(stock_guid) != objective_id) return fail("wire_objective_sealed_package_unqualified");
+        }
         bool host_conflict = false;
         if (!inventory.visit(party.stock, [&](const void* row, bool, int) {
                 host_conflict |= is_objective(row) || inventory.identity(row) == objective_id;
@@ -1493,6 +1508,15 @@ bool silverfish::native_quest_rewards::active_crossroads_dead_drop(RC::Unreal::U
         objective_recipe(canonical_save, dead_drop_quest_id, item, 300, nullptr, nullptr, WirePhase::active, 2, 1, 1);
 }
 
+bool silverfish::native_quest_rewards::active_missing_contact(RC::Unreal::UObject* canonical_save)
+{
+    constexpr auto& quest = missing_contact_objective;
+    auto* item = find<U::UClass>(quest.item);
+    return item && exact(canonical_save, find<U::UClass>(save_path)) &&
+        objective_recipe(canonical_save, quest.id, item, quest.cash, nullptr, nullptr,
+            WirePhase::active, 2, quest.xp, 1, quest.display_alias);
+}
+
 void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
@@ -1501,6 +1525,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStageCoupReportObjective", stage_objective<coup_report_objective>);
     lua.register_function("SilverfishStageDepotDocumentsObjective", stage_objective<depot_documents_objective>);
     lua.register_function("SilverfishStageBrandyObjective", stage_objective<brandy_objective>);
+    lua.register_function("SilverfishStageMissingContactObjective", stage_objective<missing_contact_objective>);
     lua.register_function("SilverfishStageStolenBagObjective", stage_objective<stolen_bag_objective>);
     lua.register_function("SilverfishStageBlackBoxObjective", stage_objective<black_box_objective>);
     lua.register_function("SilverfishStageCrossroadsDeadDropObjective", stage_objective<dead_drop_objective>);

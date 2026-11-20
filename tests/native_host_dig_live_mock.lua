@@ -28,6 +28,10 @@ for _, class in ipairs({pawn_class, save_class, instance_class}) do identity[cla
 local world = object("World " .. world_path)
 local pawn = object("Player_FP_C " .. world_path .. ":PersistentLevel.Player_FP_C_1", pawn_class)
 local save, instance = object("canonical save", save_class), object("instance", instance_class)
+local guest = object("Player_FP_C " .. world_path .. ":PersistentLevel.Player_FP_C_2", pawn_class)
+local detached = object("detached save", save_class)
+local character = "11aa22bb-33cc-44dd-88ee-9900aabbccdd"
+pawn.Dead, guest.Dead = false, false
 pawn.GetWorld, pawn.Save = function() return world end, save
 instance["As Player FP"], instance.SaveSlot_Ref = pawn, save
 local statics = object("statics")
@@ -54,6 +58,7 @@ local phase, quest_step, renews, captured = "ready", nil, 0, false
 local material, package_name, package_guid = "", "", ""
 local heartbeat, serial, fail_ack = 100, 0, false
 local name_registered, arm_failure = false, nil
+local handoffs = 0
 local env = setmetatable({
     os = {getenv = function() return "1" end, time = function() return 100 end},
     io = {open = function(path, mode)
@@ -61,8 +66,27 @@ local env = setmetatable({
         return {read = function() return tostring(heartbeat) end, close = function() end}
     end},
     require = function(name)
-        assert(name == "native_wire_quest")
-        return {stock_row = function() return quest_step and {[step_field] = quest_step} end}
+        if name == "native_wire_quest" then
+            return {stock_row = function() return quest_step and {[step_field] = quest_step} end}
+        elseif name == "native_host_save" then
+            return {canonical_host = function(state, mode)
+                if state == role and mode == "hosting" then return instance, pawn end
+            end}
+        elseif name == "guest_save" then
+            return {exact_item_context = function(state, mode, name)
+                assert(state == role and mode == "hosting" and name == guest:GetFullName())
+                return guest, detached, character
+            end}
+        end
+        assert(name == "players")
+        return {is_downed = function(object) assert(object == pawn); return false end,
+            is_standing_guest = function(object, name) return object == guest and name == guest:GetFullName() end}
+    end,
+    SilverfishTransferMissingContactPackage = function(w, host, recipient, recipient_save, identity)
+        assert(w == world:GetAddress() and host == pawn:GetAddress() and recipient == guest:GetAddress()
+            and recipient_save == detached:GetAddress() and identity == owned)
+        handoffs = handoffs + 1
+        return true, "transferred"
     end,
     StaticFindObject = function(path) return identity[path] end,
     EFindName = {FNAME_Find = 1, FNAME_Add = 2},
@@ -157,6 +181,12 @@ assert(not pcall(command, "restore", slot, escrow, spade, contact[1] + 200, cont
 phase, arm_failure = nil, "stock_live_dig_native_listen_unqualified"
 sync()
 assert(not report() and diagnosis()[7] == arm_failure and diagnosis()[8] == "native_read_empty")
+local function handoff(owner)
+    return dig.command({"nonce", "native-missing-contact-handoff", pawn:GetFullName(), guest:GetFullName(), owner, owned},
+        role, "hosting")
+end
+assert(not pcall(handoff, "wrong owner") and handoffs == 0)
+assert(handoff(character) == "stock sealed package handed off " .. owned and handoffs == 1)
 role.server = true
 sync()
 assert(not report() and diagnosis()[4] == "listen_host_unavailable" and not pcall(command, "escrow", "4", slot))

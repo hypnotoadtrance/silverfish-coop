@@ -6,8 +6,9 @@ import re
 import time
 
 from . import native_host_dig as stock, party
+from .native_downed_markers import character_id, location
 from .native_gold import valid_guid
-from .travel import CROSSROADS
+from .travel import BLACK_MARKET, CROSSROADS
 
 
 TAG = "native-host-dig-live"
@@ -15,8 +16,12 @@ KEY = "native_host_dig_live"
 DIAGNOSTIC = TAG + "-diagnostic"
 DIAGNOSTIC_KEY = KEY + "_diagnostic"
 CUSTODY = "native_host_dig_custody"
+HANDOFF = "native-missing-contact-handoff"
 HEARTBEAT = TAG + "-heartbeat"
 WAITING = "stock_live_dig_checkpoint_pending"
+_HANDOFF_MAPS = {BLACK_MARKET, CROSSROADS}
+_HANDOFF_RANGE = 300
+_HANDOFF_REFUSAL = "stock_missing_contact_handoff_"
 _STATES = {"ready", "contact", "unclaimed", "escrowed", "collecting", "collected", "owned", "failed"}
 _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
@@ -67,7 +72,7 @@ def parse_diagnostic(fields: list[str], phase: str, area: str) -> dict | None:
     return dict(zip(("map", "pawn", "context", "heartbeat", "quest", "arm", "read"), fields[1:]))
 
 
-def escrow_frames(data: dict) -> list[dict]:
+def escrow_frames(data: dict, members=None) -> list[dict]:
     custody = data.get(CUSTODY)
     if custody is None:
         return []
@@ -75,6 +80,12 @@ def escrow_frames(data: dict) -> list[dict]:
         raise ValueError("Invalid stock sealed package custody")
     state = custody["state"]
     fields = _CUSTODY_FIELDS | ({"escrow"} if state == "escrowed" else set())
+    if state == "owned" and "owner" in custody:
+        owner = custody["owner"]
+        if (not character_id(owner) or owner == "host" or owner not in data.get("players", {})
+                or members is not None and owner not in members):
+            raise ValueError("Invalid stock sealed package owner")
+        fields.add("owner")
     if (set(custody) != fields or (custody["map"], custody["source"], custody["flag"]) != (CROSSROADS, stock.SOURCE, stock.FLAG)
             or type(custody["flag_value"]) is not int or custody["flag_value"] != 1
             or not valid_guid(custody["spade_guid"]) or not valid_guid(custody["package_guid"])
@@ -86,6 +97,88 @@ def escrow_frames(data: dict) -> list[dict]:
     if type(frame) is not dict or frame.get("map") != CROSSROADS or not isinstance(frame.get("slot"), str) or not _FRAME_SLOT.fullmatch(frame["slot"]):
         raise ValueError("Invalid stock sealed package escrow frame")
     return [frame]
+
+
+def _handoff_pawns(host, character):
+    game = host.last_game
+    guest = host.native_recipients().get(character, {})
+    players = host.party["players"]
+    pawns = game.get("pawns", {})
+    sender = pawns.get("local", {})
+    recipient = pawns.get(guest.get("alias"), {})
+    if (host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
+            or game.get("state") != "hosting" or game.get("map") not in _HANDOFF_MAPS
+            or time.monotonic() - host.last_seen > 3 or not guest.get("connected")
+            or any(not players.get(actor) or players[actor]["downed"] or actor in host.party["pending_spawns"]
+                   for actor in ("host", character))
+            or not sender.get("name") or not guest.get("pawn") or recipient.get("name") != guest["pawn"]):
+        raise party.RuleError(_HANDOFF_REFUSAL + "participant_unavailable")
+    return sender, recipient
+
+
+async def handoff(host, bridge, target):
+    """Commit the exact sealed package to one enrolled guest's backpack."""
+    from .native_computer_board import MISSING_CONTACT
+
+    if (not isinstance(target, str) or not host.native_host_dig_live or not host.persist_native_guest
+            or not host.native_profile or host.transitioning):
+        raise party.RuleError(_HANDOFF_REFUSAL + "unavailable")
+    character = host.roles().get(target, target)
+    if not character_id(character) or character == "host":
+        raise party.RuleError(_HANDOFF_REFUSAL + "participant_unavailable")
+    receipt = host.party.get("native_quests", {}).get(MISSING_CONTACT.quest_id, {})
+    if receipt.get("step") == -10:
+        raise party.RuleError(_HANDOFF_REFUSAL + "quest_already_completed")
+    custody = host.party.get(CUSTODY, {})
+    escrow_frames(host.party)
+    if custody.get("state") != "owned":
+        raise party.RuleError(_HANDOFF_REFUSAL + "package_unavailable")
+    sender, recipient = _handoff_pawns(host, character)
+    owner = custody.get("owner", "host")
+    if owner == character:
+        return {CUSTODY: custody}
+    if owner != "host":
+        raise party.RuleError(_HANDOFF_REFUSAL + "wrong_owner")
+    first, second = sender.get("location"), recipient.get("location")
+    if not location(first) or not location(second) or math.dist(first, second) > _HANDOFF_RANGE:
+        raise party.RuleError(_HANDOFF_REFUSAL + "out_of_range")
+
+    host.transitioning = True
+    required = frozenset({character})
+    area, guid = host.last_game["map"], custody["package_guid"]
+    names = sender["name"], recipient["name"]
+    try:
+        await host.checkpoint_native(bridge, require_guest_frames=required)
+        current = _handoff_pawns(host, character)
+        if host.last_game["map"] != area or tuple(pawn["name"] for pawn in current) != names:
+            raise party.RuleError(_HANDOFF_REFUSAL + "participant_changed")
+        host.native_checkpoint_unsafe = True
+        try:
+            snapshot = await bridge.command(HANDOFF, *names, character, guid, timeout=5)
+        except RuntimeError as error:
+            if str(error).startswith(_HANDOFF_REFUSAL):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        if (snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message")) != (
+                "hosting", area, f"stock sealed package handed off {guid}"):
+            raise RuntimeError("The stock sealed package handoff did not verify")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        candidate = party.load_party(host.party)
+        owned = candidate[CUSTODY]
+        owned["owner"] = character
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
+        host.party = candidate
+        host.native_checkpoint_unsafe = False
+        host.control.event("native_missing_contact_handoff", revision=revision, owner=character,
+                           package_guid=guid, map=area)
+        return {CUSTODY: owned}
+    except (OSError, RuntimeError, ValueError, KeyError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    finally:
+        host.transitioning = False
 
 
 def _report(host, expected_pawn=None) -> dict:

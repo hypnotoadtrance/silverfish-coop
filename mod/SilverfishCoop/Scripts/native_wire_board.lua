@@ -70,7 +70,7 @@ local contract_prompt = {
     },
     [missing_contact] = {
         offer = "Find the Broker's contact in CrossRoads.\nInteract again to accept.",
-        missing = "The host must bring the sealed package recovered in CrossRoads.",
+        missing = "Bring the sealed package recovered in CrossRoads.\nInteract to check the contract again.",
         ready = "Turn in the sealed package for 450 shared cash.\nInteract again to turn it in.",
     },
     [black_box] = {

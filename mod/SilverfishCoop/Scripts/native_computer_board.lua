@@ -58,8 +58,9 @@ local recipes = {
         cash = 450, difficulty = 0, fail_on_death = false, redeem = 1,
         offered_boards = {1}, factions = {8, 4}, reputation = {[8] = 40, [4] = -5},
         reputation_flags = {[8] = "Rep_Freelancer", [4] = "Rep_State"}, advantage = {[8] = 5},
-        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true, canonical_objective_only = true,
+        advantage_flags = {[8] = "Adv_Freelancer"}, no_track_flag = true,
         redeem_map = black_market, wrong_board = "black_market_redemption_required",
+        stage_objective = "SilverfishStageMissingContactObjective",
     },
     ["native-dead-drop"] = {
         id = "DeadDrop_CrossRoads", title = "CrossRoads Dead Drop", fault = "dead_drop",
@@ -433,8 +434,7 @@ function contract.command(fields, state, phase)
         end
     end
     local identity, owner
-    if (before.step == 1 or before.step == 2) and
-        (not spec.canonical_objective_only or same(context.receiving_save, context.save)) then
+    if before.step == 1 or before.step == 2 then
         identity = wire_check(spec, wire.objective_guid, context.receiving_save, objective, spec.one_stack_unit)
         if identity then owner = same(context.receiving_save, context.save) and "host" or "guest" end
     end

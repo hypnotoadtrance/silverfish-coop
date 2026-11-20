@@ -193,7 +193,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
     try:
         manual_drops = stack_drop_frames(party, checkpoint["characters"])
-        dug_package = dig_escrow_frames(party)
+        dug_package = dig_escrow_frames(party, checkpoint["characters"])
     except ValueError as error:
         raise CampaignFormatError(str(error)) from error
     quests = []

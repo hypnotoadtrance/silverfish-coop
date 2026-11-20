@@ -27,6 +27,18 @@ def snapshot(verb, *, pawn=HOST, guid=GUID, owner="host", completed=False):
 
 
 class MissingContactTests(unittest.IsolatedAsyncioTestCase):
+    def test_durable_handoff_qualifies_only_the_new_owner(self):
+        recipient = "11aa22bb-33cc-44dd-88ee-9900aabbccdd"
+        receipt = {"state": "owned", "map": CROSSROADS, "source": dig.SOURCE, "flag": dig.FLAG, "flag_value": 1,
+                   "package_guid": GUID, "owner": recipient}
+        host = SimpleNamespace(party={board.DIG_CUSTODY: receipt})
+        guest_proof = snapshot("preflight", pawn=GUEST, owner="guest")[SPEC.key]
+        host_proof = snapshot("preflight")[SPEC.key]
+        self.assertTrue(board._objective_owned(host, recipient, SPEC, guest_proof))
+        self.assertFalse(board._objective_owned(host, "different guest", SPEC, guest_proof))
+        self.assertFalse(board._objective_owned(host, "host", SPEC, host_proof))
+        self.assertFalse(board._objective_owned(host, recipient, SPEC, {**guest_proof, "objective_guid": "A" * 32}))
+
     async def test_only_canonical_exact_sealed_package_can_settle_once(self):
         self.assertEqual(native_wire_board.fixture_selection(BLACK_MARKET, SPEC.quest_id), (SPEC.quest_id,))
         self.assertIs(board.AUTHORED_APPROACHES[SPEC.command("approach")], SPEC)

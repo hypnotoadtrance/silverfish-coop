@@ -1,15 +1,20 @@
 #include "host_dig.hpp"
 #include "guest_primary_input.hpp"
+#include "guest_regen.hpp"
 #include "interaction_input.hpp"
 #include "loot_escrow.hpp"
+#include "quest_rewards.hpp"
 #include "stock_wallet.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -43,6 +48,9 @@ namespace
     using Iteration = Hook::TCallbackIterationData<void>;
 
     constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto black_market_world = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01");
+    constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
+    constexpr auto save_class = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto source_path = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.BurriedItem_BP_C_1");
     constexpr auto source_class = STR("/Game/Classes/Actors/BurriedItem_BP.BurriedItem_BP_C");
     constexpr auto spade_class = STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C");
@@ -175,13 +183,13 @@ namespace
     };
 
     Context qualify(Address world_address, Address pawn_address, bool require_spade = true, bool standing = true,
-                    const char** reason = nullptr)
+                    const char** reason = nullptr, const U::TCHAR* expected_map = world_path)
     {
         const auto unavailable = [reason](const char* detail) {
             if (reason) *reason = detail;
             return Context{};
         };
-        auto* world = find<U::UWorld>(world_path);
+        auto* world = find<U::UWorld>(expected_map);
         if (!live(world) || address(world) != world_address) return unavailable("stock_live_dig_native_world_unqualified");
         auto* level = object(world, STR("PersistentLevel"));
         auto* driver = object(world, STR("NetDriver"));
@@ -196,14 +204,14 @@ namespace
             !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")))
             return unavailable("stock_live_dig_native_listen_unqualified");
         if (!exact(instance, STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")) ||
-            !exact(pawn, STR("/Game/Classes/Player/Player_FP.Player_FP_C")) || address(pawn) != pawn_address)
+            !exact(pawn, pawn_class) || address(pawn) != pawn_address)
             return unavailable("stock_live_dig_native_pawn_unqualified");
         if (!exact(controller, STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")) ||
             !authority(controller) || !authority(pawn) || static_cast<U::AActor*>(controller)->GetWorld() != world ||
             static_cast<U::AActor*>(pawn)->GetWorld() != world || object(controller, STR("Pawn")) != pawn ||
             !live(local) || !local_class || !local->IsA(local_class) || object(local, STR("PlayerController")) != controller)
             return unavailable("stock_live_dig_native_local_controller_unqualified");
-        if (!exact(save, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")) || object(pawn, STR("Save")) != save)
+        if (!exact(save, save_class) || object(pawn, STR("Save")) != save)
             return unavailable("stock_live_dig_native_save_unqualified");
         if ((standing && !boolean(pawn, STR("Dead"), false)) || !boolean(controller, STR("Loading"), false))
             return unavailable("stock_live_dig_native_host_not_ready");
@@ -721,6 +729,295 @@ namespace
         }
     }
 
+    constexpr int handoff_inventory_limit = 4096;
+
+    struct HandoffInventory
+    {
+        U::UClass* save = find<U::UClass>(save_class);
+        U::UClass* package = find<U::UClass>(package_class);
+        U::UScriptStruct* item = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct"));
+        U::FArrayProperty* backpack = field<U::FArrayProperty>(save, STR("PlayerBackpack"));
+        U::FArrayProperty* equipment = field<U::FArrayProperty>(save, STR("PlayerEquipment"));
+        U::FStructProperty* armor = field<U::FStructProperty>(save, STR("PlayerArmor"));
+        U::FStructProperty* helmet = field<U::FStructProperty>(save, STR("PlayerHelmet"));
+        U::FMapProperty* flags = field<U::FMapProperty>(save, STR("Flags"));
+        U::FStructProperty* row = backpack ? U::CastField<U::FStructProperty>(backpack->GetInner()) : nullptr;
+        U::FClassProperty* klass = field<U::FClassProperty>(item, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
+        U::FStructProperty* guid = field<U::FStructProperty>(item, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
+        U::FStructProperty* data = field<U::FStructProperty>(item, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
+        U::FBoolProperty* never_drop = field<U::FBoolProperty>(item, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
+
+        bool valid() const
+        {
+            auto* base = find<U::UClass>(STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"));
+            auto* guid_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
+            auto* payload = find<U::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+            const auto is_row = [&](U::FProperty* property) {
+                auto* typed = U::CastField<U::FStructProperty>(property);
+                return typed && typed->GetArrayDim() == 1 && typed->GetStruct().Get() == item;
+            };
+            return save && item && package && base && package->IsChildOf(base) && equipment && flags && is_row(row) &&
+                is_row(equipment->GetInner()) && is_row(armor) && is_row(helmet) && klass && klass->GetMetaClass().Get() == base &&
+                guid && guid_type && guid->GetStruct().Get() == guid_type && guid->GetSize() == 16 &&
+                data && payload && data->GetStruct().Get() == payload && never_drop;
+        }
+
+        bool is_package(const void* entry) const
+        {
+            return klass->GetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(entry)) == package;
+        }
+
+        bool same_row(const void* before, const void* after) const
+        {
+            return row->Identical(before, after) && data->Identical(data->ContainerPtrToValuePtr<void>(before),
+                data->ContainerPtrToValuePtr<void>(after));
+        }
+
+        bool visit(U::UObject* owner, const auto& visitor) const
+        {
+            for (auto* property : {backpack, equipment})
+            {
+                U::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(owner));
+                if (rows.Num() < 0 || rows.Num() > handoff_inventory_limit) return false;
+                for (int i = 0; i < rows.Num(); ++i) visitor(rows.GetRawPtr(i));
+            }
+            for (auto* property : {armor, helmet}) visitor(property->ContainerPtrToValuePtr<void>(owner));
+            return true;
+        }
+
+        bool pickup_flags(U::UObject* owner) const
+        {
+            auto* key = U::CastField<U::FNameProperty>(flags->GetKeyProp());
+            auto* value = U::CastField<U::FIntProperty>(flags->GetValueProp());
+            if (!key || key->GetOffset_Internal() != 0 || !value) return false;
+            const auto layout = U::FScriptMap::GetScriptLayout(key->GetSize(), key->GetMinAlignment(),
+                                                               value->GetSize(), value->GetMinAlignment());
+            if (value->GetOffset_Internal() != layout.ValueOffset) return false;
+            const auto* map = flags->ContainerPtrToValuePtr<U::FScriptMap>(owner);
+            if (map->Num() < 2 || map->Num() > map->GetMaxIndex() || map->GetMaxIndex() > 65536) return false;
+            const U::FName buried{buried_flag, U::FNAME_Find};
+            if (buried.IsNone()) return false;
+            constexpr std::wstring_view prefix = STR("Package_Item_FarmHouse_C_");
+            constexpr std::wstring_view suffix = STR("-CrossRoads_P-");
+            bool source_saved = false;
+            int pickups = 0;
+            for (int i = 0; i < map->GetMaxIndex(); ++i)
+            {
+                if (!map->IsValidIndex(i)) continue;
+                const auto* entry = map->GetData(i, layout);
+                if (!entry) return false;
+                const auto name = key->GetPropertyValue(entry);
+                const int state = value->GetPropertyValueInContainer(entry);
+                if (name == buried) source_saved = state == 1;
+                const auto text = name.ToString();
+                const std::wstring_view path{text};
+                if (state != 1 || !path.starts_with(prefix) || !path.ends_with(suffix) ||
+                    path.size() <= prefix.size() + suffix.size() || path.size() > prefix.size() + suffix.size() + 10) continue;
+                const auto ordinal = path.substr(prefix.size(), path.size() - prefix.size() - suffix.size());
+                if (std::ranges::all_of(ordinal, [](auto ch) { return ch >= L'0' && ch <= L'9'; })) ++pickups;
+            }
+            return source_saved && pickups == 1;
+        }
+    };
+
+    struct HandoffValue
+    {
+        struct Destroy { U::FProperty* property{}; void operator()(void* value) const { property->DestroyAndFreeValue(value); } };
+        std::unique_ptr<void, Destroy> value;
+
+        bool capture(U::FProperty* property, const void* source)
+        {
+            value = decltype(value){property->AllocateAndInitializeValue(), Destroy{property}};
+            if (!value) return false;
+            property->CopyCompleteValue(value.get(), source);
+            return matches(source);
+        }
+
+        bool matches(const void* current) const { return value.get_deleter().property->Identical(value.get(), current); }
+    };
+
+    bool handoff_alive(U::UObject* pawn, U::UObject* save)
+    {
+        auto* health = field<U::FDoubleProperty>(save, STR("PlayerHealth"));
+        if (!health || !boolean(pawn, STR("Dead"), false)) return false;
+        const auto hp = health->GetPropertyValueInContainer(save);
+        return std::isfinite(hp) && hp > 0.0;
+    }
+
+    bool handoff_in_reach(U::UObject* host, U::UObject* guest)
+    {
+        auto* actor = find<U::UClass>(STR("/Script/Engine.Actor"));
+        auto* scene = find<U::UClass>(STR("/Script/Engine.SceneComponent"));
+        auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+        auto* function = find<U::UFunction>(STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        auto* output = function ? U::CastField<U::FStructProperty>(function->GetReturnProperty()) : nullptr;
+        if (!actor || !scene || !vector || !function || function->GetOuterPrivate() != actor ||
+            !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != 1 ||
+            function->GetParmsSize() != sizeof(Point) || !output || output->GetOffset_Internal() != 0 ||
+            output->GetSize() != sizeof(Point) || output->GetStruct().Get() != vector) return false;
+        const auto read = [scene, function](U::UObject* pawn, Point& position) {
+            auto* root = object(pawn, STR("RootComponent"));
+            if (!live(root) || !root->IsA(scene) || root->GetOuterPrivate() != pawn) return false;
+            position.fill(std::numeric_limits<double>::quiet_NaN());
+            pawn->ProcessEvent(function, position.data());
+            return std::ranges::all_of(position, [](double axis) { return std::isfinite(axis); });
+        };
+        Point first{}, second{};
+        return read(host, first) && read(guest, second) && squared_distance(first, second) <= 300.0 * 300.0;
+    }
+
+    int handoff_package(const Lua& lua)
+    {
+        const auto fail = [&](std::string_view status) { return result(lua, false, status); };
+        if (!ordinary || !ready() || lua.get_stack_size() != 5 || !lua.is_string(5))
+            return fail("stock_missing_contact_handoff_arguments");
+        std::array<Address, 4> input{};
+        for (auto& slot : input)
+        {
+            if (!lua.is_integer(1)) return fail("stock_missing_contact_handoff_arguments");
+            const auto parsed = lua.get_integer();
+            if (parsed <= 0) return fail("stock_missing_contact_handoff_arguments");
+            slot = static_cast<Address>(parsed);
+        }
+        const auto identity = lua.get_string();
+        if (identity.size() != 32 || !std::ranges::all_of(identity, [](char ch) {
+                return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F');
+            }) || identity == "00000000000000000000000000000000" || input[1] == input[2])
+            return fail("stock_missing_contact_handoff_arguments");
+        const auto [world_id, host_id, guest_id, detached_id] = input;
+        const auto qualify_host = [&] {
+            auto ctx = qualify(world_id, host_id, false);
+            return ctx.world ? ctx : qualify(world_id, host_id, false, true, nullptr, black_market_world);
+        };
+        const auto host = qualify_host();
+        if (!host.world || !handoff_alive(host.pawn, host.save) || (live_context(host) && live_pending()))
+            return fail("stock_missing_contact_handoff_host_unqualified");
+
+        U::UObject* guest{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (address(candidate) != guest_id) return RC::LoopAction::Continue;
+            if (exact(candidate, pawn_class) && static_cast<U::AActor*>(candidate)->GetWorld() == host.world) guest = candidate;
+            return RC::LoopAction::Break;
+        });
+        auto* detached = object(guest, STR("Save"));
+        if (!exact(detached, save_class) || address(detached) != detached_id || !detached->GetOuterPrivate() ||
+            detached->GetOuterPrivate()->GetPathName() != STR("/Engine/Transient") ||
+            !silverfish::native_guest_regen::qualifies_detached_guest(guest, detached, host.save) || !handoff_alive(guest, detached))
+            return fail("stock_missing_contact_handoff_guest_unqualified");
+        if (!handoff_in_reach(host.pawn, guest)) return fail("stock_missing_contact_handoff_out_of_reach");
+        if (!silverfish::native_quest_rewards::active_missing_contact(host.save))
+            return fail("stock_missing_contact_handoff_quest_unqualified");
+
+        HandoffInventory inventory;
+        std::string owned;
+        if (!inventory.valid() || !inventory.pickup_flags(host.save)) return fail("stock_missing_contact_handoff_pickup_unqualified");
+        if (!loot_escrow::sealed_package_guid(host.save, owned) || owned != identity)
+            return fail("stock_missing_contact_handoff_source_unqualified");
+
+        auto* from = inventory.backpack->ContainerPtrToValuePtr<void>(host.save);
+        auto* to = inventory.backpack->ContainerPtrToValuePtr<void>(detached);
+        U::FScriptArrayHelper from_rows(inventory.backpack, from), to_rows(inventory.backpack, to);
+        if (to_rows.Num() < 0 || to_rows.Num() >= handoff_inventory_limit || from == to ||
+            (to_rows.Num() && from_rows.GetRawPtr() == to_rows.GetRawPtr()))
+            return fail("stock_missing_contact_handoff_destination_unqualified");
+        int source = 0;
+        while (source < from_rows.Num() && !inventory.is_package(from_rows.GetRawPtr(source))) ++source;
+        if (source == from_rows.Num()) return fail("stock_missing_contact_handoff_source_unqualified");
+        const auto* original = from_rows.GetRawPtr(source);
+        const auto* original_guid = inventory.guid->ContainerPtrToValuePtr<void>(original);
+        auto* defaults = inventory.package->GetClassDefaultObject().Get();
+        auto* important = field<U::FBoolProperty>(defaults, STR("NeverDrop"));
+        if (!defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), false) ||
+            !important || inventory.never_drop->GetPropertyValueInContainer(original) != important->GetPropertyValueInContainer(defaults))
+            return fail("stock_missing_contact_handoff_stock_row_unqualified");
+        const auto has_no_package = [&](U::UObject* owner) {
+            bool conflict = false;
+            return inventory.visit(owner, [&](const void* row) {
+                conflict |= inventory.is_package(row) || inventory.guid->Identical(original_guid,
+                    inventory.guid->ContainerPtrToValuePtr<void>(row));
+            }) && !conflict;
+        };
+        if (!has_no_package(detached)) return fail("stock_missing_contact_handoff_destination_conflict");
+
+        bool foreign_conflict = false;
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (candidate == host.pawn || candidate == guest || !live(candidate)) return RC::LoopAction::Continue;
+            if (candidate->GetClassPrivate() == host.instance->GetClassPrivate() && candidate != host.instance)
+            {
+                auto* save = object(candidate, STR("SaveSlot_Ref"));
+                foreign_conflict = save == host.save || save == detached;
+            }
+            else if (candidate->GetClassPrivate() == host.pawn->GetClassPrivate())
+            {
+                auto* save = object(candidate, STR("Save"));
+                foreign_conflict = save == host.save || save == detached || (authority(candidate) &&
+                    static_cast<U::AActor*>(candidate)->GetWorld() == host.world && exact(save, save_class) && !has_no_package(save));
+            }
+            return foreign_conflict ? RC::LoopAction::Break : RC::LoopAction::Continue;
+        });
+        if (foreign_conflict) return fail("stock_missing_contact_handoff_owner_conflict");
+
+        HandoffValue from_before, to_before, prepared_from, prepared_to;
+        if (!from_before.capture(inventory.backpack, from) || !to_before.capture(inventory.backpack, to) ||
+            !prepared_from.capture(inventory.backpack, from) || !prepared_to.capture(inventory.backpack, to))
+            return fail("stock_missing_contact_handoff_inventory_snapshot_unavailable");
+        constexpr std::size_t protected_count = 4;
+        const std::array<U::FProperty*, protected_count> guarded{inventory.equipment, inventory.armor, inventory.helmet, inventory.flags};
+        std::array<std::array<HandoffValue, protected_count>, 2> protected_values;
+        const std::array owners{host.save, detached};
+        for (std::size_t owner = 0; owner < owners.size(); ++owner)
+            for (std::size_t property = 0; property < guarded.size(); ++property)
+                if (!protected_values[owner][property].capture(guarded[property], guarded[property]->ContainerPtrToValuePtr<void>(owners[owner])))
+                    return fail("stock_missing_contact_handoff_inventory_snapshot_unavailable");
+        const auto protected_unchanged = [&] {
+            for (std::size_t owner = 0; owner < owners.size(); ++owner)
+                for (std::size_t property = 0; property < guarded.size(); ++property)
+                    if (!protected_values[owner][property].matches(guarded[property]->ContainerPtrToValuePtr<void>(owners[owner]))) return false;
+            return true;
+        };
+
+        U::FScriptArrayHelper planned_from(inventory.backpack, prepared_from.value.get()),
+                              planned_to(inventory.backpack, prepared_to.value.get());
+        const auto new_index = planned_to.AddValues(1);
+        if (new_index != to_rows.Num() || planned_to.Num() != to_rows.Num() + 1)
+            return fail("stock_missing_contact_handoff_append_unqualified");
+        inventory.row->CopyCompleteValue(planned_to.GetRawPtr(new_index), original);
+        if (!inventory.same_row(original, planned_to.GetRawPtr(new_index))) return fail("stock_missing_contact_handoff_payload_unqualified");
+        planned_from.RemoveValues(source, 1);
+        if (planned_from.Num() != from_rows.Num() - 1) return fail("stock_missing_contact_handoff_debit_unqualified");
+        for (int i = 0; i < planned_from.Num(); ++i)
+            if (!inventory.same_row(planned_from.GetRawPtr(i), from_rows.GetRawPtr(i + (i >= source))))
+                return fail("stock_missing_contact_handoff_source_changed");
+        for (int i = 0; i < new_index; ++i)
+            if (!inventory.same_row(planned_to.GetRawPtr(i), to_rows.GetRawPtr(i)))
+                return fail("stock_missing_contact_handoff_destination_changed");
+
+        const auto same_owners_and_quest = [&] {
+            const auto current = qualify_host();
+            return current.world == host.world && current.driver == host.driver && current.pawn == host.pawn &&
+                current.save == host.save && current.instance == host.instance && handoff_alive(host.pawn, host.save) &&
+                silverfish::native_guest_regen::qualifies_detached_guest(guest, detached, host.save) &&
+                static_cast<U::AActor*>(guest)->GetWorld() == host.world && handoff_alive(guest, detached) &&
+                silverfish::native_quest_rewards::active_missing_contact(host.save);
+        };
+        if (!same_owners_and_quest() || !from_before.matches(from) || !to_before.matches(to) || !protected_unchanged())
+            return fail("stock_missing_contact_handoff_scope_changed");
+        inventory.backpack->CopyCompleteValue(from, prepared_from.value.get());
+        inventory.backpack->CopyCompleteValue(to, prepared_to.value.get());
+        std::string sent, received;
+        if (prepared_from.matches(from) && prepared_to.matches(to) && to_rows.Num() == planned_to.Num() &&
+            inventory.same_row(planned_to.GetRawPtr(new_index), to_rows.GetRawPtr(new_index)) &&
+            protected_unchanged() && same_owners_and_quest() &&
+            loot_escrow::sealed_package_guid(host.save, sent) && sent.empty() &&
+            loot_escrow::sealed_package_guid(detached, received) && received == identity)
+            return result(lua, true, "transferred");
+
+        inventory.backpack->CopyCompleteValue(to, to_before.value.get());
+        inventory.backpack->CopyCompleteValue(from, from_before.value.get());
+        return fail(from_before.matches(from) && to_before.matches(to) && protected_unchanged() && same_owners_and_quest() ?
+            "stock_missing_contact_handoff_rolled_back" : "mutation_unverified_missing_contact_handoff_rollback");
+    }
+
     Context read_live_context(const Lua& lua, const char** reason = nullptr)
     {
         if (!ordinary || !ready() || !lua.is_integer(1) || !lua.is_integer(2)) return {};
@@ -1029,6 +1326,7 @@ namespace silverfish::native_host_dig
             lua.register_function("SilverfishVerifyNativeHostDigEscrow", verify_live_escrow);
             lua.register_function("SilverfishAcknowledgeNativeHostDig", acknowledge_live);
             lua.register_function("SilverfishRestoreNativeHostDigEscrow", restore_live_escrow);
+            lua.register_function("SilverfishTransferMissingContactPackage", handoff_package);
             if (live_fixture_enabled())
                 lua.register_function("SilverfishDispatchNativeHostDigLiveFixture", dispatch_live_fixture);
         }
