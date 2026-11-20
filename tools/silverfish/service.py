@@ -35,6 +35,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
+from . import native_mindcore_fixture
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
@@ -2530,6 +2531,8 @@ class Host:
                     target = request.get("target") or "guest"
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
                                                            profile=native_mosby_tape.APPROACHES[action])
+                elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH) and self.fixtures:
+                    result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"))
                 elif action in (native_mosby_tape.READINGS_PREFLIGHT, native_mosby_tape.DRILL.verb("preflight")):
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_mosby_tape.DRILL.verb("convert"):

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_mindcore as mindcore, party
+from tools.silverfish import native_mindcore as mindcore, native_mindcore_fixture as fixture, party
 from tools.silverfish.native_tape_profiles import DRILL, DRILL_QUEST
 
 
@@ -140,3 +140,54 @@ class MindCoreTests(unittest.IsolatedAsyncioTestCase):
                 mindcore.parse_scene(altered)
         with self.assertRaises(ValueError):
             mindcore.parse_proof(["native-mindcore-tape", mindcore.MAP, mindcore.UPLOAD, PAWN, GUID, "dispatched", "2"])
+
+
+class MindCoreFixtureTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.host = host()
+        self.local = f"Player_FP_C {mindcore.LEVEL}Player_FP_C_1"
+        self.host.fixtures = True
+        self.host.native_recipients.return_value = {CHARACTER: {"connected": True, "pawn": PAWN}}
+        self.host.last_game = self.frame(0)
+
+    def frame(self, stage):
+        return {**report(stage), mindcore.SCENE: scene(stage, installed=stage != 0),
+                "pawns": {"local": {"name": self.local}}}
+
+    async def test_dormant_core_moves_once_and_only_stock_mount_readback_allows_checkpoint(self):
+        game = SimpleNamespace(command=AsyncMock(return_value=self.frame(0)), wait_for=AsyncMock())
+
+        async def mounted(predicate, timeout):
+            self.assertTrue(self.host.native_checkpoint_unsafe and self.host.transitioning)
+            self.assertEqual(timeout, 12)
+            self.assertFalse(predicate(self.frame(0)))
+            self.assertFalse(predicate(self.frame(2)))
+            self.assertTrue(predicate(self.frame(1)))
+            return self.frame(1)
+
+        game.wait_for.side_effect = mounted
+        state = await fixture.perform(self.host, game, fixture.INSTALL, None)
+        game.command.assert_awaited_once_with(fixture.INSTALL, self.local, timeout=7)
+        self.assertEqual([call.kwargs["require_guest_frames"] for call in self.host.checkpoint_native.await_args_list],
+                         [frozenset({CHARACTER})] * 2)
+        self.assertEqual(state[mindcore.SCENE], scene(1))
+        self.assertFalse(self.host.native_checkpoint_unsafe or self.host.transitioning)
+        self.assertNotIn(mindcore.LEDGER, self.host.party)
+
+    async def test_incomplete_stock_mount_fails_closed_and_never_publishes_after_move(self):
+        game = SimpleNamespace(command=AsyncMock(return_value=self.frame(0)), wait_for=AsyncMock(side_effect=TimeoutError))
+        with self.assertRaises(TimeoutError):
+            await fixture.perform(self.host, game, fixture.INSTALL, None)
+        self.host.checkpoint_native.assert_awaited_once()
+        self.host.control.event.assert_not_called()
+        self.assertTrue(self.host.native_checkpoint_unsafe and self.host.stopping)
+        self.assertFalse(self.host.transitioning)
+
+    async def test_fixture_selectors_are_local_and_require_staged_opt_in_and_exact_guest(self):
+        game = SimpleNamespace(command=AsyncMock())
+        for enabled, guest, target in ((False, True, None), (True, False, None), (True, True, "guest")):
+            self.host.fixtures = enabled
+            self.host.native_recipients.return_value = {CHARACTER: {"connected": True, "pawn": PAWN}} if guest else {}
+            with self.subTest(enabled=enabled, guest=guest, target=target), self.assertRaises(party.RuleError):
+                await fixture.perform(self.host, game, fixture.INSTALL, target)
+        game.command.assert_not_awaited()
