@@ -136,7 +136,8 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             required_effects = effects[1:] if parked_above else effects
         if "downed" in required_effects or any(type(body.get("health")) in (int, float) and body["health"] <= 0
                                                for body in required_seats):
-            raise RuntimeError(f"Stock damage downed a required rider during {label}")
+            health = f"host {lead.get('health')}, guest {guest.get('health')}"
+            raise RuntimeError(f"Stock damage downed a required rider during {label} ({health})")
         if lease and held.get("lease") == lease and held.get("state") in {"released", "mount_released", "failure"}:
             if ((held.get("core"), held.get("pawn"), held.get("state")) == (core.CORE, guest_pawn, "released")
                     and held.get("reason") in {"stock_core_released", "stock_core_released_by_engine"}):
@@ -377,6 +378,16 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                                  (x, y), 25, seat=seat,
                                  reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
 
+        async def cross_long_level_section(index, start, finish):
+            distance = math.dist(start[:2], finish[:2])
+            behind = [b + 175 * (a - b) / distance for a, b in zip(start[:2], finish[:2], strict=True)]
+            moved = await asyncio.gather(follow("carrier", index, finish), follow("lead", index, [*behind, finish[2]]),
+                                         return_exceptions=True)
+            for result in moved:
+                if isinstance(result, BaseException):
+                    raise result
+            return moved[0]
+
         base = proof["east_staged"] if stage_east else proof["west_walkway"]
         facing = base["hold"]["yaw"]
         south_doorway_was_crossed = False
@@ -398,7 +409,14 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
                         await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
                         facing = outward
-                    frame = await follow("carrier", index, (x, y, floor))
+                    previous = points[index - 1]
+                    current = proof["last_observation"]
+                    if (upper_approach and math.dist(previous[:2], (x, y)) > 650 and abs(previous[2] - floor) < 45
+                            and math.dist(current["lead"]["location"][:2], previous[:2]) < 230):
+                        frame = await cross_long_level_section(index, previous, (x, y, floor))
+                        lead_point = index
+                    else:
+                        frame = await follow("carrier", index, (x, y, floor))
             except StockCoreReleased as released:
                 if not upper_approach or len(proof.get("stock_regrips", ())) >= 3:
                     raise
