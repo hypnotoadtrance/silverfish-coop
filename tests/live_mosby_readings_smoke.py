@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,7 +30,7 @@ TO_DRILL_HEAD = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (CISTERN,
 
 
 async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
-                   equip_reward=False, prototype_dialogue=False, prototype_pickup=False):
+                   equip_reward=False, prototype_dialogue=False, prototype_pickup=False, prototype_chamber_staged=False):
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -65,9 +66,14 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         return await command("action", *owner, verb, *arguments, expected=expected)
 
     async def launch(kind, owner, label, *arguments):
+        environment = os.environ.copy()
+        chamber_fixture = "SILVERFISH_COOP_DRILL_HEAD_CHAMBER_FIXTURE"
+        environment.pop(chamber_fixture, None)
+        if kind == "host" and prototype_chamber_staged:
+            environment[chamber_fixture] = "1"
         with (run / f"{label}.txt").open("wb") as log:
             process = await asyncio.create_subprocess_exec(*cli, kind, *owner, *arguments, cwd=REPO, stdout=log, stderr=log,
-                                                             creationflags=subprocess.CREATE_NO_WINDOW)
+                                                             env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((process, owner))
         return process
 
@@ -223,7 +229,10 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         for ordinal in (1, 2):
             scene = (await action(client, dialogue.CHOOSE, "--target", f"{scene['token']}@{ordinal}"))["native_dialogue"]
         assert (scene["effect"], scene["progress"]["prototype_step"]) == ("prototype_drill_issued", 1), scene
-        evidence["prototype_pickup"] = {"issued": scene["progress"]}
+        evidence["prototype_pickup"] = {
+            "issued": scene["progress"],
+            "scope": "headless_chamber_staged_stock_input" if prototype_chamber_staged else "stock_keypad_and_map_entry",
+        }
         current = initial
         for destination, portal in TO_DRILL_HEAD:
             current = await cross(current, destination, portal)
@@ -236,6 +245,15 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
 
         def projected(state, word):
             return state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(source, {}).get("state") == word
+
+        if not prototype_chamber_staged:
+            refused = await action(authority, pickup.APPROACH, "--target", "guest", "--pickup-source", source, expected=False)
+            assert refused["error"] == f"authored_pickup_fixture_{source}_requires_local_catwalk", refused
+            assert await inventory(authority, "host") == host_items and await inventory(client, character) == guest_items
+            await wait(run, lambda state: projected(state, "available"))
+            await wait(client_run, lambda state: projected(state, "available"))
+            evidence["prototype_pickup"]["far_approach_refusal"] = refused["error"]
+            return
 
         approach = await action(authority, pickup.APPROACH, "--target", "guest", "--pickup-source", source)
         await wait(run, lambda state: projected(state, "available"))
@@ -256,7 +274,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         for role in ("host", "guest"):
             for key in ("Player_Cash", "Player_Xp", "Topic_MicroDrill", "Mosby_DrillTest"):
                 assert after[role].get(key) == before[role].get(key), (before, after)
-        evidence["prototype_pickup"].update(stock_press=press, headless_approach=approach, claim=claimed,
+        evidence["prototype_pickup"].update(stock_press=press, headless_chamber_approach=approach, claim=claimed,
                                             rival=denied["error"], stock_flags=after)
 
         _, _, restored = await restart_pair(host_process, guest_process, current, SCI_TUNNEL, label="drill-restart")
@@ -522,8 +540,13 @@ if __name__ == "__main__":
     parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
     prototype = parser.add_mutually_exclusive_group()
     prototype.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
-    prototype.add_argument("--prototype-pickup", action="store_true", help="unlock the stock Sci Tunnel and claim the exact placed drill head")
+    prototype.add_argument("--prototype-pickup", action="store_true", help="issue Prototype Drill and verify the stock Sci Tunnel keypad and entry")
+    parser.add_argument("--prototype-chamber-staged", action="store_true",
+                        help="stage the guest on the exact local catwalk after stock entry to verify Drill Head Interact and custody")
     args = parser.parse_args()
+    if args.prototype_chamber_staged and not args.prototype_pickup:
+        parser.error("--prototype-chamber-staged requires --prototype-pickup")
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
                          stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
-                         prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup))
+                         prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup,
+                         prototype_chamber_staged=args.prototype_chamber_staged))

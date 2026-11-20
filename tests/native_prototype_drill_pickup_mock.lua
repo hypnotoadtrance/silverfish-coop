@@ -59,3 +59,107 @@ assert(not drill.read(scope, "hosting", true))
 assert(not drill.read(scope, "connected", false))
 pawn.Save = object(stock("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"))
 assert(not drill.read(scope, "hosting", false))
+
+local original_getenv = os.getenv
+local function approach_fixture(staged)
+    os.getenv = function(name)
+        if name == "SILVERFISH_COOP_HEADLESS" or name == "SILVERFISH_COOP_NATIVE_FIXTURES" then return "1" end
+        if name == "SILVERFISH_COOP_DRILL_HEAD_CHAMBER_FIXTURE" then return staged and "1" or nil end
+        return original_getenv(name)
+    end
+    package.loaded.native_authored_pickup_input_fixture = nil
+    local fixture = require("native_authored_pickup_input_fixture")
+    os.getenv = original_getenv
+    return fixture
+end
+
+local center = {X = 57700, Y = -10650, Z = -3036.265}
+local origin = {X = 10350, Y = 260, Z = -2758}
+local actor = stock(drill.profile.path)
+local placement = stock(drill.profile.map .. ".Sci_Tunnel_01_P:PersistentLevel.StaticMeshActor_1001")
+local deck = object(stock("/Script/Engine.StaticMeshComponent"))
+local box = object(stock("/Script/Engine.BoxComponent"))
+local capsule = object(stock("/Script/Engine.CapsuleComponent"))
+local camera = object(stock("/Script/Engine.CameraComponent"))
+function actor:GetFullName() return drill.profile.name .. " " .. drill.profile.path end
+function actor:GetWorld() return world end
+function actor:HasAuthority() return true end
+function placement:GetWorld() return world end
+function deck:GetOwner() return placement end
+function box:GetOwner() return actor end
+function box:K2_GetComponentLocation() return center end
+function box:GetScaledBoxExtent() return {X = 18, Y = 18, Z = 18} end
+function box:GetUpVector() return {X = 0, Y = 0, Z = 1} end
+function box:GetRightVector() return {X = 0, Y = 1, Z = 0} end
+function capsule:GetOwner() return pawn end
+function capsule:GetScaledCapsuleRadius() return 33 end
+function capsule:GetScaledCapsuleHalfHeight() return 92 end
+function camera:GetOwner() return pawn end
+function camera:K2_GetComponentLocation() return {X = origin.X, Y = origin.Y, Z = origin.Z + 50} end
+function pawn:K2_GetActorLocation() return origin end
+function pawn:K2_GetActorRotation() return {Pitch = 0, Yaw = 0, Roll = 0} end
+function pawn:ForceNetUpdate() end
+local teleports = 0
+function pawn:K2_TeleportTo(point)
+    assert(point.Z == -3204 and point.X >= 57800 and point.X <= 57912)
+    teleports = teleports + 1
+    origin = point
+    return true
+end
+placement.RootComponent = deck
+actor.Box, actor.RootComponent = box, box
+pawn.Camera, pawn.CapsuleComponent, pawn.InteractionRange, pawn.Dead = camera, capsule, 250, false
+scope.pawns = {{pawn = pawn}}
+
+local trace = stock("/Script/Engine.Default__KismetSystemLibrary")
+local floor_component, capsule_blocked, sight_blocked = deck, false, false
+local queries, swept_from = 0, nil
+function trace:LineTraceSingle(_pawn, from, to, channel, _complex, _ignore, _draw, hit)
+    queries = queries + 1
+    if channel == 4 and not sight_blocked then
+        hit.Component = {Get = function() return box end}
+        return true
+    end
+    if channel == 0 and from.X >= 57800 and from.X <= 58400 and from.Y >= -10800 and from.Y <= -10500
+        and from.Z > -3300 and to.Z < -3300 then
+        hit.ImpactPoint = {X = from.X, Y = from.Y, Z = -3300}
+        hit.ImpactNormal = {X = 0, Y = 0, Z = 1}
+        hit.Component = {Get = function() return floor_component end}
+        return true
+    end
+    return false
+end
+function trace:CapsuleTraceSingle(_pawn, from, to, radius, height)
+    assert(radius == 33 and height == 92 and to.Z == -3202)
+    swept_from = from
+    return capsule_blocked
+end
+
+local fixture = approach_fixture(false)
+local function denied(message)
+    local ok, reason = pcall(fixture.precise_approach, scope, "hosting", drill.profile, pawn, actor)
+    assert(not ok and reason:find(message, 1, true), tostring(reason))
+    assert(teleports == 0)
+end
+
+denied("_requires_local_catwalk")
+assert(queries == 0)
+origin = {X = 57985, Y = -10650, Z = -3208}
+floor_component = object()
+denied("_requires_local_catwalk")
+floor_component, capsule_blocked = deck, true
+denied("catwalk_capsule_blocked")
+capsule_blocked, sight_blocked = false, true
+denied("_no_clear_sight")
+sight_blocked = false
+assert(fixture.precise_approach(scope, "hosting", drill.profile, pawn, actor) == "stock pickup floor and interaction sight verified")
+assert(teleports == 1 and swept_from.X == 57985)
+assert(fixture.authority_sight(scope, "hosting", drill.profile, pawn, actor))
+sight_blocked = true
+assert(not fixture.authority_sight(scope, "hosting", drill.profile, pawn, actor))
+assert(not fixture.authority_sight(scope, "hosting", {source = drill.profile.source, map = drill.profile.map}, pawn, actor))
+
+origin, teleports, sight_blocked = {X = 10350, Y = 260, Z = -2758}, 0, false
+fixture = approach_fixture(true)
+assert(fixture.precise_approach(scope, "hosting", drill.profile, pawn, actor) == "headless Drill Head catwalk staged with stock sight")
+assert(teleports == 1 and swept_from.X == origin.X and swept_from.Z == -3204)

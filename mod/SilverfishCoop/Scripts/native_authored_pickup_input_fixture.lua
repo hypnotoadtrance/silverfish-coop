@@ -26,6 +26,7 @@ local sources = {
 }
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local drill_chamber_stage = headless and host_fixtures and os.getenv("SILVERFISH_COOP_DRILL_HEAD_CHAMBER_FIXTURE") == "1"
 local dust_filter = "railyard-dust-filter"
 local molasses = "northeast-rail-molasses"
 local savlo_keycard = "trench-savlo-keycard"
@@ -170,8 +171,9 @@ end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
-    local sight_profile = (profile.source == stolen_bag or profile.source == dead_drop or profile.source == black_box)
-        and profile.map == sources[profile.source] and profile.authority_sight == true
+    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop or profile.source == black_box)
+        and profile.map == sources[profile.source] and profile.authority_sight == true)
+        or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
     if (not cash and not sight_profile and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
         or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
         or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
@@ -201,7 +203,7 @@ local function restore_position(pawn, origin, facing)
     return true
 end
 
-local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel, tall_aim, floor_depth)
+local function approach_clear_sight(state, pawn, actor, box, label, distances, front, multilevel, tall_aim, floor_depth, drill_catwalk)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local capsule, camera = pawn.CapsuleComponent, pawn.Camera
     if not valid(trace) or not owned(capsule, pawn, "CapsuleComponent") or not owned(camera, pawn, "CameraComponent")
@@ -220,6 +222,39 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
         if valid(detail.pawn) then floor_ignored[#floor_ignored + 1] = detail.pawn end
     end
     if valid(pawn.EquipedItem) then sight_ignored[#sight_ignored + 1] = pawn.EquipedItem end
+    local deck, radius
+    if drill_catwalk then
+        if not drill_chamber_stage and square(origin, center) > 625^2 then
+            error(label .. "_requires_local_catwalk", 0)
+        end
+        local placement = StaticFindObject(sources[drill_head] .. ".Sci_Tunnel_01_P:PersistentLevel.StaticMeshActor_1001")
+        deck = valid(placement) and placement.RootComponent
+        radius = capsule:GetScaledCapsuleRadius()
+        if not valid(placement) or not same(placement:GetWorld(), state.world) or not owned(deck, placement, "StaticMeshComponent")
+            or not finite(radius) or radius <= 0 or radius > half_height then
+            error(label .. "_catwalk_geometry_unavailable", 0)
+        end
+    end
+    local function deck_hit(hit, floor)
+        return floor and math.abs(floor.Z + 3300) <= 18
+            and same(hit.Component and hit.Component:Get(), deck)
+    end
+    if drill_catwalk and not drill_chamber_stage then
+        local below = {X = origin.X, Y = origin.Y, Z = origin.Z - half_height - 18}
+        local support = cast(trace, pawn, origin, below, 0, false, floor_ignored)
+        local floor, normal = support and vector(support.ImpactPoint), support and vector(support.ImpactNormal)
+        if not support or not deck_hit(support, floor) or not normal or normal.Z < 0.7
+            or math.abs(origin.Z - floor.Z - half_height) > 18 then
+            error(label .. "_requires_local_catwalk", 0)
+        end
+    end
+    local function clear_step(point)
+        if not drill_catwalk then return true end
+        local above = {X = point.X, Y = point.Y, Z = point.Z + 2}
+        local from = drill_chamber_stage and point or {X = origin.X, Y = origin.Y, Z = origin.Z + 4}
+        return trace:CapsuleTraceSingle(pawn, from, above, radius, half_height, 0, false,
+            sight_ignored, 0, {}, true, trace_color, trace_color, 0) == false
+    end
     local rays, blockers = points(box, center, tall_aim ~= false), {}
     local angles = {0, 45, -45, 90, -90, 135, -135, 180}
     if multilevel then
@@ -227,7 +262,7 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
             angles[#angles + 1] = angle
         end
     end
-    local moved, candidates = false, 0
+    local moved, candidates, floor_hits, deck_hits = false, 0, 0, 0
     local function clear_sight(eye)
         for _, target in ipairs(rays) do
             local clear, reason = stock_sight(trace, pawn, box, eye, target, limit, sight_ignored)
@@ -252,14 +287,24 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
                         local floor, normal = hit and vector(hit.ImpactPoint), hit and vector(hit.ImpactNormal)
                         if not floor or floor.Z < bottom or floor.Z > from_z then break end
                         local height = math.floor(floor.Z + 0.5)
-                        if normal and normal.Z >= 0.7 and floor.Z < from_z - 1 and not tested_heights[height] then
+                        local qualified = not drill_catwalk or deck_hit(hit, floor)
+                        if drill_catwalk then
+                            floor_hits = floor_hits + 1
+                            if qualified then deck_hits = deck_hits + 1 end
+                        end
+                        if qualified and normal and normal.Z >= 0.7 and floor.Z < from_z - 1 and not tested_heights[height] then
                             tested_heights[height] = true
-                            local point = {X = x, Y = y, Z = floor.Z + half_height + 2}
+                            local point = {X = x, Y = y, Z = floor.Z + half_height + (drill_catwalk and 4 or 2)}
                             local eye = {X = x + initial_eye.X - origin.X, Y = y + initial_eye.Y - origin.Y,
                                 Z = point.Z + initial_eye.Z - origin.Z}
                             if square(point, center) <= 235^2 then
                                 candidates = candidates + 1
-                                if clear_sight(eye) and pawn:K2_TeleportTo(point, facing) then
+                                local clear = clear_sight(eye)
+                                if clear and not clear_step(point) then
+                                    blockers["catwalk_capsule_blocked"] = true
+                                    clear = false
+                                end
+                                if clear and pawn:K2_TeleportTo(point, facing) then
                                     moved = true
                                     local actual, current_eye = vector(pawn:K2_GetActorLocation()),
                                         vector(camera:K2_GetComponentLocation())
@@ -286,7 +331,8 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
     local names = {}
     for reason in pairs(blockers) do names[#names + 1] = reason end
     table.sort(names)
-    error(string.format("%s_no_clear_sight:floor=%d:%s", label, candidates,
+    local floor_proof = drill_catwalk and string.format(":hits=%d:catwalk_1001=%d", floor_hits, deck_hits) or ""
+    error(string.format("%s_no_clear_sight:floor=%d%s:%s", label, candidates, floor_proof,
         table.concat(names, "|", 1, math.min(#names, 4))), 0)
 end
 
@@ -300,19 +346,24 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     local distances = precise_distances[profile.source]
     if not distances then return end
     local label = "authored_pickup_fixture_" .. profile.source
+    local drill_catwalk = profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile
     if (profile.stock_supply and supplies[profile.source] ~= profile)
         or (profile.stock_cash and cash_sources[profile.source] ~= profile)
+        or (profile.source == drill_head and not drill_catwalk)
         or not approach_scope(state, phase, pawn, actor, sources[profile.source])
         or not same(actor.Box, actor.RootComponent) then
         error(label .. "_scope_unavailable", 0)
     end
     local forest_locker_top = profile.source == stolen_bag
     local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
-        or profile.source == dead_drop or profile.source == black_box
+        or profile.source == dead_drop or profile.source == black_box or drill_catwalk
         or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
+    -- The Drill Head sits about 264 units above its catwalk, beside the drill assembly.
+    local floor_depth = drill_catwalk and 340 or forest_locker_top and 275 or nil
     approach_clear_sight(state, pawn, actor, actor.Box, label, distances, approach_front[profile.source],
-        nested_floor, nil, forest_locker_top and 275 or nil)
+        nested_floor, nil, floor_depth, drill_catwalk)
+    if drill_catwalk and drill_chamber_stage then return "headless Drill Head catwalk staged with stock sight" end
     return "stock pickup floor and interaction sight verified"
 end
 
