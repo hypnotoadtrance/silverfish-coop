@@ -78,6 +78,7 @@ namespace
 
     constexpr std::string_view drill_head_source = "scientist-tunnel-drill-head";
     constexpr std::string_view lab_blank_tape_source = "lab-e206-blank-data-tape";
+    constexpr std::string_view crossroads_lockpick_source = "crossroads-lockpick";
 
     constexpr std::array profiles{
         dead_drop_profile,
@@ -151,6 +152,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1"),
             STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"),
             -5145.994939851458, 1711.4458331043368, 31.917839181893726, 2,
+        },
+        Profile{
+            .source = crossroads_lockpick_source,
+            .world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+            .actor = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Eqp_LockPick_C_1"),
+            .item_class = STR("/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C"),
+            .x = -17194.406526906052, .y = -2545.1588886940604, .z = -61.61132574006076,
+            .item_type = 5, .stack_units = 2, .stack_weight = 0.04, .stack_value = 14,
         },
         Profile{
             "savlo-estate-evil-eye-ring",
@@ -584,6 +593,15 @@ namespace
             return "authored_pickup_stock_drill_head_payload_unqualified";
         if (profile.source == lab_blank_tape_source && !lab_blank_tape_payload(actor))
             return "authored_pickup_stock_lab_blank_tape_payload_unqualified";
+        if (profile.source == crossroads_lockpick_source)
+        {
+            auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
+            auto* value = field<U::FIntProperty>(actor, STR("Value"));
+            if (!actor->HasAnyFlags(U::RF_WasLoaded) || !weight || !value ||
+                !(std::abs(weight->GetPropertyValueInContainer(actor) - profile.stack_weight) <= 1e-9) ||
+                value->GetPropertyValueInContainer(actor) != profile.stack_value)
+                return "authored_pickup_stock_lockpick_payload_unqualified";
+        }
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
         if (const auto* fault = profile.stock_bandage ? stock_bandage_fault(actor, profile) : nullptr) return fault;
