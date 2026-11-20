@@ -87,9 +87,12 @@ local function int32(value)
         and value >= -2147483648 and value <= 2147483647
 end
 
-local function fname(text)
+local function fname(text, display_alias)
     local value = FName(text, EFindName.FNAME_Find)
-    if value:GetComparisonIndex() == 0 or value:ToString() ~= text then refused("name_unavailable") end
+    local display = value:ToString()
+    if value:GetComparisonIndex() == 0 or (display ~= text and display ~= display_alias) then
+        refused("name_unavailable")
+    end
     return value
 end
 
@@ -205,7 +208,7 @@ local function context_for(state, phase, name, approach, profile)
         refused("board_out_of_reach")
     end
     return {world = world, host = host.pawn, instance = instance, save = save, interactor = pawn,
-        receiving_save = receiving_save, board = board, key = fname(profile.quest_id),
+        receiving_save = receiving_save, board = board, key = fname(profile.quest_id, profile.quest_display_alias),
         origin = origin, anchor = anchor, reach = reach}
 end
 

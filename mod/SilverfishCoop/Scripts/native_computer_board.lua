@@ -53,6 +53,7 @@ local recipes = {
     },
     ["native-missing-contact"] = {
         id = "Note_Farmhouse", title = "Missing Contact", fault = "missing_contact",
+        quest_display_alias = "Note_FarmHouse",
         objective_path = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C",
         cash = 450, difficulty = 0, fail_on_death = false, redeem = 1,
         offered_boards = {1}, factions = {8, 4}, reputation = {[8] = 40, [4] = -5},
@@ -144,7 +145,8 @@ for prefix, spec in pairs(recipes) do
         local world = board.map .. "." .. board.map:match("([^/]+)$")
         local path = world .. ":PersistentLevel." .. board.actor
         spec.boards[board.map] = {map = board.map, world_path = world, board_path = path, board_name = "BountyBoard_BP_C " .. path,
-            board_id = id, quest_id = spec.id, global_contracts = board.global_contracts}
+            board_id = id, quest_id = spec.id, quest_display_alias = spec.quest_display_alias,
+            global_contracts = board.global_contracts}
     end
     for _, action in ipairs({"preflight", "approach", "start", "turn-in"}) do
         operations[prefix .. "-" .. action] = {spec = spec, action = action}
