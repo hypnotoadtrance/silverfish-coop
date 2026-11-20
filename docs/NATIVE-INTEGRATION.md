@@ -58,6 +58,8 @@ Another continuous two-player run went from CrossRoads through NorthEast Rail an
 
 Paired runs crossed the Docks–Dry Dock and Dry Dock–Refinery doors in both directions. Every door refused guest interaction and a host outside the party radius. The stock Docks overlap then carried the regrouped party to the City entrance marker. The original single-player save hashes matched.
 
+Other paired runs crossed The Wall–Annex, Annex–Artifact Forge, and The Wall–Data Silo doors in both directions. The exact stock doors denied guest and distant-host requests. Regrouped crossings landed at the stock markers and restored the same guest. All original saves kept their hashes.
+
 The Observatory rest command and stock sleep screen both use the exact SavePoint and stock day cycle. A host and two guests rested for one game hour, left via the CrossRoads exit, and returned to the saved Observatory bed after all three went down. All three recovered full native health. The stock sleep-screen run measured unchanged desktop cursor bounds across 1,305 samples. The rest catalog covers 11 cooked beds, including City's verified neutral bed.
 
 A later headless run repeated this with a host and four guests. All four guests kept separate saves and were refused at the stock bed on both peers. The host confirmed sleep, all five returned to the exact Observatory bed after a wipe, and nine original save hashes matched. Sixty cursor samples taken with all five games active showed the full desktop bounds.

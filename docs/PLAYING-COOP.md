@@ -99,7 +99,7 @@ In the supported stock wipe picker, Page Up and Page Down move the selection, Sp
 
 The current stage has qualified stock paths for selected rest points, exits, transport items, qualified stock small crates, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
 
-At a qualified stock small crate, press Interact to open it. The shared loot panel appears while a player stands within reach of the opened crate. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
+At a qualified stock container, press Interact to open it. The shared loot panel appears while a player stands within reach. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
 
 The Scientist's cash counter offers the stock camera through the same guest shop overlay. Buying one adds a separate camera to the guest's inventory. The inventory overlay can equip the camera.
 
