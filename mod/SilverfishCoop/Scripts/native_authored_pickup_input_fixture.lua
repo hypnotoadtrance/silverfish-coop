@@ -10,6 +10,7 @@ local drill_head = "scientist-tunnel-drill-head"
 local lab_blank_tape = "lab-e206-blank-data-tape"
 local cistern_keycard = "cistern-old-nfta-keycard"
 local cistern_locker = "cistern-old-nfta-locker"
+local crossroads_lockpick = "crossroads-lockpick"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
@@ -18,6 +19,7 @@ local sources = {
     [lab_blank_tape] = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
     ["crossroads-pocket-watch"] = crossroads,
     ["crossroads-dead-drop-bag"] = crossroads,
+    [crossroads_lockpick] = crossroads,
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
     ["borough-mre"] = "/Game/Classes/Maps/Maps_SafeZones/Borough",
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
@@ -49,6 +51,7 @@ local precise_distances = {
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
     [cistern_keycard] = {55, 80, 105, 125, 160, 195},
     [cistern_locker] = {95, 125, 150, 185},
+    [crossroads_lockpick] = {70, 95, 120, 155, 190},
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
@@ -182,7 +185,8 @@ end
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
     local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
-        or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard)
+        or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
+        or profile.source == crossroads_lockpick)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
         or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
     if (not cash and not sight_profile and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
@@ -447,18 +451,19 @@ local function press_stock(state, pawn, box, precise_aim, label, dispatch)
     return reason
 end
 
-function input.open_cabinet(state, phase, pawn, actor, box, source)
+function input.open_cabinet(state, phase, pawn, actor, box, source, dispatch)
     local press = SilverfishProbeNativeInteractInput
     local label = cabinet_labels[source]
     if not label then error("authored_cabinet_unknown_fixture", 0) end
     if not approach_scope(state, phase, pawn, actor, sources[source])
         or not same(pawn, state.local_pawn.pawn)
-        or not owned(pawn.Camera, pawn, "CameraComponent") or type(press) ~= "function" then
+        or not owned(pawn.Camera, pawn, "CameraComponent")
+        or type(dispatch or press) ~= "function" then
         error(label .. "_fixture_scope_unavailable", 0)
     end
     local origin, facing = approach_clear_sight(state, pawn, actor, box, label .. "_fixture",
         precise_distances[source], approach_front[source], source == molasses)
-    local ok, receipt = pcall(press_stock, state, pawn, box, true, label .. "_stock_input", function()
+    local ok, receipt = pcall(press_stock, state, pawn, box, true, label .. "_stock_input", dispatch or function()
         local delivered, why, sequence = press(pawn:GetAddress(), false)
         if delivered ~= true or why ~= "stock_started" or math.type(sequence) ~= "integer" or sequence < 1 then
             error("mutation_unverified_" .. label .. "_stock_input:" .. tostring(why), 0)

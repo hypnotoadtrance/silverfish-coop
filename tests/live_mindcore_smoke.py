@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_datasilo_lift as lift
 from tools.silverfish import native_authored_pickup as pickup
+from tools.silverfish import native_cistern_lockpick as lockpick
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
 from tools.silverfish import native_mindcore_view as console
 from tools.silverfish import native_mindcore_carry as carry
@@ -141,7 +142,8 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
-                   carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False):
+                   carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
+                   lift_disembark=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -152,6 +154,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Run the stock lift ride separately from a dormant Data Silo checkpoint")
     if lift_keycard and not lift_ride:
         raise ValueError("Verify the stock button with the lift ride")
+    if lift_disembark and not lift_ride:
+        raise ValueError("Verify the stock landing after riding the lift")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -164,6 +168,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched Data Silo Core replication stage")
     if lift_ride and not runtime.staged_script(work, "native_datasilo_lift.lua", "SilverfishDataSiloLiftGuardAvailable"):
         raise ValueError("Use the matched Data Silo lift stage")
+    if lift_keycard and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
+        raise ValueError("Use the matched stock Cistern lockpick stage")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -412,28 +418,58 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 frame = await travel(frame, (area, destination, leg.entrance, leg.kind, leg.actor), receipts="lift_key_routes")
             return frame
 
-        authority = await traverse(authority, path)
-        source = pickup.CISTERN_OLD_NFTA_KEYCARD
-        opened = await action(run, pickup.CISTERN_LOCKER_FIXTURE)
+        async def collect_stock(frame, source):
+            for attempt in range(4):
+                try:
+                    staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
+                    break
+                except RuntimeError as error:
+                    if attempt == 3 or "no_clear_sight" not in str(error):
+                        raise
+                    await asyncio.sleep(.4)
+            area, actor, item_class = pickup.SOURCES[source]
+            assert staged["actor"] == actor and frame["game"]["map"] == area
+            receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
+            assert (receipt["entry"], receipt["source"], receipt["pawn"]) == (
+                "stock", source, frame["game"]["pawns"]["local"]["name"])
+            picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
+                                .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
+            claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
+            item = (await inventory(run, "host"))[claim["guid"]]
+            assert item["class_path"] == item_class
+            return item
+
+        authority = await traverse(authority, path[:-1])
+        pick = await collect_stock(authority, pickup.CROSSROADS_LOCKPICK)
+        assert (pick["source"], pick["quantity"]) == ("backpack", 2)
+        proof["lift_stock_pick"] = pick
+        authority = await traverse(authority, path[-2:])
+        opened = await asyncio.wait_for(submit(run, pickup.CISTERN_LOCKER_FIXTURE), 45)
+        if not opened.get("ok"):
+            if opened.get("error") != "stock_cistern_nfta_locker_locked":
+                raise RuntimeError(f"Stock Cistern locker preflight failed: {opened.get('error')}")
+            attempts = proof["lift_key_lockpick_attempts"] = []
+            before_host, before_guest = await inventory(run, "host"), await inventory(guest_run, character)
+            charges = pick["quantity"]
+            for _ in range(charges):
+                result = (await action(run, lockpick.FIXTURE, target=pick["guid"]))[lockpick.KEY]
+                attempts.append(result)
+                assert result["charges_before"] == charges
+                charges = result["charges_after"]
+                if result["state"] == "unlocked" or not charges:
+                    break
+            after_host = await inventory(run, "host")
+            assert after_host.get(pick["guid"], {}).get("quantity", 0) == charges
+            assert {key: row for key, row in before_host.items() if key != pick["guid"]} == {
+                key: row for key, row in after_host.items() if key != pick["guid"]}
+            assert await inventory(guest_run, character) == before_guest
+            if attempts[-1]["state"] != "unlocked":
+                raise RuntimeError("The stock Cistern locker broke both genuine lockpick charges")
+            opened = await action(run, pickup.CISTERN_LOCKER_FIXTURE)
         proof["lift_key_locker"] = opened["locker"]
-        for attempt in range(4):
-            try:
-                staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
-                break
-            except RuntimeError as error:
-                if attempt == 3 or "no_clear_sight" not in str(error):
-                    raise
-                await asyncio.sleep(.4)
-        assert staged["actor"] == pickup.SOURCES[source][1]
-        receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
-        assert (receipt["entry"], receipt["source"], receipt["pawn"]) == (
-            "stock", source, authority["game"]["pawns"]["local"]["name"])
-        picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
-                            .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
-        claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
-        item = (await inventory(run, "host"))[claim["guid"]]
-        assert item["class_path"] == pickup.SOURCES[source][2]
-        proof["lift_stock_key"] = {"source": source, "guid": claim["guid"], "class_path": item["class_path"]}
+        source = pickup.CISTERN_OLD_NFTA_KEYCARD
+        key = await collect_stock(authority, source)
+        proof["lift_stock_key"] = {"source": source, "guid": key["guid"], "class_path": key["class_path"]}
         return await traverse(authority, path[::-1])
 
     async def ride_lift(authority):
@@ -474,10 +510,16 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         assert first["source_stop"] == "lower"
         await sample("ascending", "moving")
         await sample("upper_boarded", "upper")
-        second = await action(run, lift.FIXTURE, target=button)
-        assert second["source_stop"] == "upper"
-        await sample("descending", "moving")
-        await sample("lower_returned", "lower")
+        if lift_disembark:
+            from datasilo_lift_exit import verify_disembark
+
+            lift_proof["disembark"] = await verify_disembark(
+                run, guest_run, action, host_pawn, guest_pawn, character, authority["zone_epoch"])
+        else:
+            second = await action(run, lift.FIXTURE, target=button)
+            assert second["source_stop"] == "upper"
+            await sample("descending", "moving")
+            await sample("lower_returned", "lower")
         await action(run, "checkpoint")
         saved, stock_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in stock_flags) == (0, 0)
@@ -767,8 +809,10 @@ if __name__ == "__main__":
     parser.add_argument("--guest-carry", action="store_true", help="use real guest Interact and aim to carry the exact Core")
     parser.add_argument("--lift-ride", action="store_true", help="ride the native lift with both players and verify both stops")
     parser.add_argument("--lift-keycard", action="store_true", help="get the Cistern keycard and operate the stock lift button")
+    parser.add_argument("--lift-disembark", action="store_true", help="walk both players to the stock upper landing")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
-                          guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard))
+                          guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
+                          lift_disembark=options.lift_disembark))

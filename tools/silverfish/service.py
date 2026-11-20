@@ -36,7 +36,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_datasilo_lift, native_mindcore_carry, native_mindcore_view
+from . import native_cistern_lockpick, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -2675,6 +2675,8 @@ class Host:
                     self.last_game = await bridge.command(action, timeout=7)
                     self.last_seen = time.monotonic()
                     result = {"locker": self.last_game["ack"]["message"]}
+                elif action == native_cistern_lockpick.FIXTURE and self.fixtures:
+                    result = await native_cistern_lockpick.perform(self, bridge, request.get("target"))
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
                                 native_mindcore_fixture.CARRY) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))

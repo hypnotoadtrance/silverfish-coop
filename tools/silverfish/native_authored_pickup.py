@@ -25,6 +25,7 @@ LAB_E206_BLANK_TAPE = "lab-e206-blank-data-tape"
 PROTOTYPE_DRILL = "scientist-tunnel-drill-head"
 POCKET_WATCH = "crossroads-pocket-watch"
 OLD_PIPE = "crossroads-old-pipe"
+CROSSROADS_LOCKPICK = "crossroads-lockpick"
 SAVLO_ESTATE = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 SAVLO_RING = "savlo-estate-evil-eye-ring"
 BOROUGH_MRE = "borough-mre"
@@ -60,6 +61,8 @@ SOURCES = {
                    "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"),
     OLD_PIPE: (CROSSROADS, f"MeleeWep_OldPipe_C {CROSSROADS}.CrossRoads_P:PersistentLevel.MeleeWep_OldPipe_C_1",
                "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"),
+    CROSSROADS_LOCKPICK: (CROSSROADS, f"Eqp_LockPick_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Eqp_LockPick_C_1",
+                          "/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C"),
     SAVLO_RING: (SAVLO_ESTATE, f"Art_EvilEyeRing_C {SAVLO_ESTATE}.SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
                  "/Game/Classes/Items/Artifacts/Art_EvilEyeRing.Art_EvilEyeRing_C"),
     BOROUGH_MRE: (BOROUGH, f"Item_MRE_C {BOROUGH}.Borough:PersistentLevel.Item_MRE_C_1",

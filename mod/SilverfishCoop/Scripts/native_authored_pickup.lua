@@ -108,6 +108,14 @@ local profiles = {
         fixture_only = true,
     },
     {
+        map = crossroads,
+        source = "crossroads-lockpick",
+        path = crossroads .. ".CrossRoads_P:PersistentLevel.Eqp_LockPick_C_1",
+        class = "/Game/Classes/Equipment/Eqp_LockPick.Eqp_LockPick_C",
+        name = "Eqp_LockPick_C",
+        authority_sight = true,
+    },
+    {
         map = savlo_estate,
         source = "savlo-estate-evil-eye-ring",
         path = savlo_estate .. ".SavloEstate_P:PersistentLevel.Art_EvilEyeRing_C_1",
