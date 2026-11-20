@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 
-from . import native_guest_drop, native_guest_drop_record as record, party
+from . import native_guest_drop_record as record, party
 from .native_gold import valid_guid
 
 
@@ -53,6 +53,8 @@ class HostDropInput:
         self.retry_at = 0.0
 
     async def poll(self, host, bridge) -> None:
+        from . import native_guest_drop
+
         scope = _scope(host)
         if scope is None:
             return
