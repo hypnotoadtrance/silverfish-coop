@@ -263,8 +263,9 @@ local function settle_step(state, phase)
         refuse("carry_step_seat_or_core_pose:pawn=" .. coordinates(pawn) .. ":core=" .. coordinates(core))
     end
     if now >= carry.expires then
-        refuse(("carry_motion_timeout:pawn=%.1f:core=%.1f:walk=%s"):format(
-            carry.pawn_move, carry.core_move, tostring(carry.pawn_start ~= nil)))
+        refuse(("carry_motion_timeout:pawn=%.1f:core=%.1f:pawn_along=%.1f:core_along=%.1f:walk=%s"):format(
+            carry.pawn_move, carry.core_move, carry.pawn_along or 0, carry.core_along or 0,
+            tostring(carry.pawn_start ~= nil)))
     end
     if now < carry.next_sample then return end
     if not carry.pawn_start then
@@ -272,11 +273,12 @@ local function settle_step(state, phase)
         carry.sample, carry.next_sample = core, now + 0.2
         if not prior or horizontal(core, prior) > 8 or math.abs(core.Z-prior.Z) > 8 then return end
         carry.pawn_start, carry.core_start = pawn, core
-        players.command({"mindcore-carry", "walk", tostring(carry.direction.X), tostring(carry.direction.Y), "1900"}, state, phase)
+        players.command({"mindcore-carry", "walk", tostring(carry.direction.X), tostring(carry.direction.Y), "2500"}, state, phase)
         return
     end
     carry.pawn_move, carry.core_move = horizontal(pawn, carry.pawn_start), horizontal(core, carry.core_start)
     local pawn_along, core_along = along(pawn, carry.pawn_start, carry.direction), along(core, carry.core_start, carry.direction)
+    carry.pawn_along, carry.core_along = pawn_along, core_along
     if carry.pawn_move > 300 or carry.core_move > 300
         or math.abs(pawn.Z-carry.pawn_start.Z) > 85 or math.abs(core.Z-carry.core_start.Z) > 85 then
         refuse("carry_motion_outside_short_walk:pawn=" .. coordinates(pawn) .. ":core=" .. coordinates(core))
