@@ -18,6 +18,10 @@ The staged title probe found the same stock widget at the top of its local contr
 
 A staged loopback trial mounted the co-op panel over that title using the current `menu` supervisor. The panel exposed the bound Host or Join action and refused the unoffered action. The headless input seam submitted each selection through the same one-use request as the physical keys. Host opened the chosen UDP port and started Observatory, and Join connected the invited guest and bound their detached stock save. Each title process stayed open until the new session became ready. After a forced link drop, the guest rejoined the same character and native pawn on the same port. The paired checkpoint reached revision 5 and the original save hashes matched.
 
+The two embedded workers then used the actual Unreal endpoints in Observatory. Windows attributed the two host ports to the host game and the guest's three sockets to the guest game. Each engine kept ticking while its own worker ran. The guest replaced the dropped QUIC connection, kept both Unreal-facing endpoints, and regained the same reserved pawn. Both saved to distinct native slots. Each game returned to its own stock title and released all observed co-op sockets. The original saves matched their starting hashes.
+
+A stock-layout replica loaded only the opt-in title bootstrap using the official UE4SS release and the Silverfish signature. It mounted the co-op entry over the exact title widget without any co-op environment or gameplay hooks. The entry reported coordinator availability, and the stock title wrote only `Config.sav` under its isolated user profile. The original save hashes matched. [Bootstrap package](../bootstrap/README.md)
+
 ## Delivery milestones
 
 1. **Title menu to isolated co-op stage.** Add the title entry in the matched staged build. Host and Join call the current supervisor through a private, structured handoff. The supervisor reserves the campaign or profile, passes an isolated prelaunch user directory, and reports when the requested host or guest is ready. Start with two staged processes. Verify one click produces one launch, a rejected or cancelled request leaves the title usable, and stock single-player buttons still load their own data. Hash the original save directory before and after.
@@ -29,5 +33,7 @@ A staged loopback trial mounted the co-op panel over that title using the curren
 ## Release and local control
 
 Ship a matched Windows loader, native mod, scripts, and the redistributable dependencies needed by the selected milestone. Use the player's local Steam installation for stock game content. The package and repository contain mod assets and code. Stock packages, extracted assets, user saves, host keys, and invitations stay local.
+
+The official UE4SS v4.0.0 release DLL loaded the matched co-op add-on in an isolated Windows stage. The same title handoff, Direct IP reconnect, and paired save checks passed with that combination. That result qualifies the official runtime for this test build's staged trial. The Steam entry and packaging still need their own verification.
 
 Keep a local, versioned JSON interface alongside the menu. It should expose session and map state, the active and reserved roster, checkpoint revision and recovery status, and supported player actions. Commands carry request IDs and the current session generation so an AI can distinguish an accepted request from an applied or durably committed result. Keep control files local to the Windows account and redact invite credentials and private keys from normal status and events. Use the same host validation for a menu action and its documented JSON equivalent. [Current local control](../tools/silverfish/control.py)

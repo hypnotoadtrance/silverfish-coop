@@ -1,0 +1,79 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from bootstrap import coordinator
+
+
+class ReceiptTests(unittest.TestCase):
+    def test_only_a_complete_versioned_open_receipt_is_accepted(self):
+        row = b"1\topen-coop\t" + b"a" * 32 + b"\t" + b"b" * 32 + b"\n"
+        self.assertEqual(coordinator.parse_receipt(row), coordinator.Receipt("a" * 32, "b" * 32))
+        for unsafe in (row + b"extra", row.replace(b"open-coop", b"host"), row.replace(b"a" * 32, b"0" * 32),
+                       row.replace(b"b" * 32, b"B" * 32), row[:-1]):
+            with self.subTest(row=unsafe), self.assertRaises(ValueError):
+                coordinator.parse_receipt(unsafe)
+
+    @unittest.skipUnless(os.name == "nt", "Uses an inherited Windows pipe")
+    def test_windowless_process_reads_one_complete_pipe_receipt(self):
+        row = b"1\topen-coop\t" + b"a" * 32 + b"\t" + b"b" * 32 + b"\n"
+        code = ("from bootstrap.coordinator import Receipt, read_inherited_receipt\n"
+                "assert read_inherited_receipt() == Receipt('a' * 32, 'b' * 32)")
+        for payload, expected in ((row, 0), (row + b"x", 1)):
+            with self.subTest(expected=expected):
+                child = subprocess.run([sys.executable, "-B", "-c", code], input=payload, capture_output=True,
+                                       cwd=Path(__file__).resolve().parents[1], timeout=5,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                self.assertEqual(child.returncode, expected, child.stderr.decode(errors="replace"))
+
+
+class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.work = Path(temp.name).resolve()
+        self.config = self.work / "coordinator.json"
+        self.data = {"schema": 1, "work": str(self.work), "host": {"campaign": "trail", "bind": "127.0.0.1", "port": 27015},
+                     "join": None}
+
+    def write(self):
+        self.config.write_text(json.dumps(self.data), encoding="utf-8")
+
+    async def test_opens_one_qualified_plan_per_generation_and_publishes_status(self):
+        self.write()
+        receipt = coordinator.Receipt("a" * 32, "b" * 32)
+        with patch.object(coordinator, "staged_title_menu", new_callable=AsyncMock) as menu:
+            await coordinator.open_coop(receipt, self.config)
+            with self.assertRaises(FileExistsError):
+                await coordinator.open_coop(coordinator.Receipt(receipt.generation, "c" * 32), self.config)
+        menu.assert_awaited_once()
+        plan, = menu.await_args.args
+        self.assertEqual((plan.work, plan.campaign, plan.bind, plan.port), (self.work, "trail", "127.0.0.1", 27015))
+        status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
+        self.assertEqual(coordinator.runtime.read_json(status)["state"], "stopped")
+
+    async def test_failed_start_reports_the_exception_type_without_path_or_invite_data(self):
+        self.write()
+        receipt = coordinator.Receipt("d" * 32, "e" * 32)
+        with patch.object(coordinator, "staged_title_menu", side_effect=RuntimeError("private-path")), self.assertRaises(RuntimeError):
+            await coordinator.open_coop(receipt, self.config)
+        status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
+        self.assertEqual(coordinator.runtime.read_json(status), {
+            "schema": 1, "generation": receipt.generation, "request_id": receipt.request_id,
+            "state": "failed", "error_type": "RuntimeError",
+        })
+
+    def test_invitation_must_be_inside_the_coop_workspace(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        invite = Path(temp.name).resolve() / "private.invite.json"
+        invite.write_text("{}", encoding="utf-8")
+        self.data["join"] = {"profile": "guest", "invite": str(invite), "character": None}
+        self.write()
+        with self.assertRaisesRegex(ValueError, "private co-op workspace"):
+            coordinator.load_plan(self.config)
