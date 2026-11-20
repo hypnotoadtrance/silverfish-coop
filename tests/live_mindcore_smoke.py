@@ -410,6 +410,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                                           for role in ("host", "guest")}
             if shared_core:
                 assert proof["core_displacement"]["guest"] >= 20, proof["core_displacement"]
+                assert poses["step"]["host"]["replicates"] and poses["step"]["host"]["replicate_movement"]
+                assert (poses["step"]["guest"]["local_role"], poses["step"]["guest"]["replicate_movement"]) == (1, True)
             await paired(core.MAP)
             await action(run, "checkpoint")
             saved, held_flags = await flags()

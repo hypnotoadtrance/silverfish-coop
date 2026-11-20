@@ -272,7 +272,7 @@ local function settle_step(state, phase)
         carry.sample, carry.next_sample = core, now + 0.2
         if not prior or horizontal(core, prior) > 8 or math.abs(core.Z-prior.Z) > 8 then return end
         carry.pawn_start, carry.core_start = pawn, core
-        players.command({"mindcore-carry", "walk", tostring(carry.direction.X), tostring(carry.direction.Y), "800"}, state, phase)
+        players.command({"mindcore-carry", "walk", tostring(carry.direction.X), tostring(carry.direction.Y), "1900"}, state, phase)
         return
     end
     carry.pawn_move, carry.core_move = horizontal(pawn, carry.pawn_start), horizontal(core, carry.core_start)
