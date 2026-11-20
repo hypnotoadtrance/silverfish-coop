@@ -8,14 +8,15 @@ from collections import deque
 from dataclasses import asdict
 import json
 from pathlib import Path
+import uuid
 
-from .control import select_run, status, submit
+from .control import Control, select_run, status, submit
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS
 from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
 from .native_guest_weapon import SEED_KINDS
 from .native_host_save import STOCK_START_MODES
 from .runtime import REPO, prepare_game
-from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
+from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, OBSERVATORY, PLAYTEST_MAPS
 
 def _workspace(value: str) -> Path:
     return Path(value).expanduser().resolve()
@@ -53,6 +54,15 @@ def parser() -> argparse.ArgumentParser:
     stage.add_argument("--signatures", type=Path, help="extracted Silverfish UE4SS_Signatures folder")
     stage.add_argument("--cpp-runtime", type=Path, help="locally built UE4SS v4.0.0 runtime DLL")
     stage.add_argument("--cpp-addon", type=Path, help="Silverfish native add-on from the same build")
+
+    menu = commands.add_parser("menu", help="open a staged game with the in-game Host and Join panel")
+    menu.add_argument("--title-profile", default="co-op-menu")
+    menu.add_argument("--campaign", help="campaign the title screen can host")
+    menu.add_argument("--bind", default="127.0.0.1", help="local address for Direct IP")
+    menu.add_argument("--port", type=_port, default=7777)
+    menu.add_argument("--invite", type=Path, help="invitation the title screen can join")
+    menu.add_argument("--profile", default="guest", help="local guest profile")
+    menu.add_argument("--character", help="host-owned character ID from the invitation's catalog")
 
     host = commands.add_parser("host", help="stage a listen session and wait for the guest")
     host.add_argument("--campaign", required=True)
@@ -248,11 +258,47 @@ def _events(directory: Path, limit: int) -> dict:
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
 
 
+async def staged_title_menu(opts) -> dict:
+    from . import runtime
+    from .title_session import TitleSession, host_plan, join_plan
+
+    if not (opts.campaign or opts.invite):
+        raise ValueError("Supply a campaign for Host, an invitation for Join, or both")
+    if opts.character and not opts.invite:
+        raise ValueError("Character selection requires an invitation")
+    if not runtime.qualified_authored_routes(opts.work):
+        raise ValueError("The co-op title requires the current matched native stage")
+    plans = {}
+    if opts.campaign:
+        campaign = select_run(opts.work, "campaigns", opts.campaign)
+        saved = campaign / "save"
+        has_checkpoint = any((saved / name).is_file() for name in ("campaign.json", "campaign.previous.json"))
+        starting = {} if has_checkpoint else {"start_preset": "wanderer", "expected_map": OBSERVATORY}
+        plans["host"] = host_plan(opts.work, campaign, opts.bind, opts.port or runtime.spare_udp_port(),
+                                  native_events=True, native_guest=True, native_zones=True,
+                                  native_zone_walls=True, expanded_zones=True, **starting)
+    if opts.invite:
+        guest = select_run(opts.work, "clients", opts.profile)
+        plans["join"] = join_plan(opts.work, guest, opts.invite.resolve(strict=True), character_id=opts.character)
+    title = select_run(opts.work, "titles", opts.title_profile)
+    with Control(title / "run"):
+        mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
+        process = runtime.launch(opts.work, title / "game-user", mailbox, headless=False)
+        try:
+            await TitleSession(runtime.Bridge(mailbox, process), plans).run()
+        finally:
+            if process.poll() is None:
+                await runtime.stop_game(process)
+    return {"ok": True, "state": "stopped"}
+
+
 async def execute(opts):
     operation = opts.operation
     if operation == "stage":
         return prepare_game(opts.work, opts.source, opts.ue4ss, opts.signatures,
                             cpp_runtime=opts.cpp_runtime, cpp_addon=opts.cpp_addon)
+    if operation == "menu":
+        return await staged_title_menu(opts)
     if operation == "host":
         from .service import host_game
         rules = None

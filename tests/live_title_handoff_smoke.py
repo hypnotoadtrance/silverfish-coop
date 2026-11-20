@@ -10,45 +10,52 @@ import sys
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.silverfish import native_title_entry as title, runtime, service
+from tools.silverfish import native_title_entry as title, runtime
 from tools.silverfish.control import select_run, submit
-from tools.silverfish.title_handoff import TitleHandoff
+from tools.silverfish.title_session import STATUS_FILE, TitleSession, host_plan, join_plan
 from tools.silverfish.travel import OBSERVATORY
 from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 
 
-async def title_choice(work, case, action, binding, processes):
+async def title_choice(work, case, action, plan, processes, tasks):
     home = case / action
     process = runtime.launch(work, home / "game-user", home / "game-bridge", headless=True, title_fixture=True)
     processes.append(process)
     bridge = runtime.Bridge(home / "game-bridge", process)
-    supervisor = TitleHandoff(bridge.directory)
-    choices = {action: binding}
+    stock = await bridge.wait_for(lambda game: game.get(title.KEY, {}).get("state") == "ready", timeout=30)
+    retired = []
+
+    async def retire_title():
+        assert process.poll() is None
+        assert bridge.snapshot()[title.KEY] == stock[title.KEY]
+        retired.append(plan.read_status()["state"])
+        await runtime.stop_game(process)
+
+    supervisor = TitleSession(bridge, {action: plan}, retire_title=retire_title)
+    tasks.append(asyncio.create_task(supervisor.run()))
+    shown = await bridge.wait_for(lambda game: game.get(title.PANEL_KEY, {}).get("state") == "ready", timeout=8)
+    panel = shown[title.PANEL_KEY]
+    assert panel["actions"] == [action] and panel["mounted"], panel
+    different = "join" if action == "host" else "host"
     try:
-        stock = await bridge.wait_for(lambda game: game.get(title.KEY, {}).get("state") == "ready", timeout=30)
-        assert supervisor.refresh(stock, choices), stock.get(title.KEY)
-        shown = await bridge.wait_for(lambda game: game.get(title.PANEL_KEY, {}).get("state") == "ready", timeout=8)
-        panel = shown[title.PANEL_KEY]
-        assert panel["actions"] == [action] and panel["mounted"], panel
-        different = "join" if action == "host" else "host"
-        try:
-            await bridge.command("native-title-panel-press-fixture", different, timeout=4)
-        except RuntimeError as error:
-            assert str(error) == "title_action_not_offered", error
-        else:
-            raise AssertionError("An unoffered title action was accepted")
-        accepted = await bridge.command("native-title-panel-press-fixture", action, timeout=4)
-        assert accepted["ack"]["message"] == "qualified staged title control dispatched", accepted["ack"]
-        async with asyncio.timeout(5):
-            while True:
-                claim = supervisor.poll(bridge.snapshot())
-                if claim:
-                    assert claim.action == action and claim.binding is binding, claim.action
-                    return process, claim.binding, {"stock_title": stock[title.KEY], "panel": panel, "action": action}
-                await asyncio.sleep(.1)
-    finally:
-        supervisor.close()
+        await bridge.command("native-title-panel-press-fixture", different, timeout=4)
+    except RuntimeError as error:
+        assert str(error) == "title_action_not_offered", error
+    else:
+        raise AssertionError("An unoffered title action was accepted")
+    accepted = await bridge.command("native-title-panel-press-fixture", action, timeout=4)
+    assert accepted["ack"]["message"] == "qualified staged title control dispatched", accepted["ack"]
+    expected = "hosting" if action == "host" else "connected"
+    async with asyncio.timeout(65):
+        while True:
+            report = runtime.read_json(bridge.directory / STATUS_FILE)
+            assert not report.get("last_failure"), report
+            if report.get("state") == "ready":
+                assert report["attempt"]["action"] == action and report["progress"] == expected, report
+                assert retired == [expected] and process.poll() is not None, retired
+                return {"stock_title": stock[title.KEY], "panel": panel, "action": action, "handoff": report["progress"]}
+            await asyncio.sleep(.1)
 
 
 async def verify(work: Path, original: Path) -> None:
@@ -65,36 +72,44 @@ async def verify(work: Path, original: Path) -> None:
     evidence = {"verified": False, "build": runtime.staged_build(work)}
     try:
         port = runtime.spare_udp_port()
-        host_binding = {"campaign": campaign, "port": port}
-        window, selected, proof = await title_choice(work, case, "host", host_binding, processes)
-        evidence["host_title"] = proof
-        tasks.append(asyncio.create_task(service.host_game(
-            work, selected["campaign"], "127.0.0.1", selected["port"], True,
+        host = host_plan(work, campaign, "127.0.0.1", port, headless=True,
             native_events=True, native_guest=True, native_zones=True, start_zone=OBSERVATORY,
-        )))
+        )
+        evidence["host_title"] = await title_choice(work, case, "host", host, processes, tasks)
         hosting = await wait(host_run, lambda state: state.get("state") == "hosting"
                              and state.get("game", {}).get("map") == OBSERVATORY)
         assert hosting["endpoint"] == {"address": "127.0.0.1", "port": port}, hosting["endpoint"]
-        assert window.poll() is None
-        await runtime.stop_game(window)
         evidence["host"] = {"map": OBSERVATORY, "port": port, "title_survived_until_host_ready": True}
 
         invitation = await submit(host_run, "invite", name="Title guest", character="Title Scout")
         assert invitation["ok"] is True
-        join_binding = {"profile": profile, "invitation": Path(invitation["invite_file"])}
-        window, selected, proof = await title_choice(work, case, "join", join_binding, processes)
-        evidence["guest_title"] = proof
-        tasks.append(asyncio.create_task(service.join_game(work, selected["profile"], selected["invitation"], True)))
+        guest = join_plan(work, profile, Path(invitation["invite_file"]), headless=True)
+        evidence["guest_title"] = await title_choice(work, case, "join", guest, processes, tasks)
         joined = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
                             and state.get("game", {}).get("map") == OBSERVATORY)
         paired = await wait(host_run, lambda state: state.get("game", {}).get("remote_clients") == 1
                             and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         assert joined["character_id"] == invitation["character_id"]
-        assert window.poll() is None
-        await runtime.stop_game(window)
         evidence["guest"] = {"map": OBSERVATORY, "character_id": joined["character_id"],
                              "native_save": paired["game"]["native_guest_save"]["state"],
                              "title_survived_until_guest_ready": True}
+        pawn = paired["game"]["native_guest_save"]["pawn"]
+        dropped = await submit(guest_run, "drop-link")
+        assert dropped["ok"] and dropped.get("link_connected") is False, dropped
+        reserved = await wait(host_run, lambda state: any(
+            row.get("character_id") == invitation["character_id"] and row.get("state") == "reserved"
+            for row in state.get("campaign", {}).get("leases", ())))
+        resumed = await submit(guest_run, "reconnect")
+        assert resumed["ok"] and resumed.get("resumed") is True and resumed.get("link_connected") is True, resumed
+        recovered_guest = await wait(guest_run, lambda state: state.get("state") == "connected"
+                                     and state.get("link_connected") is True)
+        recovered_host = await wait(host_run, lambda state:
+                                    state.get("game", {}).get("sequence", 0) > reserved["game"]["sequence"]
+                                    and state["game"].get("native_guest_save", {}).get("pawn") == pawn
+                                    and any(row.get("character_id") == invitation["character_id"] and row.get("state") == "active"
+                                            for row in state.get("campaign", {}).get("leases", ())))
+        assert recovered_guest["character_id"] == invitation["character_id"] and recovered_host["endpoint"]["port"] == port
+        evidence["reconnect"] = {"character_id": recovered_guest["character_id"], "pawn": pawn, "port": port}
         checkpoint = await submit(host_run, "checkpoint")
         assert checkpoint["ok"] is True and checkpoint.get("revision", 0) > 0, checkpoint
         evidence["revision"] = checkpoint["revision"]
