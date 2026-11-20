@@ -415,7 +415,28 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             await wait(run, lambda state: active_carry(state)
                        and state["game"][carry.AUTHORITY]["sequence"] > held["sequence"], timeout=14)
             after_grab = await shared_core_at(0, label="guest_held")
-            guest_pawn = readied["game"]["pawns"]["local"]["name"]
+            # Move away from the Core on the stock approach before aiming sideways into the room.
+            before_walk = runtime.read_json(run / "status.json")["game"]["pawns"]["guest"]["location"]
+            motion = proof["guest_carry_motion"] = {}
+
+            def moving_with_core(state):
+                game = state.get("game", {})
+                pawn = game.get("pawns", {}).get("guest", {})
+                prop = game.get(core.REPLICATION, {})
+                if not active_carry(state) or pawn.get("name") != held["pawn"] or "position" not in prop:
+                    return False
+                motion.update(pawn_y=round(pawn["location"][1] - before_walk[1], 3),
+                              core_y=round(prop["position"][1] - after_grab["host"]["position"][1], 3))
+                return motion["pawn_y"] >= 20 and motion["core_y"] >= 20
+
+            for _ in range(3):
+                await action(guest_run, "walk", x=0, y=1, milliseconds=1000)
+                await asyncio.sleep(.6)
+                if moving_with_core(runtime.read_json(run / "status.json")):
+                    break
+            await wait(run, moving_with_core, timeout=4)
+            assert runtime.read_json(guest_run / "status.json")["game"][carry.VIEW]["state"] == "held"
+            await shared_core_at(0, label="guest_walked_with_core")
             turn = await action(guest_run, carry.FIXTURE, target="turn")
             aim = turn["aim"]
             assert abs((aim["yaw"] - held["yaw"] + 180) % 360 - 180) >= 15
@@ -424,25 +445,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                                 and row["reason"] == "stock_core_renewed"
                                 and abs((row["yaw"] - aim["yaw"] + 180) % 360 - 180) <= 1, timeout=5)
             assert turned["game"][carry.AUTHORITY]["lease"] == held["lease"]
-            turned_scene = await shared_core_at(0, label="guest_turned_core")
-            before_walk = runtime.read_json(guest_run / "status.json")["game"]["pawns"]["local"]["location"]
-            for _ in range(3):
-                await action(guest_run, "walk", x=0, y=1, milliseconds=1000)
-                await asyncio.sleep(.9)
-            walked = await wait(guest_run, lambda state: (
-                (pawn := state.get("game", {}).get("pawns", {}).get("local", {})).get("name") == guest_pawn
-                and math.dist(pawn["location"], before_walk) >= 20
-            ), timeout=12)
-            assert walked["game"][carry.VIEW]["state"] == "held"
-            await wait(run, lambda state: active_carry(state)
-                       and math.dist(state["game"][core.REPLICATION]["position"],
-                                     turned_scene["host"]["position"]) >= 20, timeout=6)
-            await shared_core_at(0, label="guest_walked_with_core")
+            await shared_core_at(0, label="guest_turned_core")
             await action(guest_run, carry.FIXTURE, target="release")
             released = await wait(run, lambda state: (
                 (row := state.get("game", {}).get(carry.AUTHORITY, {})).get("state") == "released"
                 and row.get("lease") == held["lease"] and row.get("pawn") == held["pawn"]
             ), timeout=14)
+            assert released["game"][carry.AUTHORITY]["reason"] == "stock_core_released"
             actual_release = await shared_core_at(0, label="guest_released")
             assert await inventory(guest_run, character) == original_guest
             assert await inventory(run, "host") == original_host
