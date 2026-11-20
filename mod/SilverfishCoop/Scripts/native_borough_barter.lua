@@ -19,14 +19,17 @@ local function guid(value)
 end
 
 function barter.command(fields, state, phase, players)
-    local crafting = fields[2] == "native-crafting-bench"
+    local seed = fields[2] == "native-crafting-bench-scrap-fixture"
+    local crafting = seed or fields[2] == "native-crafting-bench"
     if not crafting and fields[2] ~= "native-borough-mama-trade" then return end
     local area = crafting and observatory or map
     local exchange = SilverfishTradeNativeBoroughMama
     if crafting then exchange = SilverfishTradeNativeCraftingBench end
+    if seed then exchange = SilverfishSeedNativeCraftingScrap end
     report = nil
     local name, input = fields[3], fields[4]
-    if #fields ~= 4 or not guid(input) or phase ~= "hosting" or state.map ~= area or state.server ~= false
+    if (seed and #fields ~= 3 or not seed and (#fields ~= 4 or not guid(input)))
+        or phase ~= "hosting" or state.map ~= area or state.server ~= false
         or not players or type(exchange) ~= "function" then refuse("arguments") end
     local qualified, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
     if not qualified or not valid(pawn) or not valid(save) or pawn:GetFullName() ~= name
@@ -53,6 +56,14 @@ function barter.command(fields, state, phase, players)
     end
     local before = wire.stock_flag(instance, "Player_Cash")
     if not math.tointeger(before) then refuse("wallet_unavailable") end
+    if seed then
+        local ok, result = exchange(pawn:GetAddress(), save:GetAddress(), stock:GetAddress())
+        if ok ~= true or result ~= "seeded" then error(tostring(result), 0) end
+        if wire.stock_flag(instance, "Player_Cash") ~= before or not same(instance.SaveSlot_Ref, stock) then
+            error("mutation_unverified_crafting_scrap_fixture_readback", 0)
+        end
+        return "stock Electron Scrap fixture verified"
+    end
     local ok, result, output, armor_guid = exchange(pawn:GetAddress(), save:GetAddress(), stock:GetAddress(), input)
     if ok ~= true then error(tostring(result), 0) end
     local after = wire.stock_flag(instance, "Player_Cash")

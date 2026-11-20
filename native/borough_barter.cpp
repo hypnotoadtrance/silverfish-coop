@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string_view>
 
@@ -55,13 +56,15 @@ namespace
     constexpr Recipe mama{STR("Trade_Mamma"), copper_path, ammo_path, 0, 5, 25, 8, 0.012, false};
     constexpr Recipe bench{STR("Crafting"), board_path, scrap_path, 14, 40, 1, 80, 0.2, true};
 
+    bool flag(const char* name)
+    {
+        std::array<char, 2> value{};
+        std::size_t size{};
+        return getenv_s(&size, value.data(), value.size(), name) == 0 && size == value.size() && value[0] == '1';
+    }
+
     bool enabled()
     {
-        const auto flag = [](const char* name) {
-            std::array<char, 2> value{};
-            std::size_t size{};
-            return getenv_s(&size, value.data(), value.size(), name) == 0 && size == value.size() && value[0] == '1';
-        };
         return U::IsInGameThreadRaw() && flag("SILVERFISH_COOP_NATIVE_ZONE") && flag("SILVERFISH_COOP_NATIVE_GUEST_SAVE");
     }
 
@@ -313,6 +316,14 @@ namespace
         }
     };
 
+    bool stack_totals(const Inventory& inventory, const void* row, int units, const Recipe& recipe)
+    {
+        return units > 0 && units <= std::numeric_limits<int>::max() / recipe.reward_value &&
+            inventory.units->GetPropertyValueInContainer(row) == units &&
+            inventory.value->GetPropertyValueInContainer(row) == recipe.reward_value * units &&
+            std::abs(inventory.weight->GetPropertyValueInContainer(row) - recipe.reward_weight * units) < 1e-9;
+    }
+
     template <typename T>
     T* parameter(U::UFunction* function, const U::TCHAR* name, int offset, bool output)
     {
@@ -353,10 +364,59 @@ namespace
         library->ProcessEvent(function, bytes.data());
         const auto* result = out->ContainerPtrToValuePtr<void>(bytes.data());
         if (layout.identity(result) == Guid{} || layout.klass(result) != item || !layout.matches_defaults(result, defaults) ||
-            layout.units->GetPropertyValueInContainer(result) != profile.quantity ||
-            !(std::abs(layout.weight->GetPropertyValueInContainer(result) - profile.reward_weight * profile.quantity) < 1e-9) ||
-            layout.value->GetPropertyValueInContainer(result) != profile.quantity * profile.reward_value) return {};
+            !stack_totals(layout, result, profile.quantity, profile)) return {};
         return copy(out, result);
+    }
+
+    int seed_crafting_scrap(const Lua& lua)
+    {
+        const auto result = [&](bool ok, std::string_view reason) {
+            lua.set_bool(ok);
+            lua.set_string(reason);
+            return 2;
+        };
+        if (!enabled() || !flag("SILVERFISH_COOP_HEADLESS") || !flag("SILVERFISH_COOP_NATIVE_FIXTURES") ||
+            lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
+            return result(false, "crafting_scrap_fixture_unavailable");
+        const auto pawn = lua.get_integer(), save = lua.get_integer(), stock = lua.get_integer();
+        auto* world = find<U::UWorld>(observatory_path);
+        silverfish::shared_loot::EscrowOwner owner;
+        if (pawn <= 0 || save <= 0 || stock <= 0 || !world ||
+            !silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, owner))
+            return result(false, "crafting_scrap_fixture_owner_unavailable");
+        Inventory layout;
+        auto* item = find<U::UClass>(scrap_path);
+        auto* flags = field<U::FMapProperty>(owner.stock, STR("Flags"));
+        if (!item || !flags || !layout.bind(owner.save)) return result(false, "crafting_scrap_fixture_schema_unavailable");
+        auto* stock_flags = flags->ContainerPtrToValuePtr<void>(owner.stock);
+        auto* backpack = layout.backpack->ContainerPtrToValuePtr<void>(owner.save);
+        const auto old_flags = copy(flags, stock_flags);
+        const auto old_pack = copy(layout.backpack, backpack);
+        const auto prepared = copy(layout.backpack, backpack);
+        if (!old_flags || !old_pack || !prepared) return result(false, "crafting_scrap_fixture_snapshot_unavailable");
+        auto fixture = bench;
+        fixture.quantity = 2;
+        const auto stack = make_stack(layout, owner.pawn, item, fixture);
+        if (!flags->Identical(stock_flags, old_flags.get()) || !layout.backpack->Identical(backpack, old_pack.get()))
+            return result(false, "mutation_unverified_crafting_scrap_fixture_create");
+        if (!stack) return result(false, "crafting_scrap_fixture_stack_unavailable");
+        const auto id = layout.identity(stack.get());
+        bool conflict{};
+        for (auto* frame : {owner.save, owner.stock})
+            if (!layout.rows(frame, [&](const void* row, int) { conflict |= layout.identity(row) == id ||
+                    (frame == owner.save && layout.klass(row) == item); }))
+                return result(false, "crafting_scrap_fixture_inventory_unavailable");
+        U::FScriptArrayHelper replacement(layout.backpack, prepared.get());
+        if (conflict || replacement.Num() >= capacity) return result(false, "crafting_scrap_fixture_inventory_conflict");
+        auto* target = replacement.GetRawPtr(replacement.AddValues(1));
+        auto* row = layout.backpack->GetInner();
+        row->CopyCompleteValue(target, stack.get());
+        if (!row->Identical(target, stack.get())) return result(false, "crafting_scrap_fixture_prepared_unverified");
+        layout.backpack->CopyCompleteValue(backpack, prepared.get());
+        if (layout.backpack->Identical(backpack, prepared.get())) return result(true, "seeded");
+        layout.backpack->CopyCompleteValue(backpack, old_pack.get());
+        return result(false, layout.backpack->Identical(backpack, old_pack.get())
+            ? "crafting_scrap_fixture_rolled_back" : "mutation_unverified_crafting_scrap_fixture_commit");
     }
 
     Guid parse_guid(std::string_view input)
@@ -440,9 +500,24 @@ namespace
 
         int source_index = -1, source_count = 0;
         bool existing_reward{};
+        int merge_index = -1, merge_units{};
+        Guid merge_id{};
+        auto* award_defaults = award->GetClassDefaultObject().Get();
         const auto expected_units = crafting ? input_units->GetPropertyValueInContainer(defaults) : 0;
         if (!layout.rows(owner.save, [&](const void* row, int index) {
-                if (layout.klass(row) == award) existing_reward = true;
+                if (layout.klass(row) == award)
+                {
+                    existing_reward = true;
+                    if constexpr (crafting)
+                    {
+                        if (index >= 0 && merge_index < 0 && award_defaults && layout.matches_defaults(row, award_defaults))
+                        {
+                            merge_index = index;
+                            merge_units = layout.units->GetPropertyValueInContainer(row);
+                            merge_id = layout.identity(row);
+                        }
+                    }
+                }
                 if (layout.identity(row) != payment) return;
                 ++source_count;
                 if (layout.klass(row) == ingredient && layout.units->GetPropertyValueInContainer(row) == expected_units &&
@@ -450,8 +525,10 @@ namespace
             }) || source_count != 1 || source_index < 0)
             return result(false, crafting ? "borough_barter_refused_exact_owned_computer_board" :
                 "borough_barter_refused_exact_owned_copper_wire");
-        if (existing_reward) return result(false, crafting ? "borough_barter_refused_existing_electron_scrap_stack" :
-            "borough_barter_refused_existing_ap_ammo_stack");
+        if constexpr (!crafting)
+        {
+            if (existing_reward) return result(false, "borough_barter_refused_existing_ap_ammo_stack");
+        }
 
         auto* flags = field<U::FMapProperty>(owner.stock, STR("Flags"));
         auto* flags_value = flags ? flags->ContainerPtrToValuePtr<void>(owner.stock) : nullptr;
@@ -461,17 +538,34 @@ namespace
         const auto stock_flags = flags_value ? copy(flags, flags_value) : Value{};
         if (!before || !prepared || !stock_flags) return result(false, "borough_barter_refused_inventory_snapshot");
 
+        U::FScriptArrayHelper replacement(layout.backpack, prepared.get());
+        if (source_index >= replacement.Num()) return result(false, "borough_barter_refused_inventory_changed");
+        if constexpr (crafting)
+        {
+            if ((existing_reward && merge_index < 0) || (merge_index >= 0 &&
+                (merge_index >= replacement.Num() || merge_id == Guid{} || merge_id == payment ||
+                 merge_units > std::numeric_limits<int>::max() / profile.reward_value - profile.quantity ||
+                 !stack_totals(layout, replacement.GetRawPtr(merge_index), merge_units, profile))))
+                return result(false, "borough_barter_refused_scrap_merge_shape");
+        }
+
         const auto reward = make_stack(layout, owner.pawn, award, profile);
         if (!flags->Identical(flags_value, stock_flags.get()) || !layout.backpack->Identical(backpack, before.get()))
             return result(false, "mutation_unverified_borough_barter_stock_make_item");
         if (!reward) return result(false, crafting ? "borough_barter_refused_stock_scrap_shape" :
             "borough_barter_refused_stock_ammo_shape");
-        const auto reward_id = layout.identity(reward.get());
+        const auto minted_id = layout.identity(reward.get());
         bool duplicate{};
+        int merge_matches{};
         for (auto* frame : {owner.save, owner.stock})
-            if (!layout.rows(frame, [&](const void* row, int) { duplicate |= layout.identity(row) == reward_id; }))
+            if (!layout.rows(frame, [&](const void* row, int) {
+                    const auto id = layout.identity(row);
+                    duplicate |= id == minted_id;
+                    merge_matches += merge_index >= 0 && id == merge_id;
+                }))
                 return result(false, "borough_barter_refused_inventory_bounds");
-        if (duplicate) return result(false, "borough_barter_refused_reward_guid_conflict");
+        if (duplicate || (merge_index >= 0 && merge_matches != 1))
+            return result(false, "borough_barter_refused_reward_guid_conflict");
         if constexpr (crafting)
         {
             silverfish::shared_loot::EscrowOwner current;
@@ -481,18 +575,29 @@ namespace
                 worn != armor) return result(false, "borough_barter_refused_crafting_scope_changed");
         }
 
-        U::FScriptArrayHelper replacement(layout.backpack, prepared.get());
-        if (source_index >= replacement.Num()) return result(false, "borough_barter_refused_inventory_changed");
         replacement.RemoveValues(source_index, 1);
-        const auto new_index = replacement.AddValues(1);
-        auto* row = layout.backpack->GetInner();
-        row->CopyCompleteValue(replacement.GetRawPtr(new_index), reward.get());
-        if (!row->Identical(replacement.GetRawPtr(new_index), reward.get()))
-            return result(false, "borough_barter_refused_prepared_inventory_unverified");
+        if (merge_index >= 0)
+        {
+            auto* target = replacement.GetRawPtr(merge_index - (source_index < merge_index ? 1 : 0));
+            const auto total = merge_units + profile.quantity;
+            layout.units->SetPropertyValueInContainer(target, total);
+            layout.weight->SetPropertyValueInContainer(target, total * profile.reward_weight);
+            layout.value->SetPropertyValueInContainer(target, total * profile.reward_value);
+            if (layout.identity(target) != merge_id || !stack_totals(layout, target, total, profile))
+                return result(false, "borough_barter_refused_prepared_scrap_merge_unverified");
+        }
+        else
+        {
+            auto* added = replacement.GetRawPtr(replacement.AddValues(1));
+            auto* row = layout.backpack->GetInner();
+            row->CopyCompleteValue(added, reward.get());
+            if (!row->Identical(added, reward.get()))
+                return result(false, "borough_barter_refused_prepared_inventory_unverified");
+        }
 
         layout.backpack->CopyCompleteValue(backpack, prepared.get());
         if (layout.backpack->Identical(backpack, prepared.get()) && flags->Identical(flags_value, stock_flags.get()))
-            return result(true, "exchanged", reward_id);
+            return result(true, "exchanged", merge_index >= 0 ? merge_id : minted_id);
         layout.backpack->CopyCompleteValue(backpack, before.get());
         return result(false, layout.backpack->Identical(backpack, before.get()) && flags->Identical(flags_value, stock_flags.get())
             ? "borough_barter_refused_exchange_rolled_back" : "mutation_unverified_borough_barter_exchange");
@@ -505,5 +610,6 @@ namespace silverfish::borough_barter
     {
         lua.register_function("SilverfishTradeNativeBoroughMama", trade<false>);
         lua.register_function("SilverfishTradeNativeCraftingBench", trade<true>);
+        lua.register_function("SilverfishSeedNativeCraftingScrap", seed_crafting_scrap);
     }
 }

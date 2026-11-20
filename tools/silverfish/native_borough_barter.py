@@ -15,6 +15,7 @@ AMMO = "/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C"
 AMMO_COUNT = 25
 CRAFT_ACTION = "native-crafting-bench"
 CRAFT_APPROACH = "native-crafting-bench-approach-fixture"
+CRAFT_SCRAP_FIXTURE = "native-crafting-bench-scrap-fixture"
 BENCH = "CraftingBench_BP_C " + native_dialogue.LEVEL + "StaticMeshActor_51"
 BOARD = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 SCRAP = "/Game/Classes/Items/Item_ElectronicScrap.Item_ElectronicScrap_C"
