@@ -65,7 +65,15 @@ async def verify(work: Path, original: Path) -> None:
                 expected = {"open": "journal_open", "close": "journal_closed"}.get(step, step + "_accepted")
                 assert row["ack"]["message"] == "native_host_invite_" + expected, row["ack"]
 
-            await act("open")
+            async with asyncio.timeout(25):
+                while True:
+                    try:
+                        await act("open")
+                        break
+                    except RuntimeError as error:
+                        if str(error) != "native_host_invite_controller_loading":
+                            raise
+                        await asyncio.sleep(.15)
             await until(lambda: status(host_run), lambda current:
                         current.get("game", {}).get("native_host_invite_journal") == "journal")
             await until(lambda: offer.read_bytes(), bool)
