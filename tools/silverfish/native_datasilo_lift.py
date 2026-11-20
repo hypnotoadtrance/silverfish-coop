@@ -72,6 +72,7 @@ async def stage_rider(host, bridge, target):
         "guest": ("guest", [-1672.0, 49.0, 160.0]),
         # Land inside the south-west rail under stock gravity without starting inside the loose Core.
         "host-clear-corner": ("host", [-1698.0, -80.0, 250.0]),
+        "guest-clear-corner": ("guest", [-1698.0, 80.0, 250.0]),
     }
     if (not host.fixtures or host.stopping or host.transitioning or game.get("map") != core.MAP
             or lift.get("state") != "active" or lift.get("stop") != "lower"
