@@ -491,7 +491,7 @@ namespace
             return arguments[1];
         }
 
-        bool configure(U::AActor* actor, U::UObject* box, std::span<U::UObject* const> components, bool stock_ammo)
+        const char* configure(U::AActor* actor, U::UObject* box, std::span<U::UObject* const> components, bool stock_ammo)
         {
             // Cooked Player_FP.LookTrace uses TraceTypeQuery index 4 for InteractionTarget_Component.
             // DefaultEngine's Interactable profile maps that trace to ECC_GameTraceChannel3.
@@ -500,7 +500,7 @@ namespace
             constexpr std::uint8_t block = 2;
             if (stock_ammo && (channel(box, response, interactable, 0xff) != block ||
                 channel(box, response, visibility, 0xff) != 0))
-                return false;
+                return "stock_drop_projection_stock_box_profile_unverified";
             for (auto* component : components)
             {
                 byte_call(component, simulate, 0);
@@ -513,13 +513,17 @@ namespace
             actor->SetActorEnableCollision(true);
             for (auto* component : components)
             {
-                if (byte_call(component, enabled, 0xff) != (component == box ? 1 : 0) ||
-                    byte_call(component, simulating, 0) || byte_call(component, overlaps, 0)) return false;
+                if (byte_call(component, enabled, 0xff) != (component == box ? 1 : 0))
+                    return "stock_drop_projection_collision_mode_unverified";
+                if (byte_call(component, simulating, 0) || byte_call(component, overlaps, 0))
+                    return "stock_drop_projection_physics_or_overlap_unverified";
+                // A disabled pistol mesh may report its stock body responses without a query shape.
+                if (!stock_ammo && component != box) continue;
                 for (std::uint8_t index = 0; index < 32; ++index)
                     if (channel(component, response, index, 0xff) != (component == box && index == interactable ? block : 0))
-                        return false;
+                        return "stock_drop_projection_collision_channel_unverified";
             }
-            return true;
+            return nullptr;
         }
     };
 
@@ -588,8 +592,7 @@ namespace
             Collision::byte_call(component, tick_on, 0);
             if (Collision::byte_call(component, ticking, 0)) return "stock_drop_projection_pistol_component_tick_not_disabled";
         }
-        return collision.configure(actor, box, live_primitives, false)
-            ? nullptr : "stock_drop_projection_pistol_component_collision_unverified";
+        return collision.configure(actor, box, live_primitives, false);
     }
 
     const char* spawn_projection()
@@ -643,7 +646,7 @@ namespace
                 !asset || object(mesh, STR("StaticMesh")) != asset)
                 return "stock_drop_projection_components_unverified";
             const std::array components{box, mesh};
-            if (!collision.configure(actor, box, components, true)) return "stock_drop_projection_inert_state_unverified";
+            if (const auto* failure = collision.configure(actor, box, components, true)) return failure;
         }
         else if (const auto* failure = pistol_components(actor, box, collision)) return failure;
 
