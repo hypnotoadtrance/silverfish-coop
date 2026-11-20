@@ -36,7 +36,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_mindcore_carry, native_mindcore_view
+from . import native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -2665,6 +2665,10 @@ class Host:
                                                            profile=native_mosby_tape.APPROACHES[action])
                 elif action == native_mindcore_carry.APPROACH_FIXTURE and self.fixtures:
                     result = await native_mindcore_carry.approach_fixture(self, bridge, request.get("target"))
+                elif action == native_datasilo_lift.FIXTURE and self.fixtures:
+                    result = await native_datasilo_lift.exercise_fixture(self, bridge, request.get("target"))
+                elif action == native_datasilo_lift.STAGE_RIDER and self.fixtures:
+                    result = await native_datasilo_lift.stage_rider(self, bridge, request.get("target"))
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
                                 native_mindcore_fixture.CARRY) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))
@@ -4600,6 +4604,11 @@ class Client:
                         raise ValueError("Select an exact staged guest Core carry input")
                     self.last_game = await self.bridge.command(action, pawn, target, timeout=6)
                     result = {"input": target, "aim": self.last_game.get(native_mindcore_carry.AIM)}
+                elif action == native_datasilo_lift.FIXTURE and request.get("target") == "guard":
+                    if self.last_game.get(native_datasilo_lift.KEY, {}).get("state") != "guarded":
+                        raise ValueError("The exact staged guest lift guard is unavailable")
+                    self.last_game = await self.bridge.command(action, "guard", timeout=5)
+                    result = {native_datasilo_lift.KEY: self.last_game.get(native_datasilo_lift.KEY)}
                 elif action == native_mindcore_view.FIXTURE and self.mindcore_view:
                     if not self.mindcore_stage_ready() or request.get("target") is not None:
                         raise ValueError("The exact stock MindCore upload is unavailable")

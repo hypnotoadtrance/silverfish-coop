@@ -19,6 +19,8 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from tools.silverfish import native_datasilo_lift as lift
+from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
 from tools.silverfish import native_mindcore_view as console
 from tools.silverfish import native_mindcore_carry as carry
@@ -26,7 +28,7 @@ from tools.silverfish import native_mosby_station_view as download_view
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_tape_profiles import BLANK_CLASS, DRILL, INSTRUCTIONS, drill_download_unlocked
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
+from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
 
 
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
@@ -106,14 +108,50 @@ def baseline_inputs(work, baseline, *, resume=False):
     return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
+def lift_pose_matches(host, guest, stop):
+    if ((host.get("actor"), host.get("state"), host.get("net_role"), host.get("replicates"))
+            != (lift.ACTOR, "active", 3, True)
+            or (guest.get("actor"), guest.get("state"), guest.get("net_role"), guest.get("button_collision"))
+            != (lift.ACTOR, "guarded", 1, 0)):
+        return False
+    if any(row["stop"] != stop or not row["replicate_movement"] or row["deck_collision"] not in {1, 3, 5}
+           for row in (host, guest)):
+        return False
+    height = host["root_position"][2]
+    if stop == "moving" and not 600 < height < 1800:
+        return False
+    if stop in lift.STOPS and abs(height - lift.STOPS[stop]) > 5:
+        return False
+    tolerance = 220 if stop == "moving" else 8
+    return all(math.dist(host[key], guest[key]) <= tolerance
+               for key in ("root_position", "deck_position", "button_position"))
+
+
+def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
+    for frame, seats in ((host_frame, {"local": host_pawn, "guest": guest_pawn}),
+                         (guest_frame, {"local": guest_frame.get("pawns", {}).get("local", {}).get("name")})):
+        height = frame[lift.KEY]["root_position"][2]
+        for slot, pawn in seats.items():
+            base = frame.get(lift.RIDER_KEY, {}).get(slot, {})
+            if (not pawn or (base.get("pawn"), base.get("base")) != (pawn, lift.DECK)
+                    or not 85 < base["position"][2] - height < 165
+                    or frame.get("player_effects", {}).get(slot, {}).get("state") != "standing"):
+                return False
+    return True
+
+
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
-                   carry_only=False, shared_core=False, guest_carry=False):
+                   carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
         raise ValueError("Run the Core handling proof separately from the Instructions exchange")
     if guest_carry and (carry_only or instructions):
         raise ValueError("Run the guest Core interaction separately")
+    if lift_ride and (not resume or stock_input or instructions or carry_only or guest_carry):
+        raise ValueError("Run the stock lift ride separately from a dormant Data Silo checkpoint")
+    if lift_keycard and not lift_ride:
+        raise ValueError("Verify the stock button with the lift ride")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -124,6 +162,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched stock Core handling fixture")
     if shared_core and not runtime.staged_script(work, "native_mindcore_replication.lua", "SetReplicateMovement"):
         raise ValueError("Use the matched Data Silo Core replication stage")
+    if lift_ride and not runtime.staged_script(work, "native_datasilo_lift.lua", "SilverfishDataSiloLiftGuardAvailable"):
+        raise ValueError("Use the matched Data Silo lift stage")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -180,7 +220,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         with (run / "events.jsonl").open(encoding="utf-8") as stream:
             return [json.loads(line) for line in stream if line.endswith("\n")]
 
-    async def travel(authority, leg):
+    async def travel(authority, leg, *, receipts="routes"):
         area, destination, entrance, kind, actor = leg
         pending = dict(source=area, destination=destination, entrance=entrance, kind=kind, actor=actor)
         proof["pending_route"] = pending
@@ -205,7 +245,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         placement = arrival["authored_arrival"]
         assert (placement["actor"], placement["placement"]) == (
             f"{actor_type} {destination}.{package}:PersistentLevel.{route.arrival_actor}", "arrow"), placement
-        proof["routes"].append({**proof.pop("pending_route"), "arrival": placement})
+        proof.setdefault(receipts, []).append({**proof.pop("pending_route"), "arrival": placement})
         return next_frame
 
     async def flags():
@@ -363,6 +403,81 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 proof["stock_button_approach_attempts"] = attempts
         raise AssertionError("The stock client did not reach or focus the exact MindCore tape button")
 
+    async def retrieve_lift_key(authority):
+        path = (core.MAP, WALL, ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, CISTERN)
+
+        async def traverse(frame, route):
+            for area, destination in zip(route, route[1:]):
+                leg, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (area, destination)]
+                frame = await travel(frame, (area, destination, leg.entrance, leg.kind, leg.actor), receipts="lift_key_routes")
+            return frame
+
+        authority = await traverse(authority, path)
+        source = pickup.CISTERN_OLD_NFTA_KEYCARD
+        staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
+        assert staged["actor"] == pickup.SOURCES[source][1]
+        receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
+        assert (receipt["entry"], receipt["source"], receipt["pawn"]) == (
+            "stock", source, authority["game"]["pawns"]["local"]["name"])
+        picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
+                            .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
+        claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
+        item = (await inventory(run, "host"))[claim["guid"]]
+        assert item["class_path"] == pickup.SOURCES[source][2]
+        proof["lift_stock_key"] = {"source": source, "guid": claim["guid"], "class_path": item["class_path"]}
+        return await traverse(authority, path[::-1])
+
+    async def ride_lift(authority):
+        lift_proof = proof["lift"] = {}
+        host_pawn = authority["game"]["pawns"]["local"]["name"]
+        guest_pawn = authority["game"]["native_guest_save"]["pawn"]
+
+        async def sample(label, stop, *, riders=True):
+            deadline = asyncio.get_running_loop().time() + 16
+            observed = {}
+            while asyncio.get_running_loop().time() < deadline:
+                main = runtime.read_json(run / "status.json").get("game", {})
+                peer = runtime.read_json(guest_run / "status.json")
+                peer_game = peer.get("game", {})
+                host_view, guest_view = main.get(lift.KEY, {}), peer_game.get(lift.KEY, {})
+                observed = {"host": host_view, "guest": guest_view, "host_riders": main.get(lift.RIDER_KEY, {}),
+                            "guest_riders": peer_game.get(lift.RIDER_KEY, {})}
+                if (lift_pose_matches(host_view, guest_view, stop)
+                        and (peer.get("character_id"), peer.get("zone_epoch")) == (character, authority["zone_epoch"])
+                        and peer.get("link_connected") is True
+                        and (not riders or lift_riders_match(main, peer_game, host_pawn, guest_pawn))):
+                    lift_proof[label] = observed
+                    return
+                await asyncio.sleep(.12)
+            raise RuntimeError(f"Stock lift did not qualify {label}: {observed}")
+
+        await sample("lower", "lower", riders=False)
+        refused = await action(guest_run, lift.FIXTURE, target="guard")
+        assert refused[lift.KEY]["stop"] == "lower"
+        await asyncio.sleep(1)
+        await sample("guest_power_refused", "lower", riders=False)
+        for name, pawn in (("host", host_pawn), ("guest", guest_pawn)):
+            staged = await action(run, lift.STAGE_RIDER, target=name)
+            assert staged["pawn"] == pawn
+        await sample("lower_boarded", "lower")
+        button = "button" if lift_keycard else "power"
+        first = await action(run, lift.FIXTURE, target=button)
+        assert first["source_stop"] == "lower"
+        await sample("ascending", "moving")
+        await sample("upper_boarded", "upper")
+        second = await action(run, lift.FIXTURE, target=button)
+        assert second["source_stop"] == "upper"
+        await sample("descending", "moving")
+        await sample("lower_returned", "lower")
+        await action(run, "checkpoint")
+        saved, stock_flags = await flags()
+        assert tuple(row.get(core.FLAG, 0) for row in stock_flags) == (0, 0)
+        if lift_keycard:
+            key = proof["lift_stock_key"]
+            assert (await inventory(run, "host"))[key["guid"]]["class_path"] == key["class_path"]
+        lift_proof["input"] = button
+        lift_proof["checkpoint"] = saved["revision"]
+
     try:
         copy_checkpoint(baseline, campaign, data)
         shutil.copyfile(inputs["identity"], campaign / "save/host-identity.json")
@@ -373,6 +488,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         port = opening["endpoint"]["port"]
         guest_job = await start_guest()
         authority = await paired(start_area)
+        if lift_keycard:
+            authority = await retrieve_lift_key(authority)
         owned_blank = await buy_blank() if instructions else None
         if not resume:
             for leg in ROUTE:
@@ -381,6 +498,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if lift_ride:
+            await ride_lift(authority)
+            proof["verified"] = True
+            return proof
         if shared_core:
             await shared_core_at(0, label="dormant")
         locked = await action(guest_run, core.UPLOAD, target=guid, success=False)
@@ -635,8 +756,10 @@ if __name__ == "__main__":
     parser.add_argument("--carry-only", action="store_true", help="grab, move, and release the Core with stock gameplay")
     parser.add_argument("--shared-core", action="store_true", help="verify the guest sees the authoritative exact Core")
     parser.add_argument("--guest-carry", action="store_true", help="use real guest Interact and aim to carry the exact Core")
+    parser.add_argument("--lift-ride", action="store_true", help="ride the native lift with both players and verify both stops")
+    parser.add_argument("--lift-keycard", action="store_true", help="get the Cistern keycard and operate the stock lift button")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
-                         guest_carry=options.guest_carry))
+                          guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard))

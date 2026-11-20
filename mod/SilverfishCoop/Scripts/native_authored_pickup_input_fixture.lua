@@ -7,6 +7,7 @@ local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 local drill_head = "scientist-tunnel-drill-head"
 local lab_blank_tape = "lab-e206-blank-data-tape"
+local cistern_keycard = "cistern-old-nfta-keycard"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
@@ -20,6 +21,7 @@ local sources = {
     ["railyard-dust-filter"] = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P",
     ["northeast-rail-molasses"] = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P",
     ["trench-savlo-keycard"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
+    [cistern_keycard] = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P",
     ["trench-savlo-locker"] = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P",
     ["fort-leto-locker-key-543"] = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P",
     ["forest-brokers-artifacts-bag"] = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P",
@@ -42,6 +44,7 @@ local precise_distances = {
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
+    [cistern_keycard] = {55, 80, 105, 125, 160, 195},
     [savlo_locker] = {95, 125, 150, 185},
     [fort_leto_key] = {120, 155, 185, 220},
     [stolen_bag] = {85, 115, 145, 175, 210},
@@ -175,7 +178,7 @@ end
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
     local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
-        or profile.source == black_box or profile.source == lab_blank_tape)
+        or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
         or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
     if (not cash and not sight_profile and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false

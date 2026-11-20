@@ -20,7 +20,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
-from . import native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
+from . import native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
@@ -1197,6 +1197,18 @@ class Bridge:
                     if role is None or data.get("map") != native_mindcore.MAP or native_mindcore.REPLICATION in data:
                         raise ValueError("Invalid Data Silo replication scope")
                     data[native_mindcore.REPLICATION] = native_mindcore.parse_replication(fields, role)
+                elif fields[0] == native_datasilo_lift.TAG:
+                    role = {"hosting": "host", "connected": "guest"}.get(data.get("state"))
+                    if role is None or data.get("map") != native_mindcore.MAP or native_datasilo_lift.KEY in data:
+                        raise ValueError("Invalid Data Silo lift frame scope")
+                    data[native_datasilo_lift.KEY] = native_datasilo_lift.parse_lift(fields, role)
+                elif fields[0] == native_datasilo_lift.RIDER_TAG:
+                    slot, rider = native_datasilo_lift.parse_rider(fields)
+                    lift = data.get(native_datasilo_lift.KEY)
+                    riders = data.setdefault(native_datasilo_lift.RIDER_KEY, {})
+                    if not lift or slot in riders or (lift["role"] == "guest" and slot != "local"):
+                        raise ValueError("Invalid Data Silo lift rider scope")
+                    riders[slot] = rider
                 elif fields[0] in native_mindcore_carry.STATUS_ROWS:
                     key, state, parse = native_mindcore_carry.STATUS_ROWS[fields[0]]
                     if key in data or (data.get("state"), data.get("map")) != (state, native_mindcore.MAP):

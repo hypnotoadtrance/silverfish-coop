@@ -20,6 +20,7 @@ local lab_e206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
+local cistern = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
 local fort_leto = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 local dead_drop = {
     map = crossroads,
@@ -145,6 +146,14 @@ local profiles = {
         class = "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C",
         name = "KeyCard_Savlo_BP_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = cistern,
+        source = "cistern-old-nfta-keycard",
+        path = cistern .. ".Cistern_P:PersistentLevel.KeyCard_Refinery_Sec_BP_C_1",
+        class = "/Game/Classes/Items/Key_Items/KeyCard_NFTA_Old_BP.KeyCard_NFTA_Old_BP_C",
+        name = "KeyCard_NFTA_Old_BP_C",
+        authority_sight = true,
     },
     {
         map = fort_leto,

@@ -8,7 +8,7 @@ from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
-from .travel import BOROUGH, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
+from .travel import BOROUGH, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 SOURCE = "observatory-comp-board"
@@ -31,6 +31,7 @@ BOROUGH_MRE = "borough-mre"
 DUST_FILTER = "railyard-dust-filter"
 MOLASSES = "northeast-rail-molasses"
 SAVLO_KEYCARD = "trench-savlo-keycard"
+CISTERN_OLD_NFTA_KEYCARD = "cistern-old-nfta-keycard"
 TRENCH = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
 FORT_LETO = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
 FORT_LETO_LOCKER_KEY = "fort-leto-locker-key-543"
@@ -68,6 +69,8 @@ SOURCES = {
                "/Game/Classes/Items/Item_Molasis.Item_Molasis_C"),
     SAVLO_KEYCARD: (TRENCH, f"KeyCard_Savlo_BP_C {TRENCH}.Trench_01_P:PersistentLevel.KeyCard_Savlo_BP_C_1",
                     "/Game/Classes/Items/Key_Items/KeyCard_Savlo_BP.KeyCard_Savlo_BP_C"),
+    CISTERN_OLD_NFTA_KEYCARD: (CISTERN, f"KeyCard_NFTA_Old_BP_C {CISTERN}.Cistern_P:PersistentLevel.KeyCard_Refinery_Sec_BP_C_1",
+                             "/Game/Classes/Items/Key_Items/KeyCard_NFTA_Old_BP.KeyCard_NFTA_Old_BP_C"),
     FORT_LETO_LOCKER_KEY: (FORT_LETO, f"LockerKey_543_C {FORT_LETO}.FortLeto_01_P:PersistentLevel.LockerKey_543_C_1",
                           "/Game/Classes/Items/Key_Items/LockerKey_543.LockerKey_543_C"),
     DEAD_DROP: (native_dead_drop.MAP, native_dead_drop.ACTOR, native_dead_drop.CLASS),

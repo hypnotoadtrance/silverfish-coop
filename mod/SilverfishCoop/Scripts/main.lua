@@ -22,6 +22,7 @@ local native_dialogue = require("native_dialogue")
 local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
+local native_datasilo_lift = require("native_datasilo_lift")
 local native_mindcore_carry = require("native_mindcore_carry")
 local native_mindcore_carry_view = require("native_mindcore_carry_view")
 local native_mindcore_fixture = require("native_mindcore_fixture")
@@ -460,6 +461,7 @@ local function run_command(fields, state, current_phase)
     if command == "travel" or command == "leave" or command == "join" then
         native_mosby_station.clear()
         native_mindcore.clear()
+        native_datasilo_lift.clear()
         native_mindcore_fixture.clear()
         native_mindcore_replication.clear()
         native_mindcore_carry_view.clear()
@@ -904,6 +906,7 @@ local function run_command(fields, state, current_phase)
         or native_borough_barter.command(fields, state, current_phase, players)
         or native_mosby_tape.command(fields, state, current_phase)
         or native_mindcore.command(fields, state, current_phase)
+        or native_datasilo_lift.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
         or native_mindcore_carry.command(fields, state, current_phase)
         or native_mindcore_carry_view.command(fields, state, current_phase)
@@ -1070,6 +1073,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_carry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1240,6 +1244,7 @@ local function tick()
     local state, current_phase = observe_session()
     if not state then return end
     native_mindcore_replication.sync(state, current_phase)
+    native_datasilo_lift.sync(state, current_phase)
     native_title_panel.sync(state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
@@ -1356,6 +1361,7 @@ native_mosby_station.start(bridge, players.is_downed)
 native_mindcore_carry.start(bridge)
 native_mindcore_carry_view.start(bridge, players.is_downed)
 native_mindcore_replication.start(function() return role == "client" and not leaving end)
+native_datasilo_lift.start(function() return role == "client" and not leaving end)
 native_mindcore_view.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
