@@ -302,8 +302,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
     async def disembark():
         def above_west_rail(row, *_):
-            x, _, z = row["prop"]["position"]
-            return x < DECK_WEST_EDGE_X - 20 and z >= UPPER_LANDING_Z + 154
+            return row["prop"]["position"][2] >= UPPER_LANDING_Z + 154
 
         picked_up_above = "upper_regrip" in proof
         if picked_up_above:
