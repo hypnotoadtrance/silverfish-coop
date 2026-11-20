@@ -328,9 +328,10 @@ local function poll()
     end
     local pending = submitted == session.offer.generation
     local selected, rises = nil, 0
+    local focused = bound_keys and next(events) and SilverfishNativeGameWindowFocused() == true
     for _, action in ipairs(key_order) do
         if session.form or action == "hide" or not pending and actions[session.offer.choices][action] then
-            local pressed = events[action] == session
+            local pressed = focused and events[action] == session
             if not bound_keys then
                 if not input_keys[action] then
                     local key = FName(keys[action], EFindName.FNAME_Find)
@@ -403,7 +404,7 @@ function panel.start(bridge)
     session_path = bridge .. "/title-handoff-session.tsv"
     request_path = bridge .. "/title-handoff-request.tsv"
     if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" and type(RegisterKeyBind) == "function"
-        and Key and Key.F7 and Key.F8 and Key.F9 then
+        and type(SilverfishNativeGameWindowFocused) == "function" and Key and Key.F7 and Key.F8 and Key.F9 then
         bound_keys = true
         for _, action in ipairs(key_order) do
             RegisterKeyBind(Key[keys[action]], function()

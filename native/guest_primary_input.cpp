@@ -1216,6 +1216,10 @@ namespace silverfish::native_guest_primary_input
 
     void register_lua(Lua& lua)
     {
+        lua.register_function("SilverfishNativeGameWindowFocused", [](const Lua& state) {
+            state.set_bool(state.get_stack_size() == 0 && U::IsInGameThreadRaw() && local_game_focused());
+            return 1;
+        });
         if (!enabled()) return;
         clear_scope();
         if (host_enabled())

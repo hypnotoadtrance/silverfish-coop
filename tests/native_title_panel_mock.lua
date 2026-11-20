@@ -3,6 +3,7 @@ local descriptor, request = "bridge/title-handoff-session.tsv", "bridge/title-ha
 local generation = string.rep("a", 32)
 local files, buttons, classes, flags = {}, {}, {}, {}
 local now, id, callback, display, writes = 100, 0, nil, nil, 0
+local refuse_rename = false
 local function object(class)
     id = id + 1
     local address = id
@@ -85,7 +86,7 @@ env = setmetatable({
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
             assert(target == request)
-            if files[target] then return false end
+            if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
         end},
@@ -216,3 +217,45 @@ editing.text = "2001:db8::1"
 press("F7")
 assert(files[request] == "2\t" .. physical_generation
     .. "\t00000001ffffffff0000000200000003\thost\t\t2001:db8::1\t\n")
+
+files[request] = nil
+offer("host", 108, string.rep("8", 32))
+assert(form_fixture("open"))
+refuse_rename = true
+allowed, reason = form_fixture("submit")
+assert(not allowed and reason == "title_request_write_failed" and not editing and not files[request])
+assert(not files[request .. ".00000001ffffffff0000000200000003.tmp"])
+refuse_rename = false
+assert(form_fixture("open"))
+assert(form_fixture("cancel") and not files[request])
+
+local native_keys = {}
+env.Key = {F7 = "F7", F8 = "F8", F9 = "F9"}
+env.RegisterKeyBind = function(key, handler) native_keys[key] = handler end
+local focused = false
+env.SilverfishNativeGameWindowFocused = function() return focused end
+flags.SILVERFISH_COOP_HEADLESS = nil
+panel = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_panel.lua", "t", env))()
+panel.start("bridge")
+local event_generation = string.rep("7", 32)
+offer("host", 108, event_generation)
+native_keys.F7()
+callback()
+assert(not editing and not files[request])
+focused = true
+native_keys.F7()
+callback()
+assert(editing.field == "campaign" and not files[request])
+callback()
+assert(not files[request])
+state.qualified = false
+native_keys.F7()
+callback()
+assert(not editing and not files[request])
+state.qualified = true
+offer("host", 108, event_generation)
+native_keys.F7()
+callback()
+native_keys.F7()
+callback()
+assert(files[request] == "2\t" .. event_generation .. "\t00000001ffffffff0000000200000003\thost\t\t\t\n")

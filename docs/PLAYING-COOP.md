@@ -1,6 +1,6 @@
 # Playing Project Silverfish Co-op
 
-Use Direct IP through the co-op launcher on Windows. The default mode starts a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
+Use Direct IP on Windows. The installed title entry opens the matched private co-op stage. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
 
 ## Stage the same build on each PC
 
@@ -22,7 +22,11 @@ Use a new workspace for each fresh stage. To load the game's signatures, extract
 
 Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace path is local to each PC. On one PC both terminals can use the same stage with separate campaign and guest profiles.
 
-## Host and join
+## Host from the co-op title
+
+After the [stock title setup](../bootstrap/README.md#install-the-stock-title-entry), open co-op from the title. In the isolated title, press **F7** to open Host settings. Edit the campaign, UDP port, and numeric listening address. Use **F8** to move between fields, **F7** to start, or **F9** to return to the title panel. A blank field uses its configured default. The headless trial verified the fields and selected endpoint. Foreground keyboard and focus still need a live check.
+
+## Host and join from the development CLI
 
 On the host, bind to the host machine's LAN address and choose the UDP port the guest will use. Replace the example address with the address of your host.
 
@@ -116,6 +120,17 @@ At the Observatory Castaway, guests can use Interact to open the stock story dia
 At the Stone Maze station, face the station and press Interact to review the exact blank tape offered from your backpack. Press Interact again to exchange it. Back at the Scientist's board, select Stone Maze Readings and use the same review and confirmation sequence.
 
 ## Machine-readable controls
+
+Use the title profile to read available actions and the current `handoff_generation`. The installed stock entry uses the `bootstrap` profile. Start or cancel against that exact generation.
+
+```powershell
+& $sfPython @sfCli status --title-profile bootstrap
+& $sfPython @sfCli title-select --title-profile bootstrap --role host --handoff-generation $sfTitleGeneration
+& $sfPython @sfCli title-cancel --title-profile bootstrap --handoff-generation $sfTitleGeneration
+& $sfPython @sfCli events --title-profile bootstrap --tail 20
+```
+
+A local selection uses the configured Host or Join settings. The acceptance response identifies the attempt. Track the same attempt through `ready` or `stopped`, then read the selected campaign or guest profile for gameplay. A starting attempt also publishes its generation under `attempt.generation` for cancellation. Private invitation data stays out of title status and events.
 
 The native guest backpack also supports `native-inventory-sort` with an `--operation-id`. Look for `gameplay.native_inventory_sort_capability` equal to 1 on the connected guest. The action returns the verified row count and either `sorted` or `already_sorted`. Request a new `native-inventory-list` page to read the resulting order.
 
