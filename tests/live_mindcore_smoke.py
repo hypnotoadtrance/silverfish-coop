@@ -229,7 +229,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                     return False
                 return {**row, "sequence": game["sequence"]}
 
-            state = await wait(directory, ready, timeout=12)
+            try:
+                state = await wait(directory, ready, timeout=12)
+            except RuntimeError:
+                raise RuntimeError(f"No fresh {role} Data Silo Core pose during the carry trial") from None
             return ready(state)
 
         host_pose, guest_pose = await asyncio.gather(observe(run, "host"), observe(guest_run, "guest"))
