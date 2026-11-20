@@ -44,13 +44,9 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
             await asyncio.sleep(.12)
         raise RuntimeError(f"Upper stock door did not settle at {pose}: {result}")
 
-    def position(game, slot):
-        pawn = game.get("pawns", {}).get(slot, {})
-        point = pawn.get("location")
-        if (not isinstance(point, list) or len(point) != 3 or abs(point[0]) > 65 or not 6660 < point[2] < 6740
-                or game.get("player_effects", {}).get(slot, {}).get("state") != "standing"):
-            raise RuntimeError(f"Upper stock door pawn left the standing catwalk: {slot} {pawn.get('location')}")
-        return point
+    def on_catwalk(game, slot, point):
+        return (isinstance(point, list) and len(point) == 3 and abs(point[0]) <= 65 and 6660 < point[2] < 6740
+                and game.get("player_effects", {}).get(slot, {}).get("state") == "standing")
 
     async def guest_pose(expected_pawn, *, after_sequence=None):
         deadline = asyncio.get_running_loop().time() + 5
@@ -62,8 +58,10 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
                     and b.get("pawns", {}).get("local", {}).get("name")
                     and (after_sequence is None or a.get("sequence", 0) > after_sequence[0]
                          and b.get("sequence", 0) > after_sequence[1])):
-                locations = [position(a, "guest"), position(b, "local")]
-                if math.dist(*locations) <= 18:
+                locations = [a.get("pawns", {}).get("guest", {}).get("location"),
+                             b.get("pawns", {}).get("local", {}).get("location")]
+                if (on_catwalk(a, "guest", locations[0]) and on_catwalk(b, "local", locations[1])
+                        and math.dist(*locations) <= 18):
                     return {"host": locations[0], "guest": locations[1], "sequences": [a["sequence"], b["sequence"]]}
             await asyncio.sleep(.12)
         raise RuntimeError(f"The same guest did not reach a synchronized upper catwalk pose: {locations}")
