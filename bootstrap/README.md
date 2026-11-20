@@ -12,12 +12,14 @@ The archive ships disabled. An isolated lab can unpack `SilverfishCoopBootstrap`
 
 Build the test coordinator with a matching Windows x64 Python environment, the repository requirements, and PyInstaller 6.22.3. Run `python bootstrap/build_coordinator.py <fresh-build-directory>`. The output in `dist` embeds the coordinator, Python dependencies, and the exact source used for invitation compatibility. Its local setup reads `%LOCALAPPDATA%\SilverfishCoop\coordinator.json` with schema `1`, the absolute `work` stage path, and `host` and `join` selections. The current Host selection includes `campaign`, numeric `bind`, and `port`. Join includes `profile`, an absolute `invite` imported under that co-op workspace, and a `character` UUID or `null`. Set either unused selection to `null`. The stock title adapter supplies one verified launch receipt over its inherited input pipe.
 
+Build the [native title bridge](native/README.md) with the coordinator's SHA-256 pin. Run `python bootstrap/package.py <new-archive.zip> --native-dll <main.dll> --coordinator <SilverfishCoopCoordinator.exe>` to package the matching pair beside the three Lua scripts. The same opt-in UE4SS mod entry loads the complete bootstrap.
+
 ## Coordinator calls
 
 - `SilverfishReadCoopBootstrapOffer()` returns integer protocol version `1` and the current generation. A generation is a nonzero string of 32 lowercase hexadecimal characters. The coordinator issues a new ID for each new offer.
-- `SilverfishRequestCoopBootstrapOpen(generation, request_id)` accepts the exact generation plus a fresh 32-character request ID in the same format. It returns `true` once the request has been queued. The coordinator consumes that generation at most once, revalidates the live title and user action, then reports gameplay startup through its own interface.
+- `SilverfishRequestCoopBootstrapOpen(generation, request_id)` accepts the exact generation plus a fresh 32-character request ID in the same format. It returns `true` once the request has been queued. The coordinator consumes that generation once and verifies the isolated title's panel and effective save path before acknowledging readiness.
 
-Both callbacks run on the game thread. The selection callback should queue bounded work and return promptly. **Opening Co-op** stays visible on the same stock title while the consumed offer is withdrawn. A refused or unverified reply leaves the title available. A new attempt requires a fresh coordinator offer.
+Both callbacks run on the game thread. The selection callback queues the launch and readiness checks on a worker thread. **Opening Co-op** stays visible while the isolated game starts. After the matching readiness receipt, the original unchanged stock title uses the stock Quit action. A refused or unverified reply leaves that title available. A new attempt requires a fresh coordinator offer.
 
 ## Isolated stock-layout check
 
