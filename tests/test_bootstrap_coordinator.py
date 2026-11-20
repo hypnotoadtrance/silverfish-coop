@@ -62,6 +62,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(FileExistsError):
                 await coordinator.open_coop(coordinator.Receipt(receipt.generation, "c" * 32), self.config)
         menu.assert_awaited_once()
+        self.assertIs(menu.await_args.kwargs["require_embedded"], True)
         plan, = menu.await_args.args
         self.assertEqual((plan.work, plan.campaign, plan.bind, plan.port), (self.work, "trail", "127.0.0.1", 27015))
         status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
@@ -84,7 +85,8 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
         sent = []
 
-        async def menu(_plan, *, on_title_ready):
+        async def menu(_plan, *, on_title_ready, require_embedded):
+            self.assertTrue(require_embedded)
             self.assertEqual(coordinator.runtime.read_json(status)["state"], "opening")
             on_title_ready()
 
@@ -95,6 +97,16 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(coordinator, "staged_title_menu", side_effect=menu):
             await coordinator.open_coop(receipt, self.config, report_ready=send)
         self.assertEqual(sent, [receipt])
+
+    async def test_packaged_title_refuses_a_stage_without_its_embedded_runtime(self):
+        self.write()
+        receipt = coordinator.Receipt("a" * 32, "b" * 32)
+        with (patch.object(coordinator.runtime, "qualified_authored_routes", return_value=True),
+              patch("tools.silverfish.embedded_title_plan.installed", return_value=False),
+              patch.object(coordinator.runtime, "launch") as launch):
+            with self.assertRaisesRegex(ValueError, "matched embedded runtime"):
+                await coordinator.open_coop(receipt, self.config)
+        launch.assert_not_called()
 
     def test_invitation_must_be_inside_the_coop_workspace(self):
         temp = TemporaryDirectory()

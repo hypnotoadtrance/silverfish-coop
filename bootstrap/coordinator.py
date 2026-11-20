@@ -133,7 +133,7 @@ async def open_coop(receipt: Receipt, config: Path, *, report_ready=write_inheri
             report_ready(receipt)
 
         try:
-            await staged_title_menu(plan, on_title_ready=ready)
+            await staged_title_menu(plan, on_title_ready=ready, require_embedded=True)
         except (OSError, ValueError, RuntimeError) as error:
             runtime.write_json(status, dict(progress, state="failed", error_type=type(error).__name__))
             raise

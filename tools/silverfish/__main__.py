@@ -260,7 +260,7 @@ def _events(directory: Path, limit: int) -> dict:
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
 
 
-async def staged_title_menu(opts, *, on_title_ready=None) -> dict:
+async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False) -> dict:
     from . import embedded_title_plan, runtime
     from .service import MENU_HOST_OPTIONS, menu_host_start
     from .title_session import TitleSession, host_plan, join_plan
@@ -272,6 +272,8 @@ async def staged_title_menu(opts, *, on_title_ready=None) -> dict:
     if not runtime.qualified_authored_routes(opts.work):
         raise ValueError("The co-op title requires the current matched native stage")
     embedded = embedded_title_plan.installed(opts.work)
+    if require_embedded and not embedded:
+        raise ValueError("The packaged co-op title requires its matched embedded runtime")
     plans = {}
     if opts.campaign:
         campaign = select_run(opts.work, "campaigns", opts.campaign)
