@@ -21,6 +21,12 @@ local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControle
 local deck_asset = "/Game/Assets/StaticMeshes/Mesh_Structures/Structure_AssemblyComponents/SM_Prop_Elevator_02.SM_Prop_Elevator_02"
 local item_class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local lower, upper = {X = -1780, Y = 0, Z = 0}, {X = -1780, Y = 0, Z = 2400}
+local west_waypoint = {X = -2132.16, Y = 1053.62, Z = 2400}
+local route_targets = {
+    ["route-west-landing"] = {X = -1990, Y = 64, Z = 2400},
+    ["route-east-stairs"] = {X = 2217.16, Y = -2277.82, Z = 2410},
+    ["route-catwalk"] = {X = 0, Y = 4810, Z = 6610},
+}
 local actor_scope, is_client, cargo
 
 local function refuse(reason) error("native_datasilo_lift_" .. reason, 0) end
@@ -461,11 +467,47 @@ local function guard_probe(state, phase)
     return "stock Data Silo lift guest guard probed"
 end
 
+local function navigation_probe(state, phase, target)
+    if not fixtures or role(state, phase) ~= "host" or not world_scope(state.world, "host") then
+        refuse("navigation_scope")
+    end
+    local pawn = local_pawn(state, "host")
+    local navigation = StaticFindObject("/Script/NavigationSystem.Default__NavigationSystemV1")
+    local is_path_valid = StaticFindObject("/Script/NavigationSystem.NavigationPath:IsValid")
+    if not pawn or not valid(navigation) or not valid(is_path_valid) then refuse("navigation_unavailable") end
+
+    local function project(location, label)
+        local projected = {}
+        local extent = {X = 100, Y = 100, Z = 130}
+        local found = navigation:K2_ProjectPointToNavigation(pawn, location, projected, nil, nil, extent)
+        local result = point(projected)
+        if found ~= true or not near(result, location, 190) then refuse(label) end
+        return result
+    end
+
+    local from = project(west_waypoint, "navigation_start_unavailable")
+    local destination = project(route_targets[target], "navigation_destination_unavailable")
+    local path = navigation:FindPathToLocationSynchronously(pawn, from, destination, nil, nil)
+    if not exact(path, "/Script/NavigationSystem.NavigationPath") or path:CallFunction(is_path_valid) ~= true then
+        refuse("navigation_no_path")
+    end
+    local points, encoded = path.PathPoints, {}
+    local count = points:GetArrayNum()
+    if count < 2 or count > 100 then refuse("navigation_path_size") end
+    for index = 1, count do
+        local position = point(points[index])
+        if not position then refuse("navigation_path_point") end
+        encoded[index] = string.format("%.2f,%.2f,%.2f", position.X, position.Y, position.Z)
+    end
+    return target .. " " .. (path:IsPartial() and "partial" or "complete") .. " " .. table.concat(encoded, ";")
+end
+
 function lift.command(fields, state, phase)
     if fields[2] ~= "native-datasilo-lift-fixture" then return end
     local target = fields[3]
     if #fields ~= 3 or not guard_available() then refuse("fixture_scope") end
     if target == "guard" then return guard_probe(state, phase) end
+    if route_targets[target] then return navigation_probe(state, phase, target) end
     if not fixtures or role(state, phase) ~= "host"
         or (target ~= "power" and target ~= "button") then refuse("fixture_scope") end
     local current, pawn, controller = scene(state.world, "host"), local_pawn(state, "host")

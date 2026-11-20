@@ -155,12 +155,14 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
                    raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False, fixture_passengers=False,
-                   west_walkway=False):
+                   west_walkway=False, route_probe=False):
     upper_door = upper_door or upper_door_keycard
     if fixture_passengers and not fixture_loose_cargo:
         raise ValueError("Fixture passengers require the isolated loose-cargo setup")
     if west_walkway and not (park_on_deck or fixture_passengers):
         raise ValueError("The west walkway requires a stock pickup at the upper stop")
+    if route_probe and not resume:
+        raise ValueError("The stock navigation probe requires the dormant Data Silo checkpoint")
     if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
         raise ValueError("Choose one lower deck positioning scenario")
     core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo
@@ -725,6 +727,17 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if route_probe:
+            navigation = proof["stock_navigation"] = {}
+            for target in lift.ROUTE_TARGETS:
+                try:
+                    navigation[target] = await action(run, lift.FIXTURE, target=target)
+                except RuntimeError as error:
+                    navigation[target] = {"error": str(error)}
+            if navigation["route-west-landing"].get("complete") is not True:
+                raise RuntimeError("The stock navigation query could not reproduce the known west walkway")
+            proof["verified"] = True
+            return proof
         if core_lift_carry:
             from datasilo_core_lift import verify_core_lift
 
@@ -1087,6 +1100,8 @@ if __name__ == "__main__":
                         help="stage both riders for the loose-cargo test and continue to stock pickup and disembark")
     parser.add_argument("--core-lift-west-walkway", action="store_true",
                         help="continue the parked-Core test from the landing along the stock west walkway")
+    parser.add_argument("--core-lift-probe-route", action="store_true",
+                        help="survey the stock navigation mesh from the west waypoint without moving any pawn")
     parser.add_argument("--guest-hazard-authority", action="store_true",
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
@@ -1102,4 +1117,5 @@ if __name__ == "__main__":
                          park_on_deck=options.core_lift_park_on_deck,
                          fixture_loose_cargo=options.core_lift_fixture_loose_cargo,
                          fixture_passengers=options.core_lift_fixture_passengers,
-                         west_walkway=options.core_lift_west_walkway))
+                         west_walkway=options.core_lift_west_walkway,
+                         route_probe=options.core_lift_probe_route))

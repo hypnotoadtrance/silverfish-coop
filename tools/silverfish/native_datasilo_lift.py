@@ -18,6 +18,11 @@ ACTOR = f"RailLift_BP_C {core.LEVEL}RailLift_BP_C_1"
 DECK = f"StaticMeshComponent {core.LEVEL}RailLift_BP_C_1.SM_Prop_Elevator_01"
 STOPS = {"lower": 0.0, "upper": 2400.0}
 STATES = {"active", "guarded", "awaiting_replica", "replication_unverified", "guard_unverified"}
+ROUTE_TARGETS = {
+    "route-west-landing": [-1990, 64, 2400],
+    "route-east-stairs": [2217.16, -2277.82, 2410],
+    "route-catwalk": [0, 4810, 6610],
+}
 
 
 def _position(fields):
@@ -55,12 +60,24 @@ async def exercise_fixture(host, bridge, target):
     before = game.get(KEY, {})
     if (not host.fixtures or host.transitioning or host.stopping or game.get("map") != core.MAP
             or before.get("state") != "active" or before.get("stop") not in STOPS
-            or target not in {"power", "button"}):
+            or not isinstance(target, str) or target not in {"power", "button", *ROUTE_TARGETS}):
         raise party.RuleError("The isolated stock Data Silo lift fixture is unavailable")
     frame = await bridge.command(FIXTURE, target, timeout=5)
     if (frame.get("map"), frame.get(KEY, {}).get("actor")) != (core.MAP, ACTOR):
         raise RuntimeError("The exact Data Silo lift did not acknowledge the stock request")
     host.last_game, host.last_seen = frame, time.monotonic()
+    if target in ROUTE_TARGETS:
+        reply = frame["ack"].get("message", "").split(" ", 2)
+        if len(reply) != 3 or reply[0] != target or reply[1] not in {"partial", "complete"}:
+            raise RuntimeError("Invalid Data Silo path reply")
+        coordinates = [position.split(",") for position in reply[2].split(";")]
+        if not 2 <= len(coordinates) <= 100 or any(len(position) != 3 for position in coordinates):
+            raise RuntimeError("Invalid Data Silo path points")
+        points = [_position(position) for position in coordinates]
+        if (math.dist(points[0], [-2132.16, 1053.62, 2400]) > 220
+                or reply[1] == "complete" and math.dist(points[-1], ROUTE_TARGETS[target]) > 220):
+            raise RuntimeError("The stock path snapped outside the requested walkthrough")
+        return {KEY: frame[KEY], "target": target, "complete": reply[1] == "complete", "points": points}
     return {KEY: frame[KEY], "input": target, "source_stop": before["stop"]}
 
 
