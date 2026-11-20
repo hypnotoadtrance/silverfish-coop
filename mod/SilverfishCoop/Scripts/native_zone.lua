@@ -821,23 +821,32 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     end
     local top = indoor_top or math.max(anchor.Z, origin.Z) + 185
     local bottom = indoor_bottom or math.min(anchor.Z, origin.Z) - (far and 550 or 325)
-    for _, offset in ipairs(candidates) do
-        local x = origin.X + offset[1] * direction.X + offset[2] * lateral_x
-        local y = origin.Y + offset[1] * direction.Y + offset[2] * lateral_y
-        local hit = {}
-        local found = library:LineTraceSingle(pawn, { X = x, Y = y, Z = top }, { X = x, Y = y, Z = bottom },
-            0, false, ignore, 0, hit, true, color, color, 0)
-        local impact = hit.OutHit or hit
-        local surface = impact.Component and impact.Component:Get()
-        if found == true and vector(impact.ImpactPoint) and vector(impact.ImpactNormal) and impact.ImpactNormal.Z >= .7
-            and impact.ImpactPoint.Z < top - 1 and impact.ImpactPoint.Z >= bottom and valid(surface)
-            and surface:GetCollisionObjectType() == 0 and (not indoor_floor or same(surface, indoor_floor)) then
-            local z = impact.ImpactPoint.Z + extents + 2
-            local squared = (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2
-            if (far and squared > 1900^2 or not far and squared <= 320^2)
-                and pawn:K2_TeleportTo({ X = x, Y = y, Z = z }, rotation) then
-                pawn:ForceNetUpdate()
-                return true
+    local starts = {top}
+    if headless and not indoor_top then
+        -- The stock marker arrow can sit above a roof or other overhead collision.
+        for _, height in ipairs({origin.Z + 120, origin.Z + 35, origin.Z - 90, origin.Z - 200}) do
+            if height < top - 2 and height > bottom + 2 then starts[#starts + 1] = height end
+        end
+    end
+    for _, start in ipairs(starts) do
+        for _, offset in ipairs(candidates) do
+            local x = origin.X + offset[1] * direction.X + offset[2] * lateral_x
+            local y = origin.Y + offset[1] * direction.Y + offset[2] * lateral_y
+            local hit = {}
+            local found = library:LineTraceSingle(pawn, { X = x, Y = y, Z = start }, { X = x, Y = y, Z = bottom },
+                0, false, ignore, 0, hit, true, color, color, 0)
+            local impact = hit.OutHit or hit
+            local surface = impact.Component and impact.Component:Get()
+            if found == true and vector(impact.ImpactPoint) and vector(impact.ImpactNormal) and impact.ImpactNormal.Z >= .7
+                and impact.ImpactPoint.Z < start - 1 and impact.ImpactPoint.Z >= bottom and valid(surface)
+                and surface:GetCollisionObjectType() == 0 and (not indoor_floor or same(surface, indoor_floor)) then
+                local z = impact.ImpactPoint.Z + extents + 2
+                local squared = (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2
+                if (far and squared > 1900^2 or not far and squared <= 320^2)
+                    and pawn:K2_TeleportTo({ X = x, Y = y, Z = z }, rotation) then
+                    pawn:ForceNetUpdate()
+                    return true
+                end
             end
         end
     end
