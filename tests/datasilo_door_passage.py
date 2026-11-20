@@ -6,7 +6,7 @@ import math
 from tools.silverfish import native_datasilo_door as door, native_mindcore as core, runtime
 
 
-async def verify_passage(run, guest_run, action, restart_guest, character, host_generation, zone_epoch):
+async def verify_passage(run, guest_run, action, restart_guest, character, host_generation, zone_epoch, *, keycard=False):
     proof = {}
 
     def observe():
@@ -33,13 +33,14 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
             return False
         return all(math.dist(host[key], guest[key]) < 8 for key in ("arrow_relative", "arrow_location", "panel_location"))
 
-    async def settled_door(pose):
+    async def settled_door(pose, *, locked=None):
         deadline = asyncio.get_running_loop().time() + 14
         result = {}
         while asyncio.get_running_loop().time() < deadline:
             _, _, a, b, valid_visit = observe()
             result = {"host": a.get(door.KEY, {}), "guest": b.get(door.KEY, {})}
-            if valid_visit and pose_matches(result["host"], result["guest"], pose):
+            if (valid_visit and pose_matches(result["host"], result["guest"], pose)
+                    and (locked is None or result["host"]["locked"] is locked)):
                 return result
             await asyncio.sleep(.12)
         raise RuntimeError(f"Upper stock door did not settle at {pose}: {result}")
@@ -88,7 +89,7 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
     guarded = await action(guest_run, door.FIXTURE, target="guard")
     assert guarded[door.KEY]["pose"] == "closed"
     await asyncio.sleep(.55)
-    proof["guest_power_refused"] = await settled_door("closed")
+    proof["guest_power_refused"] = await settled_door("closed", locked=True)
     await action(run, door.STAGE_PAWN, target="host")
     guest_pawn = (await action(run, door.STAGE_PAWN, target="guest"))["pawn"]
     before = await guest_pose(guest_pawn)
@@ -105,7 +106,18 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
         raise RuntimeError(f"The closed stock panel did not physically stop the same guest: {blocked} -> {still_blocked}")
     proof["closed_blocked"] = {"before": before, "blocked": still_blocked}
 
-    assert (await action(run, door.FIXTURE, target="power"))["source_pose"] == "closed"
+    if keycard:
+        first = await action(run, door.FIXTURE, target="button")
+        assert (first["input"], first["source_pose"]) == ("button", "closed"), first
+        unlocked = await settled_door("closed", locked=False)
+        assert unlocked["host"]["open"] is False
+        proof["stock_keycard_unlock"] = {"input": first, "unlocked": unlocked}
+        await asyncio.sleep(.5)
+        second = await action(run, door.FIXTURE, target="button")
+        assert (second["input"], second["source_pose"]) == ("button", "closed"), second
+        proof["stock_keycard_open"] = second
+    else:
+        assert (await action(run, door.FIXTURE, target="power"))["source_pose"] == "closed"
     proof["opened"] = await settled_door("open")
     assert proof["opened"]["host"]["open"] and not proof["opened"]["host"]["locked"]
     moved = math.dist(proof["closed"]["host"]["panel_location"], proof["opened"]["host"]["panel_location"])

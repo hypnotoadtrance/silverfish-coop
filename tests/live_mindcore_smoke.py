@@ -27,6 +27,7 @@ from tools.silverfish import native_host_save, native_mindcore as core, native_m
 from tools.silverfish import native_mindcore_view as console
 from tools.silverfish import native_mindcore_carry as carry
 from tools.silverfish import native_mosby_station_view as download_view
+from tools.silverfish import native_savlo_locker as savlo_locker
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_tape_profiles import BLANK_CLASS, DRILL, INSTRUCTIONS, drill_download_unlocked
@@ -36,6 +37,7 @@ from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELD
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
 ANNEX = "/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"
 WALL = "/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P"
+BEACH = "/Game/Classes/Maps/Maps_OverWorld/Beach_01_P"
 ROUTE = (
     (SCIENTIST_SHOP, RUIN_FIELDS, "Market_Flood", "door", "Dungeon_TransitionDoor_BP_C_2"),
     (RUIN_FIELDS, CROSSROADS, "CR_RF", "overlap", "Level_Exit_BP_C_1"),
@@ -144,7 +146,8 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
-                   lift_disembark=False, upper_door=False):
+                   lift_disembark=False, upper_door=False, upper_door_keycard=False):
+    upper_door = upper_door or upper_door_keycard
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -175,10 +178,20 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched stock Cistern lockpick stage")
     if upper_door and not runtime.staged_script(work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
         raise ValueError("Use the matched upper Data Silo door stage")
+    if upper_door_keycard and not (
+            runtime.staged_script(work, "native_savlo_locker.lua", savlo_locker.FIXTURE)
+            and runtime.staged_script(work, "native_authored_pickup_input_fixture.lua", pickup.SAVLO_KEYCARD)):
+        raise ValueError("Use the matched stock Fort Leto key and Trench secure locker stage")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
     data, inputs, conversion, guest_id, prior_routes = baseline_inputs(work, baseline, resume=resume)
+    if upper_door_keycard:
+        claims = data["world"]["party"].get(pickup.STATE_KEY, {})
+        if any(source in claims for source in (pickup.FORT_LETO_LOCKER_KEY, pickup.SAVLO_KEYCARD)):
+            raise ValueError("Use a dormant checkpoint with the placed Fort Leto key and Trench keycard unclaimed")
+        for index, frame in enumerate(native_host_save.references(data)):
+            inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
     character, guid, blank = (conversion[key] for key in ("owner", "filled_guid", "blank_guid"))
     name = "mindcore-" + uuid.uuid4().hex[:8]
@@ -414,32 +427,39 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 proof["stock_button_approach_attempts"] = attempts
         raise AssertionError("The stock client did not reach or focus the exact MindCore tape button")
 
+    async def traverse(frame, route, *, receipts):
+        for area, destination in zip(route, route[1:]):
+            leg, = (row for row in AUTHORED_ROUTES if (row.source, row.destination) == (area, destination))
+            frame = await travel(frame, (area, destination, leg.entrance, leg.kind, leg.actor), receipts=receipts)
+        return frame
+
+    async def stock_pickup(frame, source):
+        for attempt in range(4):
+            try:
+                staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
+                break
+            except RuntimeError as error:
+                if attempt == 3 or "no_clear_sight" not in str(error):
+                    raise
+                await asyncio.sleep(.4)
+        area, actor, item_class = pickup.SOURCES[source]
+        assert staged["actor"] == actor and frame["game"]["map"] == area
+        receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
+        assert (receipt["entry"], receipt["source"], receipt["map"], receipt["pawn"]) == (
+            "stock", source, area, frame["game"]["pawns"]["local"]["name"])
+        picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
+                            .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
+        claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
+        assert (claim["source"], claim["map"], claim["actor"], claim["class_path"], claim["owner"]) == (
+            source, area, actor, item_class, "host"), claim
+        return {"interaction": receipt, "claim": claim}
+
     async def retrieve_lift_key(authority):
         path = (core.MAP, WALL, ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, CISTERN)
 
-        async def traverse(frame, route):
-            for area, destination in zip(route, route[1:]):
-                leg, = [row for row in AUTHORED_ROUTES if (row.source, row.destination) == (area, destination)]
-                frame = await travel(frame, (area, destination, leg.entrance, leg.kind, leg.actor), receipts="lift_key_routes")
-            return frame
-
         async def collect_stock(frame, source):
-            for attempt in range(4):
-                try:
-                    staged = await action(run, pickup.APPROACH, target="host", pickup_source=source)
-                    break
-                except RuntimeError as error:
-                    if attempt == 3 or "no_clear_sight" not in str(error):
-                        raise
-                    await asyncio.sleep(.4)
-            area, actor, item_class = pickup.SOURCES[source]
-            assert staged["actor"] == actor and frame["game"]["map"] == area
-            receipt = (await action(run, pickup.STOCK_FIXTURE, pickup_source=source))["native_authored_pickup_interaction"]
-            assert (receipt["entry"], receipt["source"], receipt["pawn"]) == (
-                "stock", source, frame["game"]["pawns"]["local"]["name"])
-            picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
-                                .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
-            claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
+            claim = (await stock_pickup(frame, source))["claim"]
+            item_class = pickup.SOURCES[source][2]
             if source == pickup.CROSSROADS_LOCKPICK:
                 # Leave the hazardous console as soon as the stock pickup is durable.
                 await action(run, "native-door-position", target="host", entrance="CR_Cstrn", exit_position="near")
@@ -447,11 +467,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             assert item["class_path"] == item_class
             return item
 
-        authority = await traverse(authority, path[:-1])
+        authority = await traverse(authority, path[:-1], receipts="lift_key_routes")
         pick = await collect_stock(authority, pickup.CROSSROADS_LOCKPICK)
         assert (pick["source"], pick["quantity"]) == ("backpack", 2)
         proof["lift_stock_pick"] = pick
-        authority = await traverse(authority, path[-2:])
+        authority = await traverse(authority, path[-2:], receipts="lift_key_routes")
         opened = await asyncio.wait_for(submit(run, pickup.CISTERN_LOCKER_FIXTURE), 45)
         if not opened.get("ok"):
             if opened.get("error") != "stock_cistern_nfta_locker_locked":
@@ -484,7 +504,56 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         source = pickup.CISTERN_OLD_NFTA_KEYCARD
         key = await collect_stock(authority, source)
         proof["lift_stock_key"] = {"source": source, "guid": key["guid"], "class_path": key["class_path"]}
-        return await traverse(authority, path[::-1])
+        return await traverse(authority, path[::-1], receipts="lift_key_routes")
+
+    async def assert_key_custody(claim):
+        key_guid = claim["guid"]
+        host_items = await inventory(run, "host")
+        matching = [item for item in host_items.values() if item["class_path"] == claim["class_path"]]
+        assert len(matching) == 1, matching
+        row = matching[0]
+        assert (row["guid"], row["source"], row["quantity"], row["stackable"]) == (
+            key_guid, "backpack", 1, False), row
+        assert key_guid not in await inventory(guest_run, character)
+        return row
+
+    async def retrieve_savlo_keycard(authority):
+        to_annex = (core.MAP, WALL, ANNEX)
+        to_fort = (ANNEX, STONE_MAZE, DEAD_BRIDGE, CROSSROADS, RUIN_FIELDS, BEACH, pickup.FORT_LETO)
+        keycard_proof = proof["upper_door_keycard"] = {}
+
+        async def collect_key(frame, source, label):
+            record = await stock_pickup(frame, source)
+            keycard_proof[label] = record
+            record["inventory"] = await assert_key_custody(record["claim"])
+            return record
+
+        authority = await traverse(authority, to_annex + to_fort[1:], receipts="upper_door_keycard_routes")
+        fort_key = await collect_key(authority, pickup.FORT_LETO_LOCKER_KEY, "fort_leto_key")
+        authority = await traverse(authority, to_fort[::-1] + (pickup.TRENCH,), receipts="upper_door_keycard_routes")
+
+        locked = await wait(run, lambda state: savlo_locker.observed(state.get("game", {}), "locked"))
+        initial = await wait(guest_run, lambda state: savlo_locker.observed(state.get("game", {}), "locked")
+                             or savlo_locker.observed(state.get("game", {}), "unlocked"))
+        guest_locker = initial["game"][savlo_locker.KEY]
+        refused = await action(guest_run, pickup.ACTION, target=pickup.SAVLO_KEYCARD, success=False)
+        assert refused["error"] == "native_authored_pickup_savlo_locker_closed", refused
+        locker = keycard_proof["trench_locker"] = {"closed_claim_refused": refused["error"], "authority": []}
+        for stage in ("unlocked", "opened"):
+            report = (await action(run, savlo_locker.FIXTURE))[savlo_locker.KEY]
+            assert (report["state"], report["actor"], report["map"], report["pawn"], report["locked"]) == (
+                stage, savlo_locker.ACTOR, pickup.TRENCH, locked["game"][savlo_locker.KEY]["pawn"], False), report
+            locker["authority"].append(report)
+        projected = await wait(guest_run, lambda state: savlo_locker.observed(
+            state.get("game", {}), "projected").get("epoch") == authority["zone_epoch"])
+        locker["guest"] = projected["game"][savlo_locker.KEY]
+        assert (locker["guest"]["actor"], locker["guest"]["pawn"], locker["guest"]["locked"]) == (
+            guest_locker["actor"], guest_locker["pawn"], guest_locker["locked"])
+        assert await assert_key_custody(fort_key["claim"]) == fort_key["inventory"]
+        card = await collect_key(authority, pickup.SAVLO_KEYCARD, "savlo_card")
+        authority = await traverse(authority, (pickup.TRENCH,) + to_annex[::-1], receipts="upper_door_keycard_routes")
+        assert await assert_key_custody(card["claim"]) == card["inventory"]
+        return authority
 
     async def ride_lift(authority):
         lift_proof = proof["lift"] = {}
@@ -555,6 +624,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         authority = await paired(start_area)
         if lift_keycard:
             authority = await retrieve_lift_key(authority)
+        if upper_door_keycard:
+            authority = await retrieve_savlo_keycard(authority)
         owned_blank = await buy_blank() if instructions else None
         if not resume:
             for leg in ROUTE:
@@ -579,10 +650,17 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 return departure
 
             proof["upper_door"] = await verify_passage(
-                run, guest_run, action, restart_guest, character, authority["generation"], authority["zone_epoch"])
+                run, guest_run, action, restart_guest, character, authority["generation"], authority["zone_epoch"],
+                keycard=upper_door_keycard)
             await action(run, "checkpoint")
             saved, door_checkpoint_flags = await flags()
             assert tuple(row.get(core.FLAG, 0) for row in door_checkpoint_flags) == (0, 0)
+            if upper_door_keycard:
+                for label in ("fort_leto_key", "savlo_card"):
+                    record = proof["upper_door_keycard"][label]
+                    claim = record["claim"]
+                    assert saved["world"]["party"][pickup.STATE_KEY][claim["source"]] == claim
+                    assert await assert_key_custody(claim) == record["inventory"]
             proof["upper_door"]["checkpoint"] = saved["revision"]
             proof["verified"] = True
             return proof
@@ -848,9 +926,12 @@ if __name__ == "__main__":
     parser.add_argument("--lift-keycard", action="store_true", help="get the Cistern keycard and operate the stock lift button")
     parser.add_argument("--lift-disembark", action="store_true", help="walk both players to the stock upper landing")
     parser.add_argument("--upper-door", action="store_true", help="verify physical passage and late join at the upper door")
+    parser.add_argument("--upper-door-keycard", action="store_true",
+                        help="collect the stock Savlo keycard and unlock the upper door with genuine Interact")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
-                          lift_disembark=options.lift_disembark, upper_door=options.upper_door))
+                          lift_disembark=options.lift_disembark, upper_door=options.upper_door,
+                         upper_door_keycard=options.upper_door_keycard))
