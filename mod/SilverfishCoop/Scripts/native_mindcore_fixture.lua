@@ -87,7 +87,7 @@ local function carry_context(state, phase, name)
     local half, range, max_weight = capsule:GetScaledCapsuleHalfHeight(), pawn.InteractionRange, pawn.MaxHoldWeight
     local mass = scene.frame:GetMass()
     if not finite(half) or half < 20 or half > 150 or not finite(range) or range < 200 or range > 600
-        or not finite(mass) or math.abs(mass - 65) > 1 or not finite(max_weight) or max_weight < mass
+        or not finite(mass) or mass <= 0 or not finite(max_weight) or max_weight < mass
         or simulating(scene.frame) ~= true or scene.core:GetActorEnableCollision() ~= true then
         refuse(("carry_stock_physics:half=%s:range=%s:mass=%s:max=%s:sim=%s:collision=%s"):format(
             tostring(half), tostring(range), tostring(mass), tostring(max_weight),
