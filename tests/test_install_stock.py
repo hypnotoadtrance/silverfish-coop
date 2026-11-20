@@ -226,18 +226,20 @@ class StockInstallerTests(unittest.TestCase):
     def test_archive_member_symlink_and_other_worker_pin_are_refused(self):
         with ZipFile(self.archive) as source:
             payload = {name: source.read(name) for name in source.namelist()}
-        for change in ("unmatched worker", "symbolic link"):
+        for change in ("unmatched worker", "symbolic link", "proof bridge"):
             with self.subTest(change=change):
                 with ZipFile(self.archive, "w") as target:
                     for name, data in payload.items():
                         if name.endswith("Coordinator.exe") and change == "unmatched worker":
                             data += b"tampered"
+                        if name.endswith("dlls/main.dll") and change == "proof bridge":
+                            data += b"SilverfishReadCoopBootstrapTestKey"
                         info = ZipInfo(name)
                         if name.endswith("Scripts/main.lua") and change == "symbolic link":
                             info.create_system = 3
                             info.external_attr = (stat.S_IFLNK | 0o777) << 16
                         target.writestr(info, data)
-                with self.assertRaisesRegex(ValueError, "same SHA-256 pin|five ordinary files"):
+                with self.assertRaisesRegex(ValueError, "same SHA-256 pin|five ordinary files|isolated replicas"):
                     self.install()
                 self.assertFalse(self.mod.exists() or self.config.exists())
 

@@ -85,8 +85,9 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
         sent = []
 
-        async def menu(_plan, *, on_title_ready, require_embedded):
+        async def menu(_plan, *, on_title_ready, require_embedded, headless):
             self.assertTrue(require_embedded)
+            self.assertTrue(headless)
             self.assertEqual(coordinator.runtime.read_json(status)["state"], "opening")
             on_title_ready()
 
@@ -94,7 +95,8 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(coordinator.runtime.read_json(status)["state"], "title_ready")
             sent.append(acknowledged)
 
-        with patch.object(coordinator, "staged_title_menu", side_effect=menu):
+        with (patch.object(coordinator, "staged_title_menu", side_effect=menu),
+              patch.dict(coordinator.os.environ, {"SILVERFISH_COOP_BOOTSTRAP_HEADLESS": "1"})):
             await coordinator.open_coop(receipt, self.config, report_ready=send)
         self.assertEqual(sent, [receipt])
 

@@ -126,7 +126,13 @@ local function tick()
         if name:GetComparisonIndex() == 0 then error("open_coop_input_unqualified", 0) end
         input_key = {KeyName = name}
     end
-    local held = context.controller:IsInputKeyDown(input_key)
+    local proof = SilverfishReadCoopBootstrapTestKey
+    local held
+    if type(proof) == "function" then
+        held = proof()
+    else
+        held = context.controller:IsInputKeyDown(input_key)
+    end
     if type(held) ~= "boolean" then error("open_coop_input_unqualified", 0) end
     local selected = held and shown.held == false
     shown.held = held

@@ -3,6 +3,7 @@ project(SilverfishCoopBootstrap LANGUAGES CXX)
 
 set(SILVERFISH_UE4SS_SOURCE_DIR "" CACHE PATH "Path to the pinned UE4SS v4.0.0 source checkout")
 set(SILVERFISH_BOOTSTRAP_COORDINATOR_SHA256 "" CACHE STRING "SHA-256 of the packaged coordinator executable")
+option(SILVERFISH_BOOTSTRAP_HEADLESS_PROOF "Build a replica-only headless bootstrap test adapter" OFF)
 string(LENGTH "${SILVERFISH_BOOTSTRAP_COORDINATOR_SHA256}" coordinator_hash_length)
 if(coordinator_hash_length AND (NOT coordinator_hash_length EQUAL 64 OR
         NOT SILVERFISH_BOOTSTRAP_COORDINATOR_SHA256 MATCHES "^[0-9a-f]+$"))
@@ -21,6 +22,9 @@ target_compile_features(SilverfishCoopBootstrap PRIVATE cxx_std_23)
 target_compile_definitions(SilverfishCoopBootstrap PRIVATE
     NOMINMAX WIN32_LEAN_AND_MEAN
     SILVERFISH_BOOTSTRAP_COORDINATOR_SHA256="${SILVERFISH_BOOTSTRAP_COORDINATOR_SHA256}")
+if(SILVERFISH_BOOTSTRAP_HEADLESS_PROOF)
+    target_compile_definitions(SilverfishCoopBootstrap PRIVATE SILVERFISH_BOOTSTRAP_HEADLESS_PROOF)
+endif()
 target_link_libraries(SilverfishCoopBootstrap PRIVATE UE4SS bcrypt user32)
 set_target_properties(SilverfishCoopBootstrap PROPERTIES
     OUTPUT_NAME main

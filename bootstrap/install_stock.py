@@ -99,6 +99,8 @@ def _bootstrap_payload(path: Path) -> dict[Path, bytes]:
         if payload[relative].replace(b"\r\n", b"\n") != script.read_bytes().replace(b"\r\n", b"\n"):
             raise ValueError(f"Bootstrap script differs from this checkout: {relative.name}")
     bridge, worker = payload[TITLE_DLL], payload[WORKER]
+    if b"SilverfishReadCoopBootstrapTestKey" in bridge:
+        raise ValueError("The headless proof adapter is for isolated replicas")
     if not bridge.startswith(b"MZ") or not worker.startswith(b"MZ") or sha256(worker).hexdigest().encode("ascii") not in bridge:
         raise ValueError("The bootstrap bridge and coordinator do not share the same SHA-256 pin")
     return payload

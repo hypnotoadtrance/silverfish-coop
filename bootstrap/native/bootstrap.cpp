@@ -122,6 +122,36 @@ namespace
                foreground_pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
     }
 
+#ifdef SILVERFISH_BOOTSTRAP_HEADLESS_PROOF
+    bool proof_selection()
+    {
+        wchar_t enabled[2]{};
+        if (GetEnvironmentVariableW(L"SILVERFISH_COOP_BOOTSTRAP_HEADLESS", enabled, 2) != 1 ||
+            enabled[0] != L'1') return false;
+        std::wstring path(path_capacity, L'\0');
+        const DWORD size = GetEnvironmentVariableW(L"SILVERFISH_COOP_BOOTSTRAP_TEST_TRIGGER",
+                                                  path.data(), path_capacity);
+        if (!size || size >= path.size()) return false;
+        const Handle input(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!input || GetFileType(input.get()) != FILE_TYPE_DISK ||
+            !GetFileInformationByHandle(input.get(), &information) ||
+            information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        constexpr std::string_view expected = "open-coop\n";
+        std::array<char, expected.size() + 1> contents{};
+        DWORD used = 0;
+        return ReadFile(input.get(), contents.data(), static_cast<DWORD>(contents.size()), &used, nullptr) &&
+            std::string_view(contents.data(), used) == expected;
+    }
+
+    int read_proof_key(const Lua& lua)
+    {
+        lua.set_bool(lua.get_stack_size() == 0 && standalone_title() && proof_selection());
+        return 1;
+    }
+#endif
+
     bool exact_id(std::string_view value)
     {
         if (value.size() != 32) return false;
@@ -494,7 +524,13 @@ namespace
     bool queue_open(const Lua& lua)
     {
         if (lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_string(2) ||
-            !standalone_title() || !foreground_selection()) return false;
+            !standalone_title()) return false;
+#ifdef SILVERFISH_BOOTSTRAP_HEADLESS_PROOF
+        const bool selected_in_proof = proof_selection();
+        if (!selected_in_proof && !foreground_selection()) return false;
+#else
+        if (!foreground_selection()) return false;
+#endif
         size_t offered_length = 0, requested_length = 0;
         const auto* offered_string = lua_tolstring(lua.get_lua_state(), 1, &offered_length);
         const auto* requested_string = lua_tolstring(lua.get_lua_state(), 2, &requested_length);
@@ -504,6 +540,9 @@ namespace
         std::lock_guard lock(state_mutex);
         if (phase != Phase::offered || offered != generation) return false;
         phase = Phase::queued;
+#ifdef SILVERFISH_BOOTSTRAP_HEADLESS_PROOF
+        if (selected_in_proof) RC::Output::send(STR("[SilverfishCoopBootstrap] test_selection\n"));
+#endif
         try
         {
             request = requested;
@@ -571,6 +610,9 @@ namespace
             lua.register_function("SilverfishReadCoopBootstrapOffer", read_offer);
             lua.register_function("SilverfishRequestCoopBootstrapOpen", request_open);
             lua.register_function("SilverfishReadCoopBootstrapLaunchStatus", read_status);
+#ifdef SILVERFISH_BOOTSTRAP_HEADLESS_PROOF
+            lua.register_function("SilverfishReadCoopBootstrapTestKey", read_proof_key);
+#endif
         }
     };
 }

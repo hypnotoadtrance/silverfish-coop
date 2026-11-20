@@ -260,7 +260,7 @@ def _events(directory: Path, limit: int) -> dict:
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
 
 
-async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False) -> dict:
+async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False, headless=False) -> dict:
     from . import embedded_title_plan, runtime
     from .service import MENU_HOST_OPTIONS, menu_host_start
     from .title_session import TitleSession, host_plan, join_plan
@@ -281,19 +281,22 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         starting = {"start_preset": mode} if mode == "wanderer" else {}
         port = opts.port or runtime.spare_udp_port()
         expected = area if starting else None
-        plans["host"] = (embedded_title_plan.host_plan(opts.work, campaign, opts.bind, port, mode, expected)
-                         if embedded else host_plan(opts.work, campaign, opts.bind, port, expected_map=expected,
+        plans["host"] = (embedded_title_plan.host_plan(opts.work, campaign, opts.bind, port, mode, expected,
+                                                      headless=headless)
+                         if embedded else host_plan(opts.work, campaign, opts.bind, port, headless=headless,
+                                                    expected_map=expected,
                                                     **MENU_HOST_OPTIONS, **starting))
     if opts.invite:
         guest = select_run(opts.work, "clients", opts.profile)
         invitation = opts.invite.resolve(strict=True)
-        plans["join"] = (embedded_title_plan.guest_plan(opts.work, guest, invitation, opts.character)
-                         if embedded else join_plan(opts.work, guest, invitation, character_id=opts.character))
+        plans["join"] = (embedded_title_plan.guest_plan(opts.work, guest, invitation, opts.character, headless=headless)
+                         if embedded else join_plan(opts.work, guest, invitation, character_id=opts.character,
+                                                    headless=headless))
     title = select_run(opts.work, "titles", opts.title_profile)
     with Control(title / "run"):
         mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
         profile = title / "game-user"
-        process = runtime.launch(opts.work, profile, mailbox, headless=False,
+        process = runtime.launch(opts.work, profile, mailbox, headless=headless, title_fixture=headless,
                                  inspect_title_profile=on_title_ready is not None)
         try:
             await TitleSession(runtime.Bridge(mailbox, process), plans, on_title_ready=on_title_ready,
