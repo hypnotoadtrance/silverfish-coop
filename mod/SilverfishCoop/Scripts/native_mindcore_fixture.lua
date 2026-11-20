@@ -390,6 +390,7 @@ end
 local lift_test_sites = {
     ["east-corridor"] = {x = 2829, y = -1205, floor = 2700, yaw = 90},
     ["north-landing"] = {x = 1741, y = 1936, floor = 3300, yaw = -45},
+    ["cradle-door"] = {x = 0, y = 4770, floor = 6600, yaw = 90},
 }
 
 local function place_loose_core_for_lift_test(scene, state, name, site)

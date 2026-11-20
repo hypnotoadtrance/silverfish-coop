@@ -451,11 +451,26 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     previous = points[index - 1]
                     rising_from_north_landing = 3280 < previous[2] < 3350 and 3570 < floor < 3650
                     if rising_from_north_landing:
+                        centers = ((3300, (1722, 1955)), (3450, (1985, 1692)), (3600, (2169, 1508)))
+                        if stage_site == "north-landing":
+                            # The host was taking damage while waiting on the lower landing.
+                            # Let the faster, unencumbered host clear the stair before the Core follows.
+                            lead_steps = proof["north_stair_host_treads"] = []
+                            # The west-facing aperture starts on the same Y as the host's staged pose.
+                            lead_steps.append(await follow("lead", index - 2, (1691, 2334, 3310)))
+                            lead_steps.append(await follow("lead", index - 1, points[index - 1]))
+                            for height, point in centers:
+                                lead_steps.append(await walk_to(f"lead the party up the Z {height} stair", point, 25,
+                                    seat="lead", reached=lambda row: 48 < row["lead"]["location"][2] - height < 136))
+                            beyond = points[index + 1]
+                            lead_steps.append(await follow("lead", index, (x, y, floor)))
+                            lead_steps.append(await follow("lead", index + 1, beyond))
+                            lead_point = index + 1
                         await turn("aim the Core along the east stair centerline", -45, pitch=52)
                         facing = -45
                         treads = proof["north_stair_treads"] = []
                         # Centers of the two cooked stair meshes follow X + Y = 3676.8.
-                        for height, point in ((3300, (1722, 1955)), (3450, (1985, 1692)), (3600, (2169, 1508))):
+                        for height, point in centers:
                             await walk_to(f"reach the center of the Z {height} stair", point, 15, pulse_limit=600,
                                           reached=lambda row: 48 < row["carrier"]["location"][2] - height < 136)
                             tread = await observe(f"the held Core reaches the center of the Z {height} stair",

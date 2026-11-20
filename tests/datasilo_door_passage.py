@@ -3,7 +3,78 @@
 import asyncio
 import math
 
+from live_ai_smoke import status, wait
 from tools.silverfish import native_datasilo_door as door, native_mindcore as core, runtime
+from tools.silverfish import native_mindcore_carry as carry, native_mindcore_fixture as fixture
+
+
+async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
+    """Bring the held Core through the keyed catwalk door and into the real cradle capsule."""
+    host_name = authority["game"]["pawns"]["local"]["name"]
+    guest_name = authority["game"]["native_guest_save"]["pawn"]
+    generation, epoch = authority["generation"], authority["zone_epoch"]
+    for role, name in (("host", host_name), ("guest", guest_name)):
+        assert (await action(run, door.STAGE_PAWN, target=role))["pawn"] == name
+    proof["loose_core_at_catwalk"] = await action(run, fixture.DECK_LOAD, target="cradle-door")
+
+    def member(state):
+        game = state.get("game", {})
+        guest = game.get("pawns", {}).get("guest", {})
+        assert (state["generation"], state["zone_epoch"], game["map"], guest["name"]) == (
+            generation, epoch, core.MAP, guest_name), state
+        return guest
+
+    for pose in ("closed", "open"):
+        pressed = await action(run, door.FIXTURE, target="button")
+        assert (pressed["input"], pressed["source_pose"]) == ("button", "closed"), pressed
+        observed = await wait(run, lambda state: (panel := state.get("game", {}).get(door.KEY, {}))
+                              and panel.get("pose") == pose and not panel.get("locked"))
+        member(observed)
+        proof[f"stock_door_{pose}_unlocked"] = observed["game"][door.KEY]
+        if pose == "closed":
+            await asyncio.sleep(.5)
+
+    await action(guest_run, carry.FIXTURE, target="grab")
+    held_state = await wait(run, lambda state: (held := state.get("game", {}).get(carry.AUTHORITY, {}))
+                            and (held.get("state"), held.get("pawn"), held.get("core")) == ("held", guest_name, core.CORE))
+    held = proof["stock_grip"] = held_state["game"][carry.AUTHORITY]
+    lease = held["lease"]
+    await action(guest_run, carry.FIXTURE, target="turn@8@90")
+    await wait(run, lambda state: (row := state.get("game", {}).get(carry.AUTHORITY, {}))
+               and row.get("lease") == lease and abs(row["yaw"] - 90) < .5 and abs(row["pitch"] - 8) < .5
+               and row.get("grip_position"))
+
+    frames = proof["carrier_walk"] = []
+    for _ in range(30):
+        state = status(run)
+        guest = member(state)
+        game = state["game"]
+        hold, scene = game[carry.AUTHORITY], game[core.SCENE]
+        prop = game.get(core.REPLICATION, {})
+        x, y, z = guest["location"]
+        frames.append({"pawn": [x, y, z], "health": guest["health"], "hold": hold, "prop": prop,
+                       "scene": scene})
+        assert hold["lease"] == lease and hold["core"] == core.CORE, hold
+        if hold["state"] == "mount_released" or scene["installed"]:
+            break
+        if hold["state"] != "held" or guest["health"] <= 0 or y >= 6650 or not 6660 < z < 6740:
+            raise RuntimeError(f"The exact carrier did not reach the stock cradle while holding the Core: {frames[-1]}")
+        result = await action(guest_run, "walk", x=max(-.3, min(.3, -x / 140)), y=1,
+                              milliseconds=950 if y < 6300 else 400, continuous=True)
+        assert result["movement_scheduled"], result
+        await asyncio.sleep(1.05 if y < 6300 else .5)
+    else:
+        raise RuntimeError(f"The held Core did not reach the cradle: {frames[-1]}")
+
+    mounted = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
+                         and (scene["status"], scene["installed"]) == (1, True))
+    member(mounted)
+    release = mounted["game"][carry.AUTHORITY]
+    assert (release["lease"], release["pawn"], release["state"], release["reason"]) == (
+        lease, guest_name, "mount_released", "stock_core_capsule_release"), release
+    assert any(frame["pawn"][1] > 5140 and frame["hold"]["state"] == "held" for frame in frames), frames
+    proof["capsule_release"] = release
+    return mounted["game"][core.SCENE]
 
 
 async def verify_passage(run, guest_run, action, restart_guest, character, host_generation, zone_epoch, *, keycard=False):

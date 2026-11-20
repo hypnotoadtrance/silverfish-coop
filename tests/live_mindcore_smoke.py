@@ -155,7 +155,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
                    raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False, fixture_passengers=False,
-                   west_walkway=False, route_probe=False, east_stairs=False, upper_approach=False, stage_site=None):
+                   west_walkway=False, route_probe=False, east_stairs=False, upper_approach=False, stage_site=None,
+                   cradle_carry=False):
     upper_door = upper_door or upper_door_keycard
     if fixture_passengers and not fixture_loose_cargo:
         raise ValueError("Fixture passengers require the isolated loose-cargo setup")
@@ -198,6 +199,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     if core_lift_carry and (not resume or stock_input or lift_ride or upper_door or instructions
                             or carry_only or guest_carry or shared_core or stock_hazard_wipe or prepare_core_carry):
         raise ValueError("Test the lift carry separately from the prepared dual-card checkpoint")
+    if cradle_carry:
+        if not resume or any((core_lift_carry, route_probe, upper_door, lift_ride, stock_hazard_wipe,
+                              prepare_core_carry, guest_hazard_authority, instructions, carry_only, guest_carry)):
+            raise ValueError("Verify the held Core's cradle approach separately from the prepared dual-card checkpoint")
+        stock_input = shared_core = True
     if guest_hazard_authority and (not resume or stock_input or lift_ride or upper_door or instructions
                                    or carry_only or guest_carry or shared_core or stock_hazard_wipe
                                    or prepare_core_carry or core_lift_carry):
@@ -222,7 +228,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched stage with continuous stock movement and absolute Core carry look")
     if (lift_keycard or prepare_core_carry) and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
         raise ValueError("Use the matched stock Cistern lockpick stage")
-    if upper_door and not runtime.staged_script(work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
+    if (upper_door or cradle_carry) and not runtime.staged_script(
+            work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
         raise ValueError("Use the matched upper Data Silo door stage")
     if upper_door_keycard and not (
             runtime.staged_script(work, "native_savlo_locker.lua", savlo_locker.FIXTURE)
@@ -249,7 +256,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 or savlo_claim.get("owner") != "host"
                 or any(source in claims for source in (pickup.CROSSROADS_LOCKPICK, pickup.CISTERN_OLD_NFTA_KEYCARD))):
             raise ValueError("Require the verified host Savlo card with the CrossRoads lockpick and Cistern card unclaimed")
-    if core_lift_carry:
+    if core_lift_carry or cradle_carry:
         claims = data["world"]["party"].get(pickup.STATE_KEY, {})
         source_proof = runtime.read_json(inputs["proof"])
         prepared = source_proof.get("carry_checkpoint", {})
@@ -260,7 +267,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                        or prepared.get("cards", {}).get(claim.get("source"), {}).get("guid") != claim["guid"]
                        for claim in cards)):
             raise ValueError("Require both exact stock cards from the verified paired carry checkpoint")
-    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry or core_lift_carry or guest_hazard_authority:
+    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry or core_lift_carry or guest_hazard_authority or cradle_carry:
         for index, frame in enumerate(native_host_save.references(data)):
             inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
@@ -975,11 +982,17 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                          carry_stock_flags=[0, 0], physical_test="stock_grab_short_carry_release")
             return proof
 
-        installed = (await action(run, fixture.INSTALL))[core.SCENE]
+        if cradle_carry:
+            from datasilo_door_passage import verify_held_cradle_passage
+
+            passage = proof["held_cradle_passage"] = {"card": await assert_key_custody(cards[0])}
+            installed = await verify_held_cradle_passage(run, guest_run, action, inactive, passage)
+        else:
+            installed = (await action(run, fixture.INSTALL))[core.SCENE]
         _, mounted_flags = await flags()
         assert (installed["status"], installed["installed"]) == (1, True), installed
         assert tuple(row.get(core.FLAG, 0) for row in mounted_flags) == (1, 0), mounted_flags
-        proof["installation"] = {"scene": installed, "headless_relocation": True, "stock_flags": [1, 0]}
+        proof["installation"] = {"scene": installed, "headless_relocation": not cradle_carry, "stock_flags": [1, 0]}
         if shared_core:
             await shared_core_at(1, label="mounted")
 
@@ -1129,6 +1142,8 @@ if __name__ == "__main__":
                         help="continue the west walkway carry to the first east stair")
     parser.add_argument("--core-lift-upper-approach", action="store_true",
                         help="continue the east stair carry to the upper stair doorway")
+    parser.add_argument("--core-cradle-carry", action="store_true",
+                        help="start at the keyed catwalk door and carry the exact Core into the stock cradle")
     staging = parser.add_mutually_exclusive_group()
     staging.add_argument("--core-lift-stage-east", dest="stage_site", action="store_const", const="east-corridor",
                          help="start the upper approach test from the isolated east corridor")
@@ -1153,4 +1168,4 @@ if __name__ == "__main__":
                          route_probe=options.core_lift_probe_route,
                          east_stairs=options.core_lift_east_stairs,
                          upper_approach=options.core_lift_upper_approach,
-                         stage_site=options.stage_site))
+                         stage_site=options.stage_site, cradle_carry=options.core_cradle_carry))
