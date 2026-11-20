@@ -36,9 +36,10 @@ def parse_scene(fields: list[str]) -> dict:
 
 
 def parse_replication(fields: list[str], role: str) -> dict:
-    if role not in ("host", "guest") or len(fields) != 13 or tuple(fields[:3]) != ("native-mindcore-replication", MAP, role):
+    if (role not in ("host", "guest") or len(fields) not in (13, 16)
+            or tuple(fields[:3]) != ("native-mindcore-replication", MAP, role)):
         raise ValueError("Invalid exact Data Silo replication scope")
-    state, core, replicates, movement, overlap, stage, x, y, z, source = fields[3:]
+    state, core, replicates, movement, overlap, stage, x, y, z, source = fields[3:13]
     position = [float(value) for value in (x, y, z)]
     states = {"host": {"active", "replication_unverified"},
               "guest": {"guarded", "guard_unverified", "guest_late"}}
@@ -50,8 +51,15 @@ def parse_replication(fields: list[str], role: str) -> dict:
             or state == "guarded" and (stage, overlap) != ("0", "0")):
         raise ValueError("Invalid stock Data Silo replication report")
     bits = {"0": False, "1": True, "-": None}
-    return dict(role=role, state=state, core=core, stage=int(stage), position=position, source=source,
-                replicates=bits[replicates], replicate_movement=bits[movement], capsule_overlap=bits[overlap])
+    observed = dict(role=role, state=state, core=core, stage=int(stage), position=position, source=source,
+                    replicates=bits[replicates], replicate_movement=bits[movement], capsule_overlap=bits[overlap])
+    if len(fields) == 16:
+        simulating, parent, replicated_parent = fields[13:]
+        parents = ("free", "deck", "other")
+        if simulating not in bits or parent not in parents or replicated_parent not in parents:
+            raise ValueError("Invalid stock Data Silo Core attachment report")
+        observed.update(simulating=bits[simulating], parent=parent, replicated_parent=replicated_parent)
+    return observed
 
 
 def parse_proof(fields: list[str]) -> dict:

@@ -147,6 +147,11 @@ class MindCoreTests(unittest.IsolatedAsyncioTestCase):
         view = mindcore.parse_replication(row, "guest")
         self.assertTrue(view["replicate_movement"])
         self.assertFalse(view["capsule_overlap"])
+        attached = mindcore.parse_replication([*row, "0", "deck", "deck"], "guest")
+        self.assertFalse(attached["simulating"])
+        self.assertEqual((attached["parent"], attached["replicated_parent"]), ("deck", "deck"))
+        with self.assertRaises(ValueError):
+            mindcore.parse_replication([*row, "1", "unknown", "deck"], "guest")
         for index, value in ((3, "active"), (4, mindcore.CORE.removesuffix("_1") + "_2"), (7, "1"), (8, "1")):
             changed = row.copy()
             changed[index] = value

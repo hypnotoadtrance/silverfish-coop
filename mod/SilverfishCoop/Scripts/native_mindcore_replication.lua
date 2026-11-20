@@ -7,6 +7,8 @@ local world_path = map .. ".DataSilo_01_P"
 local persistent = world_path .. ":PersistentLevel."
 local core_path = persistent .. "MindCore_BP_C_1"
 local cradle_path = persistent .. "MindCore_Cradle_BP_C_1"
+local lift_path = persistent .. "RailLift_BP_C_1"
+local deck_name = "StaticMeshComponent " .. lift_path .. ".SM_Prop_Elevator_01"
 local core_name = "MindCore_BP_C " .. core_path
 local cradle_name = "MindCore_Cradle_BP_C " .. cradle_path
 local core_class = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
@@ -35,11 +37,11 @@ local function scene(world, core, cradle)
         or capsule:GetFullName() ~= "CapsuleComponent " .. cradle_path .. ".Capsule"
         or not exact(mount, mesh_class) or not same(mount:GetOwner(), cradle)
         or not same(capsule:GetAttachParent(), mount) then return end
-    return { world = world, core = core, cradle = cradle, capsule = capsule }
+    return { world = world, core = core, frame = mesh, cradle = cradle, capsule = capsule }
 end
 
 local function context_matches(a, b)
-    return a and b and same(a.world, b.world) and same(a.core, b.core) and same(a.cradle, b.cradle)
+    return a and b and same(a.world, b.world) and same(a.core, b.core) and same(a.frame, b.frame) and same(a.cradle, b.cradle)
         and same(a.capsule, b.capsule)
 end
 
@@ -153,6 +155,11 @@ local function finite(number)
     return type(number) == "number" and number == number and math.abs(number) < 10000000
 end
 
+local function parent_kind(parent)
+    if not valid(parent) then return "free" end
+    return parent:GetFullName() == deck_name and "deck" or "other"
+end
+
 function replication.rows(state, phase, row)
     if not enabled or state.map ~= map or not state.listening then return {} end
     local ok, result = pcall(function()
@@ -169,10 +176,13 @@ function replication.rows(state, phase, row)
         local observed = active.state
         if hosting and (replicates ~= 1 or movement ~= 1) then observed = "replication_unverified" end
         if not hosting and overlap ~= 0 then observed = "guard_unverified" end
+        local attachment = active.core.AttachmentReplication
         return { row("native-mindcore-replication", map, hosting and "host" or "guest", observed, core_name,
             replicates, movement, overlap,
             stage, string.format("%.3f", position.X), string.format("%.3f", position.Y),
-            string.format("%.3f", position.Z), active.origin) }
+            string.format("%.3f", position.Z), active.origin,
+            bit(active.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find))),
+            parent_kind(active.frame:GetAttachParent()), parent_kind(attachment and attachment.AttachComponent)) }
     end)
     return ok and result or {}
 end

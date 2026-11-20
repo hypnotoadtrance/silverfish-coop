@@ -73,6 +73,9 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
     proof["walks"] = []
+    moving_samples = {}
+    if fixture_loose_cargo:
+        proof["moving_cargo_samples"] = moving_samples
     lease = guest_local_pawn = None
     carrier_can_be_downed = False
 
@@ -98,6 +101,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                    "lift": root, "bases": [host_bases, guest_bases],
                    "prop": prop, "guest_prop": remote_prop}
         proof["last_observation"] = witness
+        if fixture_loose_cargo and root.get("stop") == "moving":
+            height = root["root_position"][2]
+            peer_lift = peer_game.get(lift.KEY, {})
+            moving_samples.setdefault(int(height // 300), dict(lift=root, guest_lift=peer_lift,
+                                                               prop=prop, guest_prop=remote_prop))
         paired = ((host.get("generation"), host.get("zone_epoch"), host_game.get("map"), host.get("state"))
                   == (session, epoch, core.MAP, "hosting")
                   and (peer.get("host_session"), peer.get("zone_epoch"), peer.get("character_id"),
@@ -294,6 +302,8 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof["released_at_upper_stop"] = await observe(
             "the Core settles at the upper stop and the guest can carry it again",
             lambda row, *_: (row["lift"].get("stop") == "upper" and row["guest_hold"].get("state") == "ready"
+                              and all(prop.get("simulating") is True and prop.get("parent") == "free"
+                                      for prop in (row["prop"], row["guest_prop"]))
                               and math.dist(row["prop"]["position"], expected) < 25
                               and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 12),
         )
