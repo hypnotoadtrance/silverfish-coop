@@ -64,6 +64,8 @@ Separate paired runs took the Southeast Road doors to Factory and Gunsmith and r
 
 Paired runs crossed the NorthEast Rail–Trash Pit overlap and the Trash Pit–The Throat door in both directions. The overlaps blocked the guest and the separated host. Both doors refused the guest and required the host to regroup before opening. The Throat return test placed the distant guest on the stock lower floor to test vertical separation. The party returned to the exact NorthEast Rail marker, and the original save hashes matched.
 
+Another paired run crossed from CrossRoads to Ruin Fields, used both directions of the Lab East Wing door, then took both stock overlaps between Ruin Fields and Rail Yard. All five crossings enforced guest and regroup restrictions, reached the original arrivals, and preserved the original save hashes.
+
 The Observatory rest command and stock sleep screen both use the exact SavePoint and stock day cycle. A host and two guests rested for one game hour, left via the CrossRoads exit, and returned to the saved Observatory bed after all three went down. All three recovered full native health. The stock sleep-screen run measured unchanged desktop cursor bounds across 1,305 samples. The rest catalog covers 11 cooked beds, including City's verified neutral bed.
 
 A later headless run repeated this with a host and four guests. All four guests kept separate saves and were refused at the stock bed on both peers. The host confirmed sleep, all five returned to the exact Observatory bed after a wipe, and nine original save hashes matched. Sixty cursor samples taken with all five games active showed the full desktop bounds.
@@ -274,6 +276,10 @@ A headless Observatory probe used the stock mode-zero spawn with a verified gues
 
 A three-instance Observatory test then dropped an exact guest-owned stack of nine 9mm rounds into durable escrow. A second guest could neither see the owner's drop record nor reclaim it. On the same-port restart, the owner saw the same drop and their backpack stayed debited. The authority rejected reclaim from beyond range, then returned the exact original stack GUID and quantity within range. Replays left each inventory unchanged. This test exercised the local action and owner-only status. The original save hashes matched.
 
+A later run tested the owner-only floor cue with the original Interact binding. The exact drop remained available after a same-port restart and a Direct IP reconnect. The new connection received a fresh authorization, and the cue kept its actor identity from discovery through Interact. The owner recovered the same nine rounds under the original GUID. The second guest received no cue, and the original save hashes matched. This headless run verified the stock look trace and input binding. Windowed rendering still needs coverage.
+
+An Observatory run also dropped a full 9mm stack from the guest's inventory overlay on a host running without fixtures. The guest cancelled the first confirmation and kept the stack. The next confirmation removed the exact nine rounds and committed the same GUID to owner-only escrow. Replay left the inventory unchanged, and the original single-player save hashes matched.
+
 Two guests collected separate authored ammunition stacks through stock Interact. The first carried 14 buckshot shells from Slums. The second collected 10 .45 Ball rounds in CrossRoads. The host refused a stale visit, a wrong-map source, an out-of-range claim, and a second claim on the same source. Each guest retained their own exact stack through Rail Yard travel, a same-port restart, and a revisit to Slums. The host inventory and original save hashes matched.
 
 A separate three-instance run collected the same .45 placement into a guest's existing 10-round backpack stack. The stock calculation increased it to 20 rounds under the original stack GUID. The pickup kept a distinct source receipt, other inventories matched, and the owner kept the 20-round stack after same-port restart.
@@ -304,6 +310,6 @@ With `--native-guest-sickness`, the stock infection callback rolled 110 sickness
 
 - The shipped Black Market board hides the `MeetBroker` template because both stock visibility flags are false. A live start request reached the correct board and was refused by its offer check. An already-active stock row qualifies for the typed starter kit and XP path in offline tests. Its live redemption remains unverified.
 
-- The authored travel registry covers 145 directed exits across 55 worlds. Live coverage beyond the tested routes remains open.
+- The authored travel registry covers 145 directed exits across 55 worlds. The staged archive records exact stock arrivals and the same guest ready afterward for 92 exits, including 49 overlaps and 43 doors.
 
 The stock Silverfish build ships Unreal's Null subsystem. A Steam Invite test needs an authorized Steamworks integration under the game's App ID and two separately entitled Steam sessions for a real invite round-trip. The existing Direct IP path supports local two-process testing without Steam. [Steamworks setup](https://partner.steamgames.com/doc/sdk/api) · [Steam lobby invites](https://partner.steamgames.com/doc/api/ISteamMatchmaking#InviteUserToLobby)
