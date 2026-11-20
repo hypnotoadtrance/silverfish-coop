@@ -104,7 +104,7 @@ local env = setmetatable({
 }, {__index = _G})
 
 local dig = assert(loadfile("mod/SilverfishCoop/Scripts/native_host_dig_live.lua", "t", env))()
-dig.start("bridge/")
+dig.start("bridge")
 local function sync() dig.sync(role, "hosting") end
 local function row(tag)
     for _, record in ipairs(dig.rows(role, "hosting", table.pack)) do

@@ -10,7 +10,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.silverfish import native_title_entry, runtime
-from live_smoke import saved_hashes
+from live_multi_smoke import saved_hashes
 
 
 async def verify(work: Path, original: Path) -> None:
