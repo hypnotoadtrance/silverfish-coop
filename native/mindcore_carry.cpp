@@ -330,7 +330,7 @@ namespace
 
     bool carrier_target_in_range(U::UObject* pawn, const Point& target)
     {
-        const auto origin = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
+        auto origin = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
         const auto x = target[0] - origin.GetX(), y = target[1] - origin.GetY(), z = target[2] - origin.GetZ();
         return x * x + y * y + z * z <= carrier_reach * carrier_reach;
     }
