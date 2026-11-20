@@ -145,7 +145,6 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     async def walk_to(label, point, tolerance, *, seat="carrier", reached=None):
         directory = guest_run if seat == "carrier" else run
         last = await observe(label, lambda *_: True)
-        speed = 500
         stalled = 0
         for _ in range(18):
             position = last[seat]["location"][:2]
@@ -155,33 +154,43 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             if distance <= 1:
                 break
             dx, dy = ((target - origin) / distance for target, origin in zip(point, position, strict=True))
-            duration = max(50, min(700, round(820 * distance / speed)))
-            request = {"x": dx, "y": dy, "milliseconds": duration, "continuous": True}
+            strength = min(1, max(.16, distance / 180))
+            duration = max(50, min(2200, round(.7 * 1000 * distance / (500 * strength))))
+            request = {"x": strength * dx, "y": strength * dy, "milliseconds": duration, "continuous": True}
             step = {"phase": label, "seat": seat, "target": point, "before": position, "input": request}
             proof["walks"].append(step)
             result = await action(directory, "walk", **request)
             assert result["movement_scheduled"] is True, result
             step["frames"] = []
+            previous = last
             deadline = asyncio.get_running_loop().time() + duration / 1000
             while asyncio.get_running_loop().time() < deadline:
-                sample(label)
+                observed = sample(label)
+                if observed:
+                    previous = observed[0]
                 frame = proof["last_observation"]
                 scans = step["frames"]
                 if not scans or scans[-1]["sequences"] != frame["sequences"]:
                     scans.append({key: frame[key] for key in (
                         "sequences", "carrier", "prop", "hold", "guest_scope", "guest_aim")})
                 await asyncio.sleep(.055)
-            after = await observe(label, lambda row, *_: (
-                all(a > b for a, b in zip(row["sequences"], last["sequences"], strict=True))))
+            # The last published pose during a pulse can predate both its end and stock braking.
+            # Wait for two fresh paired poses before deciding the direction of the next pulse.
+            def stopped(row, *_):
+                nonlocal previous
+                if not all(a > b for a, b in zip(row["sequences"], previous["sequences"], strict=True)):
+                    return False
+                settled = math.dist(previous[seat]["location"], row[seat]["location"]) < 4
+                previous = row
+                return settled
+
+            after = await observe(label, stopped)
             end = after[seat]["location"][:2]
             step.update(after=end, prop=after["prop"]["position"], health=after[seat]["health"])
             progressed = distance - math.dist(point, end)
             stalled = stalled + 1 if progressed < min(4, distance / 4) else 0
             if stalled >= 3:
                 raise RuntimeError(f"Three stock walks did not approach {label} at {point}")
-            if progressed > 5:
-                measured = 1000 * progressed / duration
-                speed = max(25, min(850, (speed + measured) / 2))
             last = after
         raise RuntimeError(f"Stock walking did not reach {label} at {point}")
 
@@ -209,10 +218,16 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
     await turn("keep the starting Core behind the northbound carrier", -90)
     await walk_to("clear the loose Core's starting floor", (714, -1110), 36)
+    await walk_to("clear the east corner of the scrap pile", (310, -900), 32)
+    await walk_to("carry the Core north through the gap between the scrap piles", (50, 125), 26)
     await turn("trail the Core while walking west", 0)
-    await walk_to("west of the Core start", (-200, -1110), 65)
-    await walk_to("southwest of the lower lift", (-1960, -440), 65)
-    await turn("trail the Core outside the lower lift", -90)
+    await walk_to("cross north of the scrap pile", (-560, 215), 30)
+    await walk_to("reach the shelf north of the pile face", (-650, 250), 12)
+    await walk_to("round the pile face on its shallow shelf", (-710, 300), 12)
+    await walk_to("cross the shallow shelf", (-770, 300), 12)
+    await walk_to("clear the second pile face", (-805, 245), 12)
+    await walk_to("reach the west side of the lower lift", (-1900, 170), 17)
+    await turn("trail the Core on the west approach", 90)
     await walk_to("west approach to the lower lift", (-1900, EXIT_Y), 9)
     await walk_to("align with the lower lift opening", (-1900, EXIT_Y), 3.5)
     await turn("align the trailing Core with the west opening", 180)
