@@ -2,7 +2,7 @@ local drill = {}
 local wire = require("native_wire_quest")
 local mosby = require("native_dialogue_mosby")
 local guest_save = require("guest_save")
-local zones = require("authored_zone_maps")
+local zones = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"

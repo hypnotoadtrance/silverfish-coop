@@ -99,8 +99,6 @@ package.loaded.guest_save = {exact_item_context = function(actual, phase, name)
     assert(actual == state and phase == "hosting" and name == guest:GetFullName())
     return guest, guest_save
 end}
-package.loaded.authored_zone_maps = {[area] = {}}
-
 assets[code_path] = object("FL_CodeLib01_C " .. code_path)
 assets[code_path].TurnIn_Quest = function(_, key, game, confirmed, pawn, out, copy)
     assert(key.name == "Clt_DrillHead" and game == instance and confirmed == true and pawn == host and out == copy)
