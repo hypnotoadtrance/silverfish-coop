@@ -8,6 +8,7 @@ local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local interact_path = player_path .. ":InpActEvt_IA_Interact_K2Node_EnhancedInputActionEvent_19"
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
+local system_library_path = "/Script/Engine.Default__KismetSystemLibrary"
 local input_subsystem_path = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
 local subsystem_library_path = "/Script/Engine.Default__SubsystemBlueprintLibrary"
 local gameplay_input_path = "/Game/Classes/Player/Player_Inputs/IMC_FP.IMC_FP"
@@ -40,6 +41,7 @@ local local_player
 local local_input_status
 local restoring_gate
 local walking
+local walk_frame_action, walk_frame_clock, last_walk_frame
 local input_file
 local input_sequence = 0
 local interact_hook_checked = false
@@ -143,6 +145,67 @@ end
 local function now(pawn)
     local statics = StaticFindObject(gameplay_statics_path)
     return statics:GetRealTimeSeconds(pawn)
+end
+
+local function cancel_walk_frames()
+    if walk_frame_action then
+        CancelDelayedAction(walk_frame_action)
+        walk_frame_action = nil
+    end
+end
+
+local function stop_walk()
+    walking = nil
+    cancel_walk_frames()
+end
+
+local function walk_scope(record)
+    local pawn, controller, world = record.pawn, record.controller, record.world
+    return valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn.Dead == false
+        and pawn:GetFullName() == record.name and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world)
+        and valid(controller) and controller:IsLocalController() and same(pawn.Controller, controller)
+        and same(controller.Pawn, pawn) and same(controller:GetWorld(), world)
+end
+
+local function add_walk_input(record)
+    local pawn = record.pawn
+    local movement = pawn.CharacterMovement
+    if not valid(movement) or movement.MovementMode == 0 or pawn:IsMoveInputIgnored() then return end
+    if walk_frame_clock then
+        local frame = walk_frame_clock:GetFrameCount()
+        if frame == last_walk_frame then return end
+        last_walk_frame = frame
+    end
+    pawn:AddMovementInput(record.world_direction, 1.0, false)
+end
+
+local function apply_walk()
+    local record = walking
+    if not record or not local_player or local_player.name ~= record.name or not same(local_player.pawn, record.pawn)
+        or not walk_scope(record) or now(record.pawn) >= record.deadline then
+        stop_walk()
+        return
+    end
+    add_walk_input(record)
+end
+
+local function movement_failure(failure)
+    stop_walk()
+    print("[SilverfishCoop] Player movement update failed: " .. tostring(failure) .. "\n")
+end
+
+local function start_walk_frames()
+    if walk_frame_action or EngineTickAvailable ~= true or type(LoopInGameThreadAfterFrames) ~= "function"
+        or type(CancelDelayedAction) ~= "function" then return end
+    local clock = StaticFindObject(system_library_path)
+    if not valid(clock) then return end
+    local measured, frame = pcall(function() return clock:GetFrameCount() end)
+    if not measured or math.type(frame) ~= "integer" then return end
+    local scheduled, handle = pcall(LoopInGameThreadAfterFrames, 1, function()
+        local ok, failure = pcall(apply_walk)
+        if not ok then movement_failure(failure) end
+    end)
+    if scheduled and math.type(handle) == "integer" then walk_frame_action, walk_frame_clock = handle, clock end
 end
 
 local function read_fields(object, names)
@@ -635,9 +698,9 @@ end
 
 function players.sync(state, phase)
     local slots, names = roster(state, phase)
-    if not active(phase) then walking = nil end
     slot_pawns = slots
     local_player = slots["local"]
+    if walking and not current_identity(walking, local_player, state.world) then stop_walk() end
 
     for name, record in pairs(desired) do
         local details = names[name]
@@ -699,21 +762,25 @@ function players.command(fields, state, phase)
         if not ok then error(status, 0) end
         sync_native_interact(phase)
         return "stock interact input callback verified"
-    elseif command == "walk" then
+    elseif command == "walk" or command == "walk-continuous" then
         local x, y, milliseconds = tonumber(fields[3]), tonumber(fields[4]), tonumber(fields[5])
         if #fields ~= 5 or not finite(x) or not finite(y) or not finite(milliseconds)
             or math.abs(x) > 1 or math.abs(y) > 1 or milliseconds % 1 ~= 0
             or milliseconds < 20 or milliseconds > 3000 or (x == 0 and y == 0) then
             error("Expected walk direction components in [-1, 1] and 20-3000 milliseconds", 0)
         end
-        if not active(phase) or not state.local_pawn or not state.local_pawn.pawn:IsLocallyControlled() then
+        local detail = state.local_pawn
+        local record = {pawn = detail and detail.pawn, name = detail and detail.name, controller = state.controller,
+            world = state.world}
+        if not active(phase) or not walk_scope(record) then
             error("Walking requires the active local pawn", 0)
         end
-        local pawn = state.local_pawn.pawn
         local scale = math.max(1, math.sqrt(x * x + y * y))
-        walking = { pawn = pawn, world_direction = { X = x / scale, Y = y / scale, Z = 0 },
-            deadline = now(pawn) + milliseconds / 1000 }
-        pawn:AddMovementInput(walking.world_direction, 1.0, false)
+        record.world_direction = { X = x / scale, Y = y / scale, Z = 0 }
+        record.deadline = now(record.pawn) + milliseconds / 1000
+        walking = record
+        if command == "walk-continuous" then start_walk_frames() else cancel_walk_frames() end
+        add_walk_input(record)
         return "walking input scheduled"
     elseif command == "native-host-downed-inventory-fixture" then
         return open_host_inventory_fixture(fields, state, phase)
@@ -780,15 +847,6 @@ local function on_interact(context)
     if type(SilverfishTakeNativeInteractPress) ~= "function" then write_interaction(context:get()) end
 end
 
-local function apply_walk(pawn)
-    if not local_player or not same(local_player.pawn, pawn)
-        or not pawn:IsLocallyControlled() or now(pawn) >= walking.deadline then
-        walking = nil
-        return
-    end
-    pawn:AddMovementInput(walking.world_direction, 1.0, false)
-end
-
 local function ensure_hooks()
     if type(SilverfishTakeNativeInteractPress) == "function" then
         interact_hook_checked = true
@@ -803,7 +861,7 @@ end
 
 local function pulse()
     for _, record in pairs(applied) do apply_downed(record) end
-    if walking then apply_walk(walking.pawn) end
+    if walking and not walk_frame_action then apply_walk() end
 end
 
 function players.start(bridge)
@@ -812,12 +870,9 @@ function players.start(bridge)
         if not interact_hook_checked then ensure_hooks() end
     end)
     LoopInGameThreadWithDelay(20, function()
-        if not walking and not next(applied) then return end
+        if not (walking and not walk_frame_action) and not next(applied) then return end
         local ok, failure = pcall(pulse)
-        if not ok then
-            walking = nil
-            print("[SilverfishCoop] Player movement update failed: " .. tostring(failure) .. "\n")
-        end
+        if not ok then movement_failure(failure) end
     end)
 end
 

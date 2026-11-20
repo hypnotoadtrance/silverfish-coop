@@ -36,7 +36,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_cistern_lockpick, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
+from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -2669,6 +2669,10 @@ class Host:
                     result = await native_datasilo_lift.exercise_fixture(self, bridge, request.get("target"))
                 elif action == native_datasilo_lift.STAGE_RIDER and self.fixtures:
                     result = await native_datasilo_lift.stage_rider(self, bridge, request.get("target"))
+                elif action == native_datasilo_door.FIXTURE and self.fixtures:
+                    result = await native_datasilo_door.exercise_fixture(self, bridge, request.get("target"))
+                elif action == native_datasilo_door.STAGE_PAWN and self.fixtures:
+                    result = await native_datasilo_door.stage_pawn(self, bridge, request.get("target"))
                 elif action == native_authored_pickup.CISTERN_LOCKER_FIXTURE and self.fixtures:
                     if self.last_game.get("map") != CISTERN or request.get("target") is not None:
                         raise ValueError("The isolated Cistern locker fixture requires the exact host world")
@@ -3018,7 +3022,8 @@ class Host:
                     snapshot = await bridge.command(action, owner["pawn"], timeout=6)
                     result = {"native_rest_guard": snapshot.get("native_rest_guard", {})}
                 elif action == "walk":
-                    await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
+                    await bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"),
+                                      continuous=request.get("continuous", False))
                     result = {"movement_scheduled": True}
                 elif action in ("interact", "buy", "test-damage", "test-quest-reward", "rest", "keep"):
                     result = self.act("host", request.get("operation_id") or path.stem,
@@ -4485,7 +4490,8 @@ class Client:
                     result = {"link_connected": True, "resumed": data.get("resumed", False),
                               "game_connected": self.last_game.get("state") == "connected"}
                 elif action == "walk":
-                    await self.bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"))
+                    await self.bridge.walk(request.get("x"), request.get("y"), request.get("milliseconds"),
+                                           continuous=request.get("continuous", False))
                     result = {"movement_scheduled": True}
                 elif action == "native-transport-probe" and self.last_game.get("native_transport", {}).get("state") == "ready":
                     result = await probe_transport(self.bridge, request.get("target"))
@@ -4617,6 +4623,11 @@ class Client:
                         raise ValueError("The exact staged guest lift guard is unavailable")
                     self.last_game = await self.bridge.command(action, "guard", timeout=5)
                     result = {native_datasilo_lift.KEY: self.last_game.get(native_datasilo_lift.KEY)}
+                elif action == native_datasilo_door.FIXTURE and request.get("target") == "guard":
+                    if self.last_game.get(native_datasilo_door.KEY, {}).get("state") != "guarded":
+                        raise ValueError("The exact staged upper door guard is unavailable")
+                    self.last_game = await self.bridge.command(action, "guard", timeout=5)
+                    result = {native_datasilo_door.KEY: self.last_game.get(native_datasilo_door.KEY)}
                 elif action == native_mindcore_view.FIXTURE and self.mindcore_view:
                     if not self.mindcore_stage_ready() or request.get("target") is not None:
                         raise ValueError("The exact stock MindCore upload is unavailable")

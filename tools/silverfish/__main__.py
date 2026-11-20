@@ -264,6 +264,8 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--x", type=float, help="normalized world X movement")
     action.add_argument("--y", type=float, help="normalized world Y movement")
     action.add_argument("--milliseconds", type=int, help="controlled movement or SMG hold duration")
+    action.add_argument("--continuous", action="store_true", default=None,
+                        help="apply each stock walking input on every available game frame")
     action.add_argument("--keep", action="append", metavar="ITEM=COUNT", help="inventory stack to retain after a wipe")
     action.add_argument("--exit-position", choices=("near", "inside", "far"), help="position relative to the staged exit")
     action.add_argument("--entrance", help="select an authored entrance tag for the local exit position fixture")
@@ -483,7 +485,7 @@ async def execute(opts):
             raise ValueError("Each retained item needs a distinct ID and positive count")
         retained[item] = int(count)
     return await submit(directory, opts.action, target=opts.target, operation_id=opts.operation_id,
-                        amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds,
+                        amount=opts.amount, x=opts.x, y=opts.y, milliseconds=opts.milliseconds, continuous=opts.continuous,
                         retained=retained if opts.action == "keep" else None,
                         exit_position=opts.exit_position, entrance=opts.entrance, exit_actor=opts.exit_actor,
                         item_guid=opts.item_guid, kind=opts.kind, pickup_source=opts.pickup_source)

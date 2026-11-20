@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_datasilo_lift as lift
+from tools.silverfish import native_datasilo_door as door
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_cistern_lockpick as lockpick
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
@@ -143,7 +144,7 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
-                   lift_disembark=False):
+                   lift_disembark=False, upper_door=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -156,6 +157,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Verify the stock button with the lift ride")
     if lift_disembark and not lift_ride:
         raise ValueError("Verify the stock landing after riding the lift")
+    if upper_door and (not resume or stock_input or instructions or carry_only or guest_carry or lift_ride or shared_core):
+        raise ValueError("Verify the upper door separately from a dormant Data Silo checkpoint")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -170,6 +173,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched Data Silo lift stage")
     if lift_keycard and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
         raise ValueError("Use the matched stock Cistern lockpick stage")
+    if upper_door and not runtime.staged_script(work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
+        raise ValueError("Use the matched upper Data Silo door stage")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -558,6 +563,23 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if upper_door:
+            from datasilo_door_passage import verify_passage
+
+            async def restart_guest():
+                nonlocal guest_job
+                await stop(guest_run, guest_job)
+                guest_job = await start_guest()
+                await paired(core.MAP)
+
+            proof["upper_door"] = await verify_passage(
+                run, guest_run, action, restart_guest, character, authority["generation"], authority["zone_epoch"])
+            await action(run, "checkpoint")
+            saved, stock_flags = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in stock_flags) == (0, 0)
+            proof["upper_door"]["checkpoint"] = saved["revision"]
+            proof["verified"] = True
+            return proof
         if lift_ride:
             await ride_lift(authority)
             proof["verified"] = True
@@ -819,9 +841,10 @@ if __name__ == "__main__":
     parser.add_argument("--lift-ride", action="store_true", help="ride the native lift with both players and verify both stops")
     parser.add_argument("--lift-keycard", action="store_true", help="get the Cistern keycard and operate the stock lift button")
     parser.add_argument("--lift-disembark", action="store_true", help="walk both players to the stock upper landing")
+    parser.add_argument("--upper-door", action="store_true", help="verify physical passage and late join at the upper door")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
-                          lift_disembark=options.lift_disembark))
+                          lift_disembark=options.lift_disembark, upper_door=options.upper_door))

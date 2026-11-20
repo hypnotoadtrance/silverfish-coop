@@ -20,7 +20,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
-from . import native_cistern_lockpick, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
+from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
@@ -1202,6 +1202,11 @@ class Bridge:
                     if role is None or data.get("map") != native_mindcore.MAP or native_datasilo_lift.KEY in data:
                         raise ValueError("Invalid Data Silo lift frame scope")
                     data[native_datasilo_lift.KEY] = native_datasilo_lift.parse_lift(fields, role)
+                elif fields[0] == native_datasilo_door.TAG:
+                    role = {"hosting": "host", "connected": "guest"}.get(data.get("state"))
+                    if role is None or data.get("map") != native_mindcore.MAP or native_datasilo_door.KEY in data:
+                        raise ValueError("Invalid upper Data Silo door frame scope")
+                    data[native_datasilo_door.KEY] = native_datasilo_door.parse(fields, role)
                 elif fields[0] == native_datasilo_lift.RIDER_TAG:
                     slot, rider = native_datasilo_lift.parse_rider(fields)
                     lift = data.get(native_datasilo_lift.KEY)
@@ -2240,14 +2245,16 @@ class Bridge:
                 if pending:
                     command.unlink()
 
-    async def walk(self, x: float, y: float, milliseconds: int) -> None:
+    async def walk(self, x: float, y: float, milliseconds: int, *, continuous: bool = False) -> None:
         if type(x) not in {int, float} or type(y) not in {int, float}:
             raise ValueError("Movement requires numeric x and y")
+        if type(continuous) is not bool:
+            raise ValueError("The continuous movement option must be Boolean")
         if (not math.isfinite(x) or not math.isfinite(y) or math.hypot(x, y) > 1.001
                 or math.hypot(x, y) < 0.01 or type(milliseconds) is not int
                 or not 50 <= milliseconds <= 1000):
             raise ValueError("Use a normalized planar direction and a duration of 50 to 1000 ms")
-        await self.command("walk", str(x), str(y), str(milliseconds))
+        await self.command("walk-continuous" if continuous else "walk", str(x), str(y), str(milliseconds))
 
     async def restore(self, role: str, pawn: dict, *, binding: Assignment | None = None,
                       respawning: bool = False) -> dict | None:
