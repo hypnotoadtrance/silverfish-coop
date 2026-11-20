@@ -13,7 +13,7 @@ from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
 from .native_host_dig_live import escrow_frames as dig_escrow_frames
-from .native_tape_profiles import BY_MAP as TAPE_PROFILES, STONE
+from .native_tape_profiles import BY_MAP as TAPE_PROFILES, DRILL, STONE, drill_download_unlocked
 from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
 
@@ -217,21 +217,26 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         exchanges = party.get(profile.ledger, {})
         if type(exchanges) is not dict:
             raise CampaignFormatError("The campaign's stock station exchanges are invalid")
+        if profile == DRILL and exchanges and not drill_download_unlocked(party):
+            raise CampaignFormatError("A Drill Test Results exchange has no durable Prototype Drill completion")
         for blank, trade in exchanges.items():
+            owner = trade.get("owner") if type(trade) is dict else None
             if (not valid_guid(blank) or blank in blanks or type(trade) is not dict or trade.get("blank_guid") != blank
-                    or not isinstance(trade.get("owner"), str) or trade["owner"] not in checkpoint["characters"]
+                    or not isinstance(owner, str) or not (owner in checkpoint["characters"] or profile.allows_host and owner == "host")
                     or not valid_guid(trade.get("filled_guid")) or trade["filled_guid"] in products
                     or not isinstance(trade.get("operation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", trade["operation_id"])
-                    or (trade["owner"], trade["operation_id"]) in operations):
+                    or (owner, trade["operation_id"]) in operations):
                 raise CampaignFormatError("A stock station exchange has an invalid owner or tape identity")
+            if profile == DRILL and (type(trade.get("mosby_drill_test")) is not int or not 1 <= trade["mosby_drill_test"] <= 3):
+                raise CampaignFormatError("A Drill Test Results exchange has no verified stock stage")
             if profile != STONE:
-                expected = uuid.uuid5(uuid.NAMESPACE_URL, f"{profile.namespace}:{trade['owner']}:{blank}").hex.upper()
+                expected = uuid.uuid5(uuid.NAMESPACE_URL, f"{profile.namespace}:{owner}:{blank}").hex.upper()
                 if (trade.get("map"), trade.get("station"), trade.get("class_path"), trade["filled_guid"]) != (
                         profile.map, profile.station, profile.product, expected):
                     raise CampaignFormatError("A stock station exchange does not match its exact product and station")
             blanks.add(blank)
             products.add(trade["filled_guid"])
-            operations.add((trade["owner"], trade["operation_id"]))
+            operations.add((owner, trade["operation_id"]))
     if blanks & products:
         raise CampaignFormatError("A stock tape is both an exchange input and a product")
     mosby = party.get("native_mosby_rewards")

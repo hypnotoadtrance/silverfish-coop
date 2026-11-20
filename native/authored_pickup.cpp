@@ -275,6 +275,11 @@ namespace
         STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
         STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C"),
     };
+    constexpr TapeExchangeProfile drill_test_results_tape{
+        STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
+        STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
+        STR("/Game/Classes/Items/DataTapes/DataTape_DrillTestResults.DataTape_DrillTestResults_C"),
+    };
     constexpr std::array guid_members{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr std::size_t parameter_capacity = 256;
     constexpr double maximum_range_squared = 250.0 * 250.0;
@@ -1371,14 +1376,47 @@ namespace
         return owned ? world : nullptr;
     }
 
-    bool tape_station_reachable(U::UWorld* world, U::UObject* pawn, const TapeExchangeProfile& profile)
+    bool drill_station_unlocked(U::UObject* canonical, U::UObject* station)
+    {
+        const U::FName flag{STR("Mosby_DrillTest"), U::FNAME_Find};
+        auto* flags = field<U::FMapProperty>(canonical, STR("Flags"));
+        auto* key = flags ? U::CastField<U::FNameProperty>(flags->GetKeyProp()) : nullptr;
+        auto* value = flags ? U::CastField<U::FIntProperty>(flags->GetValueProp()) : nullptr;
+        if (flag.IsNone() || !key || !value || key->GetOffset_Internal() != 0 ||
+            key->GetSize() != sizeof(U::FName) || value->GetSize() != sizeof(std::int32_t) ||
+            !key->HasAnyPropertyFlags(U::CPF_HasGetValueTypeHash)) return false;
+        const auto layout = U::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
+        if (value->GetOffset_Internal() != layout.ValueOffset) return false;
+        auto* map = flags->ContainerPtrToValuePtr<U::FScriptMap>(canonical);
+        if (!map || map->Num() < 1 || map->Num() > map->GetMaxIndex() || map->GetMaxIndex() > 4096) return false;
+        const auto* found = map->FindValue(&flag, layout, [&](const void* raw) { return key->GetValueTypeHash(raw); },
+            [&](const void* a, const void* b) { return key->Identical(a, b); });
+        if (!found) return false;
+        const auto stage = value->GetPropertyValue(found);
+        if (stage < 1 || stage > 3) return false;
+
+        auto* product = find<U::UClass>(drill_test_results_tape.product);
+        auto* database = field<U::FArrayProperty>(station, STR("Tapes_DataBase"));
+        auto* entry = database ? U::CastField<U::FClassProperty>(database->GetInner()) : nullptr;
+        if (!product || !entry || !entry->GetMetaClass().Get() || !product->IsChildOf(entry->GetMetaClass().Get())) return false;
+        U::FScriptArrayHelper items(database, database->ContainerPtrToValuePtr<void>(station));
+        if (items.Num() < 1 || items.Num() > 16) return false;
+        int matches = 0;
+        for (int index = 0; index < items.Num(); ++index)
+            if (entry->GetObjectPropertyValue(items.GetRawPtr(index)) == product) ++matches;
+        return matches == 1;
+    }
+
+    bool tape_station_reachable(U::UWorld* world, U::UObject* pawn, U::UObject* canonical, const TapeExchangeProfile& profile)
     {
         auto* station = find<U::UObject>(profile.station);
         auto* box = object(station, STR("Box"));
         return exact(station, tape_station_class) && role(station) == 3 &&
             boolean(station, STR("bActorIsBeingDestroyed"), false) && exact(box, STR("/Script/Engine.BoxComponent")) &&
             box->GetOuterPrivate() == station && static_cast<U::AActor*>(station)->GetWorld() == world &&
-            static_cast<U::AActor*>(station)->GetLevel() == object(world, STR("PersistentLevel")) && in_range(pawn, station);
+            static_cast<U::AActor*>(station)->GetLevel() == object(world, STR("PersistentLevel")) && in_range(pawn, station) &&
+            (&profile != &drill_test_results_tape || drill_station_unlocked(canonical, station));
     }
 
     bool exclusive_tape_ids(const TapeStores& stores, U::UWorld* world, U::UObject* pawn, U::UObject* target,
@@ -1409,14 +1447,16 @@ namespace
     int exchange_tape(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) {
-            if constexpr (&Profile == &eather_pump_tape)
+            if constexpr (&Profile != &stone_maze_tape)
             {
                 if (const auto at = reason.find("stone_maze"); at != std::string_view::npos)
-                    return result(lua, false, std::format("{}eather_pump{}", reason.substr(0, at), reason.substr(at + 10)));
+                    return result(lua, false, std::format("{}{}{}", reason.substr(0, at),
+                        &Profile == &eather_pump_tape ? "eather_pump" : "drill_test_results", reason.substr(at + 10)));
             }
             return result(lua, false, reason);
         };
-        if (!ready() || !env("SILVERFISH_COOP_NATIVE_ZONE") || lua.get_stack_size() != 5 ||
+        if (!ready() || !env("SILVERFISH_COOP_NATIVE_ZONE") ||
+            (&Profile == &drill_test_results_tape && !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) || lua.get_stack_size() != 5 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
             !lua.is_string(4) || !lua.is_string(5)) return fail("stone_maze_tape_arguments");
         const auto pawn_address = lua.get_integer();
@@ -1435,7 +1475,8 @@ namespace
         auto* target = live_address(static_cast<Address>(target_address), rows.save);
         auto* canonical = live_address(static_cast<Address>(canonical_address), rows.save);
         auto* world = tape_owner_world(pawn, target, canonical, Profile);
-        if (!world || !tape_station_reachable(world, pawn, Profile) || !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
+        if (!world || !tape_station_reachable(world, pawn, canonical, Profile) ||
+            !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
             return fail("stone_maze_exact_tape_owner_unavailable");
 
         auto* blank_class = find<U::UClass>(blank_tape_path);
@@ -1485,7 +1526,7 @@ namespace
         library->ProcessEvent(fn, buffer.data());
         auto* generated = output->ContainerPtrToValuePtr<void>(buffer.data());
         if (!rows.matches_actor(generated, filled_cdo) || tape_owner_world(pawn, target, canonical, Profile) != world ||
-            !tape_station_reachable(world, pawn, Profile) ||
+            !tape_station_reachable(world, pawn, canonical, Profile) ||
             !stores.scan(target, blank, old) || old.count != 1 || !old.backpack_row ||
             !rows.authored(old.backpack_row, blank_class) || quantity->GetPropertyValueInContainer(old.backpack_row) != 0 ||
             !stores.scan(target, filled, replacement) || replacement.count != 0)
@@ -1922,6 +1963,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishMergeNativeAuthoredSupply", merge_supply);
         lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape<stone_maze_tape>);
         lua.register_function("SilverfishExchangeEatherPumpTape", exchange_tape<eather_pump_tape>);
+        lua.register_function("SilverfishExchangeDrillTestResultsTape", exchange_tape<drill_test_results_tape>);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);
         if (headless()) lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
     }

@@ -16,7 +16,7 @@ from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
 from .native_guest_weapon import SEED_KINDS
 from .native_host_save import STOCK_START_MODES
 from .runtime import REPO, prepare_game
-from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, OBSERVATORY, PLAYTEST_MAPS
+from .travel import AUTHORED_MAPS, DREAM_MAPS, GOLD_NEXUS, PLAYTEST_MAPS
 
 def _workspace(value: str) -> Path:
     return Path(value).expanduser().resolve()
@@ -179,6 +179,8 @@ def parser() -> argparse.ArgumentParser:
         "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture", "native-borough-mama-trade",
         "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",
         "native-pump-tape-preflight", "native-pump-tape-convert", "native-pump-tape-approach",
+        "native-drill-test-results-preflight", "native-drill-test-results-convert", "native-drill-test-results-approach",
+        "native-prototype-drill-preflight",
         "native-pump-room-preflight", "native-pump-room-approach", "native-pump-room-xp-fixture",
         "native-mosby-station-fixture",
         "native-subway-valve-preflight", "native-subway-valve-approach", "native-subway-valve-activate",
@@ -259,7 +261,8 @@ def _events(directory: Path, limit: int) -> dict:
 
 
 async def staged_title_menu(opts, *, on_title_ready=None) -> dict:
-    from . import runtime
+    from . import embedded_title_plan, runtime
+    from .service import MENU_HOST_OPTIONS, menu_host_start
     from .title_session import TitleSession, host_plan, join_plan
 
     if not (opts.campaign or opts.invite):
@@ -268,18 +271,22 @@ async def staged_title_menu(opts, *, on_title_ready=None) -> dict:
         raise ValueError("Character selection requires an invitation")
     if not runtime.qualified_authored_routes(opts.work):
         raise ValueError("The co-op title requires the current matched native stage")
+    embedded = embedded_title_plan.installed(opts.work)
     plans = {}
     if opts.campaign:
         campaign = select_run(opts.work, "campaigns", opts.campaign)
-        saved = campaign / "save"
-        has_checkpoint = any((saved / name).is_file() for name in ("campaign.json", "campaign.previous.json"))
-        starting = {} if has_checkpoint else {"start_preset": "wanderer", "expected_map": OBSERVATORY}
-        plans["host"] = host_plan(opts.work, campaign, opts.bind, opts.port or runtime.spare_udp_port(),
-                                  native_events=True, native_guest=True, native_zones=True,
-                                  native_zone_walls=True, expanded_zones=True, **starting)
+        mode, area = menu_host_start(campaign)
+        starting = {"start_preset": mode} if mode == "wanderer" else {}
+        port = opts.port or runtime.spare_udp_port()
+        expected = area if starting else None
+        plans["host"] = (embedded_title_plan.host_plan(opts.work, campaign, opts.bind, port, mode, expected)
+                         if embedded else host_plan(opts.work, campaign, opts.bind, port, expected_map=expected,
+                                                    **MENU_HOST_OPTIONS, **starting))
     if opts.invite:
         guest = select_run(opts.work, "clients", opts.profile)
-        plans["join"] = join_plan(opts.work, guest, opts.invite.resolve(strict=True), character_id=opts.character)
+        invitation = opts.invite.resolve(strict=True)
+        plans["join"] = (embedded_title_plan.guest_plan(opts.work, guest, invitation, opts.character)
+                         if embedded else join_plan(opts.work, guest, invitation, character_id=opts.character))
     title = select_run(opts.work, "titles", opts.title_profile)
     with Control(title / "run"):
         mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex

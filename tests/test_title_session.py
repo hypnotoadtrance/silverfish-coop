@@ -281,6 +281,40 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         child.finish.set()
         await task
 
+    async def test_embedded_attempt_waits_for_the_owned_game_pid_to_accept_this_claim(self):
+        child = Child("host")
+        claimed = []
+        accepted = asyncio.Event()
+        game_pid = os.getpid() + 100
+
+        async def start(claim):
+            claimed.append(claim)
+            await child.start()
+
+        def producer(claim):
+            if claimed == [claim] and accepted.is_set():
+                return game_pid
+
+        plan = SessionPlan(start, lambda: child.state, lambda _state: True, producer)
+        _, task = self.supervise(host=plan)
+        generation = await self.wait(self.generation)
+        self.request("host", generation)
+        await child.started.wait()
+        self.assertEqual((claimed[0].generation, claimed[0].request_id), (generation, "a" * 32))
+        child.ready()
+        child.state["pid"] = game_pid
+        await asyncio.sleep(.025)
+        self.assertTrue(self.bridge.alive)
+        child.state["pid"] = os.getpid()
+        accepted.set()
+        await asyncio.sleep(.025)
+        self.assertTrue(self.bridge.alive)
+        child.state["pid"] = game_pid
+        await self.wait(lambda: self.status().get("state") == "ready")
+        self.assertFalse(self.bridge.alive)
+        child.finish.set()
+        await task
+
     async def test_never_uses_prior_controller_file_and_times_out_without_progress(self):
         child = Child("host")
         child.ready()

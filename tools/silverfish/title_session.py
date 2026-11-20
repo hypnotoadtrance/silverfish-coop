@@ -29,9 +29,10 @@ class SessionPlan:
     Its progress uses the existing Control status envelope.
     """
 
-    start: Callable[[], Awaitable[None]]
+    start: Callable[..., Awaitable[None]]
     read_status: Callable[[], dict | None]
     ready: Callable[[dict], bool]
+    producer_pid: Callable[[Claim], int | None] | None = None
 
 
 def _read_plan_status(plan: SessionPlan) -> dict:
@@ -42,11 +43,12 @@ def _read_plan_status(plan: SessionPlan) -> dict:
     return status if isinstance(status, dict) else {}
 
 
-def _is_attempt(status: dict, baseline: str | None, started: float, action: str) -> bool:
+def _is_attempt(status: dict, baseline: str | None, started: float, action: str, producer_pid: int | None) -> bool:
     generation = status.get("generation")
     child_started, updated = status.get("started_unix"), status.get("updated_unix")
     return (
-        status.get("schema") == 1 and status.get("pid") == os.getpid()
+        type(producer_pid) is int and producer_pid > 0 and status.get("schema") == 1
+        and type(status.get("pid")) is int and status["pid"] == producer_pid
         and status.get("role") == _ROLE[action]
         and isinstance(generation, str) and generation != baseline and re.fullmatch(r"[a-f0-9]{32}", generation)
         and type(child_started) in (int, float) and type(updated) in (int, float)
@@ -205,8 +207,14 @@ class TitleSession:
         self._cancel_requested = False
         self._publish("starting", attempt=attempt, progress="launching")
 
+        def producer_pid():
+            return os.getpid() if plan.producer_pid is None else plan.producer_pid(claim)
+
         async def start():
-            await plan.start()
+            if plan.producer_pid is None:
+                await plan.start()
+            else:
+                await plan.start(claim)
 
         task = asyncio.create_task(start())
         retired = False
@@ -228,7 +236,7 @@ class TitleSession:
                     error = "startup_timeout" if now >= deadline else "startup_stalled"
                     break
                 status = _read_plan_status(plan)
-                verified = _is_attempt(status, baseline, started_wall, claim.action)
+                verified = _is_attempt(status, baseline, started_wall, claim.action, producer_pid())
                 if verified:
                     if child_generation is not None and status["generation"] != child_generation:
                         error = "child_generation_changed"
@@ -280,7 +288,7 @@ class TitleSession:
             if interrupted:
                 raise asyncio.CancelledError
         status = _read_plan_status(plan)
-        current = _is_attempt(status, baseline, started_wall, claim.action)
+        current = _is_attempt(status, baseline, started_wall, claim.action, producer_pid())
         cleanup_proven = current and status.get("active") is False and status["generation"] == child_generation
         unsafe = (current and status.get("active") is True) or (child_generation is not None and not cleanup_proven)
         self._last_failure = dict(attempt, code="cleanup_unverified" if unsafe else error)

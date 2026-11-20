@@ -46,6 +46,8 @@ from .udp_ownership import owns_udp_port
 
 
 PROTOCOL = 2
+MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
+                     "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
 GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
@@ -2523,8 +2525,11 @@ class Host:
                     target = request.get("target") or "guest"
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
                                                            profile=native_mosby_tape.APPROACHES[action])
-                elif action == native_mosby_tape.READINGS_PREFLIGHT:
+                elif action in (native_mosby_tape.READINGS_PREFLIGHT, native_mosby_tape.DRILL.verb("preflight")):
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
+                elif action == native_mosby_tape.DRILL.verb("convert"):
+                    result = await native_mosby_tape.convert(self, bridge, "host", request.get("target"),
+                                                             request.get("operation_id") or path.stem, profile=native_mosby_tape.DRILL)
                 elif action == native_prototype_drill.PREFLIGHT:
                     result = await native_prototype_drill.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
@@ -3200,7 +3205,8 @@ class Host:
 
 async def _acquire_embedded_game(work: Path, directory: Path, role: str, headless: bool,
                                  internal_port: int | None, options: dict) -> EmbeddedEngine:
-    expected = game_environment(work, headless, internal_port, embedded_engine=True, **options)
+    startup = os.environ.get("SILVERFISH_COOP_EMBEDDED_STARTUP")
+    expected = game_environment(work, headless, internal_port, embedded_engine=True, embedded_startup=startup, **options)
     conditions = {name: expected.get(name) for name in os.environ.keys() | expected.keys()
                   if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
     return await EmbeddedEngine.acquire(work, directory, role=role, internal_port=internal_port,
@@ -3220,6 +3226,34 @@ async def _stop_session_game(transport, process, embedded: EmbeddedEngine | None
                         await asyncio.sleep(0.1)
         elif process:
             await stop_game(process)
+
+
+def _host_stage_options(work: Path, native_guest: bool, native_zones: bool) -> dict:
+    scoped = native_guest and native_zones
+    return dict(native_loot_input=scoped and staged_script(work, "native_loot_crate_input.lua"),
+                native_wipe_view=scoped and staged_script(work, "native_wipe_view.lua"),
+                host_camera_input=scoped and staged_script(work, "native_host_camera.lua"))
+
+
+def _host_save_options(work: Path, profile: Path, native_guest: bool, authored: bool) -> tuple[bool, Path | None]:
+    persist_guest = native_guest and staged_script(work, "guest_save.lua", "native-guest-save-frame")
+    native_profile = profile if (authored or persist_guest) and staged_script(work, "native_host_save.lua") else None
+    return persist_guest, native_profile
+
+
+def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_profile: Path | None) -> bool:
+    return bool(authored and persist_guest and native_profile and
+                staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
+
+
+def menu_host_start(directory: Path) -> tuple[str, str]:
+    profile = directory / "game-user"
+    checkpoint = CampaignStore.read_existing(
+        directory / "save", verify_world=verify_travel_checkpoint,
+        verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data),
+    )
+    area = checkpoint["world"].get("map") if checkpoint else None
+    return ("resume", area) if area else ("wanderer", OBSERVATORY)
 
 
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
@@ -3247,14 +3281,15 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("The stock Wanderer preset requires a fresh native Observatory campaign")
     game_build = staged_build(work)
     native_backend = native_death_backend(work)
-    native_loot_input = native_guest and native_zones and staged_script(work, "native_loot_crate_input.lua")
+    stage_options = _host_stage_options(work, native_guest, native_zones)
+    native_loot_input = stage_options["native_loot_input"]
     if native_dead_bridge_enemy_loot and not (native_loot_input and native_backend == "cpp" and
             staged_script(work, "native_enemy_loot.lua", "native-enemy-loot-cqc-capability") and
             staged_script(work, "native_enemy_loot_registry.lua", "refinery-cqc-v1") and
             staged_script(work, "guest_save.lua", "native-guest-bind-exact")):
         raise ValueError("Stock placed CQC enemy loot requires the current native co-op stage")
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
-    wipe_view_enabled = native_guest and native_zones and staged_script(work, "native_wipe_view.lua")
+    wipe_view_enabled = stage_options["native_wipe_view"]
     wire_board_enabled = native_guest and native_zones and staged_script(work, "native_wire_board.lua")
     dialogue_enabled = native_guest and native_zones and staged_script(work, "native_dialogue.lua")
     mosby_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_mosby.lua")
@@ -3262,7 +3297,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     mama_dialogue_enabled = (dialogue_enabled and staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma")
                              and staged_script(work, "native_borough_barter.lua", "SilverfishTradeNativeBoroughMama"))
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
-    host_camera_input = native_guest and native_zones and staged_script(work, "native_host_camera.lua")
+    host_camera_input = stage_options["host_camera_input"]
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
     if guest_melee_canary and not (headless and fixtures and native_guest and native_zones and native_backend == "cpp"
                                   and staged_script(work, "native_guest_melee.lua", "SilverfishStartNativeGuestMeleeCanary")):
@@ -3306,8 +3341,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
-        persist_guest = native_guest and staged_script(work, "guest_save.lua", "native-guest-save-frame")
-        native_profile = profile if (authored or persist_guest) and staged_script(work, "native_host_save.lua") else None
+        persist_guest, native_profile = _host_save_options(work, profile, native_guest, authored)
         if extraction is not None and (old_world.get("map") or not authored or not native_guest or not native_profile
                                        or not staged_script(work, "main.lua", "native-extraction-prepare")):
             raise ValueError("Stock extraction settings require a new authored native campaign with detached guest saves")
@@ -3316,8 +3350,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Restage the current mod to restore this campaign's native host save")
         saved_party = party.load_party(old_world.get("party"))
         saved_dig_escrow = native_host_dig_live.escrow_frames(saved_party)
-        host_dig_live = bool(authored and persist_guest and native_profile and (not fixtures or host_dig_live_fixture or saved_dig_escrow)
-                             and staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
+        host_dig_live = (not fixtures or host_dig_live_fixture or bool(saved_dig_escrow)) and _host_dig_available(
+            work, authored, persist_guest, native_profile,
+        )
         if (saved_dig_escrow or host_dig_live_fixture) and not host_dig_live:
             raise ValueError("Restage the live dig bridge to recover the committed stock sealed package")
         pending = pending_cube(saved_party)
@@ -3345,11 +3380,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             internal_port = embedded_port if embedded_port is not None else spare_udp_port()
             game_options = dict(native_events=native_events, native_guest=native_guest, native_zones=native_zones,
                                 native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
-                                native_shop_view=native_shop_view, native_loot_input=native_loot_input,
-                                guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input,
-                                guest_mre=guest_mre, native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
+                                native_shop_view=native_shop_view, guest_regen=guest_regen, guest_sickness=guest_sickness,
+                                guest_mre=guest_mre, guest_held_fire=guest_held_fire,
                                 native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary,
-                                host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture)
+                                host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture, **stage_options)
             if embedded_port is not None:
                 embedded = await _acquire_embedded_game(work, directory, "host", headless, embedded_port, game_options)
                 process, bridge = embedded, embedded.bridge
@@ -4436,12 +4470,10 @@ class Client:
             await asyncio.sleep(0.25)
 
 
-async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,
-                    character_id: str | None = None, *, native_zones: bool = False,
-                    native_zone_walls: bool = False, guest_reload_input: bool = False,
-                    guest_inventory_view: bool = False, guest_primary_input: bool = False,
-                    embedded_engine: bool = False) -> None:
-    invite = load_invite(invitation, staged_build(work))
+def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,
+                         native_zone_walls: bool = False, guest_reload_input: bool = False,
+                         guest_inventory_view: bool = False, guest_primary_input: bool = False) -> dict:
+    """Resolve the staged guest's startup options from the exact authenticated invitation."""
     native_zones = native_zones or invite.get("native_zones", False)
     native_zone_walls = native_zone_walls or invite.get("native_zone_walls", False)
     if invite.get("native_guest_controls"):
@@ -4477,6 +4509,23 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
     if expanded_zones and not (native_zones and staged_script(work, "authored_zone_maps.lua")
                                and (not native_zone_walls or staged_script(work, "authored_wall_routes.lua"))):
         raise ValueError("Restage the current mod to join the host's expanded stock routes")
+    return dict(native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
+                guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
+                native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
+                native_loot_input=native_loot_input, broker_input=broker_input, native_wipe_view=wipe_view_enabled,
+                guest_clock=native_zones and staged_script(work, "native_guest_clock.lua"), guest_held_fire=guest_held_fire,
+                native_mosby_station=mosby_station_enabled, guest_mre=invite.get("native_guest_mre", False))
+
+
+async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,
+                    character_id: str | None = None, *, native_zones: bool = False,
+                    native_zone_walls: bool = False, guest_reload_input: bool = False,
+                    guest_inventory_view: bool = False, guest_primary_input: bool = False,
+                    embedded_engine: bool = False) -> None:
+    invite = load_invite(invitation, staged_build(work))
+    game_options = guest_engine_options(work, invite, native_zones=native_zones, native_zone_walls=native_zone_walls,
+                                        guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
+                                        guest_primary_input=guest_primary_input)
     if character_id is not None:
         try:
             if str(uuid.UUID(character_id)) != character_id:
@@ -4489,13 +4538,6 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         result = "stopped"
         try:
             control.status(active=True, role="client", state="starting")
-            guest_clock = native_zones and staged_script(work, "native_guest_clock.lua")
-            game_options = dict(native_zones=native_zones, native_zone_walls=native_zone_walls, expanded_zones=expanded_zones,
-                                guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
-                                native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
-                                native_loot_input=native_loot_input, broker_input=broker_input, native_wipe_view=wipe_view_enabled,
-                                guest_clock=guest_clock, guest_held_fire=guest_held_fire, native_mosby_station=mosby_station_enabled,
-                                guest_mre=invite.get("native_guest_mre", False))
             if embedded_engine:
                 embedded = await _acquire_embedded_game(work, directory, "client", headless, None, game_options)
                 process, bridge = embedded, embedded.bridge
@@ -4505,11 +4547,11 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
                 process = launch(work, directory / "game-user", bridge_directory, headless, **game_options)
                 bridge = Bridge(bridge_directory, process)
-            maps = PLAYTEST_MAPS | AUTHORED_MAPS if native_zones and qualified_authored_routes(work) else PLAYTEST_MAPS
-            if expanded_zones:
+            maps = PLAYTEST_MAPS | AUTHORED_MAPS if game_options["native_zones"] and qualified_authored_routes(work) else PLAYTEST_MAPS
+            if game_options["expanded_zones"]:
                 maps |= EXPANDED_MAPS
-            client = Client(control, transport, invite, bridge, allowed_maps=maps, guest_primary_input=guest_primary_input,
-                            guest_clock=guest_clock)
+            client = Client(control, transport, invite, bridge, allowed_maps=maps,
+                            guest_primary_input=game_options["guest_primary_input"], guest_clock=game_options["guest_clock"])
             await bridge.wait_for(lambda state: state["state"] == "ready")
             await client.connect(queue=True)
             try:
@@ -4518,7 +4560,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                 if process.poll() is not None:
                     raise
                 control.event("client_initial_game_join_retry", character_id=invite["character_id"])
-            if invite.get("native_shop_view") or broker_input or client.wire_board:
+            if game_options["native_shop_view"] or game_options["broker_input"] or client.wire_board:
                 heartbeat = asyncio.create_task(client.renew_native_interactions())
                 try:
                     await client.run()

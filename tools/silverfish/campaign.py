@@ -193,19 +193,10 @@ class CampaignStore:
         return handle
 
     def _load_or_create(self):
-        invalid_primary = None
-        try:
-            return self._read_verified(self.path)
-        except FileNotFoundError:
-            pass
-        except CampaignFormatError as exc:
-            invalid_primary = exc
-
-        try:
-            data = self._read_verified(self.previous_path)
-        except FileNotFoundError:
-            if invalid_primary is not None:
-                raise invalid_primary
+        data, self.recovered = self._select_existing(self.path, self.previous_path, self._read_verified)
+        if data is not None and not self.recovered:
+            return data
+        if data is None:
             data = {
                 "schema_version": SCHEMA_VERSION,
                 "campaign_id": str(uuid.uuid4()),
@@ -214,10 +205,40 @@ class CampaignStore:
                 "guests": {},
                 "characters": {},
             }
-        else:
-            self.recovered = True
-
         self._write(self.path, data)
+        return data
+
+    @staticmethod
+    def _select_existing(path, previous_path, read_verified):
+        invalid_primary = None
+        try:
+            return read_verified(path), False
+        except FileNotFoundError:
+            pass
+        except CampaignFormatError as exc:
+            invalid_primary = exc
+
+        try:
+            return read_verified(previous_path), True
+        except FileNotFoundError:
+            if invalid_primary is not None:
+                raise invalid_primary
+            return None, False
+
+    @classmethod
+    def read_existing(cls, directory, *, verify_world=None, verify_checkpoint=None):
+        """Inspect the currently admissible checkpoint without creating or promoting a save."""
+        directory = Path(directory)
+
+        def read_verified(path):
+            data = cls._read(path)
+            if verify_world is not None:
+                verify_world(data["world"])
+            if verify_checkpoint is not None:
+                verify_checkpoint(data)
+            return data
+
+        data, _ = cls._select_existing(directory / "campaign.json", directory / "campaign.previous.json", read_verified)
         return data
 
     def _read_verified(self, path):

@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import socket
 import subprocess
@@ -311,7 +312,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
-           embedded_engine: bool = False, inspect_title_profile: bool = False) -> dict[str, str]:
+           embedded_engine: bool = False, inspect_title_profile: bool = False,
+           embedded_startup: str | None = None) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
@@ -328,6 +330,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_HEADLESS", None)
     env.pop("SILVERFISH_COOP_TITLE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_ENGINE", None)
+    env.pop("SILVERFISH_COOP_EMBEDDED_STARTUP", None)
     env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_CQC_LOOT", None)
@@ -365,6 +368,11 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         if not native_zones:
             raise ValueError("Embedded engine startup requires the staged native campaign")
         env["SILVERFISH_COOP_EMBEDDED_ENGINE"] = "1"
+    if embedded_startup is not None:
+        if (not embedded_engine or not isinstance(embedded_startup, str)
+                or not re.fullmatch(r"[a-f0-9]{32}", embedded_startup) or embedded_startup == "0" * 32):
+            raise ValueError("Invalid packaged embedded game startup identity")
+        env["SILVERFISH_COOP_EMBEDDED_STARTUP"] = embedded_startup
     if inspect_title_profile:
         if port is not None:
             raise ValueError("A separate title profile must start without a listen port")
@@ -483,6 +491,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     if options.get("embedded_engine") or options.get("inspect_title_profile"):
         from .embedded_engine import assert_private_saved_tree
         assert_private_saved_tree(profile)
+    if options.get("embedded_startup") is not None and bridge.name != options["embedded_startup"]:
+        raise ValueError("The packaged startup identity must name its exact bridge")
     profile.mkdir(parents=True, exist_ok=True)
     bridge.mkdir(parents=True, exist_ok=True)
     env["SILVERFISH_COOP_BRIDGE"] = str(bridge)

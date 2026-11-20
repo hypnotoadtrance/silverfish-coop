@@ -10,7 +10,7 @@ import sys
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.silverfish import native_title_entry as title, runtime
+from tools.silverfish import embedded_title_plan, native_title_entry as title, runtime
 from tools.silverfish.control import select_run, submit
 from tools.silverfish.title_session import STATUS_FILE, TitleSession, host_plan, join_plan
 from tools.silverfish.travel import OBSERVATORY
@@ -73,9 +73,11 @@ async def title_choice(work, case, action, plan, processes, tasks):
             await asyncio.sleep(.1)
 
 
-async def verify(work: Path, original: Path) -> None:
+async def verify(work: Path, original: Path, *, embedded: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The co-op title handoff requires a staged Windows game")
+    if embedded and not embedded_title_plan.installed(work):
+        raise ValueError("The matched staged embedded runtime package is missing")
     name = "title-handoff-" + uuid.uuid4().hex[:8]
     case = work / "title-probes" / name
     case.mkdir(parents=True)
@@ -84,21 +86,28 @@ async def verify(work: Path, original: Path) -> None:
     host_run, guest_run = campaign / "run", profile / "run"
     initial = saved_hashes(original)
     processes, tasks = [], []
-    evidence = {"verified": False, "build": runtime.staged_build(work)}
+    evidence = {"verified": False, "build": runtime.staged_build(work), "embedded": embedded}
     try:
         port = runtime.spare_udp_port()
-        host = host_plan(work, campaign, "127.0.0.1", port, headless=True,
-            native_events=True, native_guest=True, native_zones=True, start_zone=OBSERVATORY,
-        )
+        if embedded:
+            host = embedded_title_plan.host_plan(work, campaign, "127.0.0.1", port, "wanderer", OBSERVATORY, headless=True)
+        else:
+            host = host_plan(work, campaign, "127.0.0.1", port, headless=True,
+                             native_events=True, native_guest=True, native_zones=True, start_zone=OBSERVATORY)
         evidence["host_title"] = await title_choice(work, case, "host", host, processes, tasks)
         hosting = await wait(host_run, lambda state: state.get("state") == "hosting"
                              and state.get("game", {}).get("map") == OBSERVATORY)
         assert hosting["endpoint"] == {"address": "127.0.0.1", "port": port}, hosting["endpoint"]
         evidence["host"] = {"map": OBSERVATORY, "port": port, "title_survived_until_host_ready": True}
+        if embedded:
+            assert hosting["pid"] != os.getpid()
+            evidence["host"]["worker_pid"] = hosting["pid"]
 
         invitation = await submit(host_run, "invite", name="Title guest", character="Title Scout")
         assert invitation["ok"] is True
-        guest = join_plan(work, profile, Path(invitation["invite_file"]), headless=True)
+        invite_file = Path(invitation["invite_file"])
+        guest = (embedded_title_plan.guest_plan(work, profile, invite_file, None, headless=True) if embedded else
+                 join_plan(work, profile, invite_file, headless=True))
         evidence["guest_title"] = await title_choice(work, case, "join", guest, processes, tasks)
         joined = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
                             and state.get("game", {}).get("map") == OBSERVATORY)
@@ -108,6 +117,9 @@ async def verify(work: Path, original: Path) -> None:
         evidence["guest"] = {"map": OBSERVATORY, "character_id": joined["character_id"],
                              "native_save": paired["game"]["native_guest_save"]["state"],
                              "title_survived_until_guest_ready": True}
+        if embedded:
+            assert joined["pid"] not in (os.getpid(), hosting["pid"])
+            evidence["guest"]["worker_pid"] = joined["pid"]
         pawn = paired["game"]["native_guest_save"]["pawn"]
         dropped = await submit(guest_run, "drop-link")
         assert dropped["ok"] and dropped.get("link_connected") is False, dropped
@@ -154,5 +166,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--embedded", action="store_true")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True), embedded=options.embedded))

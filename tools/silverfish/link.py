@@ -42,6 +42,7 @@ _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-dialogue-choose": 20.0,
     "native-mosby-tape-convert": 20.0,
+    "native-drill-test-results-convert": 20.0,
     "native-pump-tape-convert": 20.0,
     "native-authored-pickup-claim": 20.0,
     "native-finite-shop-list": 15.0,
