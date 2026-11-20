@@ -55,6 +55,8 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-guest-melee-swing": 20.0,
     "native-inventory-split": 20.0,
     "native-inventory-sort": 20.0,
+    "native-guest-stack-drop": 36.0,
+    "native-guest-stack-reclaim": 24.0,
     "native-subway-valve-activate": 24.0,
     "native-quest-interact": 15.0,
     "native-quest-list": 15.0,

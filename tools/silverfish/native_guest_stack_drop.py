@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_host_save, native_inventory, party
+from . import native_guest_drop_record, native_host_save, native_inventory, party
 from .native_gold import valid_guid
 from .travel import OBSERVATORY
 
@@ -12,6 +12,8 @@ from .travel import OBSERVATORY
 ACTION = "native-guest-stack-drop-probe"
 KEY = "native_guest_stack_drop_probe"
 CAPABILITY = KEY + "_capability"
+SETTLE = "native-guest-stack-drop-settle"
+SETTLE_KEY = "native_guest_stack_drop_settle"
 SUCCESS = "stock_spawn_verified_and_retired"
 REFUSAL = "native_guest_stack_drop_"
 UNSAFE = "mutation_unverified_native_guest_stack_drop_"
@@ -22,10 +24,12 @@ _STATUS = re.compile(r"[a-z0-9_]{1,100}\Z")
 
 
 def parse(fields: list[str], state: str, area: str) -> dict:
-    if (len(fields) != 10 or fields[0] != ACTION or state != "hosting" or area != OBSERVATORY
+    if fields[:1] == [SETTLE]:
+        return parse_settlement(fields, state, area)
+    if (len(fields) not in (10, 13) or fields[0] != ACTION or state != "hosting" or area != OBSERVATORY
             or fields[1] != area):
         raise ValueError("Invalid isolated stock stack drop report")
-    map_name, pawn, slot, guid, raw_count, flag, status, actor, new_guid = fields[1:]
+    map_name, pawn, slot, guid, raw_count, flag, status, actor, new_guid = fields[1:10]
     if (not _PAWN.fullmatch(pawn) or not native_host_save.SLOT.fullmatch(slot) or not valid_guid(guid)
             or not re.fullmatch(r"[1-9][0-9]{0,2}", raw_count) or int(raw_count) > 200
             or flag not in ("0", "1") or not _STATUS.fullmatch(status)):
@@ -35,8 +39,28 @@ def parse(fields: list[str], state: str, area: str) -> dict:
         raise ValueError("The stock actor or stock-converted GUID was not verified")
     if not ok and (not status.startswith((REFUSAL, UNSAFE)) or (actor, new_guid) != ("-", "-")):
         raise ValueError("Invalid isolated stock stack drop refusal")
-    return dict(map=map_name, pawn=pawn, slot=slot, guid=guid, quantity=int(raw_count), ok=ok, status=status,
-                actor=actor if ok else None, new_guid=new_guid if ok else None)
+    proof = dict(map=map_name, pawn=pawn, slot=slot, guid=guid, quantity=int(raw_count), ok=ok, status=status,
+                 actor=actor if ok else None, new_guid=new_guid if ok else None)
+    if len(fields) == 13:
+        location = list(map(float, fields[10:]))
+        if not ok or not native_guest_drop_record.valid_position(location):
+            raise ValueError("Invalid exact stack drop placement")
+        proof["location"] = location
+    return proof
+
+
+def parse_settlement(fields: list[str], state: str, area: str) -> dict:
+    if len(fields) != 10 or state != "hosting" or area != OBSERVATORY or fields[1] != area:
+        raise ValueError("Invalid isolated stack drop settlement")
+    _, operation, pawn, drop_id, source, replacement, flag, status, count = fields[1:]
+    if (operation not in ("debit", "reclaim") or not _PAWN.fullmatch(pawn) or not native_guest_drop_record.valid_id(drop_id)
+            or not native_host_save.SLOT.fullmatch(source) or source == replacement
+            or (operation == "debit" and not native_host_save.SLOT.fullmatch(replacement))
+            or (operation == "reclaim" and replacement != "-") or flag not in ("0", "1") or count != flag
+            or not _STATUS.fullmatch(status)):
+        raise ValueError("Invalid isolated stock stack settlement identity")
+    return dict(map=area, operation=operation, pawn=pawn, drop_id=drop_id, source=source,
+                replacement=replacement if operation == "debit" else None, ok=flag == "1", status=status, count=int(count))
 
 
 async def perform(host, bridge, character: str, guid: str, count: int) -> dict:

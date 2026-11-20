@@ -397,14 +397,13 @@ namespace
         return std::ranges::all_of(origin, [](auto axis) { return std::isfinite(axis) && std::abs(axis) < 1e8; });
     }
 
-    bool near_arrow(U::UObject* actor, const Position& origin)
+    bool near_arrow(U::UObject* actor, const Position& origin, Position& result)
     {
         auto* call = find<U::UFunction>(STR("/Script/Engine.Actor:K2_GetActorLocation"));
         auto* output = call ? U::CastField<U::FStructProperty>(call->GetReturnProperty()) : nullptr;
         if (!call || !call->HasAnyFunctionFlags(U::FUNC_Native) || call->GetNumParms() != 1 ||
             call->GetParmsSize() != sizeof(Position) || !output || output->GetOffset_Internal() ||
             output->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"))) return false;
-        Position result{};
         actor->ProcessEvent(call, result.data());
         return std::hypot(result[0] - origin[0], result[1] - origin[1], result[2] - origin[2]) <= 180;
     }
@@ -551,11 +550,12 @@ namespace
             added = actor;
         }
         if (added) scope.actor = added;
+        Position location{};
         std::string_view qualification;
         if (!added) qualification = "native_guest_stack_drop_no_stock_birth";
         else if (!scope.saw_stock_frame || spawned != added || birth != added)
             qualification = "native_guest_stack_drop_stock_birth_frame_unqualified";
-        else if (!near_arrow(spawned, origin)) qualification = "native_guest_stack_drop_stock_transform_unqualified";
+        else if (!near_arrow(spawned, origin, location)) qualification = "native_guest_stack_drop_stock_transform_unqualified";
         else if (object(spawned, STR("As Game Instance FP")) != owner.game || object(spawned, STR("Owner")) ||
             object(spawned, STR("Instigator")) || !byte(spawned, STR("Item_RespawnMode"), 0) ||
             !boolean(spawned, STR("Stacks"), true) || !boolean(spawned, STR("Physics"), true) || !boolean(spawned, STR("bReplicates"), false))
@@ -592,7 +592,8 @@ namespace
         lua.set_string(name);
         lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", fresh[0], fresh[1], fresh[2], fresh[3]));
         lua.set_integer(rounds);
-        return 5;
+        for (auto axis : location) lua.set_number(axis);
+        return 8;
     }
 }
 

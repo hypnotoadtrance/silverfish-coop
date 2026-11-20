@@ -11,6 +11,7 @@ from .campaign import CampaignFormatError
 from .authored_loot import CRATES, FOUR_SLOT_CONTAINERS, GUARANTEED_CRATES, loot_capacity
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
+from .native_guest_drop_record import active_frames as stack_drop_frames
 from .native_tape_profiles import BY_MAP as TAPE_PROFILES, STONE
 from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
@@ -185,6 +186,10 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     bags = party.get("native_backpacks", {})
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
+    try:
+        manual_drops = stack_drop_frames(party, checkpoint["characters"])
+    except ValueError as error:
+        raise CampaignFormatError(str(error)) from error
     quests = []
     for key, area in (("native_wire_quest_reward", BOROUGH), ("native_meet_broker_reward", BLACK_MARKET)):
         reward = party.get(key)
@@ -253,6 +258,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     return ([roll["escrow"] for roll in rolls.values() if "escrow" in roll]
             + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]
+            + manual_drops
             + quests)
 
 

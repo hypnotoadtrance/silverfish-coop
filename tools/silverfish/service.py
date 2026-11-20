@@ -25,6 +25,7 @@ from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
+from . import native_guest_drop
 from . import native_guest_melee
 from . import native_host_dig, native_host_landmine
 from . import native_kill_volume
@@ -51,6 +52,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
+                        *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
@@ -1442,6 +1444,8 @@ class Host:
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
+        if self.fixtures and self.last_game.get(native_guest_stack_drop.CAPABILITY) == 1:
+            gameplay["native_guest_stack_drops"] = native_guest_drop.visible_drops(self.party, character, self.last_game.get("map"))
         if "native_pawns" in gameplay:
             positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
@@ -1548,6 +1552,9 @@ class Host:
                 result = await native_inventory.inspect(self, bridge, character, int(offset))
             elif action == native_inventory.SPLIT:
                 result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"])
+            elif action in native_guest_drop.ACTIONS:
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await native_guest_drop.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == "native-quest-list":
                 result = {"native_quest_page": native_quest_catalog.page(await self.read_quest_catalog(bridge), target)}
             elif action == native_broker.INTERACT:
@@ -2346,6 +2353,11 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_stack_drop.perform(self, bridge, character, request.get("item_guid"),
                                                                    request.get("amount"))
+                elif action in native_guest_drop.ACTIONS and self.fixtures:
+                    character = self.roles().get("guest")
+                    async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                        result = await native_guest_drop.perform(self, bridge, character, action, request.get("target"),
+                                                                request.get("operation_id") or path.stem)
                 elif action == "native-wipe-inventory-fixture":
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_inventory_death.probe(self, bridge, character, request.get("item_guid"))

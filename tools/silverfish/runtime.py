@@ -1510,6 +1510,10 @@ class Bridge:
                     if native_guest_stack_drop.KEY in data:
                         raise ValueError("Duplicate isolated stack drop report")
                     data[native_guest_stack_drop.KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_guest_stack_drop.SETTLE:
+                    if native_guest_stack_drop.SETTLE_KEY in data:
+                        raise ValueError("Duplicate isolated stack drop settlement")
+                    data[native_guest_stack_drop.SETTLE_KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-inventory-sort" and len(fields) == 5:
                     data["native_inventory_sort"] = {"map": fields[1], "pawn": fields[2], "state": fields[3],
                                                      "count": int(fields[4])}
