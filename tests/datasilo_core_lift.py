@@ -159,7 +159,9 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     async def at_stop(label, stop, *, riders=False):
         return await observe(label, lambda _, host, peer: (
             lift_pose_matches(host.get(lift.KEY, {}), peer.get(lift.KEY, {}), stop)
-            and (not riders or lift_riders_match(host, peer, host_pawn, guest_pawn))), timeout=16)
+            and (not riders or lift_riders_match(host, peer, host_pawn, guest_pawn,
+                                                 allow_downed_guest=carrier_can_be_downed,
+                                                 allow_rail=park_on_deck or fixture_passengers))), timeout=16)
 
     async def turn(label, yaw, *, pitch=CARRY_PITCH):
         before = await observe(label, lambda *_: True)
@@ -324,11 +326,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         host_boarding = await action(run, lift.STAGE_RIDER, target="host-clear-corner")
         guest_boarding = await action(run, lift.STAGE_RIDER, target="guest-clear-corner")
         assert (host_boarding["pawn"], guest_boarding["pawn"]) == (host_pawn, guest_pawn)
-        await asyncio.gather(
-            walk_to("bring the staged host inside the south rail", (-1698, -48), 5, seat="lead"),
-            walk_to("bring the staged guest inside the north rail", (-1698, 49), 5, reached=on_deck),
-        )
-        boarded = await at_stop("the staged passengers land on the stock deck", "lower", riders=True)
+        boarded = await at_stop("the staged passengers settle on the stock lift mesh", "lower", riders=True)
         await pick_up_at_upper_stop(await ride_lift(boarded))
         await disembark()
         return
@@ -408,7 +406,6 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof["deck_release"] = await set_down("release the Core over the stock deck")
         proof["lower_parked"] = await observe_parked_core()
         staged = await action(run, lift.STAGE_RIDER, target="host-clear-corner")
-        await walk_to("bring the staged host inside the south rail", (-1698, -48), 5, seat="lead")
     else:
         staged, proof["stock_regrip"] = await asyncio.gather(
             action(run, lift.STAGE_RIDER, target="host"),

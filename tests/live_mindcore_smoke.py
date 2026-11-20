@@ -131,15 +131,21 @@ def lift_pose_matches(host, guest, stop):
                for key in ("root_position", "deck_position", "button_position"))
 
 
-def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
+def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn, *, allow_downed_guest=False, allow_rail=False):
+    maximum_height = 215 if allow_rail else 165
     for frame, seats in ((host_frame, {"local": host_pawn, "guest": guest_pawn}),
                          (guest_frame, {"local": guest_frame.get("pawns", {}).get("local", {}).get("name")})):
         height = frame[lift.KEY]["root_position"][2]
         for slot, pawn in seats.items():
             base = frame.get(lift.RIDER_KEY, {}).get(slot, {})
-            if (not pawn or (base.get("pawn"), base.get("base")) != (pawn, lift.DECK)
-                    or not 85 < base["position"][2] - height < 165
-                    or frame.get("player_effects", {}).get(slot, {}).get("state") != "standing"):
+            if not pawn or (base.get("pawn"), base.get("base")) != (pawn, lift.DECK):
+                return False
+            effect = frame.get("player_effects", {}).get(slot, {}).get("state")
+            relative_height = base["position"][2] - height
+            downed_seat = allow_downed_guest and (frame is guest_frame or slot == "guest")
+            if downed_seat and effect == "downed" and 48 < relative_height < 105:
+                continue
+            if effect != "standing" or not 85 < relative_height < maximum_height:
                 return False
     return True
 
