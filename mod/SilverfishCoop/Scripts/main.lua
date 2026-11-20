@@ -83,6 +83,7 @@ local native_guest_clock = require("native_guest_clock")
 local native_host_camera = require("native_host_camera")
 local native_host_landmine = require("native_host_landmine")
 local native_host_dig = require("native_host_dig")
+local native_host_dig_live = require("native_host_dig_live")
 local native_guest_consumable = require("native_guest_consumable")
 local native_guest_mre = require("native_guest_mre")
 local native_guest_regen = require("native_guest_regen")
@@ -425,6 +426,10 @@ local function run_command(fields, state, current_phase)
         or command == "native-guest-save-capture") and native_kill_volume.capture_blocked(state, current_phase) then
         error("stock_kill_volume_recovery_in_progress", 0)
     end
+    if role == "host" and (command == "travel" or command == "native-world-flush" or command == "native-rest")
+        and not native_host_dig_live.capture_allowed(state, current_phase) then
+        error("stock_live_dig_checkpoint_pending", 0)
+    end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
@@ -434,7 +439,10 @@ local function run_command(fields, state, current_phase)
         if command == "native-guest-clear" then native_enemy_loot.clear_fixture() else native_enemy_loot.clear() end
     end
     if command == "travel" or command == "leave" then native_rest.clear_hook() end
-    if command == "travel" or command == "leave" then native_host_dig.clear() end
+    if command == "travel" or command == "leave" then
+        native_host_dig.clear()
+        native_host_dig_live.clear()
+    end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_mosby_station.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
@@ -711,7 +719,10 @@ local function run_command(fields, state, current_phase)
         last_broker_quest = { world = state.world, operation = command, target = argument, result = result }
         return "stock Broker quest state verified"
     elseif command == "native-host-save-capture" then
-        if #fields ~= 3 or role ~= "host" then error("Expected an isolated host save generation", 0) end
+        if (#fields ~= 3 and #fields ~= 4) or role ~= "host" then error("Expected an isolated host save generation", 0) end
+        if not native_host_dig_live.capture_allowed(state, current_phase, fields[4]) then
+            error("stock_live_dig_checkpoint_pending", 0)
+        end
         return native_host_save.capture(state, current_phase, argument)
     elseif command == "native-guest-quest-xp" then
         if #fields ~= 4 or role ~= "host" or current_phase ~= "hosting" or type(guest_save.quest_xp) ~= "function" then
@@ -857,6 +868,7 @@ local function run_command(fields, state, current_phase)
         or native_host_camera.command(fields, state, current_phase)
         or native_host_landmine.command(fields, state, current_phase)
         or native_host_dig.command(fields, state, current_phase)
+        or native_host_dig_live.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -971,6 +983,9 @@ local function write_status(state, current_phase, failure)
     if type(guest_save.quest_xp) == "function" then
         rows[#rows + 1] = status_row("native-guest-xp-capability", 1)
     end
+    if type(SilverfishRenewNativeHostDigScope) == "function" then
+        rows[#rows + 1] = status_row("native-host-dig-live-capability", 1)
+    end
     if last_guest_xp and last_guest_xp.map == state.map then
         rows[#rows + 1] = status_row("native-guest-xp", last_guest_xp.map, last_guest_xp.pawn,
             last_guest_xp.before, last_guest_xp.after)
@@ -1007,6 +1022,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_host_camera.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_landmine.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_dig.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_dig_live.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_consumable.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_mre.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1191,6 +1207,7 @@ local function tick()
     native_guest_primary_input.sync(state, current_phase)
     native_guest_clock.sync(state, current_phase)
     native_host_camera.sync(state, current_phase)
+    native_host_dig_live.sync(state, current_phase)
     native_enemy_loot.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
@@ -1279,6 +1296,7 @@ native_shop_view.start(bridge, players.is_downed)
 native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
 native_host_camera.start(bridge, players.is_downed)
+native_host_dig_live.start(bridge)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)

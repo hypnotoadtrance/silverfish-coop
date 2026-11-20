@@ -36,7 +36,7 @@ from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_melee import parse as parse_guest_melee
-from . import native_host_dig
+from . import native_host_dig, native_host_dig_live
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity
@@ -317,7 +317,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False, guest_mre: bool = False,
            guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
-           native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False):
+           native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
+           host_dig_live: bool = False, host_dig_live_fixture: bool = False):
     """Launch the staged executable with a dedicated Unreal user directory."""
     game = (work / "stage" / SHIPPING).resolve(strict=True)
     if not game.is_relative_to(work.resolve() / "stage"):
@@ -347,6 +348,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT", None)
+    env.pop("SILVERFISH_COOP_NATIVE_HOST_DIG", None)
+    env.pop("SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_FIXTURES", None)
     env.pop("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_INPUT", None)
@@ -440,6 +443,10 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool,
             env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES"] = "1"
     if host_camera_input:
         env["SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT"] = "1"
+    if host_dig_live and port is not None and native_guest and native_zones:
+        env["SILVERFISH_COOP_NATIVE_HOST_DIG"] = "1"
+        if host_dig_live_fixture and headless and native_fixtures:
+            env["SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES"] = "1"
     if guest_inventory_view:
         env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
     if native_shop_view:
@@ -1431,6 +1438,12 @@ class Bridge:
                     if native_host_dig.KEY in data:
                         raise ValueError("Repeated stock host dig report")
                     data[native_host_dig.KEY] = native_host_dig.parse(fields, data.get("state"), data.get("map"))
+                elif fields == ["native-host-dig-live-capability", "1"]:
+                    data["native_host_dig_live_capability"] = True
+                elif fields[0] == native_host_dig_live.TAG:
+                    if native_host_dig_live.KEY in data:
+                        raise ValueError("Duplicate live stock dig report")
+                    data[native_host_dig_live.KEY] = native_host_dig_live.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-host-landmine":
                     report = parse_host_landmine(fields)
                     if report:

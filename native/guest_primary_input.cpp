@@ -1151,6 +1151,18 @@ namespace
 
 namespace silverfish::native_guest_primary_input
 {
+    bool matches_stock_spade_started(U::UObject* pawn, U::UFunction* function, const void* arguments)
+    {
+        static const U::FName name{STR("InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36")};
+        if (!U::IsInGameThreadRaw() || !function || function->GetFName() != name || !arguments ||
+            !live(pawn) || pawn->GetClassPrivate() != find<U::UClass>(pawn_path)) return false;
+        auto* action = find<U::UObject>(action_path);
+        auto* type = find<U::UClass>(STR("/Script/EnhancedInput.InputAction"));
+        if (!live(action) || !type || action->GetClassPrivate() != type) return false;
+        const auto wrapper = bind_wrapper(pawn->GetClassPrivate(), action, started_path, 2);
+        return function == wrapper.function.Get() && verifies_source(wrapper, action, arguments);
+    }
+
     bool dispatch_crossroads_spade_fixture(RC::Unreal::UObject* pawn, RC::Unreal::UObject* spade, bool down)
     {
         if (!U::IsInGameThreadRaw() || !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") ||

@@ -45,6 +45,8 @@ namespace
     constexpr auto item_struct_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto guid_struct_path = STR("/Script/CoreUObject.Guid");
     constexpr auto payload_struct_path = STR("/Script/StructUtils.InstancedStruct");
+    constexpr auto spade_path = STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C");
+    constexpr auto sealed_package_path = STR("/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr int max_inventory = 4096;
     constexpr int max_escrow = 2;
@@ -334,6 +336,15 @@ namespace
             if (!committed && rows.Num() > before) rows.RemoveValues(before, rows.Num() - before);
         }
     };
+
+    bool sealed_package_row(const Inventory& inventory, const void* row)
+    {
+        auto* type = find<Unreal::UClass>(sealed_package_path);
+        if (!type || inventory.klass(row) != type || inventory.identity(row) == Guid{}) return false;
+        const auto amount = inventory.ammo->GetPropertyValueInContainer(row);
+        return (amount == 0 || amount == 1) && inventory.weight->GetPropertyValueInContainer(row) == 1.0 &&
+            inventory.value->GetPropertyValueInContainer(row) == 50;
+    }
 
     template <bool enemy>
     int capture(const Lua& lua)
@@ -646,6 +657,105 @@ namespace
 
 namespace silverfish::loot_escrow
 {
+    bool stock_spade_guid(Unreal::UObject* save, std::string& guid)
+    {
+        Inventory inventory;
+        if (!Unreal::IsInGameThreadRaw() || !live(save) || save->GetClassPrivate() != inventory.save_class ||
+            !inventory.bind()) return false;
+        auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+        auto* type = find<Unreal::UClass>(spade_path);
+        if (!selected || !type) return false;
+        const auto index = selected->GetPropertyValueInContainer(save);
+        Unreal::FScriptArrayHelper rows(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
+        if (index < 0 || index >= rows.Num() || rows.Num() > max_inventory) return false;
+        const auto* row = rows.GetRawPtr(index);
+        const auto id = inventory.identity(row);
+        if (inventory.klass(row) != type || inventory.ammo->GetPropertyValueInContainer(row) != -1 || id == Guid{}) return false;
+        Match identity;
+        if (!inspect_owner(inventory, save, id, identity) || identity.count != 1 || identity.row != row) return false;
+        guid = print_guid(id);
+        return true;
+    }
+
+    bool sealed_package_guid(Unreal::UObject* save, std::string& guid)
+    {
+        Inventory inventory;
+        auto* type = find<Unreal::UClass>(sealed_package_path);
+        if (!Unreal::IsInGameThreadRaw() || !type || !live(save) || save->GetClassPrivate() != inventory.save_class ||
+            !inventory.bind()) return false;
+        Guid id{};
+        const void* assigned{};
+        for (auto* property : {inventory.backpack, inventory.equipment})
+        {
+            Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(save));
+            if (rows.Num() < 0 || rows.Num() > max_inventory) return false;
+            for (int index = 0; index < rows.Num(); ++index)
+            {
+                const auto* row = rows.GetRawPtr(index);
+                if (inventory.klass(row) != type) continue;
+                if (assigned || property != inventory.backpack || !sealed_package_row(inventory, row)) return false;
+                assigned = row;
+                id = inventory.identity(row);
+            }
+        }
+        if (inventory.klass(inventory.armor->ContainerPtrToValuePtr<void>(save)) == type ||
+            inventory.klass(inventory.helmet->ContainerPtrToValuePtr<void>(save)) == type) return false;
+        if (assigned)
+        {
+            Match identity;
+            if (!inspect_owner(inventory, save, id, identity) || identity.count != 1 || identity.row != assigned) return false;
+            guid = print_guid(id);
+        }
+        else guid.clear();
+        return true;
+    }
+
+    bool capture_sealed_package(Unreal::UObject* pawn, Unreal::UObject* package, Address scratch_address, std::string& guid)
+    {
+        Inventory inventory;
+        auto* type = find<Unreal::UClass>(sealed_package_path);
+        if (!Unreal::IsInGameThreadRaw() || !type || !live(package) || package->GetClassPrivate() != type ||
+            !live(pawn) || !inventory.bind()) return false;
+        std::string_view failure;
+        auto* scratch = isolated_save(scratch_address, inventory, failure);
+        if (!scratch) return false;
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(scratch));
+        if (rows.Num() != 0 || !qualified_escrow(inventory, scratch, rows, 1)) return false;
+        const auto item = convert(inventory, pawn, package);
+        if (!item || !sealed_package_row(inventory, item.get())) return false;
+        AddedRows append{rows};
+        const auto index = rows.AddValue();
+        if (index != 0 || rows.Num() != 1) return false;
+        inventory.row->CopyCompleteValue(rows.GetRawPtr(0), item.get());
+        if (!inventory.identical(rows.GetRawPtr(0), item.get()) || !qualified_escrow(inventory, scratch, rows, 1)) return false;
+        guid = print_guid(inventory.identity(item.get()));
+        append.committed = true;
+        return true;
+    }
+
+    bool verify_sealed_package(Address scratch_address, std::string_view guid, Unreal::UObject* pawn, Unreal::UObject* package)
+    {
+        Inventory inventory;
+        const auto id = parse_guid(guid);
+        if (!Unreal::IsInGameThreadRaw() || id == Guid{} || !inventory.bind()) return false;
+        std::string_view failure;
+        auto* scratch = isolated_save(scratch_address, inventory, failure);
+        if (!scratch) return false;
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(scratch));
+        if (rows.Num() != 1 || !qualified_escrow(inventory, scratch, rows, 1)) return false;
+        const auto* stored = rows.GetRawPtr(0);
+        if (inventory.identity(stored) != id || !sealed_package_row(inventory, stored)) return false;
+        if (!package) return pawn == nullptr;
+        if (!live(pawn) || !live(package) || package->GetClassPrivate() != inventory.klass(stored)) return false;
+        const auto actual = convert(inventory, pawn, package);
+        if (!actual) return false;
+        // ItemActorToStruct assigns a fresh GUID on every conversion. Only the
+        // scratch copy is normalized before comparing all other stock fields.
+        inventory.guid->CopyCompleteValue(inventory.guid->ContainerPtrToValuePtr<void>(actual.get()),
+                                          inventory.guid->ContainerPtrToValuePtr<void>(stored));
+        return inventory.identical(stored, actual.get());
+    }
+
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         if (!enabled()) return;

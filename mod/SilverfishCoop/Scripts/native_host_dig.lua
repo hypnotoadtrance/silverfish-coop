@@ -4,6 +4,7 @@ local wire = require("native_wire_quest")
 
 local enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
+local live_fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local world_path = map .. ".CrossRoads_P"
 local source_path = world_path .. ":PersistentLevel.BurriedItem_BP_C_1"
@@ -24,8 +25,10 @@ local actions = {
     ["native-host-dig-press-fixture"] = "press",
     ["native-host-dig-collect-fixture"] = "collect",
     ["native-host-dig-inspect-fixture"] = "inspect",
+    ["native-host-dig-live-press-fixture"] = "live_press",
+    ["native-host-dig-live-collect-fixture"] = "live_collect",
 }
-local current, proof, acquiring
+local current, proof, acquiring, live_pose
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -371,16 +374,71 @@ local function matches(ctx)
         and same(current.save, ctx.save) and same(current.detached, ctx.detached)
 end
 
+local function live_report(ctx)
+    if type(SilverfishReadNativeHostDigScope) == "function" then
+        return SilverfishReadNativeHostDigScope(ctx.world:GetAddress(), ctx.pawn:GetAddress())
+    end
+end
+
+local function fixture_command(action, fields, ctx, spade_type, package_type)
+    need(live_fixture and not current and not live_pose and
+        type(SilverfishDispatchNativeHostDigLiveFixture) == "function", "live_fixture_unavailable")
+    local state, serial, _, name = live_report(ctx)
+    if action == "live_press" then
+        local spade, identity = held(ctx, spade_type)
+        local _, present = wire.stock_flag(ctx.instance, key())
+        need(state == "ready" and spade and identity == fields[4] and not present
+            and inventory(ctx.save, package_type) == 0, "live_fixture_spade_preflight")
+        local prior = pose(ctx)
+        need(prior.place and prior.facing and prior.control and prior.camera, "dig_pose")
+        local _, _, moved = dig_aim(ctx, spade, exact_site(ctx), prior)
+        local sent, status = SilverfishDispatchNativeHostDigLiveFixture(ctx.world:GetAddress(), ctx.pawn:GetAddress(), true)
+        if sent ~= true or status ~= "stock_started" then
+            need(restore(ctx, prior, moved), "dig_pose_restore", moved)
+            error(status or "stock_live_dig_fixture_no_stock_start", 0)
+        end
+        live_pose = {world = ctx.world, pawn = ctx.pawn, save = ctx.save,
+            prior = prior, moved = moved, until_time = os.time() + 5}
+        return "stock primary Started dispatched to the ordinary dig observer"
+    end
+    need((state == "escrowed" or state == "unclaimed") and serial == math.tointeger(tonumber(fields[4]))
+        and name == fields[5] and site_retired(ctx), "live_fixture_loose_package_unavailable")
+    local path = name:match("^Package_Item_FarmHouse_C (.+)$")
+    local actor = path and StaticFindObject(path)
+    need(exact(actor, package_class) and stock_valid(actor) == true and actor:HasAuthority()
+        and same(actor:GetWorld(), ctx.world) and actor:GetFullName() == name
+        and inventory(ctx.save, package_type) == 0
+        and inventory(ctx.detached, package_type) == 0, "live_fixture_loose_package_identity")
+    stock_f(ctx, actor, actor.Box, "live_package")
+    return "stock Interact dispatched to the ordinary sealed package observer"
+end
+
+local function finish_live_pose(ctx)
+    if not ctx or not same(live_pose.world, ctx.world) or not same(live_pose.pawn, ctx.pawn)
+        or not same(live_pose.save, ctx.save) then return end
+    local state = live_report(ctx)
+    if state ~= "unclaimed" and state ~= "escrowed" and state ~= "failed" and os.time() < live_pose.until_time then return end
+    local pending = live_pose
+    live_pose = nil
+    local sent, status = SilverfishDispatchNativeHostDigLiveFixture(ctx.world:GetAddress(), ctx.pawn:GetAddress(), false)
+    need(restore(ctx, pending.prior, pending.moved), "live_fixture_pose_restore", true)
+    need(sent == true and status == "stock_completed", "live_fixture_release:" .. tostring(status), true)
+end
+
 function dig.command(fields, state, phase)
     local action = actions[fields[2]]
     if not action then return end
     local ctx = need(context(state, phase), "exact_headless_host_unavailable")
-    need(fields[3] == ctx.name and #fields == (action == "press" and 4 or 3), "fixture_arguments")
+    local size = (action == "press" or action == "live_press") and 4 or action == "live_collect" and 5 or 3
+    need(fields[3] == ctx.name and #fields == size, "fixture_arguments")
     local spade_type, package_type = StaticFindObject(spade_class), StaticFindObject(package_class)
     need(valid(spade_type) and valid(package_type), "stock_classes_unavailable")
     local flag, present = wire.stock_flag(ctx.instance, key())
     local guest_spade, guest_package = inventory(ctx.detached, spade_type), inventory(ctx.detached, package_type)
     need(guest_spade == 0 and guest_package == 0, "guest_inventory_unqualified")
+    if action == "live_press" or action == "live_collect" then
+        return fixture_command(action, fields, ctx, spade_type, package_type)
+    end
     if action == "acquire" then
         need(not acquiring, "spade_pickup_already_pending")
         local actor = StaticFindObject(spade_path)
@@ -451,9 +509,11 @@ function dig.command(fields, state, phase)
 end
 
 function dig.rows(state, phase, status_row)
-    if not proof then return {} end
+    if not proof and not live_pose then return {} end
     local ctx = context(state, phase)
     if not ctx then return {} end
+    if live_pose then finish_live_pose(ctx) end
+    if not proof then return {} end
     if proof.status == "acquiring" then settle_acquisition(ctx) end
     if proof.status == "pressed" and matches(ctx) then
         local ok, status, address, x, y, z, holes, incidental =
@@ -492,7 +552,7 @@ function dig.rows(state, phase, status_row)
 end
 
 function dig.clear()
-    current, proof, acquiring = nil, nil, nil
+    current, proof, acquiring, live_pose = nil, nil, nil, nil
 end
 
 return dig

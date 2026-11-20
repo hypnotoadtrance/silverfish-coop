@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from . import native_authored_pickup, native_black_box, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .native_host_dig import KEY as DIG_RECORD, FLAG as DIG_FLAG, SOURCE as DIG_SOURCE
+from .native_host_dig_live import CUSTODY as DIG_CUSTODY
 from .native_tape_profiles import PUMP, TapeProfile
 from .travel import BLACK_MARKET, BOROUGH, CROSSROADS, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
@@ -156,10 +157,11 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
     if not valid_guid(guid) or proof.get("objective_owner") != ("host" if actor == "host" else "guest"):
         return False
     if spec is MISSING_CONTACT:
-        dug = host.party.get(DIG_RECORD)
+        durable = host.party.get(DIG_CUSTODY)
+        dug = durable if durable is not None else host.party.get(DIG_RECORD)
         return (actor == "host" and isinstance(dug, dict) and type(dug.get("flag_value")) is int and
                 tuple(dug.get(field) for field in ("state", "map", "source", "flag", "flag_value", "package_guid"))
-                == ("collected", CROSSROADS, DIG_SOURCE, DIG_FLAG, 1, guid))
+                == ("owned" if durable is not None else "collected", CROSSROADS, DIG_SOURCE, DIG_FLAG, 1, guid))
     if profile := spec.exchange:
         return any(
             (trade.get("map"), trade.get("station"), trade.get("class_path"), trade.get("filled_guid"), trade.get("owner"))

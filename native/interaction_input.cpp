@@ -932,6 +932,12 @@ namespace
 
 namespace silverfish::native_interaction_input
 {
+    bool has_current_host_press(Unreal::UObject* pawn)
+    {
+        return available() && scope.host && event_depth && event_source_matches && !event_consumed && pawn &&
+            pawn == scope.pawn.Get() && Clock::now() < scope.expires && live_scope(scope) && standing(pawn);
+    }
+
     Unreal::UObject* current_guest_pawn(std::uintptr_t requested)
     {
         if (!available() || scope.host || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;

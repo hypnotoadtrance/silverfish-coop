@@ -28,7 +28,7 @@ from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_guest_melee
-from . import native_host_dig, native_host_landmine
+from . import native_host_dig, native_host_dig_live, native_host_landmine
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
@@ -172,7 +172,7 @@ class Host:
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
                  mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False, mama_dialogue_enabled: bool = False,
-                 native_dead_bridge_enemy_loot: bool = False):
+                 native_dead_bridge_enemy_loot: bool = False, host_dig_live: bool = False, host_dig_live_fixture: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -215,6 +215,8 @@ class Host:
         self.mosby_station_enabled = mosby_station_enabled
         self.camera_ready_at = {}
         self.host_camera_input = native_turret_photo.HostCameraInput() if host_camera_input else None
+        self.native_host_dig_live = host_dig_live
+        self.native_host_dig_live_fixture = host_dig_live_fixture
         self.wipe_view = None
         self.last_crate_intent = 0
         if authored_zones and expanded_zones:
@@ -473,7 +475,8 @@ class Host:
 
     async def checkpoint_native(self, bridge: Bridge, proposed_party: dict | None = None, *,
                                 unleased_states: dict | None = None,
-                                require_guest_frames: frozenset[str] = frozenset()) -> int:
+                                require_guest_frames: frozenset[str] = frozenset(),
+                                dig_token: str | None = None) -> int:
         if self.native_profile is None:
             return self.checkpoint(proposed_party, unleased_states=unleased_states, require_guest_frames=require_guest_frames)
         source = self.last_game.get("map")
@@ -481,7 +484,8 @@ class Host:
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
             raise RuntimeError("The canonical native host is unavailable for checkpointing")
         slot = native_host_save.new_slot()
-        snapshot = await bridge.command("native-host-save-capture", slot, timeout=7)
+        dig_arguments = (dig_token,) if dig_token else ()
+        snapshot = await bridge.command("native-host-save-capture", slot, *dig_arguments, timeout=7)
         observed = snapshot.get("native_host_save", {})
         if (observed.get("state") != "captured" or observed.get("slot") != slot or observed.get("map") != source
                 or observed.get("pawn") != pawn or snapshot.get("map") != source or snapshot.get("state") != "hosting"):
@@ -2485,6 +2489,10 @@ class Host:
                 elif action in native_host_dig.ACTIONS and self.fixtures:
                     result = await native_host_dig.perform(
                         self, bridge, action, request.get("target"), request.get("operation_id", path.stem))
+                elif action == "native-host-dig-live-fixture" and self.native_host_dig_live_fixture:
+                    from . import native_host_dig_live_fixture
+                    result = await native_host_dig_live_fixture.perform(
+                        self, bridge, request.get("target"), request.get("operation_id") or path.stem)
                 elif action in native_host_landmine.ACTIONS and self.fixtures:
                     result = await native_host_landmine.perform(self, bridge, action, request.get("target"),
                                                                  request.get("operation_id") or path.stem)
@@ -3012,6 +3020,9 @@ class Host:
                 if self.wire_board_enabled and game.get("map") in native_wire_board.MAPS:
                     with contextlib.suppress(OSError):
                         write_text(bridge.directory / native_wire_board.HEARTBEAT, stamp)
+                if self.native_host_dig_live and game.get("map") == CROSSROADS:
+                    with contextlib.suppress(OSError):
+                        write_text(bridge.directory / native_host_dig_live.HEARTBEAT, stamp)
             await asyncio.sleep(.4)
 
     async def run(self, bridge: Bridge, transport) -> None:
@@ -3054,6 +3065,16 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            try:
+                dig_pending = await native_host_dig_live.settle(self, bridge)
+            except (OSError, ValueError, RuntimeError):
+                self.native_checkpoint_unsafe = True
+                raise
+            if dig_pending:
+                self.refresh_native_zone_heartbeat(bridge, time.monotonic())
+                self.publish_host_status(transport)
+                await asyncio.sleep(.25)
+                continue
             native_kill_volume.fence(self)
             if native_kill_volume.pending(self.last_game):
                 self.refresh_native_zone_heartbeat(bridge, time.monotonic())
@@ -3171,7 +3192,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_sickness: bool = False, start_preset: str | None = None, world_seed: int | None = None, guest_mre: bool = False,
                     difficulty: str | None = None,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
-                    guest_melee_canary: bool = False) -> None:
+                    guest_melee_canary: bool = False, host_dig_live_fixture: bool = False) -> None:
     if start_zone == GOLD_NEXUS or start_zone in native_dream.PROFILES:
         raise ValueError("Enter this destination through its required host transport item")
     if world_seed is not None and (start_preset is None or type(world_seed) is not int or not 1 <= world_seed <= 999_999):
@@ -3217,6 +3238,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("--native-events requires the staged C++ lab")
     if native_guest and not native_events:
         raise ValueError("--native-guest requires the staged C++ event scope (--native-events)")
+    if host_dig_live_fixture and not (headless and fixtures and native_guest and native_zones):
+        raise ValueError("The live stock dig input fixture requires a headless native co-op host with fixtures")
     if type(max_guests) is not int or not 1 <= max_guests <= 4:
         raise ValueError("The staged host accepts one to four guests")
     if max_guests > 1 and not (native_guest and native_zones):
@@ -3249,6 +3272,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         if native_record and native_profile is None:
             raise ValueError("Restage the current mod to restore this campaign's native host save")
         saved_party = party.load_party(old_world.get("party"))
+        saved_dig_escrow = native_host_dig_live.escrow_frames(saved_party)
+        host_dig_live = bool(authored and persist_guest and native_profile and (not fixtures or host_dig_live_fixture or saved_dig_escrow)
+                             and staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
+        if (saved_dig_escrow or host_dig_live_fixture) and not host_dig_live:
+            raise ValueError("Restage the live dig bridge to recover the committed stock sealed package")
         pending = pending_cube(saved_party)
         dream = native_dream.visit(saved_party)
         matrix = native_matrix.pending(saved_party)
@@ -3279,9 +3307,12 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                              native_shop_view=native_shop_view, native_loot_input=native_loot_input,
                              guest_regen=guest_regen, guest_sickness=guest_sickness, host_camera_input=host_camera_input, guest_mre=guest_mre,
                              native_wipe_view=wipe_view_enabled, guest_held_fire=guest_held_fire,
-                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary)
+                             native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary,
+                             host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture)
             bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
+            if host_dig_live and not ready.get("native_host_dig_live_capability"):
+                raise RuntimeError("The staged native add-on is missing its live dig bridge")
             if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 3:
                 raise RuntimeError("The staged addon did not expose the exact placed CQC enemy loot bridge")
             extraction_rules = {}
@@ -3370,7 +3401,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               shopkeep_dialogue_enabled=shopkeep_dialogue_enabled, mama_dialogue_enabled=mama_dialogue_enabled,
                               mosby_station_enabled=mosby_station_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
-                              native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot,
+                              native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, host_dig_live=host_dig_live,
+                              host_dig_live_fixture=host_dig_live_fixture,
                               exact_guest_binding=persist_guest and staged_script(work, "guest_save.lua", "native-guest-bind-exact"),
                               **multi_options)
             controller.internal_port = internal_port
@@ -3410,6 +3442,12 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 await controller.advance_dream(bridge, None)
             elif matrix:
                 await matrix_service.resume(controller, bridge, None, recovery=True)
+            if host_dig_live and controller.last_game.get("map") == CROSSROADS and native_host_dig_live.escrow_frames(controller.party):
+                write_text(bridge.directory / native_host_dig_live.HEARTBEAT, f"{int(time.time())}\n")
+                controller.last_game = await bridge.wait_for(
+                    lambda game: game.get(native_host_dig_live.KEY, {}).get("state") == "ready", timeout=5)
+                controller.last_seen = time.monotonic()
+                await native_host_dig_live.settle(controller, bridge)
             transport = await link.start_host(bind, port, "127.0.0.1", internal_port, identity,
                                               controller.admit, on_disconnect=controller.disconnected,
                                               on_request=controller.guest_request, max_game_guests=max_guests)

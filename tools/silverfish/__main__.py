@@ -68,6 +68,8 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--native-guest-regen", action="store_true", help="enable qualified stock passive guest regeneration")
     host.add_argument("--native-guest-sickness", action="store_true", help="keep stock infection and recovery in the guest save")
     host.add_argument("--native-guest-melee-canary", action="store_true", help="observe one fenced stock Old Pipe swing in a headless fixture")
+    host.add_argument("--native-host-dig-live-fixtures", action="store_true",
+                      help="test ordinary stock Spade and Interact through the headless input wrappers")
     host.add_argument("--native-guest-mre", action="store_true", help="enable guest MRE and Canned Peaches use with personal intoxication")
     host.add_argument("--native-guest-held-fire", action="store_true", help="enable experimental stock standard SMG holds")
     host.add_argument("--native-authored-enemy-loot", "--native-dead-bridge-enemy-loot",
@@ -185,6 +187,7 @@ def parser() -> argparse.ArgumentParser:
         "native-host-camera-aim-fixture", "native-host-camera-equip-fixture", "refresh-invite",
         "native-host-landmine-prepare-fixture", "native-host-landmine-deploy-fixture", "native-host-landmine-inspect-fixture",
         "native-host-dig-acquire-fixture", "native-host-dig-fixture", "native-host-dig-inspect-fixture",
+        "native-host-dig-live-fixture",
         "native-computer-board-preflight", "native-computer-board-approach",
         "native-coup-report-preflight", "native-coup-report-approach",
         "native-depot-documents-preflight", "native-depot-documents-approach",
@@ -269,6 +272,7 @@ async def execute(opts):
                         guest_regen=opts.native_guest_regen, guest_sickness=opts.native_guest_sickness, guest_mre=opts.native_guest_mre,
                         guest_held_fire=opts.native_guest_held_fire,
                         guest_melee_canary=opts.native_guest_melee_canary,
+                        host_dig_live_fixture=opts.native_host_dig_live_fixtures,
                         native_dead_bridge_enemy_loot=opts.native_dead_bridge_enemy_loot,
                         start_preset=opts.native_start_preset, difficulty=opts.native_difficulty,
                         world_seed=opts.native_world_seed,
