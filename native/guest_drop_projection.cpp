@@ -528,21 +528,22 @@ namespace
         return type && live(component) && component->GetOuterPrivate() == actor && component->GetClassPrivate() == type;
     }
 
-    bool pistol_components(U::AActor* actor, U::UObject* box, Collision& collision)
+    const char* pistol_components(U::AActor* actor, U::UObject* box, Collision& collision)
     {
         auto* mesh_type = find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"));
         auto* skeletal_type = find<U::UClass>(STR("/Script/Engine.SkeletalMeshComponent"));
-        auto* arrow_type = find<U::UClass>(STR("/Script/Engine.ArrowComponent"));
         auto* primitive = find<U::UClass>(STR("/Script/Engine.PrimitiveComponent"));
         auto* component_type = find<U::UClass>(STR("/Script/Engine.ActorComponent"));
-        if (!arrow_type || !primitive || !component_type) return false;
+        if (!primitive || !component_type) return "stock_drop_projection_pistol_component_types_unavailable";
         auto* tick_on = collision.native<U::FBoolProperty>(STR("/Script/Engine.ActorComponent:SetComponentTickEnabled"),
                                                           component_type, STR("bEnabled"));
         auto* ticking = collision.native<U::FBoolProperty>(STR("/Script/Engine.ActorComponent:IsComponentTickEnabled"),
                                                           component_type, STR("ReturnValue"), true);
-        if (!tick_on || !ticking) return false;
+        auto* primary_tick = field<U::FStructProperty>(component_type, STR("PrimaryComponentTick"));
+        auto* can_tick = primary_tick ? field<U::FBoolProperty>(primary_tick->GetStruct().Get(), STR("bCanEverTick")) : nullptr;
+        if (!tick_on || !ticking || !can_tick) return "stock_drop_projection_pistol_tick_schema_unavailable";
         auto* skeleton = object(actor, STR("Wep_Skeli"));
-        if (!owned_component(actor, skeleton, skeletal_type)) return false;
+        if (!owned_component(actor, skeleton, skeletal_type)) return "stock_drop_projection_pistol_skeleton_unverified";
         constexpr std::array mesh_fields{STR("Mesh_Frame"), STR("Mesh_Mag"), STR("Mesh_Slide")};
         constexpr std::array mesh_assets{
             STR("/Game/Classes/Weapons/Wep_Assets/Wep_Models/LightPistol_Frame.LightPistol_Frame"),
@@ -555,7 +556,7 @@ namespace
             auto* mesh = object(actor, mesh_fields[index]);
             auto* asset = find<U::UObject>(mesh_assets[index]);
             if (!owned_component(actor, mesh, mesh_type) || !asset || object(mesh, STR("StaticMesh")) != asset)
-                return false;
+                return "stock_drop_projection_pistol_stock_mesh_unverified";
             required[index + 2] = mesh;
         }
         const auto owned_primitives = actor->K2_GetComponentsByClass(primitive);
@@ -563,29 +564,32 @@ namespace
         if (owned_primitives.Num() < static_cast<int>(required.size()) ||
             owned_primitives.Num() > static_cast<int>(component_limit) ||
             owned_components.Num() < owned_primitives.Num() || owned_components.Num() > static_cast<int>(component_limit))
-            return false;
+            return "stock_drop_projection_pistol_component_census_invalid";
         std::array<U::UObject*, component_limit> components{};
         for (int index = 0; index < owned_primitives.Num(); ++index)
         {
             auto* component = owned_primitives[index];
             const auto prior = std::span{components}.first(index);
-            if ((!owned_component(actor, component, arrow_type) &&
-                 std::ranges::find(required, component) == required.end()) ||
-                std::ranges::find(prior, component) != prior.end()) return false;
+            if (!live(component) || component->GetOuterPrivate() != actor ||
+                std::ranges::find(prior, component) != prior.end())
+                return "stock_drop_projection_pistol_primitive_ownership_unverified";
             components[index] = component;
         }
         const auto live_primitives = std::span{components}.first(owned_primitives.Num());
         if (!std::ranges::all_of(required, [&](auto* component) {
             return std::ranges::find(live_primitives, component) != live_primitives.end();
-        })) return false;
+        })) return "stock_drop_projection_pistol_component_missing_from_census";
         for (int index = 0; index < owned_components.Num(); ++index)
         {
             auto* component = owned_components[index];
-            if (!live(component) || component->GetOuterPrivate() != actor) return false;
+            if (!live(component) || component->GetOuterPrivate() != actor)
+                return "stock_drop_projection_pistol_component_ownership_unverified";
+            if (!can_tick->GetPropertyValueInContainer(primary_tick->ContainerPtrToValuePtr<void>(component))) continue;
             Collision::byte_call(component, tick_on, 0);
-            if (Collision::byte_call(component, ticking, 0xff)) return false;
+            if (Collision::byte_call(component, ticking, 0)) return "stock_drop_projection_pistol_component_tick_not_disabled";
         }
-        return collision.configure(actor, box, live_primitives, false);
+        return collision.configure(actor, box, live_primitives, false)
+            ? nullptr : "stock_drop_projection_pistol_component_collision_unverified";
     }
 
     const char* spawn_projection()
@@ -641,7 +645,7 @@ namespace
             const std::array components{box, mesh};
             if (!collision.configure(actor, box, components, true)) return "stock_drop_projection_inert_state_unverified";
         }
-        else if (!pistol_components(actor, box, collision)) return "stock_drop_projection_pistol_components_unverified";
+        else if (const auto* failure = pistol_components(actor, box, collision)) return failure;
 
         if (!show(actor)) return "stock_drop_projection_visible_actor_unverified";
         projection.box = box;
