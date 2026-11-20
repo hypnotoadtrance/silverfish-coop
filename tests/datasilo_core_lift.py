@@ -8,6 +8,7 @@ from live_ai_smoke import status
 from tools.silverfish import native_datasilo_lift as lift, native_guest_armor as armor
 from tools.silverfish import native_mindcore as core, native_mindcore_carry as carry
 from tools.silverfish import native_mindcore_fixture as fixture
+from tools.silverfish.party import INTERACT_RANGE
 
 
 EXIT_Y = 64.0
@@ -21,6 +22,10 @@ class StockCoreReleased(RuntimeError):
     def __init__(self, label, hold):
         super().__init__(f"The exact Core hold ended during {label}: {hold['reason']}")
         self.hold = hold
+
+
+class StockHostDowned(RuntimeError):
+    pass
 
 
 async def equip_stock_protection(run, guest_run, action, *, helmet_profile="basic-helmet"):
@@ -86,7 +91,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     if fixture_loose_cargo:
         proof["moving_cargo_samples"] = moving_samples
     lease = guest_local_pawn = None
-    carrier_can_be_downed = False
+    carrier_can_be_downed = host_can_be_downed = False
 
     def sample(label):
         host, peer = status(run), status(guest_run)
@@ -127,13 +132,20 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         if not paired:
             return None
         parked_above = root.get("stop") == "upper"
-        if carrier_can_be_downed:
+        if host_can_be_downed:
+            required_seats, required_effects = (guest, local), effects[1:]
+        elif carrier_can_be_downed:
             if effects[1:] not in (["standing", "standing"], ["downed", "downed"]):
                 return None
             required_seats, required_effects = (lead,), effects[:1]
+        elif parked_above:
+            required_seats, required_effects = (guest, local), effects[1:]
         else:
-            required_seats = (guest, local) if parked_above else (lead, guest, local)
-            required_effects = effects[1:] if parked_above else effects
+            required_seats, required_effects = (lead, guest, local), effects
+        if (upper_approach and not host_can_be_downed and effects[1:] == ["standing", "standing"]
+                and (effects[0] == "downed" or type(lead.get("health")) in (int, float) and lead["health"] <= 0)
+                and all(type(body.get("health")) in (int, float) and body["health"] > 0 for body in (guest, local))):
+            raise StockHostDowned(f"The host went down during {label}")
         if "downed" in required_effects or any(type(body.get("health")) in (int, float) and body["health"] <= 0
                                                for body in required_seats):
             health = f"host {lead.get('health')}, guest {guest.get('health')}"
@@ -286,6 +298,26 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof.setdefault("stock_regrips", []).append({"release": released.hold, "pickup": held})
         return held["hold"]["yaw"]
 
+    async def revive_host():
+        nonlocal host_can_be_downed
+        host_can_be_downed = True
+        down = await observe("the host is downed and the Core carrier is standing", lambda row, *_: (
+            row["effects"] == ["downed", "standing", "standing"]), timeout=5)
+        lead, guest = down["lead"]["location"], down["carrier"]["location"]
+        if math.dist(lead, guest) > INTERACT_RANGE - 25:
+            distance = math.dist(lead[:2], guest[:2])
+            if distance < 1 or abs(lead[2] - guest[2]) > 135:
+                raise RuntimeError("The downed host and Core carrier are on different floors")
+            close = [a + (b - a) * 135 / distance for a, b in zip(lead[:2], guest[:2], strict=True)]
+            await walk_to("come within reach of the downed host", close, 20)
+        restored = await action(guest_run, "interact", target="host")
+        assert (restored["effect"], restored["target"]) == ("revive", "host"), restored
+        assert math.isclose(restored["health"], down["lead"]["max_health"] * .10)
+        standing = await observe("the exact host stands again after the stock revive", lambda row, *_: (
+            row["effects"] == ["standing", "standing", "standing"] and row["lead"]["health"] > 0), timeout=5)
+        proof.setdefault("host_revives", []).append({"downed": down, "restored": restored, "standing": standing})
+        host_can_be_downed = False
+
     async def observe_parked_core():
         previous = None
 
@@ -431,6 +463,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     raise
                 facing = await recover_stock_drop(released)
                 south_doorway_was_crossed = True
+                continue
+            except StockHostDowned:
+                if len(proof.get("host_revives", ())) >= 2:
+                    raise
+                await revive_host()
                 continue
             south_doorway_was_crossed = south_doorway
             proof["east_stair_progress"] = {"point": index, "frame": frame}
