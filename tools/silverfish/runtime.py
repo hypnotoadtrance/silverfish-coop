@@ -26,6 +26,7 @@ from . import native_black_box
 from . import native_spratt
 from . import native_spratt_fixture
 from . import native_subway_valve
+from . import native_prototype_drill
 from . import native_kill_volume
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
@@ -44,7 +45,7 @@ from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacit
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
-from .travel import CROSSROADS
+from .travel import CROSSROADS, SCIENTIST_SHOP
 from . import udp_ownership
 
 REPO = Path(__file__).resolve().parents[2]
@@ -310,7 +311,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
-           embedded_engine: bool = False) -> dict[str, str]:
+           embedded_engine: bool = False, inspect_title_profile: bool = False) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
@@ -327,6 +328,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_HEADLESS", None)
     env.pop("SILVERFISH_COOP_TITLE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_ENGINE", None)
+    env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_CQC_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_RELOAD_INPUT", None)
@@ -363,6 +365,10 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         if not native_zones:
             raise ValueError("Embedded engine startup requires the staged native campaign")
         env["SILVERFISH_COOP_EMBEDDED_ENGINE"] = "1"
+    if inspect_title_profile:
+        if port is not None:
+            raise ValueError("A separate title profile must start without a listen port")
+        env["SILVERFISH_COOP_INSPECT_TITLE_PROFILE"] = "1"
     if native_zone_walls and not native_zones:
         raise ValueError("Physical exit blockers require native exit handling")
     if guest_reload_input and (port is not None or not native_zones):
@@ -474,7 +480,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     if not game.is_relative_to(work.resolve() / "stage"):
         raise ValueError("The staged shipping executable points outside the stage")
     env = game_environment(work, headless, port, **options)
-    if options.get("embedded_engine"):
+    if options.get("embedded_engine") or options.get("inspect_title_profile"):
         from .embedded_engine import assert_private_saved_tree
         assert_private_saved_tree(profile)
     profile.mkdir(parents=True, exist_ok=True)
@@ -905,6 +911,7 @@ class Bridge:
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
             mosby_frame, mosby_reputation = None, []
+            drill_frame, drill_reputation = None, []
             matrix_rows, marker_rows = [], []
             marker_frame = None
             malformed_markers = False
@@ -1164,6 +1171,19 @@ class Bridge:
                     mosby_reputation.append(fields)
                 elif fields[0] == "native-mosby-reward":
                     data["native_mosby_reward"] = native_mosby_tape.parse_reward(fields)
+                elif fields[0] == native_prototype_drill.TAG:
+                    if drill_frame is not None or len(fields) != 23:
+                        raise ValueError("Invalid Prototype Drill board frame")
+                    drill_frame = fields
+                elif fields[0] == native_prototype_drill.REP_TAG:
+                    if len(fields) != 10 or len(drill_reputation) >= 3:
+                        raise ValueError("Invalid Prototype Drill faction row")
+                    drill_reputation.append(fields)
+                elif fields[0] == native_prototype_drill.REWARD_TAG:
+                    if (len(fields) != 7 or native_prototype_drill.REWARD_KEY in data
+                            or (data.get("state"), data.get("map")) != ("hosting", fields[1])):
+                        raise ValueError("Invalid Prototype Drill reward frame")
+                    data[native_prototype_drill.REWARD_KEY] = native_prototype_drill.parse_reward(fields)
                 elif fields[0] == "native-subway-valve-board":
                     if native_subway_valve.BOARD_KEY in data:
                         raise ValueError("Duplicate Flood Control board report")
@@ -2046,6 +2066,12 @@ class Bridge:
                     if not mosby_frame:
                         raise ValueError("Missing Stone Maze quest frame")
                     data["native_mosby_readings"] = native_mosby_tape.parse_readings(mosby_frame, mosby_reputation)
+                if drill_frame or drill_reputation:
+                    if not drill_frame or (data.get("state"), data.get("map"), drill_frame[2]) != (
+                        "hosting", SCIENTIST_SHOP, SCIENTIST_SHOP,
+                    ):
+                        raise ValueError("Prototype Drill proof is outside its authoritative map")
+                    data[native_prototype_drill.KEY] = native_prototype_drill.parse_redemption(drill_frame, drill_reputation)
                 for key in (*(profile.key for profile in native_mosby_tape.BY_MAP.values()),
                             "native_mosby_readings", "native_mosby_reward"):
                     if key in data and (data.get("state"), data.get("map")) != ("hosting", data[key]["map"]):

@@ -35,20 +35,34 @@ def parse_receipt(row: bytes) -> Receipt:
     return Receipt(*(value.decode("ascii") for value in match.groups()))
 
 
-def read_inherited_receipt() -> Receipt:
-    import msvcrt
-
+def _inherited_pipe(standard_handle: int) -> int:
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.GetStdHandle.argtypes = [wintypes.DWORD]
     kernel.GetStdHandle.restype = wintypes.HANDLE
     kernel.GetFileType.argtypes = [wintypes.HANDLE]
     kernel.GetFileType.restype = wintypes.DWORD
-    handle = kernel.GetStdHandle(-10)  # STD_INPUT_HANDLE
+    handle = kernel.GetStdHandle(standard_handle)
     if not handle or kernel.GetFileType(handle) != 3:  # FILE_TYPE_PIPE
-        raise ValueError("The game title must supply an inherited launch request")
-    fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        raise ValueError("The game title must supply a private inherited pipe")
+    return handle
+
+
+def read_inherited_receipt() -> Receipt:
+    import msvcrt
+
+    fd = msvcrt.open_osfhandle(_inherited_pipe(-10), os.O_RDONLY | os.O_BINARY)  # STD_INPUT_HANDLE
     with os.fdopen(fd, "rb") as stream:
         return parse_receipt(stream.read(_REQUEST_BYTES + 1))
+
+
+def write_inherited_ready(receipt: Receipt) -> None:
+    import msvcrt
+
+    row = f"1\tcoop-title-ready\t{receipt.generation}\t{receipt.request_id}\n".encode("ascii")
+    fd = msvcrt.open_osfhandle(_inherited_pipe(-11), os.O_WRONLY | os.O_BINARY)  # STD_OUTPUT_HANDLE
+    with os.fdopen(fd, "wb", buffering=0) as stream:
+        if stream.write(row) != len(row):
+            raise RuntimeError("The windowless title readiness receipt was incomplete")
 
 
 def _qualified_path(value: object, *, directory: bool) -> Path:
@@ -103,7 +117,7 @@ def load_plan(config_path: Path) -> SimpleNamespace:
     return plan
 
 
-async def open_coop(receipt: Receipt, config: Path) -> None:
+async def open_coop(receipt: Receipt, config: Path, *, report_ready=write_inherited_ready) -> None:
     plan = load_plan(config)
     receipts = plan.work / "bootstrap-receipts"
     receipts.mkdir(exist_ok=True)
@@ -113,8 +127,13 @@ async def open_coop(receipt: Receipt, config: Path) -> None:
     with lock.open("xb"):
         progress = dict(schema=1, generation=receipt.generation, request_id=receipt.request_id)
         runtime.write_json(status, dict(progress, state="opening"))
+
+        def ready():
+            runtime.write_json(status, dict(progress, state="title_ready"))
+            report_ready(receipt)
+
         try:
-            await staged_title_menu(plan)
+            await staged_title_menu(plan, on_title_ready=ready)
         except (OSError, ValueError, RuntimeError) as error:
             runtime.write_json(status, dict(progress, state="failed", error_type=type(error).__name__))
             raise
@@ -128,6 +147,7 @@ def main() -> int:
     except (OSError, ValueError):
         return 2
     try:
+        _inherited_pipe(-11)
         local = Path(os.environ["LOCALAPPDATA"]).resolve(strict=True)
         asyncio.run(open_coop(receipt, local / "SilverfishCoop" / "coordinator.json"))
     except (KeyError, OSError, ValueError, RuntimeError):

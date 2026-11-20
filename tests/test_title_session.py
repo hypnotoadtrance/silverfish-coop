@@ -4,11 +4,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from test_title_handoff import ready
-from tools.silverfish import runtime, service
+from tools.silverfish import native_title_entry, runtime, service
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession, host_plan, join_plan
 from tools.silverfish.travel import OBSERVATORY
@@ -141,6 +141,61 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         await task
         self.assertEqual(self.status()["state"], "stopped")
         self.assertEqual(child.calls, 1)
+
+    async def test_notifies_original_once_after_advancing_frames_from_the_isolated_panel(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        original = self.bridge.snapshot
+        actions = ["join"]
+        renders = 0
+
+        def snapshot():
+            nonlocal renders
+            renders += 1
+            data = original()
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=actions)
+            data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+            return data
+
+        self.bridge.snapshot = snapshot
+        notify = Mock()
+        session = TitleSession(self.bridge, {"host": Child("host").plan()}, on_title_ready=notify,
+                               title_saved_directory=saved, poll_interval=.005)
+        task = asyncio.create_task(session.run())
+        self.addAsyncCleanup(self.stop, task)
+        await self.wait(lambda: renders >= 2)
+        notify.assert_not_called()
+        self.bridge.frozen = True
+        actions = ["host"]
+        await self.wait(lambda: renders >= 6)
+        notify.assert_not_called()
+        self.bridge.frozen = False
+        await self.wait(lambda: notify.called)
+        self.assertEqual(self.status()["state"], "offered")
+        await self.wait(lambda: renders >= 9)
+        notify.assert_called_once_with()
+
+    async def test_refuses_a_stock_title_that_reports_the_wrong_effective_save_directory(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        foreign = self.directory.resolve() / "another-profile" / "Saved"
+        for path in (saved, foreign):
+            path.mkdir(parents=True)
+        original = self.bridge.snapshot
+
+        def snapshot():
+            data = original()
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host"])
+            data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=data["sequence"], saved_directory=str(foreign))
+            return data
+
+        self.bridge.snapshot = snapshot
+        notify = Mock()
+        session = TitleSession(self.bridge, {"host": Child("host").plan()}, on_title_ready=notify,
+                               title_saved_directory=saved, poll_interval=.005)
+        with self.assertRaisesRegex(ValueError, "effective Unreal save directory"):
+            await asyncio.wait_for(session.run(), 1)
+        self.assertFalse(self.descriptor_path.exists())
+        notify.assert_not_called()
 
     async def test_launch_failure_keeps_title_and_supplies_fresh_generation(self):
         calls = 0

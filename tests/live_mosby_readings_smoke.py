@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_authored_pickup as pickup, native_dialogue as dialogue, native_mosby_tape as tape
 from tools.silverfish import native_guest_armor as armor
 from tools.silverfish import native_mosby_station_view as station_view
+from tools.silverfish import native_prototype_drill as drill
 from tools.silverfish import native_wire_board
 from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP, SCI_TUNNEL
 
@@ -27,10 +28,14 @@ from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELD
 TO_MAZE = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (DEAD_BRIDGE, "DB_CR"), (tape.STONE_MAZE, "DB_SM"))
 TO_SCIENTIST = ((DEAD_BRIDGE, "DB_SM"), (CROSSROADS, "DB_CR"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
 TO_DRILL_HEAD = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (CISTERN, "CR_Cstrn"), (SCI_TUNNEL, "Cistern_Sci"))
+FROM_DRILL_HEAD = ((CISTERN, "Cistern_Sci"), (CROSSROADS, "CR_Cstrn"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
 
 
 async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
-                   equip_reward=False, prototype_dialogue=False, prototype_pickup=False, prototype_chamber_staged=False):
+                   equip_reward=False, prototype_dialogue=False, prototype_pickup=False, prototype_chamber_staged=False,
+                   prototype_redeem=False):
+    if prototype_redeem:
+        prototype_pickup = prototype_chamber_staged = True
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -277,7 +282,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         evidence["prototype_pickup"].update(stock_press=press, headless_chamber_approach=approach, claim=claimed,
                                             rival=denied["error"], stock_flags=after)
 
-        _, _, restored = await restart_pair(host_process, guest_process, current, SCI_TUNNEL, label="drill-restart")
+        next_host, next_guest, restored = await restart_pair(host_process, guest_process, current, SCI_TUNNEL, label="drill-restart")
         await wait(run, lambda state: projected(state, "claimed"))
         await wait(client_run, lambda state: projected(state, "claimed"))
         assert await inventory(authority, "host") == host_items and await inventory(client, character) == expected_items
@@ -286,6 +291,104 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert durable["world"]["party"]["native_quests"][pickup.PROTOTYPE_QUEST]["step"] == 1
         assert flags(durable, SCI_TUNNEL)["host"].get("Topic_MicroDrill") == 1
         evidence["prototype_pickup"]["restart"] = {"port": port, "epoch": restored["zone_epoch"], "guid": claimed["guid"]}
+        if prototype_redeem:
+            await redeem_prototype(restored, next_host, next_guest, claimed, host_items, expected_items)
+
+    async def redeem_prototype(current, host_process, guest_process, claimed, host_items, guest_items):
+        proof = evidence["prototype_redemption"] = {"objective_guid": claimed["guid"]}
+        for destination, portal in FROM_DRILL_HEAD:
+            current = await cross(current, destination, portal)
+        assert await inventory(authority, "host") == host_items and await inventory(client, character) == guest_items
+        placed = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
+        assert placed["target"] == drill.BOARD
+        await action(authority, "checkpoint")
+        before = flags(saved())
+        assert before["host"].get("Mosby_DrillTest", 0) == 0
+
+        def panel(status):
+            return status.get("game", {}).get("native_wire_board", {})
+
+        def matches(row):
+            return (row.get("map"), row.get("board"), row.get("quest")) == (SCIENTIST_SHOP, drill.BOARD, drill.QUEST_ID)
+
+        async def press():
+            return (await action(client, native_wire_board.FIXTURE, "--target", drill.QUEST_ID))["native_wire_board"]
+
+        async def rendered(state, request):
+            def matching(status):
+                row = panel(status)
+                return row if matches(row) and (row.get("state"), row.get("sequence"), row.get("open")) == (
+                    state, request["sequence"], request["open"]) else None
+
+            return matching(await wait(client_run, matching, timeout=34 if state == "completed" else 16))
+
+        def ready_stock(status, step, flag):
+            row = status.get("game", {}).get(drill.KEY, {})
+            return ((row.get("operation"), row.get("map"), row.get("pawn"), row.get("board"), row.get("quest_id"),
+                     row.get("step_after"), row.get("flag_after")) ==
+                    (drill.PREFLIGHT, SCIENTIST_SHOP, placed["pawn"], drill.BOARD, drill.QUEST_ID, step, flag))
+
+        await wait(client_run, lambda status: panel(status).get("state") in ("armed", "focused"), timeout=15)
+        started = await press()
+        assert matches(started) and started["state"] == "loading" and started["open"] == started["sequence"]
+        offer = await rendered("ready", started)
+        offered = (await wait(run, lambda status: ready_stock(status, 1, 0)))["game"][drill.KEY]
+        assert (offered["objective_guid"], offered["objective_owner"], offered["station"]) == (
+            claimed["guid"], "guest", drill.STATION), offered
+        assert offered["eligible"] is True and offered["drill_tested_after"] is False and offered["tape_after"] is False
+        assert await inventory(client, character) == guest_items and flags(saved()) == before
+        pending = await press()
+        assert matches(pending) and pending["state"] == "redeeming" and pending["open"] == offer["open"]
+        assert pending["sequence"] > offer["sequence"]
+        proof["stock_board"] = {"review": offer, "turn_in": await rendered("completed", pending), "stock_preflight": offered}
+        durable = saved()
+        record = durable["world"]["party"]["native_quests"][drill.QUEST_ID]
+        assert (record["actor"], record["step"], record["cash"], record["xp"], record["consumed_drill_head"]) == (
+            character, -10, 10000, 3, claimed["guid"]), record
+        assert set(record["recipients"]) == {"host", character} == set(record["armor"])
+        assert len(set(record["armor"].values())) == 2
+        assert record["test_results"] == {"station": drill.STATION, "class_path": drill.TAPE_CLASS}
+        assert drill.REWARDS not in durable["world"]["party"]
+        proof["receipt"] = record
+
+        suit = (drill.ARMOR_CLASS, "backpack", 1)
+        expected_host = {**host_items, record["armor"]["host"]: suit}
+        expected_guest = {guid: row for guid, row in guest_items.items() if guid != claimed["guid"]}
+        expected_guest[record["armor"][character]] = suit
+        assert await inventory(authority, "host") == expected_host
+        assert await inventory(client, character) == expected_guest
+        gained = flags(durable)
+        for role in ("host", "guest"):
+            assert gained[role].get("Player_Xp", 0) == before[role].get("Player_Xp", 0) + drill.XP
+            assert gained[role].get("Player_Cash", 0) == before[role].get("Player_Cash", 0) + (drill.CASH if role == "host" else 0)
+        assert gained["host"].get("Mosby_DrillTest") == 1
+        for label, reputation in record["reputation"].items():
+            rep, advantage = f"Rep_{label.title()}", f"Adv_{label.title()}"
+            assert (before["host"].get(rep, 0), gained["host"].get(rep, 0)) == (reputation["before"], reputation["after"])
+            assert before["host"].get(advantage) == gained["host"].get(advantage)
+        assert record["wallet"] == gained["host"]["Player_Cash"]
+        await wait(client_run, lambda status: status.get("gameplay", {}).get("economy", {}).get("wallet") == record["wallet"])
+        proof["stock_flags"] = gained
+
+        async def replay():
+            receipt = await action(client, "native-quest-turnin", "--target", drill.QUEST_ID)
+            assert receipt == {"effect": "native_quest_already_settled", **record}, receipt
+            observed = (await wait(run, lambda status: ready_stock(status, -10, 1)))["game"][drill.KEY]
+            assert (observed["station"], observed["objective_guid"], observed["armor_guid"]) == (drill.STATION, None, None)
+            assert observed["tape_after"] is True and observed["drill_tested_after"] is True and observed["eligible"] is False
+            assert observed["cash_after"] == gained["host"]["Player_Cash"] and observed["xp_after"] == gained["host"]["Player_Xp"]
+            return observed
+
+        proof["replay"] = await replay()
+        _, _, restarted = await restart_pair(host_process, guest_process, current, SCIENTIST_SHOP, label="drill-redemption-restart")
+        assert await inventory(authority, "host") == expected_host and await inventory(client, character) == expected_guest
+        placed = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
+        restored = await replay()
+        assert flags(saved()) == gained
+        events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        completions = [row for row in events if row["event"] == "native_prototype_drill_completed"]
+        assert len(completions) == 1 and completions[0]["consumed_drill_head"] == claimed["guid"]
+        proof["restart"] = {"port": port, "generation": restarted["generation"], "restored": restored}
 
     async def exercise_reward_armor(reward_guid, original_inventory):
         backpack = (armor.HAZOP_CLASS_PATH, "backpack", 1)
@@ -541,12 +644,14 @@ if __name__ == "__main__":
     prototype = parser.add_mutually_exclusive_group()
     prototype.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
     prototype.add_argument("--prototype-pickup", action="store_true", help="issue Prototype Drill and verify the stock Sci Tunnel keypad and entry")
+    prototype.add_argument("--prototype-redeem", action="store_true",
+                           help="redeem the exact Drill Head with stock Interact after a staged chamber pickup and stock return route")
     parser.add_argument("--prototype-chamber-staged", action="store_true",
                         help="stage the guest on the exact local catwalk after stock entry to verify Drill Head Interact and custody")
     args = parser.parse_args()
-    if args.prototype_chamber_staged and not args.prototype_pickup:
-        parser.error("--prototype-chamber-staged requires --prototype-pickup")
+    if args.prototype_chamber_staged and not (args.prototype_pickup or args.prototype_redeem):
+        parser.error("--prototype-chamber-staged requires --prototype-pickup or --prototype-redeem")
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
                          stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
                          prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup,
-                         prototype_chamber_staged=args.prototype_chamber_staged))
+                         prototype_chamber_staged=args.prototype_chamber_staged, prototype_redeem=args.prototype_redeem))

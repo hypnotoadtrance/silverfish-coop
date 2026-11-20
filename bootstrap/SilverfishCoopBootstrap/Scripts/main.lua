@@ -10,6 +10,7 @@ local messages = {
     unavailable = "Open Co-op\nCoordinator unavailable",
     queued = "Opening Co-op…",
     started = "Opening the co-op title…",
+    handed_off = "Co-op title ready",
     failed = "Open Co-op\nThe coordinator could not start",
     refused = "Open Co-op\nThe coordinator could not accept the request",
 }
@@ -63,14 +64,17 @@ local function request_id()
     if id:find("[^0]") then return id end
 end
 
-local function observe_attempt()
+local function observe_attempt(context)
     local read = SilverfishReadCoopBootstrapLaunchStatus
     if type(read) ~= "function" or (attempt.state ~= "queued" and attempt.state ~= "started") then return end
     local ok, version, state, generation, id = pcall(read)
-    if ok and math.type(version) == "integer" and version == 1
-        and generation == attempt.generation and id == attempt.id and (state == "started" or state == "failed") then
-        attempt.state = state
-    end
+    if not ok or math.type(version) ~= "integer" or version ~= 1 or generation ~= attempt.generation or id ~= attempt.id then return end
+    if state == "started" or state == "failed" then attempt.state = state end
+    if state ~= "ready" or not same_title(context, stock_title()) then return end
+    local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not valid(system) then attempt.state = "failed"; return end
+    attempt.state = "handed_off"
+    if not pcall(function() system:QuitGame(context.world, context.controller, 0, false) end) then attempt.state = "failed" end
 end
 
 local function publish(state)
@@ -111,7 +115,7 @@ local function tick()
     local generation, submit = offer()
     local state = generation and "ready" or "unavailable"
     if attempt and (not generation or attempt.generation == generation) and same_title(attempt.context, context) then
-        observe_attempt()
+        observe_attempt(context)
         state = attempt.state
     end
     show(context, generation, state)

@@ -1,7 +1,7 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
 from . import native_broker, native_computer_board, native_flood_jammer, native_meet_broker, native_wire_quest, native_rewards, native_turret_photo, party
-from . import native_mosby_tape, native_subway_valve
+from . import native_mosby_tape, native_prototype_drill, native_subway_valve
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -51,6 +51,10 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         if verb != "native-quest-turnin":
             raise party.RuleError("native_mosby_readings_uses_authored_dialogue_and_station")
         return await native_mosby_tape.turn_in(host, bridge, actor)
+    if target == native_prototype_drill.QUEST_ID:
+        if verb != "native-quest-turnin":
+            raise party.RuleError("native_prototype_drill_uses_authored_mosby_dialogue")
+        return await native_prototype_drill.turn_in(host, bridge, actor)
     if target == native_meet_broker.QUEST_ID and verb in ("native-quest-start", "native-quest-turnin"):
         return await native_meet_broker.commit(host, bridge, actor, turning_in=verb == "native-quest-turnin")
     if target == native_wire_quest.QUEST_ID and verb == "native-quest-start":

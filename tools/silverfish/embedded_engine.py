@@ -13,7 +13,7 @@ import threading
 
 from . import native_title_entry, runtime
 from .control import NAME
-from .title_handoff import _stock_title
+from .title_handoff import _isolated_stock_title
 
 
 STARTUP_KEY = native_title_entry.STARTUP_KEY
@@ -174,24 +174,6 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     return profile / "Saved", bridge
 
 
-def _effective_title(snapshot: dict, saved_directory: Path):
-    title = _stock_title(snapshot)
-    if title is None:
-        return None
-    receipt = snapshot.get(STARTUP_KEY)
-    if (not isinstance(receipt, dict) or set(receipt) != {"map", "sequence", "saved_directory"}
-            or receipt["map"] != native_title_entry.MAP or type(receipt["sequence"]) is not int
-            or receipt["sequence"] != title[0]):
-        return None
-    value = receipt["saved_directory"]
-    if not isinstance(value, str) or not value or not value.isprintable():
-        raise ValueError("The engine did not report an exact effective save directory")
-    candidate = Path(value)
-    if not candidate.is_absolute() or candidate.resolve(strict=True) != _exact_existing(saved_directory):
-        raise ValueError("The effective Unreal save directory does not match the isolated profile")
-    return title
-
-
 class EmbeddedEngine:
     """A single-use process view and bridge owned by the embedded service.
 
@@ -241,7 +223,7 @@ class EmbeddedEngine:
 
         def advancing(snapshot):
             nonlocal first
-            frame = _effective_title(snapshot, saved_directory)
+            frame = _isolated_stock_title(snapshot, saved_directory)
             if not frame:
                 first = None
                 return False
@@ -270,7 +252,7 @@ class EmbeddedEngine:
                 if type(acknowledged) is not int or acknowledged <= self._sequence:
                     raise RuntimeError("The staged engine did not acknowledge stock leave on a new frame")
                 ready = await self.bridge.wait_for(
-                    lambda snapshot: _effective_title(snapshot, self._saved_directory)
+                    lambda snapshot: _isolated_stock_title(snapshot, self._saved_directory)
                     and snapshot["sequence"] > acknowledged,
                     timeout=timeout,
                 )

@@ -42,6 +42,12 @@ function stack:GetArrayNum() return #self end
 controller.MenuStack = stack
 
 local statics, widgets, layout, guids = object(), object(), object(), object()
+local system, quit_count = object(), 0
+classes["/Script/Engine.Default__KismetSystemLibrary"] = system
+function system:QuitGame(target, owner, preference, ignore_platform)
+    assert(target == world and owner == controller and preference == 0 and ignore_platform == false)
+    quit_count = quit_count + 1
+end
 classes["/Script/Engine.Default__GameplayStatics"] = statics
 classes["/Script/UMG.Default__WidgetBlueprintLibrary"] = widgets
 classes["/Script/UMG.Default__WidgetLayoutLibrary"] = layout
@@ -169,6 +175,24 @@ press()
 assert(text():find("could not accept", 1, true) and #requests == 2)
 press()
 assert(#requests == 2)
+generation = ("c"):rep(32)
+env.SilverfishRequestCoopBootstrapOpen = function(...)
+    requests[#requests + 1] = {...}
+    return true
+end
+press()
+assert(#requests == 3 and text():find("Opening Co-op", 1, true))
+env.SilverfishReadCoopBootstrapLaunchStatus = function() return 1, "ready", table.unpack(requests[1]) end
+tick()
+assert(quit_count == 0)
+env.SilverfishReadCoopBootstrapLaunchStatus = function() return 1, "ready", table.unpack(requests[3]) end
+stack[2] = object()
+tick()
+assert(quit_count == 0 and not widget:IsInViewport())
+stack[2] = nil
+tick()
+tick()
+assert(quit_count == 1 and notices[#notices] == "handed_off")
 stack[2] = object()
 tick()
 assert(notices[#notices] == "waiting_title")

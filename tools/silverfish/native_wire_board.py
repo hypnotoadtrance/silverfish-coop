@@ -5,6 +5,7 @@ import time
 import uuid
 
 from . import native_computer_board, native_flood_jammer, native_mosby_tape, native_subway_valve, native_turret_photo, native_wire_quest, party
+from . import native_prototype_drill
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
@@ -26,7 +27,7 @@ QUESTS = {
                             native_computer_board.BLACK_BOX.quest_id}),
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id,
                         native_subway_valve.QUEST}),
-    SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST}),
+    SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID}),
     SCAV_BAR: frozenset({DEPOT_DOCUMENTS.quest_id, native_computer_board.POCKET_WATCH.quest_id,
                          native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
@@ -42,6 +43,7 @@ PREFLIGHTS = {
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
     native_turret_photo.QUEST_ID: (native_turret_photo.PREFLIGHT, "native_turret_photo"),
     native_mosby_tape.MOSBY_QUEST: (native_mosby_tape.READINGS_PREFLIGHT, "native_mosby_readings"),
+    native_prototype_drill.QUEST_ID: (native_prototype_drill.PREFLIGHT, native_prototype_drill.KEY),
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
@@ -130,6 +132,8 @@ class WireBoardView:
         if kind == "start":
             if quest == native_mosby_tape.MOSBY_QUEST:
                 raise party.RuleError("native_mosby_readings_uses_authored_dialogue_and_station")
+            if quest == native_prototype_drill.QUEST_ID:
+                raise party.RuleError("native_prototype_drill_uses_authored_mosby_dialogue")
             await action("native-quest-start", operation, quest)
         elif kind == "turnin":
             if quest == native_computer_board.QUEST_ID and area != SCIENTIST_SHOP:
@@ -147,7 +151,9 @@ class WireBoardView:
             if quest != QUEST and str(error) in HIDDEN_OFFERS:
                 return "not_offered"
             raise
-        field = "id" if quest == QUEST else "quest_id" if quest == native_mosby_tape.MOSBY_QUEST else "quest"
+        field = "id" if quest == QUEST else "quest"
+        if quest in (native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID):
+            field = "quest_id"
         expected_quest = proof.get(field)
         expected_board = proof.get("target") if quest == native_turret_photo.QUEST_ID else proof.get("board")
         # The authenticated service verifies the authority pawn. Its Unreal name can differ from the receiving client's name.
@@ -167,6 +173,14 @@ class WireBoardView:
             if step == -10:
                 return "completed"
             return "ready" if valid_guid(proof.get("objective_guid")) and proof.get("objective_owner") in ("host", "guest") else "missing"
+        if quest == native_prototype_drill.QUEST_ID:
+            if step is None:
+                return "not_offered"
+            if step == -10:
+                return "completed"
+            if proof.get("eligible") is not True:
+                return "unavailable"
+            return "ready" if proof.get("objective_qualified") is True else "missing"
         if step is None:
             return "offer"
         if step == -10:

@@ -54,6 +54,25 @@ def _stock_title(snapshot):
     return sequence, names
 
 
+def _isolated_stock_title(snapshot, saved_directory: Path):
+    title = _stock_title(snapshot)
+    if title is None:
+        return None
+    receipt = snapshot.get(native_title_entry.STARTUP_KEY)
+    if (not isinstance(receipt, dict) or set(receipt) != {"map", "sequence", "saved_directory"}
+            or receipt["map"] != native_title_entry.MAP or type(receipt["sequence"]) is not int
+            or receipt["sequence"] != title[0]):
+        return None
+    value = receipt["saved_directory"]
+    if not isinstance(value, str) or not value or not value.isprintable():
+        raise ValueError("The engine did not report an exact effective save directory")
+    candidate = Path(value)
+    if (not candidate.is_absolute() or candidate.resolve(strict=True) != saved_directory
+            or not saved_directory.is_dir() or saved_directory.resolve(strict=True) != saved_directory):
+        raise ValueError("The effective Unreal save directory does not match the isolated profile")
+    return title
+
+
 def _unlink(path: Path) -> bool:
     try:
         path.unlink(missing_ok=True)

@@ -31,6 +31,16 @@ class ReceiptTests(unittest.TestCase):
                                        creationflags=subprocess.CREATE_NO_WINDOW)
                 self.assertEqual(child.returncode, expected, child.stderr.decode(errors="replace"))
 
+    @unittest.skipUnless(os.name == "nt", "Uses inherited Windows pipes")
+    def test_windowless_process_writes_the_exact_readiness_receipt(self):
+        ids = b"a" * 32 + b"\t" + b"b" * 32 + b"\n"
+        code = ("from bootstrap.coordinator import read_inherited_receipt, write_inherited_ready\n"
+                "write_inherited_ready(read_inherited_receipt())")
+        child = subprocess.run([sys.executable, "-B", "-c", code], input=b"1\topen-coop\t" + ids, capture_output=True,
+                               cwd=Path(__file__).resolve().parents[1], timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(child.returncode, 0, child.stderr.decode(errors="replace"))
+        self.assertEqual(child.stdout, b"1\tcoop-title-ready\t" + ids)
+
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -67,6 +77,24 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             "schema": 1, "generation": receipt.generation, "request_id": receipt.request_id,
             "state": "failed", "error_type": "RuntimeError",
         })
+
+    async def test_publishes_readiness_for_the_exact_title_request(self):
+        self.write()
+        receipt = coordinator.Receipt("a" * 32, "b" * 32)
+        status = self.work / "bootstrap-receipts" / (receipt.generation + ".json")
+        sent = []
+
+        async def menu(_plan, *, on_title_ready):
+            self.assertEqual(coordinator.runtime.read_json(status)["state"], "opening")
+            on_title_ready()
+
+        def send(acknowledged):
+            self.assertEqual(coordinator.runtime.read_json(status)["state"], "title_ready")
+            sent.append(acknowledged)
+
+        with patch.object(coordinator, "staged_title_menu", side_effect=menu):
+            await coordinator.open_coop(receipt, self.config, report_ready=send)
+        self.assertEqual(sent, [receipt])
 
     def test_invitation_must_be_inside_the_coop_workspace(self):
         temp = TemporaryDirectory()

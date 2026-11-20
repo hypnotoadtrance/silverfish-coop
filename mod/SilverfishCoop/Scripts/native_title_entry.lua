@@ -8,7 +8,8 @@ local widget_path = "/Game/Classes/GUI/MainMenu_Widget.MainMenu_Widget_C"
 local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local viewport_path = "/Script/Engine.GameViewportClient"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
+local inspect_save_directory = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
+    or os.getenv("SILVERFISH_COOP_INSPECT_TITLE_PROFILE") == "1"
 
 local function valid(object)
     return object and object:IsValid()
@@ -130,7 +131,7 @@ function title.rows(state, phase, status_row, idle_sequence)
     local rows = {status_row("native-title-entry", report.map, report.state, name(report.controller), name(report.menu),
         name(report.viewport), report.count or "-", bit(report.top), bit(report.mounted), bit(report.visible),
         report.reason or "-")}
-    if embedded and idle_sequence and report.state == "ready" then
+    if inspect_save_directory and idle_sequence and report.state == "ready" then
         local ok, path = pcall(saved_directory)
         if ok and path then rows[#rows + 1] = status_row("embedded-engine-startup", map, idle_sequence, path) end
     end

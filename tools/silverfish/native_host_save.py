@@ -130,6 +130,8 @@ def _wipe_frames(world: dict) -> dict:
 
 
 def _escrow_frames(checkpoint: dict) -> list[dict]:
+    from . import native_prototype_drill
+
     party = checkpoint["world"].get("party") or {}
     if type(party) is not dict:
         raise CampaignFormatError("The campaign's native party records are invalid")
@@ -243,6 +245,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("A pending Stone Maze reward has an invalid recipient or armor identity")
             used.add(armor)
         quests.append(mosby["escrow"])
+    quests.extend(native_prototype_drill.escrow_frames(checkpoint))
     valve = party.get("native_subway_valve_rewards")
     if valve is not None:
         if (type(valve) is not dict or type(valve.get("escrow")) is not dict or valve["escrow"].get("map") != BOROUGH

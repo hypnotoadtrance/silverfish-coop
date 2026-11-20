@@ -258,7 +258,7 @@ def _events(directory: Path, limit: int) -> dict:
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
 
 
-async def staged_title_menu(opts) -> dict:
+async def staged_title_menu(opts, *, on_title_ready=None) -> dict:
     from . import runtime
     from .title_session import TitleSession, host_plan, join_plan
 
@@ -283,9 +283,12 @@ async def staged_title_menu(opts) -> dict:
     title = select_run(opts.work, "titles", opts.title_profile)
     with Control(title / "run"):
         mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
-        process = runtime.launch(opts.work, title / "game-user", mailbox, headless=False)
+        profile = title / "game-user"
+        process = runtime.launch(opts.work, profile, mailbox, headless=False,
+                                 inspect_title_profile=on_title_ready is not None)
         try:
-            await TitleSession(runtime.Bridge(mailbox, process), plans).run()
+            await TitleSession(runtime.Bridge(mailbox, process), plans, on_title_ready=on_title_ready,
+                               title_saved_directory=profile / "Saved" if on_title_ready is not None else None).run()
         finally:
             if process.poll() is None:
                 await runtime.stop_game(process)

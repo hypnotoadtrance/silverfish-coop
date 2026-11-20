@@ -35,6 +35,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
+from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
@@ -51,6 +52,7 @@ NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolum
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION,
                         *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
+                        native_prototype_drill.PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
@@ -1577,6 +1579,8 @@ class Host:
                 result = await native_borough_barter.trade(self, bridge, character, target, request["operation_id"])
             elif action in native_mosby_tape.PREFLIGHTS or action == native_mosby_tape.READINGS_PREFLIGHT:
                 result = await native_mosby_tape.preflight(self, bridge, character, action, target)
+            elif action == native_prototype_drill.PREFLIGHT:
+                result = await native_prototype_drill.preflight(self, bridge, character, action, target)
             elif action in native_mosby_tape.CONVERSIONS:
                 result = await native_mosby_tape.convert(self, bridge, character, target, request["operation_id"],
                                                         profile=native_mosby_tape.CONVERSIONS[action])
@@ -1648,6 +1652,7 @@ class Host:
             await native_wire_quest.settle(self, bridge)
             await native_wire_quest.settle(self, bridge, native_meet_broker.REWARDS)
             await native_mosby_tape.settle(self, bridge)
+            await native_prototype_drill.settle(self, bridge)
             await native_subway_valve.settle(self, bridge)
             if not self.fixtures:
                 return
@@ -2520,6 +2525,8 @@ class Host:
                                                            profile=native_mosby_tape.APPROACHES[action])
                 elif action == native_mosby_tape.READINGS_PREFLIGHT:
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
+                elif action == native_prototype_drill.PREFLIGHT:
+                    result = await native_prototype_drill.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_meet_broker.PREFLIGHT and request.get("target") is None:
                     result = await native_meet_broker.preflight(self, bridge, "host")
                 elif action == native_meet_broker.APPROACH and self.fixtures:
@@ -3061,6 +3068,8 @@ class Host:
                 return await native_wire_quest.preflight(self, bridge, "host")
             if action == native_mosby_tape.READINGS_PREFLIGHT:
                 return await native_mosby_tape.preflight(self, bridge, "host", action, target)
+            if action == native_prototype_drill.PREFLIGHT:
+                return await native_prototype_drill.preflight(self, bridge, "host", action, target)
             if action in native_computer_board.PREFLIGHTS:
                 return await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.PREFLIGHTS[action])
             if action == native_turret_photo.PREFLIGHT:

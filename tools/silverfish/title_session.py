@@ -12,7 +12,7 @@ import time
 import uuid
 
 from . import native_title_entry, runtime
-from .title_handoff import ACTIONS, Claim, TitleHandoff, _stock_title
+from .title_handoff import ACTIONS, Claim, TitleHandoff, _isolated_stock_title, _stock_title
 
 
 STATUS_FILE = "title-session-status.json"
@@ -110,7 +110,8 @@ class TitleSession:
     """Own a staged title offer, then the verified child session for its lifetime."""
 
     def __init__(self, bridge: runtime.Bridge, plans: Mapping[str, SessionPlan], *,
-                 retire_title=None, poll_interval: float = .1,
+                 retire_title=None, on_title_ready: Callable[[], None] | None = None,
+                 title_saved_directory: Path | None = None, poll_interval: float = .1,
                  startup_timeout: float = 120, stall_timeout: float = 60):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
@@ -118,9 +119,13 @@ class TitleSession:
         if not (math.isfinite(poll_interval) and math.isfinite(startup_timeout) and math.isfinite(stall_timeout)
                 and 0 < poll_interval < min(startup_timeout, stall_timeout)):
             raise ValueError("Expected bounded title supervision intervals")
+        if (on_title_ready is None) != (title_saved_directory is None):
+            raise ValueError("The title handoff requires an isolated save directory and readiness callback")
         self._bridge = bridge
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)
+        self._on_title_ready = on_title_ready
+        self._title_saved_directory = title_saved_directory
         self._poll_interval = poll_interval
         self._startup_timeout = startup_timeout
         self._stall_timeout = stall_timeout
@@ -147,20 +152,41 @@ class TitleSession:
         if self._handoff is not None:
             raise RuntimeError("This title supervisor is already running")
         self._handoff = TitleHandoff(self._bridge.directory)
+        initial_frame = None
+        title_deadline = time.monotonic() + min(self._startup_timeout, 45)
+        actions = [action for action in ACTIONS if action in self._plans]
         try:
             while self._bridge.process.poll() is None:
                 snapshot = self._bridge.snapshot()
                 offered = self._handoff.refresh(snapshot, self._plans)
+                if self._on_title_ready is not None:
+                    panel = snapshot.get(native_title_entry.PANEL_KEY, {}) if snapshot else {}
+                    frame = _isolated_stock_title(snapshot, self._title_saved_directory) if offered else None
+                    if not isinstance(panel, dict) or (panel.get("state"), panel.get("mounted"), panel.get("actions")) != (
+                        "ready", True, actions,
+                    ):
+                        frame = None
+                    if frame and initial_frame and frame[1] == initial_frame[1] and frame[0] > initial_frame[0]:
+                        self._publish("offered", actions=actions)
+                        self._on_title_ready()
+                        self._on_title_ready = None
+                    else:
+                        initial_frame = frame
+                        if time.monotonic() >= title_deadline:
+                            raise TimeoutError("The isolated co-op title did not become ready")
+                        await asyncio.sleep(self._poll_interval)
+                        continue
                 claim = self._handoff.poll(snapshot)
                 if claim is None:
-                    self._publish("offered" if offered else "waiting_title",
-                                  actions=[action for action in ACTIONS if offered and action in self._plans])
+                    self._publish("offered" if offered else "waiting_title", actions=actions if offered else [])
                     await asyncio.sleep(self._poll_interval)
                     continue
                 if await self._launch(claim, _stock_title(snapshot)):
                     return
                 self._handoff = TitleHandoff(self._bridge.directory)
             self._publish("title_exited")
+            if self._on_title_ready is not None:
+                raise RuntimeError("The game exited before the isolated co-op title was ready")
         except asyncio.CancelledError:
             self._publish("cancelled")
             raise

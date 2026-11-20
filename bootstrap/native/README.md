@@ -18,12 +18,22 @@ On its first qualified title read, the module resolves its own loaded DLL and ve
 1<TAB>open-coop<TAB><32 lowercase hex digits><TAB><32 lowercase hex digits><LF>
 ```
 
-The module passes the verified executable as the Windows application path and the only argument. It confines inherited handles to the read end of the receipt pipe and quiet output. It creates the coordinator suspended and resumes it only after verifying the exact process image, detached job state, and receipt write.
+The module passes the verified executable as the Windows application path and the only argument. It confines inherited handles to the stdin receipt reader, the stdout readiness writer, and quiet stderr. It creates the coordinator suspended and resumes it only after verifying the exact process image, detached job state, and receipt write.
 
-`SilverfishReadCoopBootstrapLaunchStatus()` returns integer `1`, the phase, the generation or `nil`, and the request ID or `nil`. The phases are `unavailable`, `checking`, `offered`, `queued`, `started`, and `failed`. **Started** means the coordinator process passed the launch checks and resumed. Coordinator readiness and the original title's eventual retirement require a separate proof. The loader log records the start or a bounded failure code. This module issues one startup offer per process.
+The coordinator sends this 85-byte ASCII record on stdout after verifying the isolated title.
+
+```text
+1<TAB>coop-title-ready<TAB><32 lowercase hex digits><TAB><32 lowercase hex digits><LF>
+```
+
+The native worker waits up to 120 seconds on its private pipe and the exact coordinator process. It verifies the complete record against the request and rejects extra bytes present on the pipe. The LF ends the record, allowing an outer package runner to retain its writer while the coordinator continues. The coordinator keeps stdout reserved for this record.
+
+`SilverfishReadCoopBootstrapLaunchStatus()` returns integer `1`, the phase, the generation or `nil`, and the request ID or `nil`. The phases are `unavailable`, `checking`, `offered`, `queued`, `started`, `ready`, and `failed`. **Started** means the checked coordinator process resumed. **Ready** also requires its exact readiness record and continued process liveness. The original title requalifies its own stock context before it can retire. The loader log records launch, readiness, and bounded failure codes. This module issues one startup offer per process.
 
 ## Isolated verification
 
-Use a stock-layout replica and fresh isolated `-userdir` as described in the [bootstrap check](../README.md). Verify the title remains usable with the coordinator absent, a wrong hash, or a reparse point at the expected sibling. For a positive test, install the exact packaged worker, focus the replica, and press F7 once. Confirm one launch, the exact two IDs at the worker, receipt EOF, and the absence of an extra console window. A held key or repeated press for that generation leaves the process count steady.
+Use a stock-layout replica and fresh isolated `-userdir` as described in the [bootstrap check](../README.md). Verify the title remains usable with the coordinator absent, a wrong hash, or a reparse point at the expected sibling. For a positive test, install the exact packaged worker, focus the replica, and press F7 once. Confirm one launch, the exact two IDs at the worker, stdin receipt EOF, the later readiness record, and the absence of an extra console window. A held key or repeated press for that generation leaves the process count steady.
+
+For readiness refusals, exercise a partial record, wrong identity, extra data, a process exit before readiness, and a live coordinator with no record. These paths leave the original title available and give the resumed coordinator responsibility for its own shutdown.
 
 Try the same positive case in a test job that allows explicit breakaway. For a controlled refusal use a job that forbids breakaway. The latter should log `job_breakaway_rejected` or `child_job_not_detached`, keep the title usable, and leave the coordinator unstarted. Verify the stock save hashes and process tree in all cases.

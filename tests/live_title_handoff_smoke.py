@@ -20,11 +20,22 @@ from live_multi_smoke import saved_hashes
 
 async def title_choice(work, case, action, plan, processes, tasks):
     home = case / action
-    process = runtime.launch(work, home / "game-user", home / "game-bridge", headless=True, title_fixture=True)
+    profile = home / "game-user"
+    process = runtime.launch(work, profile, home / "game-bridge", headless=True, title_fixture=True,
+                             inspect_title_profile=True)
     processes.append(process)
     bridge = runtime.Bridge(home / "game-bridge", process)
     stock = await bridge.wait_for(lambda game: game.get(title.KEY, {}).get("state") == "ready", timeout=30)
-    retired = []
+    retired, isolated_ready = [], []
+    title_ready = asyncio.Event()
+
+    def report_title_ready():
+        snapshot = bridge.snapshot()
+        assert process.poll() is None and snapshot[title.KEY] == stock[title.KEY]
+        receipt = snapshot[title.STARTUP_KEY]
+        assert Path(receipt["saved_directory"]).resolve(strict=True) == (profile / "Saved").resolve(strict=True)
+        isolated_ready.append(receipt)
+        title_ready.set()
 
     async def retire_title():
         assert process.poll() is None
@@ -32,8 +43,10 @@ async def title_choice(work, case, action, plan, processes, tasks):
         retired.append(plan.read_status()["state"])
         await runtime.stop_game(process)
 
-    supervisor = TitleSession(bridge, {action: plan}, retire_title=retire_title)
+    supervisor = TitleSession(bridge, {action: plan}, retire_title=retire_title, on_title_ready=report_title_ready,
+                              title_saved_directory=profile / "Saved")
     tasks.append(asyncio.create_task(supervisor.run()))
+    await asyncio.wait_for(title_ready.wait(), timeout=8)
     shown = await bridge.wait_for(lambda game: game.get(title.PANEL_KEY, {}).get("state") == "ready", timeout=8)
     panel = shown[title.PANEL_KEY]
     assert panel["actions"] == [action] and panel["mounted"], panel
@@ -54,7 +67,9 @@ async def title_choice(work, case, action, plan, processes, tasks):
             if report.get("state") == "ready":
                 assert report["attempt"]["action"] == action and report["progress"] == expected, report
                 assert retired == [expected] and process.poll() is not None, retired
-                return {"stock_title": stock[title.KEY], "panel": panel, "action": action, "handoff": report["progress"]}
+                assert len(isolated_ready) == 1
+                return {"stock_title": stock[title.KEY], "panel": panel, "action": action, "handoff": report["progress"],
+                        "isolated_title_ready": isolated_ready[0]}
             await asyncio.sleep(.1)
 
 

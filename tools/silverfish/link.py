@@ -103,7 +103,7 @@ def checkpoint_action_timeout(payload: Action) -> float | None:
     action, target = payload["action"], payload["target"]
     if action == "native-quest-turnin" and target == "Clt_Wire":
         return 22.0
-    if action == "native-quest-turnin" and target in ("Clt_Tape_StoneMaze_01", "Sub_Valve"):
+    if action == "native-quest-turnin" and target in ("Clt_Tape_StoneMaze_01", "Clt_DrillHead", "Sub_Valve"):
         return 28.0
     if action in _QUEST_ACTIONS and isinstance(target, str) and target in _CHECKPOINT_QUESTS:
         return 20.0
