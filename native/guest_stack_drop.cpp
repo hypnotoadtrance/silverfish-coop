@@ -1,6 +1,7 @@
 #include "guest_stack_drop.hpp"
 #include "guest_drop_maps.hpp"
 #include "guest_regen.hpp"
+#include "interaction_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -219,21 +220,47 @@ namespace
 
     struct Owners
     {
-        U::UObject *pawn{}, *detached{}, *frozen{}, *game{}, *stock{};
+        U::UObject *pawn{}, *live_save{}, *frozen{}, *game{}, *stock{};
         U::UWorld* world{};
+
+        bool canonical_host() const
+        {
+            if (!byte(pawn, STR("Role"), 3) ||
+                silverfish::native_interaction_input::current_local_pawn(reinterpret_cast<Address>(pawn)) != pawn)
+                return false;
+
+            bool shared_save = false;
+            const auto* pawn_class = pawn->GetClassPrivate();
+            const auto* game_class = game->GetClassPrivate();
+            U::UObjectGlobals::ForEachUObject([&](U::UObject* value, int, int) {
+                if (!live(value)) return RC::LoopAction::Continue;
+                const auto* klass = value->GetClassPrivate();
+                if ((klass == pawn_class && value != pawn && object(value, STR("Save")) == stock) ||
+                    (klass == game_class && value != game && object(value, STR("SaveSlot_Ref")) == stock))
+                {
+                    shared_save = true;
+                    return RC::LoopAction::Break;
+                }
+                return RC::LoopAction::Continue;
+            });
+            return !shared_save;
+        }
 
         bool current() const
         {
-            auto* health = field<U::FDoubleProperty>(detached, STR("PlayerHealth"));
-            return live(frozen) && live(game) && live(pawn) && live(detached) && live(stock) && health &&
-                object(world, STR("OwningGameInstance")) == game && object(game, STR("SaveSlot_Ref")) == stock &&
-                static_cast<U::AActor*>(pawn)->GetWorld() == world && boolean(pawn, STR("Dead"), false) &&
-                std::isfinite(health->GetPropertyValueInContainer(detached)) && health->GetPropertyValueInContainer(detached) > 0 &&
-                silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock);
+            if (!live(frozen) || !live(game) || !live(pawn) || !live(live_save) || !live(stock) || !live(world) ||
+                object(world, STR("OwningGameInstance")) != game || object(game, STR("SaveSlot_Ref")) != stock ||
+                object(pawn, STR("Save")) != live_save || static_cast<U::AActor*>(pawn)->GetWorld() != world ||
+                !boolean(pawn, STR("Dead"), false)) return false;
+            auto* health = field<U::FDoubleProperty>(live_save, STR("PlayerHealth"));
+            if (!health) return false;
+            const double hp = health->GetPropertyValueInContainer(live_save);
+            return std::isfinite(hp) && hp > 0 && (live_save == stock ? canonical_host() :
+                silverfish::native_guest_regen::qualifies_detached_guest(pawn, live_save, stock));
         }
     };
 
-    Owners owners(Address pawn_id, Address detached_id, Address frozen_id, const Inventory& inventory)
+    Owners owners(Address pawn_id, Address save_id, Address frozen_id, const Inventory& inventory)
     {
         Owners result;
         auto* pawn_class = find<U::UClass>(pawn_path);
@@ -256,10 +283,12 @@ namespace
         if (!result.pawn || !result.frozen || frozen_attached || !result.frozen->GetOuterPrivate() ||
             result.frozen->GetOuterPrivate()->GetPathName() != STR("/Engine/Transient")) return {};
         result.world = static_cast<U::AActor*>(result.pawn)->GetWorld();
-        result.detached = object(result.pawn, STR("Save"));
+        result.live_save = object(result.pawn, STR("Save"));
         result.game = object(result.world, STR("OwningGameInstance"));
         result.stock = object(result.game, STR("SaveSlot_Ref"));
-        if (!matches(result.detached, detached_id) || !live(result.game) || result.game->GetClassPrivate() != game_class ||
+        if (!matches(result.live_save, save_id) || !live(result.live_save) || !live(result.stock) ||
+            result.live_save->GetClassPrivate() != inventory.save_class || result.stock->GetClassPrivate() != inventory.save_class ||
+            !live(result.game) || result.game->GetClassPrivate() != game_class ||
             !silverfish::native_guest_drop_maps::contains(result.world) || !result.current()) return {};
         return result;
     }
@@ -449,15 +478,15 @@ namespace
         if (!enabled() || !U::IsInGameThreadRaw() || scope.active || lua.get_stack_size() != 5 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4) || !lua.is_integer(5))
             return reply(lua, false, "native_guest_stack_drop_scope_unavailable");
-        const auto pawn = lua.get_integer(), detached = lua.get_integer(), frozen = lua.get_integer();
+        const auto pawn = lua.get_integer(), save = lua.get_integer(), frozen = lua.get_integer();
         const auto id = parse_guid(lua.get_string());
         const auto rounds = lua.get_integer();
-        if (pawn <= 0 || detached <= 0 || frozen <= 0 || frozen == detached ||
+        if (pawn <= 0 || save <= 0 || frozen <= 0 || frozen == save ||
             id == Guid{} || rounds < 1 || rounds > max_rounds)
             return reply(lua, false, "native_guest_stack_drop_arguments_unqualified");
         Inventory inventory;
         if (!inventory.bound()) return reply(lua, false, "native_guest_stack_drop_inventory_schema");
-        const auto owner = owners(pawn, detached, frozen, inventory);
+        const auto owner = owners(pawn, save, frozen, inventory);
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
         auto* ammo = find<U::UClass>(ammo_path);
         auto* defaults = ammo ? ammo->GetClassDefaultObject().Get() : nullptr;
@@ -466,7 +495,7 @@ namespace
             !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), true) ||
             !boolean(defaults, STR("DespawnIfPlayerOwns"), false) || !boolean(defaults, STR("bReplicates"), false))
             return reply(lua, false, "native_guest_stack_drop_stock_9mm_default_flags_unqualified");
-        if (!row || !inventory.same_row(row, inventory.exact_row(owner.detached, id)) ||
+        if (!row || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
             inventory.klass->GetObjectPropertyValue(inventory.klass->ContainerPtrToValuePtr<void>(row)) != ammo ||
             inventory.never_drop->GetPropertyValueInContainer(row) || inventory.quantity->GetPropertyValueInContainer(row) != rounds)
             return reply(lua, false, "native_guest_stack_drop_stock_9mm_row_unqualified");
@@ -476,13 +505,15 @@ namespace
         for (std::size_t i = 0; i < stores.size(); ++i)
         {
             auto* store = stores[i];
-            const auto* guest_frame = store->ContainerPtrToValuePtr<void>(owner.frozen);
+            const auto* frozen_frame = store->ContainerPtrToValuePtr<void>(owner.frozen);
             if (auto* array = U::CastField<U::FArrayProperty>(store))
             {
                 std::array<const void*, 3> first_rows{};
-                const std::array saves{owner.frozen, owner.detached, owner.stock};
+                const std::array saves{owner.frozen, owner.live_save, owner.stock};
                 for (std::size_t index = 0; index < saves.size(); ++index)
                 {
+                    // The canonical host's live save and stock save are the same object.
+                    if (index == 2 && owner.live_save == owner.stock) continue;
                     U::FScriptArrayHelper rows(array, array->ContainerPtrToValuePtr<void>(saves[index]));
                     if (rows.Num() < 0 || rows.Num() > max_items)
                         return reply(lua, false, "native_guest_stack_drop_inventory_bounds");
@@ -494,7 +525,7 @@ namespace
                     }
                 }
             }
-            if (!store->Identical(guest_frame, store->ContainerPtrToValuePtr<void>(owner.detached)))
+            if (!store->Identical(frozen_frame, store->ContainerPtrToValuePtr<void>(owner.live_save)))
                 return reply(lua, false, "native_guest_stack_drop_frozen_inventory_changed");
             stock_before[i] = copy_value(store, store->ContainerPtrToValuePtr<void>(owner.stock));
             if (!stock_before[i]) return reply(lua, false, "native_guest_stack_drop_stock_inventory_snapshot");
@@ -582,7 +613,7 @@ namespace
         {
             auto* store = stores[i];
             if (!store->Identical(stock_before[i].get(), store->ContainerPtrToValuePtr<void>(owner.stock)) ||
-                !store->Identical(store->ContainerPtrToValuePtr<void>(owner.frozen), store->ContainerPtrToValuePtr<void>(owner.detached)))
+                !store->Identical(store->ContainerPtrToValuePtr<void>(owner.frozen), store->ContainerPtrToValuePtr<void>(owner.live_save)))
                 return reply(lua, false, "mutation_unverified_native_guest_stack_drop_inventory_changed");
         }
         if (!owner.current()) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_owner_changed");
