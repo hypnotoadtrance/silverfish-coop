@@ -61,7 +61,8 @@ def _integer(text: str, minimum: int = 0, maximum: int = 2_147_483_647) -> int:
 def _quest_id(value: str) -> str:
     if not 0 < len(value) <= 96 or value.casefold() == "none" or not value.isprintable():
         raise ValueError("Invalid quest catalog ID")
-    return value
+    # The runtime FName pool can display the package's spelling for this cooked quest row.
+    return "Note_Farmhouse" if value == "Note_FarmHouse" else value
 
 
 def _summary(source: str, fields: Sequence[str]) -> CatalogSource:

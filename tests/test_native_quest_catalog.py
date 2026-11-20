@@ -21,6 +21,14 @@ def reward(source, quest_id, index="0", class_path=REWARD):
 
 
 class QuestCatalogTests(unittest.TestCase):
+    def test_missing_contact_uses_its_cooked_id_when_the_stock_board_displays_package_casing(self):
+        result = parse([
+            summary("board", count="1", emitted="1"),
+            quest("board", "Note_FarmHouse", state="offered", cash="450"),
+        ], sequence=23, board=True)
+        entry, = result["board"]["entries"].items()
+        self.assertEqual((entry[0], entry[1]["cash"]), ("Note_Farmhouse", 450))
+
     def test_preserves_frame_sequence_and_typed_scope_specific_metadata(self):
         fields = [
             ["schema", "1"],
