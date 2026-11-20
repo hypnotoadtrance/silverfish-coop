@@ -243,8 +243,9 @@ local function standing_pawn(state, peer)
         or not same(pawn:GetWorld(), state.world) or not same(controller:GetWorld(), state.world)
         or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
         or pawn:HasAuthority() ~= (peer == "host") or not pawn:IsLocallyControlled()
-        or not controller:IsLocalController() or controller.Loading ~= false
-        or not controller.MenuStack or controller.MenuStack:GetArrayNum() ~= 0
+        or not controller:IsLocalController()
+        or (peer == "host" and (controller.Loading ~= false or not controller.MenuStack
+            or controller.MenuStack:GetArrayNum() ~= 0))
         or pawn.Dead ~= false or players.is_downed(pawn) ~= false then return end
     return pawn
 end
@@ -335,7 +336,8 @@ function door.command(fields, state, phase)
         refuse("fixture_scope")
     end
     local current, pawn = scene(state.world, peer), standing_pawn(state, peer)
-    if not current or not pawn or not same_scope(current) or current.pose == "moving" then refuse("fixture_not_ready") end
+    if not current or not same_scope(current) or current.pose == "moving" then refuse("fixture_door_not_ready") end
+    if not pawn then refuse("fixture_pawn_not_ready") end
     if peer == "guest" then return guest_guard(current, pawn) end
     if scoped.status ~= "active" then refuse("fixture_replication_unverified") end
     local save = canonical_save(pawn)
