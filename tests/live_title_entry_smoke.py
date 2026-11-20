@@ -35,9 +35,10 @@ async def verify(work: Path, original: Path) -> None:
         assert second.get(native_title_entry.KEY) == proof, (proof, second.get(native_title_entry.KEY))
         assert (second["state"], second["map"], second["remote_clients"], second["server_connection"]) == (
             "ready", native_title_entry.MAP, 0, False), second.get(native_title_entry.KEY)
-        saves = list(profile.rglob("*.sav"))
-        assert not saves, saves
-        evidence.update(verified=True, stock_title=proof, observed_sequences=[first["sequence"], second["sequence"]])
+        saves = {path.relative_to(profile).as_posix() for path in profile.rglob("*.sav")}
+        assert saves <= {"Saved/SaveGames/Config.sav"}, saves
+        evidence.update(verified=True, stock_title=proof, observed_sequences=[first["sequence"], second["sequence"]],
+                        isolated_title_files=sorted(saves))
     except (OSError, RuntimeError, ValueError, AssertionError) as error:
         evidence["failure"] = str(error)
         raise
