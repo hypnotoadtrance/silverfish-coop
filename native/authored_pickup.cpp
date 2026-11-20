@@ -432,27 +432,36 @@ namespace
         return read(table, row) == expected_table && name->GetPropertyValueInContainer(row) == expected;
     }
 
-    bool stock_bandage_matches(U::UObject* actor, const Profile& profile)
+    const char* stock_bandage_fault(U::UObject* actor, const Profile& profile)
     {
         auto* type = find<U::UClass>(STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C"));
-        auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
+        if (!type || actor->GetClassPrivate() != type || !actor->HasAnyFlags(U::RF_WasLoaded))
+            return "authored_pickup_stock_bandage_identity_unqualified";
+        auto* defaults = type->GetClassDefaultObject().Get();
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!defaults || defaults->GetClassPrivate() != type || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            defaults->HasAnyFlags(destroyed) || defaults->IsUnreachable())
+            return "authored_pickup_stock_bandage_defaults_unqualified";
         auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        if (!mode || mode->GetPropertyValueInContainer(actor) != 2 || mode->GetPropertyValueInContainer(defaults) != 2 ||
+            !boolean(actor, STR("DespawnIfPlayerOwns"), false) || !boolean(actor, STR("bReplicates"), false))
+            return "authored_pickup_stock_bandage_persistence_unqualified";
         auto* units = field<U::FIntProperty>(actor, STR("Ammo"));
         auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
         auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        const auto stock_weight = [&](U::UObject* item) {
+            return std::abs(weight->GetPropertyValueInContainer(item) - profile.stack_weight) <= 1e-9;
+        };
+        if (!units || units->GetPropertyValueInContainer(defaults) != 1 || !weight ||
+            !stock_weight(actor) || !stock_weight(defaults) || !value ||
+            value->GetPropertyValueInContainer(actor) != profile.stack_value ||
+            value->GetPropertyValueInContainer(defaults) != profile.stack_value)
+            return "authored_pickup_stock_bandage_payload_unqualified";
         auto* picked_up = field<U::FMulticastInlineDelegateProperty>(actor, STR("Item_PickedUp"));
-        return type && actor->GetClassPrivate() == type && actor->HasAnyFlags(U::RF_WasLoaded) &&
-            live(defaults) && defaults->HasAnyFlags(U::RF_ClassDefaultObject) && defaults->GetClassPrivate() == type &&
-            mode && mode->GetPropertyValueInContainer(actor) == 2 &&
-            mode->GetPropertyValueInContainer(defaults) == 2 &&
-            boolean(actor, STR("DespawnIfPlayerOwns"), false) && boolean(actor, STR("bReplicates"), false) &&
-            units && units->GetPropertyValueInContainer(defaults) == 1 &&
-            weight && std::abs(weight->GetPropertyValueInContainer(actor) - profile.stack_weight) <= 1e-9 &&
-            std::abs(weight->GetPropertyValueInContainer(defaults) - profile.stack_weight) <= 1e-9 &&
-            value && value->GetPropertyValueInContainer(actor) == profile.stack_value &&
-            value->GetPropertyValueInContainer(defaults) == profile.stack_value &&
-            picked_up && picked_up->GetSize() == sizeof(U::FMulticastScriptDelegate) &&
-            !picked_up->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound();
+        if (!picked_up || picked_up->GetSize() != sizeof(U::FMulticastScriptDelegate) ||
+            picked_up->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound())
+            return "authored_pickup_stock_bandage_delegate_unqualified";
+        return nullptr;
     }
 
     int loose_cash_value(U::UObject* actor)
@@ -489,8 +498,7 @@ namespace
             return "authored_pickup_stock_category_unqualified";
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
-        if (profile.stock_bandage && !stock_bandage_matches(actor, profile))
-            return "authored_pickup_stock_bandage_profile_unqualified";
+        if (const auto* fault = profile.stock_bandage ? stock_bandage_fault(actor, profile) : nullptr) return fault;
         if (profile.stock_cash && !loose_cash_value(actor)) return "authored_pickup_stock_cash_profile_unqualified";
         // Physics-enabled items can settle below their authored placement under vanilla simulation.
         // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
