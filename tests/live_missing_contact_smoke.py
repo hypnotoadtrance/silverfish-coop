@@ -1,0 +1,232 @@
+"""Accept, dig, and redeem the stock Missing Contact contract on loopback."""
+
+import argparse
+import asyncio
+import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+from live_ai_smoke import wait
+from live_computer_board_smoke import stock_flags
+from live_multi_smoke import saved_hashes
+
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from tools.silverfish import native_computer_board as board, native_host_dig as dig, native_host_save
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.control import submit
+from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE
+
+
+SPEC = board.MISSING_CONTACT
+BOARD = board.BOARDS[BLACK_MARKET]
+BALANCES = ("Player_Cash", "Player_Xp", "Rep_Freelancer", "Rep_State", "Adv_Freelancer", dig.FLAG)
+ROUTE = (BLACK_MARKET, LAKE, CROSSROADS, LAKE, BLACK_MARKET)
+
+
+async def exercise(work: Path, vanilla_saved: Path) -> None:
+    originals = saved_hashes(vanilla_saved)
+    if not originals:
+        raise ValueError("Supply the original single-player Saved directory")
+    name = "missing-contact-" + uuid.uuid4().hex[:8]
+    campaign = work / "campaigns" / name
+    run, guest_run = campaign / "run", work / "clients" / name / "run"
+    run.mkdir(parents=True)
+    print(run, flush=True)
+    cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
+    host_options = ("--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest",
+                    "--native-zones", "--native-expanded-zones")
+    guest_options = ("--profile", name, "--headless", "--native-zones")
+    jobs, evidence = [], {"verified": False, "routes": [], "board_input": []}
+
+    async def action(directory, verb, *, accepted=True, **request):
+        reply = await submit(directory, verb, **request)
+        assert reply.get("ok") is accepted, (verb, reply)
+        return reply
+
+    async def launch(directory, stage, *args):
+        with (run / f"{stage}.txt").open("wb") as log:
+            process = await asyncio.create_subprocess_exec(*cli, *args, cwd=REPO, stdout=log, stderr=log,
+                                                            creationflags=subprocess.CREATE_NO_WINDOW)
+        jobs.append((directory, process))
+        return process
+
+    async def stop(directory, process):
+        if process.returncode is None:
+            await action(directory, "stop")
+            await asyncio.wait_for(process.wait(), 20)
+        assert process.returncode == 0
+
+    async def paired(area, character, previous=None):
+        host = await wait(run, lambda state: state.get("state") == "hosting" and state.get("link_connected") is True
+                          and state.get("game", {}).get("map") == area
+                          and (state.get("generation"), state.get("zone_epoch")) != previous
+                          and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=75)
+        await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected") is True
+                   and state.get("character_id") == character and state.get("host_session") == host["generation"]
+                   and state.get("zone_epoch") == host["zone_epoch"] and state.get("game", {}).get("map") == area, timeout=75)
+        return host
+
+    async def follow(source, destination, previous, character):
+        route, = (route for route in AUTHORED_ROUTES if (route.source, route.destination) == (source, destination))
+        evidence["pending_route"] = (source, destination, route.entrance, route.actor)
+        if route.kind == "door":
+            for actor in ("host", "guest"):
+                await action(run, "native-door-position", target=actor, exit_position="near", entrance=route.entrance)
+            await action(run, "native-door-probe", target="host", entrance=route.entrance)
+        else:
+            args = {"entrance": route.entrance, "exit_actor": route.actor}
+            for actor in ("host", "guest"):
+                await action(run, "native-exit-position", target=actor, exit_position="near", **args)
+            await action(run, "native-exit-position", target="host", exit_position="inside", **args)
+        current = await paired(destination, character, (previous["generation"], previous["zone_epoch"]))
+        evidence["routes"].append(evidence.pop("pending_route"))
+        return current
+
+    async def board_state(directory, *states):
+        await wait(directory, lambda doc: (row := doc.get("game", {}).get("native_wire_board", {}))
+                   and row.get("map") == BLACK_MARKET and row.get("board") == BOARD and row.get("state") in states)
+
+    async def press(directory, state):
+        row = (await action(directory, "native-wire-board-fixture", target=SPEC.quest_id))["native_wire_board"]
+        assert (row["map"], row["board"], row["quest"], row["state"]) == (BLACK_MARKET, BOARD, SPEC.quest_id, state), row
+        evidence["board_input"].append(row)
+
+    def party_state(doc):
+        return doc.get("campaign", {}).get("world", {}).get("party", {})
+
+    async def committed(step):
+        status = await wait(run, lambda doc: party_state(doc).get("native_quests", {}).get(SPEC.quest_id, {}).get("step") == step)
+        return party_state(status)["native_quests"][SPEC.quest_id]
+
+    async def inventory(directory):
+        page = (await action(directory, "native-inventory-list"))["native_inventory"]
+        assert page["next_offset"] is None, page
+        return {item["guid"]: item for item in page["items"]}
+
+    async def balances(character):
+        await action(run, "checkpoint")
+        saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+        profile = campaign / "game-user"
+        native_host_save.verify_checkpoint(profile, saved)
+        authority = saved["world"]["native_host_save"]
+        guest = saved["characters"][character]["state"]["native_guest_save"]
+        assert authority["slot"] != guest["slot"] and guest["character_id"] == character, (authority, guest)
+        entries = [stock_flags(native_host_save.directory(profile), row, BLACK_MARKET) for row in (authority, guest)]
+        return [{name: entry.get(name, 0) for name in BALANCES} for entry in entries]
+
+    try:
+        host = await launch(run, "host", "host", *host_options, "--port", "0", "--start-zone", BLACK_MARKET)
+        await wait(run, lambda doc: doc.get("state") == "hosting")
+        invite = await action(run, "invite", name="Missing Contact loopback", character="Courier")
+        character = invite["character_id"]
+        guest = await launch(guest_run, "guest", "join", *guest_options, "--invite", invite["invite_file"])
+        first = current = await paired(BLACK_MARKET, character)
+        await action(run, SPEC.command("approach"), target=character)
+        offer = (await action(guest_run, SPEC.command("preflight")))[SPEC.key]
+        assert (offer["step_after"], offer["xp_before"], offer["board"], offer["objective_qualified"]) == (None, 0, BOARD, False), offer
+        evidence["stock_availability"] = offer
+        offset = 0
+        while offset is not None:
+            page = (await action(guest_run, "native-bounty-board-list", target=str(offset)))["native_bounty_board"]
+            assert (page["board"], page["offset"]) == (BOARD, offset), page
+            if row := next((row for row in page["quests"] if row["id"] == SPEC.quest_id), None):
+                assert row["co_op"] == "experimental", row
+                evidence["stock_offer"] = row
+                break
+            offset = page["next_offset"]
+        assert "stock_offer" in evidence, "The stock board did not advertise Missing Contact"
+        await board_state(guest_run, "armed", "focused")
+        await press(guest_run, "loading")
+        await board_state(guest_run, "offer")
+        await press(guest_run, "starting")
+        accepted = await committed(1)
+        assert (accepted["actor"], accepted["quest_id"]) == (character, SPEC.quest_id), accepted
+        evidence["accepted"] = accepted
+        await action(run, SPEC.command("approach"), target="host")
+        missing = await action(run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)
+        assert missing["error"] == "stock_missing_contact_objective_required", missing
+        evidence["empty_host_refusal"] = missing["error"]
+
+        for source, destination in zip(ROUTE, ROUTE[1:]):
+            current = await follow(source, destination, current, character)
+            if destination == CROSSROADS:
+                equipped = (await action(run, dig.ACQUIRE))[dig.KEY]
+                assert equipped["state"] == "equipped" and equipped["stock_f"] > 0, equipped
+                dug = (await action(run, dig.DIG, target=equipped["guid"]))[dig.KEY]
+                assert (dug["state"], dug["source"], dug["flag_value"], dug["holes"]) == ("collected", dig.SOURCE, 1, 1), dug
+                package = dug["package_guid"]
+                stock = (await inventory(run))[package]
+                assert (stock["source"], stock["class_path"], stock["quantity"], stock["stackable"]) == (
+                    "backpack", dig.PACKAGE_CLASS, 1, False), stock
+                assert package not in await inventory(guest_run), dug
+                evidence["stock_dig"] = dug
+
+        await action(run, SPEC.command("approach"), target=character)
+        wrong_owner = await action(guest_run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)
+        assert wrong_owner["error"] == "stock_missing_contact_objective_required", wrong_owner
+        evidence["wrong_owner_refusal"] = wrong_owner["error"]
+        await action(run, SPEC.command("approach"), target="host")
+        active = (await action(run, SPEC.command("preflight")))[SPEC.key]
+        assert (active["step_after"], active["objective_guid"], active["objective_owner"], active["objective_qualified"]) == (
+            1, package, "host", True), active
+        before = await balances(character)
+        assert before[0][dig.FLAG] == 1 and before[1][dig.FLAG] == 0
+        await board_state(run, "armed", "focused")
+        await press(run, "loading")
+        await board_state(run, "ready")
+        await press(run, "redeeming")
+        done = await committed(-10)
+        assert (done["cash"], done["xp"], done[SPEC.consumed_field], done["objective_owner"]) == (450, 1, package, "host"), done
+        assert set(done["recipients"]) == {"host", character}, done
+        assert done["wallet"] == before[0]["Player_Cash"] + 450, done
+        assert package not in await inventory(run) and package not in await inventory(guest_run), done
+        expected_host = dict(before[0], Player_Cash=done["wallet"], Player_Xp=before[0]["Player_Xp"] + 1,
+                             Rep_Freelancer=before[0]["Rep_Freelancer"] + 40, Rep_State=before[0]["Rep_State"] - 5)
+        expected_guest = dict(before[1], Player_Xp=before[1]["Player_Xp"] + 1)
+        after = await balances(character)
+        assert after == [expected_host, expected_guest], (before, after)
+        evidence.update(stock_turn_in=done, stock_balances=after)
+
+        await stop(run, host)
+        await stop(guest_run, guest)
+        await launch(run, "host-restart", "host", *host_options, "--port", str(first["endpoint"]["port"]))
+        await wait(run, lambda doc: doc.get("state") == "hosting" and doc.get("generation") != first["generation"])
+        renewed = await action(run, "refresh-invite", target=invite["guest_id"])
+        await launch(guest_run, "guest-restart", "join", *guest_options, "--invite", renewed["invite_file"])
+        restarted = await paired(BLACK_MARKET, character, (current["generation"], current["zone_epoch"]))
+        assert restarted["endpoint"]["port"] == first["endpoint"]["port"], restarted["endpoint"]
+        replay = await action(run, "native-quest-turnin", target=SPEC.quest_id)
+        assert (replay["effect"], replay[SPEC.consumed_field]) == ("native_quest_already_settled", package), replay
+        assert await balances(character) == after
+        assert package not in await inventory(run) and package not in await inventory(guest_run)
+        evidence.update(verified=True, restart=replay)
+    except BaseException as error:
+        evidence["failure"] = str(error)
+        raise
+    finally:
+        for directory, process in reversed(jobs):
+            if process.returncode is None:
+                try:
+                    await stop(directory, process)
+                except (OSError, RuntimeError, AssertionError, TimeoutError):
+                    if process.returncode is None:
+                        process.terminate()
+                        await process.wait()
+        evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
+        evidence["verified"] = evidence["verified"] and evidence["original_saves_verified"]
+        (run / "live-missing-contact-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(evidence), flush=True)
+        assert evidence["original_saves_verified"], "Original single-player saves changed"
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--vanilla-saved", type=Path, required=True)
+    args = parser.parse_args()
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve()))

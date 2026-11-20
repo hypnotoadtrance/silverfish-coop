@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 from . import native_authored_pickup, native_black_box, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
+from .native_host_dig import KEY as DIG_RECORD, FLAG as DIG_FLAG, SOURCE as DIG_SOURCE
 from .native_tape_profiles import PUMP, TapeProfile
-from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
+from .travel import BLACK_MARKET, BOROUGH, CROSSROADS, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
 
 QUEST_ID = "Clt_ComputerBoard"
@@ -61,6 +62,9 @@ DEPOT_DOCUMENTS = CollectionContract("DepotDocs", "native-depot-documents", "Dep
 BRANDY = CollectionContract("Clt_Brandy", "native-brandy", "Fine Vintage", BLACK_MARKET,
                             "black_market_redemption_required", 900, frozenset({"8"}), "consumed_brandy",
                             native_authored_pickup.CITY_BRANDY, frozenset({BLACK_MARKET}))
+MISSING_CONTACT = CollectionContract("Note_Farmhouse", "native-missing-contact", "Missing Contact", BLACK_MARKET,
+                                      "black_market_redemption_required", 450, frozenset({"8", "4"}), "consumed_package",
+                                      board_maps=frozenset({BLACK_MARKET}))
 DEAD_DROP = CollectionContract("DeadDrop_CrossRoads", "native-dead-drop", "CrossRoads Dead Drop", BLACK_MARKET,
                                "black_market_redemption_required", 300, frozenset({"4", "8"}), "consumed_bag",
                                native_authored_pickup.DEAD_DROP, frozenset({BLACK_MARKET, OBSERVATORY}), fixture_xp=1)
@@ -87,7 +91,7 @@ BLACK_BOX = CollectionContract(native_black_box.QUEST, native_black_box.PREFIX, 
                               native_black_box.SOURCE, frozenset({OBSERVATORY, BLACK_MARKET}), fixture_xp=12)
 CONTRACTS = {spec.quest_id: spec for spec in (
     COMPUTER_BOARD, COUP_REPORT, DEPOT_DOCUMENTS, BRANDY, STOLEN_BAG, POCKET_WATCH, SAVLO_RING, PUMP_ROOM, MOLASSES, SAVLO_KEYCARD,
-    DEAD_DROP, BLACK_BOX,
+    DEAD_DROP, BLACK_BOX, MISSING_CONTACT,
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
@@ -150,6 +154,11 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
     guid = proof.get("objective_guid")
     if not valid_guid(guid) or proof.get("objective_owner") != ("host" if actor == "host" else "guest"):
         return False
+    if spec is MISSING_CONTACT:
+        dug = host.party.get(DIG_RECORD)
+        return (actor == "host" and isinstance(dug, dict) and type(dug.get("flag_value")) is int and
+                tuple(dug.get(field) for field in ("state", "map", "source", "flag", "flag_value", "package_guid"))
+                == ("collected", CROSSROADS, DIG_SOURCE, DIG_FLAG, 1, guid))
     if profile := spec.exchange:
         return any(
             (trade.get("map"), trade.get("station"), trade.get("class_path"), trade.get("filled_guid"), trade.get("owner"))
@@ -167,7 +176,7 @@ def _objective_owned(host, actor: str, spec: CollectionContract, proof: dict) ->
 async def preflight(host, bridge, actor: str, *, spec: CollectionContract = COMPUTER_BOARD) -> dict:
     pawn, area = _scope(host, actor, spec)
     proof = await _command(host, bridge, spec, "preflight", pawn, area)
-    if spec.pickup_source or spec.exchange:
+    if spec.pickup_source or spec.exchange or spec is MISSING_CONTACT:
         proof = dict(proof, objective_qualified=_objective_owned(host, actor, spec, proof))
     return {spec.key: proof}
 

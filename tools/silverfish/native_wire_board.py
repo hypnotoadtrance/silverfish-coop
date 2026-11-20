@@ -30,7 +30,7 @@ QUESTS = {
                          native_computer_board.SAVLO_RING.quest_id}),
     BLACK_MARKET: frozenset({native_computer_board.BRANDY.quest_id, native_computer_board.PUMP_ROOM.quest_id,
                             native_computer_board.STOLEN_BAG.quest_id, native_computer_board.DEAD_DROP.quest_id,
-                            native_computer_board.BLACK_BOX.quest_id,
+                            native_computer_board.BLACK_BOX.quest_id, native_computer_board.MISSING_CONTACT.quest_id,
                             LAKE_JAMMER.quest, LENNY.quest}),
 }
 PREFLIGHTS = {
@@ -175,7 +175,8 @@ class WireBoardView:
             raise RuntimeError("The host board report has an unexpected redemption location")
         if area != spec.redeem_map:
             return "elsewhere"
-        qualified = proof.get("objective_qualified") is True if spec.pickup_source else valid_guid(proof.get("objective_guid"))
+        requires_provenance = spec.pickup_source or spec is native_computer_board.MISSING_CONTACT
+        qualified = proof.get("objective_qualified") is True if requires_provenance else valid_guid(proof.get("objective_guid"))
         return "ready" if qualified else "missing"
 
     @staticmethod
