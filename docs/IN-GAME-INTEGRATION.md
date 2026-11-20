@@ -12,6 +12,8 @@ The current Python launcher starts a staged game process with `-userdir` and `-M
 
 A standalone Windows x64 test ran both existing QUIC roles inside one C++ process with an embedded CPython worker. The host rejected an invalid credential and a mismatched character ID. Both roles exchanged UDP payloads through simulated Unreal endpoints. Reconnect restored the same character, saved state, lease, and relay endpoints. The next transport milestone connects that worker to Unreal's game thread.
 
+A separate staged probe loaded the same transport exercise from a pinned UE4SS add-on inside the actual Project Silverfish process. The game ran 83 engine ticks while the Python worker authenticated both roles, exchanged datagrams, and reconnected on loopback. The probe used simulated Unreal endpoints. The mounted title stayed ready, and the original single-player save hashes matched.
+
 The staged title probe found the same stock widget at the top of its local controller's menu stack across several frames. It verified that the widget was visible and attached to the actual viewport. The title created only the stock `Config.sav` in its isolated profile. The original single-player save hashes matched.
 
 A staged loopback trial mounted the co-op panel over that title. The panel exposed the bound Host or Join action and refused the unoffered action. The headless input seam submitted each selection through the same one-use request as the physical keys. Host opened the chosen UDP port and started Observatory, and Join connected the invited guest and bound their detached stock save. Each title process stayed open until the new session became ready. The paired checkpoint succeeded and the original save hashes matched.
