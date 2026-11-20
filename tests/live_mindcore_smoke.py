@@ -68,7 +68,23 @@ def _route_proofs(rows):
     return True
 
 
-def baseline_inputs(work, baseline, *, resume=False):
+def natural_mount_release(proof):
+    passage = proof.get("held_cradle_passage", {})
+    grip, release = (passage.get(key, {}) for key in ("stock_grip", "capsule_release"))
+    lease, pawn = grip.get("lease"), grip.get("pawn")
+    start_sequence, end_sequence = grip.get("sequence"), release.get("sequence")
+    if (proof.get("baseline_verified") is not True or proof.get("original_saves_verified") is not True
+            or not carry.token(lease) or not carry.valid_pawn(pawn)
+            or (grip.get("core"), grip.get("state"), grip.get("reason")) != (core.CORE, "held", "stock_core_grabbed")
+            or tuple(release.get(key) for key in ("lease", "pawn", "core", "state", "reason"))
+            != (lease, pawn, core.CORE, "mount_released", "stock_core_capsule_release")
+            or type(start_sequence) is not int or type(end_sequence) is not int or not 0 < start_sequence < end_sequence):
+        raise ValueError("Resume needs an isolated stock capsule release of the exact guest-held Core")
+    return release
+
+
+def baseline_inputs(work, baseline, *, resume=False, resume_mounted=False):
+    resume = resume or resume_mounted
     prefix, report, area = ("mindcore-", REPORT, core.MAP) if resume else (
         "drill-results-", "live-drill-test-results-verification.json", SCIENTIST_SHOP)
     if (baseline.resolve(strict=True) != baseline or baseline.is_junction()
@@ -95,10 +111,18 @@ def baseline_inputs(work, baseline, *, resume=False):
     if resume:
         dormant = core.parse_scene(["native-mindcore-scene", core.MAP, core.CRADLE, core.UPLOADER, core.CORE, core.FLAG, "0", "0"])
         frames = (data["world"]["native_host_save"], data["characters"][character]["state"]["native_guest_save"])
+        expected_flags = (1, 0) if resume_mounted else (0, 0)
         if (proof.get("dormant") != dormant or not _route_proofs(proof.get("routes"))
                 or frames[0]["slot"] == frames[1]["slot"]
-                or any(stock_flags(profile / "Saved/SaveGames", frame, core.MAP).get(core.FLAG, 0) != 0 for frame in frames)):
-            raise ValueError("Resume needs the exact dormant console, seven authored legs, and both original stage-zero frames")
+                or tuple(stock_flags(profile / "Saved/SaveGames", frame, core.MAP).get(core.FLAG, 0)
+                         for frame in frames) != expected_flags):
+            raise ValueError(f"Resume needs seven authored legs and both original console flags {expected_flags}")
+        if resume_mounted:
+            mounted = dict(dormant, status=1, installed=True)
+            if (data["world"].get("native_observation", {}).get(core.SCENE) != mounted
+                    or not core.valid_guid(guid) or not core.valid_guid(blank)):
+                raise ValueError("Resume needs the exact saved stage-one console and owned Results tape")
+            natural_mount_release(proof)
     elif proof.get("verified") is not True:
         raise ValueError("The Scientist Results proof is unverified")
     guest_id = str(uuid.UUID(data["characters"][character]["guest_id"]))
@@ -150,7 +174,7 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn, *, allow_d
     return True
 
 
-async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
+async def exercise(work, baseline, vanilla_saved, *, resume=False, resume_mounted=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
@@ -172,6 +196,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
         raise ValueError("Choose one lower deck positioning scenario")
     core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo or bool(stage_site)
+    if resume_mounted:
+        if any((resume, instructions, carry_only, guest_carry, lift_ride, upper_door, stock_hazard_wipe,
+                prepare_core_carry, core_lift_carry, guest_hazard_authority, route_probe, cradle_carry)):
+            raise ValueError("Run the mounted restart and stock upload separately from stage-zero scenarios")
+        resume = stock_input = shared_core = True
     if route_probe and (not resume or core_lift_carry or stock_input or instructions or carry_only
                         or shared_core or guest_carry or lift_ride or upper_door or stock_hazard_wipe
                         or prepare_core_carry or guest_hazard_authority):
@@ -238,7 +267,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
-    data, inputs, conversion, guest_id, prior_routes = baseline_inputs(work, baseline, resume=resume)
+    data, inputs, conversion, guest_id, prior_routes = baseline_inputs(work, baseline, resume=resume, resume_mounted=resume_mounted)
     if stock_hazard_wipe:
         saved_host = data["world"].get("host", {})
         if data["world"]["map"] != core.MAP or math.dist(saved_host["location"], [-1672, -49, 120]) > 15:
@@ -267,7 +296,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                        or prepared.get("cards", {}).get(claim.get("source"), {}).get("guid") != claim["guid"]
                        for claim in cards)):
             raise ValueError("Require both exact stock cards from the verified paired carry checkpoint")
-    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry or core_lift_carry or guest_hazard_authority or cradle_carry:
+    if (upper_door_keycard or stock_hazard_wipe or prepare_core_carry or core_lift_carry or guest_hazard_authority
+            or cradle_carry or resume_mounted):
         for index, frame in enumerate(native_host_save.references(data)):
             inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
@@ -279,7 +309,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     print(run, flush=True)
     start_area = data["world"]["map"]
     proof = {"baseline": baseline.name, "routes": prior_routes, "source_results": conversion}
-    if resume:
+    if resume_mounted:
+        source_proof = runtime.read_json(inputs["proof"])
+        proof["dormant"] = source_proof["dormant"]
+        proof["resumed_mounted_checkpoint"] = {"revision": data["revision"],
+                                               "scene": data["world"]["native_observation"][core.SCENE],
+                                               "capsule_release": natural_mount_release(source_proof), "stock_flags": [1, 0]}
+    elif resume:
         proof["resumed_dormant_checkpoint"] = data["revision"]
     jobs = []
 
@@ -740,9 +776,12 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             for leg in ROUTE:
                 authority = await travel(authority, leg)
 
-        inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
-                              and (scene["status"], scene["installed"]) == (0, False), timeout=20)
-        proof["dormant"] = inactive["game"][core.SCENE]
+        if resume_mounted:
+            mounted_boot = await wait(run, lambda state: core._ready(state.get("game", {}), 1), timeout=25)
+        else:
+            inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
+                                  and (scene["status"], scene["installed"]) == (0, False), timeout=20)
+            proof["dormant"] = inactive["game"][core.SCENE]
         if route_probe:
             navigation = proof["stock_navigation"] = {}
             for target in lift.ROUTE_TARGETS:
@@ -826,17 +865,19 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             await ride_lift(authority)
             proof["verified"] = True
             return proof
-        if shared_core:
-            await shared_core_at(0, label="dormant")
-        locked = await action(guest_run, core.UPLOAD, target=guid, success=False)
-        assert locked["error"] == core.LOCKED, locked
-        if stock_input:
-            await view("pass-through", 0, 0)
-            dormant_f = await action(guest_run, console.FIXTURE, success=False)
-            assert dormant_f["error"] == "The exact stock MindCore upload is unavailable", dormant_f
-        await action(run, "checkpoint")
-        dormant_checkpoint, dormant_flags = await flags()
-        assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
+        locked = None
+        if not resume_mounted:
+            if shared_core:
+                await shared_core_at(0, label="dormant")
+            locked = await action(guest_run, core.UPLOAD, target=guid, success=False)
+            assert locked["error"] == core.LOCKED, locked
+            if stock_input:
+                await view("pass-through", 0, 0)
+                dormant_f = await action(guest_run, console.FIXTURE, success=False)
+                assert dormant_f["error"] == "The exact stock MindCore upload is unavailable", dormant_f
+            await action(run, "checkpoint")
+            dormant_checkpoint, dormant_flags = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
         if guest_carry:
             from datasilo_core_lift import equip_stock_protection
 
@@ -982,7 +1023,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                          carry_stock_flags=[0, 0], physical_test="stock_grab_short_carry_release")
             return proof
 
-        if cradle_carry:
+        if resume_mounted:
+            installed = mounted_boot["game"][core.SCENE]
+            assert installed == proof["resumed_mounted_checkpoint"]["scene"], installed
+        elif cradle_carry:
             from datasilo_core_lift import equip_stock_protection
             from datasilo_door_passage import verify_held_cradle_passage
 
@@ -995,7 +1039,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         mounted_frame, mounted_flags = await flags()
         assert (installed["status"], installed["installed"]) == (1, True), installed
         assert tuple(row.get(core.FLAG, 0) for row in mounted_flags) == (1, 0), mounted_flags
-        proof["installation"] = {"scene": installed, "headless_relocation": not cradle_carry, "stock_flags": [1, 0]}
+        proof["installation"] = {"scene": installed, "headless_relocation": not (cradle_carry or resume_mounted),
+                                 "stock_flags": [1, 0]}
         if cradle_carry:
             assert mounted_frame["revision"] >= saved_mount["revision"] > dormant_checkpoint["revision"]
             proof["installation"]["checkpoint"] = mounted_frame["revision"]
@@ -1044,8 +1089,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             operation_id = receipt["operation_id"]
         assert (receipt["operation_id"], receipt["owner"], receipt["guid"]) == (operation_id, character, guid)
         assert await inventory(guest_run, character) == original_guest and await inventory(run, "host") == original_host
-        proof["upload"] = {"locked": locked["error"], "wrong_guid": wrong["error"], "preflight": ready,
+        proof["upload"] = {"wrong_guid": wrong["error"], "preflight": ready,
                            "receipt": receipt, "tape": original_guest[guid], "stock_flags": [2, 0]}
+        if locked is not None:
+            proof["upload"]["locked"] = locked["error"]
         final_guest, instructions_receipt = (await download_tape(owned_blank, original_guest, original_host, compiled_flags)
                                              if instructions else (original_guest, None))
 
@@ -1114,7 +1161,9 @@ if __name__ == "__main__":
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
-    parser.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
+    resume_mode = parser.add_mutually_exclusive_group()
+    resume_mode.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
+    resume_mode.add_argument("--resume-mounted", action="store_true", help="clone a natural stock stage-one mount and verify stock upload")
     parser.add_argument("--stock-input", action="store_true", help="confirm the upload with two genuine stock Interact presses")
     parser.add_argument("--instructions", action="store_true", help="buy a second blank and use the compiled console's stock exchange")
     parser.add_argument("--carry-only", action="store_true", help="grab, move, and release the Core with stock gameplay")
@@ -1159,7 +1208,8 @@ if __name__ == "__main__":
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
-    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
+    asyncio.run(exercise(*paths, resume=options.resume, resume_mounted=options.resume_mounted,
+                         stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
                           lift_disembark=options.lift_disembark, upper_door=options.upper_door,
