@@ -12,7 +12,7 @@ from tools.silverfish import native_mindcore_fixture as fixture
 
 EXIT_Y = 64.0
 UPPER_LANDING_Z = 2400.0
-LOWER_DECK_WEST_EDGE_X = -1732.3
+DECK_WEST_EDGE_X = -1732.3
 # Stock HoldObject uses the camera's horizontal heading above level pitch.
 CARRY_PITCH = 3
 
@@ -301,17 +301,24 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof["upper_regrip"] = await regrip("pick up the same Core from the parked upper deck", proof.get("deck_release"))
 
     async def disembark():
-        if "upper_regrip" in proof:
+        def above_west_rail(row, *_):
+            x, _, z = row["prop"]["position"]
+            return x < DECK_WEST_EDGE_X - 20 and z >= UPPER_LANDING_Z + 154
+
+        picked_up_above = "upper_regrip" in proof
+        if picked_up_above:
             await turn("raise the Core above the upper rail before moving west", 180, pitch=68)
-            proof["upper_raised"] = await observe("verify the Core clears the upper rail", lambda row, *_: (
-                abs(row["prop"]["position"][1] - row["carrier"]["location"][1]) < 23
-                and row["prop"]["position"][2] >= UPPER_LANDING_Z + 154), timeout=5)
+            proof["upper_raised"] = await observe("verify the Core clears the upper rail", above_west_rail, timeout=5)
         await walk_to("align just inside the west edge of the upper deck", (-1720, EXIT_Y), 2.5, reached=on_deck)
-        await turn("raise the Core outside the upper deck lip", 180, pitch=24)
-        proof["upper_aligned"] = await observe("verify the Core is raised and centered before exiting", lambda row, *_: (
-            row["prop"]["position"][0] < row["carrier"]["location"][0] - 75
-            and abs(row["prop"]["position"][1] - EXIT_Y) < 12
-            and row["prop"]["position"][2] >= UPPER_LANDING_Z + 28), timeout=6)
+        if picked_up_above:
+            proof["upper_aligned"] = await observe("keep the Core above the rail while aligning with the opening",
+                                                   above_west_rail, timeout=6)
+        else:
+            await turn("raise the Core outside the upper deck lip", 180, pitch=24)
+            proof["upper_aligned"] = await observe("verify the Core is raised and centered before exiting", lambda row, *_: (
+                row["prop"]["position"][0] < row["carrier"]["location"][0] - 75
+                and abs(row["prop"]["position"][1] - EXIT_Y) < 12
+                and row["prop"]["position"][2] >= UPPER_LANDING_Z + 28), timeout=6)
         landed = await walk_to("carry the Core onto the west landing", (-1990, EXIT_Y), 18, reached=lambda row: not on_deck(row))
         proof["landing"] = landed
         assert "guest" not in landed["bases"][0] and "local" not in landed["bases"][1]
@@ -402,7 +409,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         await turn("lift the Core above the west railing", 180, pitch=68)
         await walk_to("move the held Core inward from the west rail", (-1654, EXIT_Y), 8, reached=on_deck)
         proof["above_lower_rail"] = await observe("verify the Core is above the rail and inside the cabin", lambda row, *_: (
-            row["prop"]["position"][0] > LOWER_DECK_WEST_EDGE_X and row["prop"]["position"][2] >= 154), timeout=5)
+            row["prop"]["position"][0] > DECK_WEST_EDGE_X and row["prop"]["position"][2] >= 154), timeout=5)
         await turn("rotate the raised Core along the longer side of the cabin", -90, pitch=52)
         proof["before_deck_release"] = await observe("verify the raised Core is over the middle of the lower deck", lambda row, *_: (
             -1697 < row["prop"]["position"][0] < -1642 and abs(row["prop"]["position"][1]) < 23
