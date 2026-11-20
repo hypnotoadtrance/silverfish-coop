@@ -343,6 +343,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         proof["stock_board"] = {"review": offer, "turn_in": await rendered("completed", pending), "stock_preflight": offered}
         durable = saved()
         gained = flags(durable)
+        proof["stock_flags"] = gained
         record = durable["world"]["party"]["native_quests"][drill.QUEST_ID]
         assert (record["actor"], record["step"], record["cash"], record["xp"], record["consumed_drill_head"]) == (
             character, -10, 10000, 3, claimed["guid"]), record
@@ -364,11 +365,11 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert gained["host"].get("Mosby_DrillTest") == 1
         for label, reputation in record["reputation"].items():
             rep, advantage = f"Rep_{label.title()}", f"Adv_{label.title()}"
-            assert (before["host"].get(rep, 0), gained["host"].get(rep, 0)) == (reputation["before"], reputation["after"])
+            assert offered["reputation"][label]["before"] == reputation["before"]
+            assert gained["host"][rep] == reputation["after"]
             assert before["host"].get(advantage) == gained["host"].get(advantage)
         assert record["wallet"] == gained["host"]["Player_Cash"]
         await wait(client_run, lambda status: status.get("gameplay", {}).get("economy", {}).get("wallet") == record["wallet"])
-        proof["stock_flags"] = gained
 
         async def replay():
             receipt = await action(client, "native-quest-turnin", "--target", drill.QUEST_ID)
