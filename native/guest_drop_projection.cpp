@@ -513,8 +513,15 @@ namespace
             actor->SetActorEnableCollision(true);
             for (auto* component : components)
             {
-                if (byte_call(component, enabled, 0xff) != (component == box ? 1 : 0))
-                    return "stock_drop_projection_collision_mode_unverified";
+                const auto expected_mode = component == box ? 1 : 0;
+                const auto actual_mode = byte_call(component, enabled, 0xff);
+                if (actual_mode != expected_mode)
+                {
+                    static thread_local std::string detail;
+                    detail = "stock_drop_projection_collision_mode_unverified:" + RC::to_utf8_string(component->GetName())
+                        + ":expected=" + std::to_string(expected_mode) + ":actual=" + std::to_string(actual_mode);
+                    return detail.c_str();
+                }
                 if (byte_call(component, simulating, 0) || byte_call(component, overlaps, 0))
                     return "stock_drop_projection_physics_or_overlap_unverified";
                 // A disabled pistol mesh may report its stock body responses without a query shape.
