@@ -165,7 +165,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
     async def turn(label, yaw, *, pitch=CARRY_PITCH):
         before = await observe(label, lambda *_: True)
-        await action(guest_run, carry.FIXTURE, target=f"turn@{pitch}@{yaw}")
+        await action(guest_run, carry.FIXTURE, target=f"turn@{pitch:.3f}@{yaw:.3f}")
         return await observe(label, lambda row, *_: (
             row["hold"]["sequence"] > before["hold"]["sequence"] and abs(row["hold"]["pitch"] - pitch) < .35
             and abs((row["hold"]["yaw"] - yaw + 180) % 360 - 180) < .35))
