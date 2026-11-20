@@ -113,14 +113,52 @@ class StageBackendTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
     def test_only_headless_launches_use_unreals_offscreen_application(self):
-        with patch("tools.silverfish.win_job.GameProcess") as game:
-            runtime.launch(self.work, self.work / "profile", self.work / "bridge", headless=True)
-            command = game.call_args.args[0]
-            self.assertIn("-RenderOffScreen", command)
-            self.assertIn("-nullrhi", command)
+        paths = self.work, self.work / "profile", self.work / "bridge"
+        with patch.dict(os.environ), patch("tools.silverfish.win_job.GameProcess") as game:
+            os.environ.pop("SILVERFISH_COOP_RENDER_CAPTURE", None)
+            for port in (17432, None):
+                runtime.launch(*paths, headless=True, port=port)
+                command = game.call_args.args[0]
+                self.assertIn("-RenderOffScreen", command)
+                self.assertIn("-nullrhi", command)
 
-            runtime.launch(self.work, self.work / "profile", self.work / "bridge", headless=False)
+            runtime.launch(*paths, headless=False)
             self.assertNotIn("-RenderOffScreen", game.call_args.args[0])
+
+    @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
+    def test_headless_capture_enables_gpu_only_for_the_selected_peer(self):
+        paths = self.work, self.work / "profile", self.work / "bridge"
+        flag = "SILVERFISH_COOP_RENDER_CAPTURE"
+        fixture = "SILVERFISH_COOP_FIXTURE_CAPTURE"
+        with patch.dict(os.environ, {fixture: "inherited"}), patch("tools.silverfish.win_job.GameProcess") as game:
+            for capture in ("host", "guest", "unknown"):
+                os.environ[flag] = capture
+                for role, port in (("host", 17432), ("guest", None)):
+                    with self.subTest(capture=capture, role=role):
+                        runtime.launch(*paths, headless=True, port=port)
+                        command = game.call_args.args[0]
+                        self.assertEqual("-nullrhi" in command, capture != role)
+                        self.assertIn("-RenderOffScreen", command)
+                        self.assertIn("DefaultViewportMouseCaptureMode=NoCapture", command)
+                        self.assertIn("DefaultViewportMouseLockMode=DoNotLock", command)
+                        self.assertNotIn(flag, game.call_args.kwargs["env"])
+                        self.assertEqual(game.call_args.kwargs["env"].get(fixture), "1" if capture == role else None)
+                        startup = game.call_args.kwargs["startupinfo"]
+                        self.assertTrue(startup.dwFlags & runtime.subprocess.STARTF_USESHOWWINDOW)
+                        self.assertEqual(startup.wShowWindow, runtime.subprocess.SW_HIDE)
+
+    @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
+    def test_title_and_foreground_do_not_use_the_guest_capture_setting(self):
+        paths = self.work, self.work / "profile", self.work / "bridge"
+        fixture = "SILVERFISH_COOP_FIXTURE_CAPTURE"
+        with (patch.dict(os.environ, {"SILVERFISH_COOP_RENDER_CAPTURE": "guest", fixture: "1"}),
+              patch("tools.silverfish.win_job.GameProcess") as game):
+            runtime.launch(*paths, headless=True, title_fixture=True)
+            self.assertIn("-nullrhi", game.call_args.args[0])
+            self.assertNotIn(fixture, game.call_args.kwargs["env"])
+            runtime.launch(*paths, headless=False)
+            self.assertNotIn("-RenderOffScreen", game.call_args.args[0])
+            self.assertNotIn(fixture, game.call_args.kwargs["env"])
 
     @unittest.skipUnless(os.name == "nt", "Uses the Windows game launcher")
     def test_reload_fixture_requires_headless_client_with_reload_input(self):

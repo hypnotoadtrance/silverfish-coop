@@ -494,6 +494,8 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     if not game.is_relative_to(work.resolve() / "stage"):
         raise ValueError("The staged shipping executable points outside the stage")
     env = game_environment(work, headless, port, **options)
+    render_capture = env.pop("SILVERFISH_COOP_RENDER_CAPTURE", None)
+    env.pop("SILVERFISH_COOP_FIXTURE_CAPTURE", None)
     if options.get("embedded_engine") or options.get("inspect_title_profile"):
         from .embedded_engine import assert_private_saved_tree
         assert_private_saved_tree(profile)
@@ -508,7 +510,13 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
         arguments += f" -port={port}"
     info = None
     if headless:
-        arguments += (" -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480"
+        role = "host" if port is not None else "guest"
+        if (render_capture != role or options.get("embedded_engine") or options.get("title_fixture")
+                or options.get("inspect_title_profile")):
+            arguments += " -nullrhi"
+        else:
+            env["SILVERFISH_COOP_FIXTURE_CAPTURE"] = "1"
+        arguments += (" -RenderOffScreen -nosound -ResX=640 -ResY=480"
                       " -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,"
                       "[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock")
         info = subprocess.STARTUPINFO()
@@ -2130,6 +2138,10 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
+                elif fields[0] == "native-player-avatar" and len(fields) == 5:
+                    area, pawn, status, diagnostic = fields[1:]
+                    if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):
+                        data.setdefault("native_player_avatars", {})[pawn] = {"state": status, "diagnostic": diagnostic}
             if data.get("schema") == 1 and "state" in data:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):

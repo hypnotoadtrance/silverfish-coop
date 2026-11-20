@@ -3,6 +3,8 @@ if not bridge or bridge == "" then return end
 
 local guest_save = require("guest_save")
 local loot = require("loot")
+local native_player_avatar = require("native_player_avatar")
+local native_avatar_capture_fixture = require("native_avatar_capture_fixture")
 local native_bed = require("native_bed")
 local native_bag_projection = require("native_bag_projection")
 local native_authored_pickup = require("native_authored_pickup")
@@ -1013,6 +1015,7 @@ local function write_status(state, current_phase, failure)
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
         end
     end
+    for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
     local guest_save_row = guest_save.row(status_row)
     if guest_save_row then rows[#rows + 1] = guest_save_row end
     local guest_frame = guest_save.frame_row(status_row)
@@ -1334,6 +1337,8 @@ local function tick()
         vitals.sync(state, current_phase)
         native_enemy_shell_view.sync(state, current_phase)
         players.sync(state, current_phase)
+        native_player_avatar.sync(state, current_phase)
+        native_avatar_capture_fixture.sync(state, current_phase, native_player_avatar)
         native_host_invite.sync(state, current_phase)
         native_wire_board.sync(state, current_phase)
         native_dialogue.sync(state, current_phase)
