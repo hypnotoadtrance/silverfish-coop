@@ -3879,7 +3879,7 @@ class Client:
             splits = (self.gameplay.get(native_inventory.SPLIT_CAPABILITY) == 1
                       and self.last_game.get("native_inventory_split_view_capability") is True)
             drops = (self.gameplay.get(native_guest_drop_record.CAPABILITY) == 1
-                     and area == native_guest_drop_record.OBSERVATORY)
+                     and native_guest_drop_record.supported_map(area))
             entries = []
             for row in items:
                 options = []

@@ -1,4 +1,5 @@
 #include "guest_stack_drop.hpp"
+#include "guest_drop_maps.hpp"
 #include "guest_regen.hpp"
 
 #include <algorithm>
@@ -35,7 +36,6 @@ namespace
     using Lua = RC::LuaMadeSimple::Lua;
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
-    constexpr auto area_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto game_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
@@ -260,7 +260,7 @@ namespace
         result.game = object(result.world, STR("OwningGameInstance"));
         result.stock = object(result.game, STR("SaveSlot_Ref"));
         if (!matches(result.detached, detached_id) || !live(result.game) || result.game->GetClassPrivate() != game_class ||
-            result.world != find<U::UWorld>(area_path) || !result.current()) return {};
+            !silverfish::native_guest_drop_maps::contains(result.world) || !result.current()) return {};
         return result;
     }
 
@@ -552,7 +552,8 @@ namespace
         Position location{};
         std::string_view qualification;
         if (!added) qualification = "native_guest_stack_drop_no_stock_birth";
-        else if (!scope.saw_stock_frame || spawned != added || birth != added)
+        else if (!scope.saw_stock_frame || spawned != added || birth != added
+                 || !silverfish::native_guest_drop_maps::persistent_actor(static_cast<U::AActor*>(added), owner.world))
             qualification = "native_guest_stack_drop_stock_birth_frame_unqualified";
         else if (!near_arrow(spawned, origin, location)) qualification = "native_guest_stack_drop_stock_transform_unqualified";
         else if (object(spawned, STR("As Game Instance FP")) != owner.game || object(spawned, STR("Owner")) ||

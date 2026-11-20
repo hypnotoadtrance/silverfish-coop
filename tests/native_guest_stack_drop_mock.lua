@@ -11,6 +11,8 @@ local function object(address)
 end
 local game = { map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P", listening = true, server = false }
 local pawn, detached, isolated, statics = object(1), object(2), object(3), object(4)
+game.world = object(5)
+function game.world:GetFullName() return "World " .. game.map .. "." .. game.map:match("[^/]+$") end
 local actor = "Ammo_Pistol_BP_C " .. game.map .. ".Observitory_P:PersistentLevel.Ammo_Pistol_BP_C_14"
 local guest, slot, guid, changed = "exact guest", "SFCoop_" .. ("a"):rep(32), ("B"):rep(32), ("C"):rep(32)
 local loaded, calls, standing, broken = 0, 0, true, false
@@ -74,7 +76,7 @@ function SilverfishRecoverNativeInventoryBag(source, target, owner)
     recovered = recovered + 1
     return true, "recovered", 1
 end
-local settle = {"request", "native-guest-stack-drop-settle", "reclaim", guest, ("e"):rep(32), slot, "-", "20", "0", "0"}
+local settle = {"request", "native-guest-stack-drop-settle", "reclaim", guest, ("e"):rep(32), slot, "-", "20", "0", "0", game.map}
 location.X = 300
 ok, reason = attempt(settle, "hosting")
 assert(not ok and reason == "native_guest_stack_drop_out_of_range" and recovered == 0)
@@ -90,6 +92,18 @@ broken = false
 assert(not attempt(command, "hosting"))
 local rows = stack_drop.rows(game, "hosting", status)
 assert(#rows == 1 and rows[1][1] == birth .. "-capability")
-assert(attempt({"request", birth, guest, slot, guid, "9"}, "hosting"))
+assert(attempt({"request", birth, guest, slot, guid, "9", game.map}, "hosting"))
 row = stack_drop.rows(game, "hosting", status)[2]
 assert(row[1] == birth and row[9] == actor and row[10] == changed)
+
+
+local observatory = game.map
+game.map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+actor = "Ammo_Pistol_BP_C " .. game.map .. ".CrossRoads_P:PersistentLevel.Ammo_Pistol_BP_C_14"
+assert(not attempt({"request", birth, guest, slot, guid, "9", observatory}, "hosting"))
+assert(attempt({"request", birth, guest, slot, guid, "9", game.map}, "hosting"))
+row = stack_drop.rows(game, "hosting", status)[2]
+assert(row[1] == birth and row[2] == game.map and row[9] == actor)
+assert(not attempt(settle, "hosting") and recovered == 1)
+settle[11] = game.map
+assert(attempt(settle, "hosting") and recovered == 2)

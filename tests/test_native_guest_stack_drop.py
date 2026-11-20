@@ -5,9 +5,9 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_guest_stack_drop as drop, native_host_save, party
+from tools.silverfish import native_guest_stack_drop as drop, native_guest_drop_record as record, native_host_save, party
 from tools.silverfish.runtime import Bridge
-from tools.silverfish.travel import OBSERVATORY
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
 LEVEL = OBSERVATORY + ".Observitory_P:PersistentLevel."
@@ -44,6 +44,28 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
             row[index] = wrong
             self.assertIsNone(snapshot(row))
 
+    def test_crossroads_birth_capability_requires_the_exact_map_and_class(self):
+        path = Path(self.enterContext(TemporaryDirectory()))
+        bridge = Bridge(path, Mock())
+        area = CROSSROADS
+        level = area + ".CrossRoads_P:PersistentLevel."
+        pawn, actor = f"Player_FP_C {level}Player_FP_C_200", f"Ammo_Pistol_BP_C {level}Ammo_Pistol_BP_C_202"
+        row = [drop.BIRTH, area, pawn, SLOT, GUID, "9", "1", drop.SUCCESS, actor, NEW_GUID]
+
+        def snapshot(report):
+            rows = ("schema\t1", f"session\tnative\thosting\t{area}\t1\t0", drop.BIRTH + "-capability\t1",
+                    drop.ACTION + "-capability\t1", "\t".join(report))
+            (path / "status.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            return bridge.snapshot()
+
+        report = snapshot(row)
+        self.assertEqual(report[record.CAPABILITY], 1)
+        self.assertNotIn(drop.CAPABILITY, report)
+        self.assertEqual(report[drop.KEY]["actor"], actor)
+        self.assertIsNone(snapshot([drop.ACTION, *row[1:]]))
+        self.assertIsNone(snapshot([*row[:8], ACTOR, NEW_GUID]))
+        self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_Magnum_BP"), NEW_GUID]))
+
     def make_host(self):
         profile = Path(self.enterContext(TemporaryDirectory()))
         file = native_host_save.slot_path(profile, SLOT)
@@ -53,7 +75,7 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         campaign = {"revision": 5, "characters": [{"character_id": CHARACTER, "state": {"native_guest_save": frame}}]}
         state = party.new_party()
         party.add_player(state, CHARACTER)
-        host = SimpleNamespace(fixtures=True, native_guest=True, native_zones=True, native_profile=profile,
+        host = SimpleNamespace(zone_epoch="f" * 32, fixtures=True, native_guest=True, native_zones=True, native_profile=profile,
                                stopping=False, transitioning=False, last_seen=time.monotonic(), native_checkpoint_unsafe=False,
                                last_game={"state": "hosting", "map": OBSERVATORY, drop.CAPABILITY: 1},
                                native_recipients=lambda: {CHARACTER: {"connected": True, "pawn": PAWN}},

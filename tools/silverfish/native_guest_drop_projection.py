@@ -13,10 +13,6 @@ SYNC = ROW + "-sync"
 CLEAR = ROW + "-clear"
 FIXTURE = ROW + "-fixture"
 _TARGET = re.compile(r"stack-drop:([0-9a-f]{32}):([0-9a-f]{32})\Z")
-_ITEM_NAME = "Ammo_Pistol_BP_C"
-_PREFIX = f"{record.OBSERVATORY}.Observitory_P:PersistentLevel."
-_ACTOR = re.compile(re.escape(f"{_ITEM_NAME} {_PREFIX}{_ITEM_NAME}_") + r"[0-9]{1,10}\Z")
-_PAWN = re.compile(re.escape(f"Player_FP_C {_PREFIX}Player_FP_C_") + r"[0-9]{1,10}\Z")
 
 
 def target_parts(target: str | None) -> tuple[str, str] | None:
@@ -25,11 +21,11 @@ def target_parts(target: str | None) -> tuple[str, str] | None:
 
 
 def parse(fields: list[str], state: str, area: str) -> dict:
-    if len(fields) != 7 or (state, area) != ("connected", record.OBSERVATORY):
+    if len(fields) != 7 or state != "connected" or not record.supported_map(area):
         raise ValueError("Unexpected stock drop projection report")
     _, reported_area, token, drop_id, pawn, actor, sequence = fields
     if (reported_area != area or not record.valid_id(token) or not record.valid_id(drop_id)
-            or not _ACTOR.fullmatch(actor) or not _PAWN.fullmatch(pawn)
+            or not record.actor_matches(area, actor) or not record.pawn_matches(area, pawn)
             or not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", sequence) or int(sequence) >= 2**53):
         raise ValueError("Invalid stock drop projection report")
     return dict(map=area, epoch=token, drop_id=drop_id, pawn=pawn, actor=actor, sequence=int(sequence))
@@ -38,11 +34,11 @@ def parse(fields: list[str], state: str, area: str) -> dict:
 def _desired(client, active: bool, admission: str):
     game = client.last_game
     character = client.invite["character_id"]
+    area = game.get("map")
     if (not active or client.stopping or client.suspended or client.needs_travel or client.server_transitioning
             or not client.transport.game_access or not client.host_session
             or not record.valid_id(client.zone_epoch)
-            or (game.get("state"), game.get("map"), client.expected_zone) !=
-                ("connected", record.OBSERVATORY, record.OBSERVATORY)):
+            or game.get("state") != "connected" or not record.supported_map(area) or client.expected_zone != area):
         return None
     rows = client.gameplay.get(record.STATE, {})
     if not isinstance(rows, dict) or len(rows) != 1:
@@ -50,14 +46,14 @@ def _desired(client, active: bool, admission: str):
     drop_id, row = next(iter(rows.items()))
     if (not record.valid_id(drop_id) or not isinstance(row, dict)
             or (row.get("drop_id"), row.get("owner"), row.get("map"), row.get("class_path")) !=
-                (drop_id, character, record.OBSERVATORY, record.ITEM)
+                (drop_id, character, area, record.ITEM)
             or not record.valid_position(row.get("location"))):
         return None
     pawn = game.get("pawns", {}).get("local", {}).get("name")
-    if not isinstance(pawn, str) or not _PAWN.fullmatch(pawn):
+    if not record.pawn_matches(area, pawn):
         return None
-    epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{client.host_session}:{client.zone_epoch}:{character}:{admission}").hex
-    return epoch, drop_id, pawn, row["location"]
+    epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{client.host_session}:{client.zone_epoch}:{character}:{admission}:{area}").hex
+    return epoch, drop_id, pawn, area, row["location"]
 
 
 def _fresh(client) -> bool:
@@ -79,8 +75,8 @@ class Projection:
     @staticmethod
     def _matches(snapshot, desired):
         proof = snapshot.get(KEY, {})
-        epoch, drop_id, pawn, _ = desired
-        return (proof.get("epoch"), proof.get("drop_id"), proof.get("pawn")) == (epoch, drop_id, pawn)
+        epoch, drop_id, pawn, area, _ = desired
+        return (proof.get("epoch"), proof.get("drop_id"), proof.get("pawn"), proof.get("map")) == (epoch, drop_id, pawn, area)
 
     async def clear(self, client):
         if self.current is not None or client.last_game.get(KEY):
@@ -97,7 +93,7 @@ class Projection:
                 self.claimed = None
             await self.clear(client)
             return
-        epoch, drop_id, _, xyz = desired
+        epoch, drop_id, _, area, xyz = desired
         if self.claimed == (epoch, drop_id):
             await self.clear(client)
             return
@@ -107,17 +103,17 @@ class Projection:
         if not _fresh(client) or now < self.next_sync:
             return
         self.next_sync = now + .6
-        snapshot = await client.bridge.command(SYNC, epoch, drop_id, *(str(axis) for axis in xyz), timeout=2)
+        snapshot = await client.bridge.command(SYNC, area, epoch, drop_id, *(str(axis) for axis in xyz), timeout=2)
         if not self._matches(snapshot, desired):
             raise RuntimeError("The exact local stock drop projection was unverified")
-        client.last_game, self.current = snapshot, desired[:3]
+        client.last_game, self.current = snapshot, desired[:4]
         self.last_error = None
 
     async def reclaim(self, client, operation: str, target: tuple[str, str]):
         from .native_guest_drop import RECLAIM, RESULT
 
         desired = _desired(client, True, self.admission)
-        if (not _fresh(client) or desired is None or self.current != desired[:3] or desired[:2] != target
+        if (not _fresh(client) or desired is None or self.current != desired[:4] or desired[:2] != target
                 or self.claimed == target
                 or not self._matches(client.last_game, desired)):
             raise party.RuleError("native_guest_drop_projection_intent_stale")
@@ -132,7 +128,7 @@ class Projection:
     async def fixture(self, client, drop_id: str | None):
         desired = _desired(client, True, self.admission)
         if (not _fresh(client) or not record.valid_id(drop_id) or desired is None
-                or self.current != desired[:3] or desired[1] != drop_id
+                or self.current != desired[:4] or desired[1] != drop_id
                 or not self._matches(client.last_game, desired)):
             raise party.RuleError("stock_drop_projection_fixture_scope_unavailable")
         before = client.last_game[KEY]["sequence"]

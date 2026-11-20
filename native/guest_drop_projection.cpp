@@ -1,4 +1,5 @@
 #include "guest_drop_projection.hpp"
+#include "guest_drop_maps.hpp"
 #include "interaction_input.hpp"
 
 #include <algorithm>
@@ -35,7 +36,6 @@ namespace
     using Clock = std::chrono::steady_clock;
     using Position = std::array<double, 3>;
 
-    constexpr auto map_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto ammo_base_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -511,7 +511,7 @@ namespace
     const char* spawn_projection()
     {
         auto* ammo = find<U::UClass>(ammo_path);
-        auto* const world = lease.world.Get();
+        auto* const world = U::Cast<U::UWorld>(lease.world.Get());
         Spawn spawn;
         Collision collision;
         if (!scope_current() || !stock_schema(ammo, find<U::UClass>(ammo_base_path), find<U::UClass>(item_path))
@@ -541,7 +541,8 @@ namespace
         finish.actor = actor;
         finish.transform = deferred.transform;
         spawn.statics->ProcessEvent(spawn.finish, &finish);
-        if (finish.result != actor || !mutable_actor(actor) || actor->GetWorld() != world || !projection.begin_veto)
+        if (finish.result != actor || !mutable_actor(actor) || !projection.begin_veto ||
+            !silverfish::native_guest_drop_maps::persistent_actor(actor, world))
             return "stock_drop_projection_stock_begin_veto_unverified";
         auto* box = object(actor, STR("Box"));
         auto* mesh = object(actor, STR("SM_Ammo_HevRifle"));
@@ -579,7 +580,7 @@ namespace
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         auto* driver = object(world, STR("NetDriver"));
         auto* connection = object(driver, STR("ServerConnection"));
-        if (!pawn || !live(world) || world != find<U::UWorld>(map_path) || !live(driver) || !live(connection) ||
+        if (!pawn || !live(world) || !silverfish::native_guest_drop_maps::contains(world) || !live(driver) || !live(connection) ||
             !id_valid(epoch) || !id_valid(id) || !std::ranges::all_of(source, coordinate) ||
             !coordinate(visual) || visual > source[2] + 18 || visual < source[2] - 145)
         {

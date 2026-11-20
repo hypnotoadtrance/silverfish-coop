@@ -16,15 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
 from tools.silverfish import native_guest_stack_drop as stack_drop
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
+from tools.silverfish import native_guest_drop_projection as drop_projection
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 
 
 async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False,
-                 manual_drop: bool = False):
-    mode = ("inventory-manual-drop" if manual_drop else "stock-stack-drop" if stock_drop_probe
-            else "inventory-sort" if sort_backpack else "inventory-split")
+                 manual_drop: bool = False, *, crossroads_drop: bool = False):
+    area = drop_record.CROSSROADS if crossroads_drop else OBSERVATORY
+    manual_drop = manual_drop or crossroads_drop
+    mode = ("crossroads-stack-drop" if crossroads_drop else "inventory-manual-drop" if manual_drop
+            else "stock-stack-drop" if stock_drop_probe else "inventory-sort" if sort_backpack else "inventory-split")
     name = mode + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     guest = ("--profile", name)
@@ -61,11 +64,11 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
 
     async def enrolled():
         await wait(guest_run, lambda state: state.get("state") == "connected"
-                   and state.get("game", {}).get("map") == OBSERVATORY
+                   and state.get("game", {}).get("map") == area
                    and (not sort_backpack or (state.get("gameplay_fresh") and
                         state.get("gameplay", {}).get("native_inventory_sort_capability") == 1)))
         return await wait(run, lambda state: state.get("state") == "hosting"
-                          and state.get("game", {}).get("map") == OBSERVATORY
+                          and state.get("game", {}).get("map") == area
                           and state["game"].get("native_guest_save", {}).get("state") == "bound"
                           and state["game"].get(stack_drop.CAPABILITY if stock_drop_probe
                                                 else "native_inventory_split_capability") == 1)
@@ -84,7 +87,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
         return exact
 
     try:
-        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", OBSERVATORY, *host_flags)
+        authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", area, *host_flags)
         await wait(run, lambda state: state.get("state") == "hosting")
         invitation = await ask("invite", *host, "--name", "Stock inventory tester", "--character", "Ammunition")
         character = invitation["character_id"]
@@ -150,11 +153,37 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
             native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
             escrow = checkpoint["world"]["party"][drop_record.STATE][operation]
-            assert escrow["guid"] == source and escrow["quantity"] == 9 and escrow["claim_id"] is None and "escrow" in escrow
+            assert (escrow["guid"], escrow["quantity"], escrow["map"], escrow["claim_id"]) == (source, 9, area, None)
+            assert escrow["escrow"]["map"] == area
             assert await page(guest, character) == [row for row in rows if row["guid"] != source]
             replay = (await ask("action", *guest, drop.DROP, "--target", f"{source}|9", "--operation-id", operation))[drop.RESULT]
             assert replay == {key: committed[key] for key in replay}, replay
             assert await page(host, "host") == host_before
+            if crossroads_drop:
+                await ask(*key, "back")
+                observed = await wait(guest_run, lambda state: state.get("gameplay_fresh")
+                                      and state.get("game", {}).get(drop_projection.KEY, {}).get("drop_id") == operation)
+                before = observed["game"][drop_projection.KEY]
+                assert before["map"] == area and drop_record.actor_matches(area, before["actor"]), before
+                press = (await ask("action", *guest, drop_projection.FIXTURE, "--target", operation))[drop_projection.KEY]
+                assert press == {**before, "sequence": before["sequence"] + 1}, (before, press)
+                evidence["crossroads_stock_interaction"] = press
+                await wait(guest_run, lambda state: state.get("gameplay_fresh")
+                           and state.get("gameplay", {}).get(drop_record.STATE) == {}
+                           and drop_projection.KEY not in state.get("game", {}))
+                events = (await ask("events", *guest, "--tail", "100"))["events"]
+                claims = [event for event in events if event["event"] == "local_interaction"
+                          and event.get(drop.RESULT, {}).get("drop_id") == operation]
+                assert len(claims) == 1, claims
+                claim, = claims
+                assert claim[drop.RESULT] == {**replay, "state": "reclaimed"}, claim
+                checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+                native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
+                tombstone = checkpoint["world"]["party"][drop_record.STATE][operation]
+                assert tombstone == {**{key: value for key, value in escrow.items() if key != "escrow"},
+                                     "claim_id": claim["operation_id"]}
+                assert await page(guest, character) == rows and await page(host, "host") == host_before
+                evidence["crossroads_reclaim"] = claim
             evidence["verified"] = True
             return
         if stock_drop_probe:
@@ -268,7 +297,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                         process.terminate()
                         await process.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        report = ("live-inventory-manual-drop-verification.json" if manual_drop else
+        report = ("live-crossroads-stack-drop-verification.json" if crossroads_drop else
+                  "live-inventory-manual-drop-verification.json" if manual_drop else
                   "live-stock-stack-drop-verification.json" if stock_drop_probe else "live-inventory-split-verification.json")
         (run / report).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         assert evidence["original_saves_verified"], "Original single-player saves changed during the test"
@@ -282,6 +312,7 @@ if __name__ == "__main__":
     modes.add_argument("--sort-backpack", action="store_true", help="verify stock sort on a mixed backpack before splitting")
     modes.add_argument("--stock-drop-probe", action="store_true", help="verify one stock 9mm actor born and retired in the same tick")
     modes.add_argument("--manual-drop", action="store_true", help="qualify regular co-op inventory Drop after isolated seeding")
+    modes.add_argument("--crossroads-drop", action="store_true", help="qualify normal 9mm Drop and stock reclaim in CrossRoads")
     settings = parser.parse_args()
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack,
-                       settings.stock_drop_probe, settings.manual_drop))
+                       settings.stock_drop_probe, settings.manual_drop, crossroads_drop=settings.crossroads_drop))

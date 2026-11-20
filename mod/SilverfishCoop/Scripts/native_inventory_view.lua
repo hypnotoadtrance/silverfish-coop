@@ -1,6 +1,7 @@
 local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
+local drop_maps = require("native_guest_drop_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -20,7 +21,6 @@ local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
 local drop_ammo = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
-local drop_map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local split_ammo = {
     [drop_ammo] = true,
     ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
@@ -185,7 +185,7 @@ local function page(fields)
             error("The authenticated inventory split row did not qualify", 0)
         end
         local droppable = options == "drop" or options == "split,drop"
-        if droppable and (fields[4] ~= drop_map or source ~= "backpack" or class ~= drop_ammo or quantity > 200) then
+        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or class ~= drop_ammo or quantity > 200) then
             error("The authenticated inventory drop row did not qualify", 0)
         end
         if usable then name = consumable end

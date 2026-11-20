@@ -6,7 +6,7 @@ import re
 from .guest_weapon_profiles import NINE_MM_BALL
 from .native_gold import valid_guid
 from .party import REQUEST_ID
-from .travel import OBSERVATORY
+from .travel import CROSSROADS, OBSERVATORY
 
 
 STATE = "native_guest_stack_drops"
@@ -15,6 +15,7 @@ VIEW = "native_guest_inventory_drop_view"
 VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
 ITEM = NINE_MM_BALL.item_path
+MAPS = {OBSERVATORY: "Observitory_P", CROSSROADS: "CrossRoads_P"}
 MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
@@ -30,15 +31,32 @@ def valid_position(value) -> bool:
             and all(type(axis) in (int, float) and abs(axis) <= 1e7 and math.isfinite(axis) for axis in value))
 
 
-_PAWN = re.compile(r"Player_FP_C " + re.escape(f"{OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_")
-                   + r"[0-9]{1,10}\Z")
+def supported_map(area) -> bool:
+    return isinstance(area, str) and area in MAPS
+
+
+def _paths(actor_class: str) -> dict:
+    return {area: re.compile(re.escape(f"{actor_class} {area}.{leaf}:PersistentLevel.{actor_class}_")
+                             + r"[0-9]{1,10}\Z") for area, leaf in MAPS.items()}
+
+
+_PAWN_PATHS = _paths("Player_FP_C")
+_ACTOR_PATHS = _paths("Ammo_Pistol_BP_C")
+
+
+def pawn_matches(area, name) -> bool:
+    return supported_map(area) and isinstance(name, str) and _PAWN_PATHS[area].fullmatch(name) is not None
+
+
+def actor_matches(area, name) -> bool:
+    return supported_map(area) and isinstance(name, str) and _ACTOR_PATHS[area].fullmatch(name) is not None
 
 
 def parse_view(fields: list[str], state: str, area: str) -> dict:
-    if len(fields) != 8 or (state, area) != ("connected", OBSERVATORY):
+    if len(fields) != 8 or state != "connected" or not supported_map(area):
         raise ValueError("Unexpected stock inventory drop view")
     _, number, reported_area, pawn, guid, item, phase, quantity = fields
-    if (reported_area != area or not _PAWN.fullmatch(pawn) or not valid_guid(guid) or item != ITEM
+    if (reported_area != area or not pawn_matches(area, pawn) or not valid_guid(guid) or item != ITEM
             or phase not in {"confirming", "dropping", "dropped", "refused"}
             or not re.fullmatch(r"[1-9][0-9]{0,15}", number) or int(number) >= 2**53
             or not re.fullmatch(r"[1-9][0-9]{0,2}", quantity) or int(quantity) > MAX_QUANTITY):
@@ -61,7 +79,7 @@ def active_frames(data: dict, members) -> list[dict]:
                 or set(row) != (_RECORD_FIELDS | ({"escrow"} if claim_id is None else set()))
                 or not valid_guid(row.get("guid")) or type(row.get("quantity")) is not int
                 or not 1 <= row["quantity"] <= MAX_QUANTITY or row.get("class_path") != ITEM
-                or row.get("map") != OBSERVATORY or not valid_position(row.get("location"))):
+                or not supported_map(row.get("map")) or not valid_position(row.get("location"))):
             raise ValueError("Invalid stock stack drop payload")
         operations.add((owner, drop_id))
         if claim_id is not None:
@@ -70,7 +88,7 @@ def active_frames(data: dict, members) -> list[dict]:
             operations.add((owner, claim_id))
             continue
         frame = row["escrow"]
-        if (len(frames) >= MAX_ACTIVE or type(frame) is not dict or frame.get("map") != OBSERVATORY
+        if (len(frames) >= MAX_ACTIVE or type(frame) is not dict or frame.get("map") != row["map"]
                 or not isinstance(frame.get("slot"), str) or frame["slot"] in slots
                 or owner in active_owners or row["guid"] in active_guids):
             raise ValueError("Invalid or duplicate stock stack drop escrow")

@@ -23,8 +23,9 @@ local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local display_class = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local text_class = "/Script/UMG.TextBlock"
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local pawn_name = "Player_FP_C " .. map .. ".Observitory_P:PersistentLevel.Player_FP_C_7"
+local leaf = arg[1] == "crossroads" and "CrossRoads_P" or "Observitory_P"
+local map = "/Game/Classes/Maps/Maps_OverWorld/" .. leaf
+local pawn_name = "Player_FP_C " .. map .. "." .. leaf .. ":PersistentLevel.Player_FP_C_7"
 for _, path in ipairs({pawn_class, controller_class, display_class, text_class,
     "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"}) do object(path) end
 local world, pawn, controller = object(), object(nil, pawn_class), object(nil, controller_class)

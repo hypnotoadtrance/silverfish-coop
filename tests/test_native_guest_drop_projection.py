@@ -29,7 +29,8 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         async def bridge(command, *args, timeout):
             if command == projection.CLEAR:
                 return game.copy()
-            epoch, drop_id, *coords = args
+            area, epoch, drop_id, *coords = args
+            self.assertEqual(area, MAP)
             self.assertEqual((command, drop_id, coords), (projection.SYNC, ID, ["10.0", "20.0", "40.0"]))
             row = [projection.ROW, MAP, epoch, drop_id, PAWN, ACTOR, "0"]
             return {**game, projection.KEY: projection.parse(row, "connected", MAP)}
@@ -58,7 +59,7 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         row["owner"] = "owner"
         await view.sync(client, True)
         self.assertEqual(client.last_game[projection.KEY]["actor"], ACTOR)
-        self.assertEqual(client.bridge.command.await_args.args[2:], (ID, "10.0", "20.0", "40.0"))
+        self.assertEqual(client.bridge.command.await_args.args[3:], (ID, "10.0", "20.0", "40.0"))
         client.suspended = True
         await view.sync(client, False)
         client.bridge.command.assert_awaited_with(projection.CLEAR, timeout=2)
@@ -72,7 +73,7 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         view.next_sync = 0.
         await view.sync(client, True)
         client.bridge.command.assert_awaited_once()
-        self.assertEqual(view.current, (proof["epoch"], ID, PAWN))
+        self.assertEqual(view.current, (proof["epoch"], ID, PAWN, MAP))
         with self.assertRaisesRegex(party.RuleError, "intent_stale"):
             await view.reclaim(client, OPERATION, (proof["epoch"], ID))
         with self.assertRaisesRegex(party.RuleError, "fixture_scope_unavailable"):
@@ -103,3 +104,17 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(projection.KEY, client.last_game)
         with self.assertRaisesRegex(party.RuleError, "intent_stale"):
             await view.reclaim(client, OPERATION, fresh)
+
+
+    async def test_foreign_map_ledger_snapshot_cannot_rematerialize_the_old_drop(self):
+        client, view = self.client(), projection.Projection()
+        await view.sync(client, True)
+        previous = client.last_game[projection.KEY]
+        client.expected_zone = client.last_game["map"] = record.CROSSROADS
+        client.last_game["pawns"] = {"local": {"name":
+            f"Player_FP_C {record.CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_404"}}
+        with self.assertRaisesRegex(party.RuleError, "intent_stale"):
+            await view.reclaim(client, OPERATION, (previous["epoch"], ID))
+        await view.sync(client, True)
+        client.bridge.command.assert_awaited_with(projection.CLEAR, timeout=2)
+        client.gameplay_action.assert_not_awaited()

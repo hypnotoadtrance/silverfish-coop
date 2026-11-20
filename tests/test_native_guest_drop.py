@@ -17,14 +17,14 @@ POS = [10., 20., 30.]
 
 
 class GuestDropTests(unittest.IsolatedAsyncioTestCase):
-    def make_world(self):
+    def make_world(self, area=MAP):
         profile = Path(self.enterContext(TemporaryDirectory()))
         native_host_save.directory(profile).mkdir(parents=True)
 
         def generation(letter):
             slot = "SFCoop_" + letter * 32
             native_host_save.slot_path(profile, slot).write_bytes(b"GVAS" + letter.encode() * 32)
-            return native_host_save.record(profile, slot, MAP)
+            return native_host_save.record(profile, slot, area)
 
         source = {**generation("a"), "character_id": OWNER}
         escrow, replacement = generation("b"), generation("c")
@@ -32,28 +32,31 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         for owner in (OWNER, OTHER):
             party.add_player(state, owner)
         frozen = {"revision": 42, "characters": [{"character_id": OWNER, "state": {"native_guest_save": source}}]}
-        host = SimpleNamespace(fixtures=True, native_guest=True, native_zones=True, native_profile=profile, party=state,
+        pawn = f"Player_FP_C {area}.{record.MAPS[area]}:PersistentLevel.Player_FP_C_82"
+        host = SimpleNamespace(zone_epoch="f" * 32, fixtures=True, native_guest=True, native_zones=True, native_profile=profile, party=state,
                                stopping=False, transitioning=False, native_checkpoint_unsafe=False, smg_holds=None,
-                               last_seen=time.monotonic(), last_game={"state": "hosting", "map": MAP, record.CAPABILITY: 1},
-                               native_recipients=lambda: {character: {"connected": True, "pawn": PAWN} for character in (OWNER, OTHER)},
+                               last_seen=time.monotonic(), last_game={"state": "hosting", "map": area, record.CAPABILITY: 1},
+                               native_recipients=lambda: {character: {"connected": True, "pawn": pawn} for character in (OWNER, OTHER)},
                                roles=lambda: {"guest": OWNER, "guest2": OTHER},
-                               authoritative_pawns=Mock(return_value={OWNER: {"map": MAP, "location": POS}}),
+                               authoritative_pawns=Mock(return_value={OWNER: {"map": area, "location": POS}}),
                                checkpoint_native=AsyncMock(return_value=43), control=Mock(),
                                store=Mock(status=Mock(return_value=frozen)))
         item = {"guid": GUID, "quantity": 9, "class_path": record.ITEM, "source": "backpack", "stackable": True, "important": False}
-        row = dict(owner=OWNER, guid=GUID, quantity=9, class_path=record.ITEM, map=MAP,
+        row = dict(owner=OWNER, guid=GUID, quantity=9, class_path=record.ITEM, map=area,
                    location=POS, escrow=escrow, claim_id=None)
         return host, source, escrow, replacement, item, row
 
     def reply(self, host, verb, source, replacement=None):
         status = "applied" if verb == "debit" else "recovered"
-        row = [probe.SETTLE, MAP, verb, PAWN, DROP, source["slot"], replacement["slot"] if replacement else "-", "1", status, "1"]
-        return {**host.last_game, probe.SETTLE_KEY: probe.parse(row, "hosting", MAP)}
+        area = host.last_game["map"]
+        pawn = host.native_recipients()[OWNER]["pawn"]
+        row = [probe.SETTLE, area, verb, pawn, DROP, source["slot"], replacement["slot"] if replacement else "-", "1", status, "1"]
+        return {**host.last_game, probe.SETTLE_KEY: probe.parse(row, "hosting", area)}
 
     async def test_debit_publishes_one_required_guest_frame_and_exact_escrow(self):
         host, source, escrow, replacement, item, expected = self.make_world()
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.reply(host, "debit", source, replacement)))
-        birth = {probe.KEY: {"slot": source["slot"], "revision": 42, "location": POS}}
+        birth = {probe.KEY: {"map": MAP, "pawn": PAWN, "slot": source["slot"], "revision": 42, "location": POS}}
         prepared = {"bag": escrow, "replacement": replacement}
         with (patch.object(probe, "perform", AsyncMock(return_value=birth)),
               patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})),
@@ -120,4 +123,53 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         native_host_save.verify_checkpoint(host.native_profile, checkpoint)
         row["escrow"] = {key: value for key, value in source.items() if key != "character_id"}
         with self.assertRaisesRegex(RuntimeError, "shares another Unreal save generation"):
+            native_host_save.verify_checkpoint(host.native_profile, checkpoint)
+
+
+    async def test_crossroads_reclaim_requires_the_exact_source_map_and_unchanged_epoch(self):
+        host, _, escrow, _, item, row = self.make_world(record.CROSSROADS)
+        host.party[record.STATE] = {DROP: row}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.reply(host, "reclaim", escrow)))
+        origin = host.authoritative_pawns.return_value[OWNER]
+        origin["map"] = MAP
+        with self.assertRaisesRegex(party.RuleError, "out_of_range"):
+            await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+        host.checkpoint_native.assert_not_awaited()
+        bridge.command.assert_not_awaited()
+
+        origin["map"] = record.CROSSROADS
+
+        async def read_during_epoch_change(*args):
+            host.zone_epoch = "d" * 32
+            return {"items": [item]}
+
+        with patch.object(drop.native_inventory, "read_complete", side_effect=read_during_epoch_change):
+            with self.assertRaisesRegex(party.RuleError, "scope_changed"):
+                await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+        bridge.command.assert_not_awaited()
+        self.assertEqual(host.party[record.STATE][DROP], row)
+
+        with patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})):
+            result = await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+        self.assertEqual(result[drop.RESULT]["map"], record.CROSSROADS)
+        self.assertEqual(bridge.command.await_args.args[-1], record.CROSSROADS)
+
+    def test_legacy_and_crossroads_drops_share_a_ledger_without_aliasing_frames(self):
+        host, source, escrow, replacement, _, legacy = self.make_world()
+        crossing = native_host_save.record(host.native_profile, replacement["slot"], record.CROSSROADS)
+        other_id = "d" * 32
+        newer = {**legacy, "owner": OTHER, "guid": "B" * 32, "map": record.CROSSROADS, "escrow": crossing}
+        host.party[record.STATE] = {DROP: legacy, other_id: newer}
+        checkpoint = {"world": {"map": record.CROSSROADS, "party": host.party},
+                      "characters": {OWNER: {"state": {"native_guest_save": source}}, OTHER: {"state": {}}}}
+        native_host_save.verify_checkpoint(host.native_profile, checkpoint)
+        self.assertEqual(record.active_frames(host.party, {OWNER, OTHER}), [escrow, crossing])
+        self.assertEqual(drop.visible_drops(host.party, OWNER, record.CROSSROADS), {})
+        self.assertEqual(drop.visible_drops(host.party, OTHER, MAP), {})
+
+        newer["escrow"] = {**crossing, "map": MAP}
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate stock stack drop escrow"):
+            record.active_frames(host.party, {OWNER, OTHER})
+        newer["escrow"] = native_host_save.record(host.native_profile, escrow["slot"], record.CROSSROADS)
+        with self.assertRaisesRegex(RuntimeError, "Invalid or duplicate stock stack drop escrow"):
             native_host_save.verify_checkpoint(host.native_profile, checkpoint)

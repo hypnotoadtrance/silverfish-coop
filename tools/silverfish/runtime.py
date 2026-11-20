@@ -1562,10 +1562,12 @@ class Bridge:
                 elif len(fields) == 2 and fields[1] == "1" and fields[0] in (
                     native_guest_stack_drop.BIRTH + "-capability", native_guest_stack_drop.ACTION + "-capability",
                 ):
-                    if data.get("state") == "hosting" and data.get("map") == native_guest_stack_drop.OBSERVATORY:
-                        key = (native_guest_drop_record.CAPABILITY if fields[0].startswith(native_guest_stack_drop.BIRTH)
-                               else native_guest_stack_drop.CAPABILITY)
-                        data[key] = 1
+                    area = data.get("map")
+                    if data.get("state") == "hosting" and native_guest_drop_record.supported_map(area):
+                        if fields[0] == native_guest_stack_drop.BIRTH + "-capability":
+                            data[native_guest_drop_record.CAPABILITY] = 1
+                        elif area == native_guest_stack_drop.OBSERVATORY:
+                            data[native_guest_stack_drop.CAPABILITY] = 1
                 elif fields[0] in (native_guest_stack_drop.ACTION, native_guest_stack_drop.BIRTH):
                     if native_guest_stack_drop.KEY in data:
                         raise ValueError("Duplicate isolated stack drop report")

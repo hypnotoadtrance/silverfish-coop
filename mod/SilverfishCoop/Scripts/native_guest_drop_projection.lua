@@ -1,8 +1,8 @@
 local projection = {}
+local maps = require("native_guest_drop_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local ammo_class = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local color = { R = 0, G = 0, B = 0, A = 1 }
 local current
@@ -24,9 +24,11 @@ local function coordinate(value)
 end
 
 local function local_pawn(state, phase)
-    if not enabled or phase ~= "connected" or state.map ~= area or state.server ~= true or state.listening ~= true then return end
+    local leaf = maps[state.map]
+    if not enabled or phase ~= "connected" or not leaf or state.server ~= true or state.listening ~= true then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
-    if valid(pawn) and valid(state.world) and same(pawn:GetWorld(), state.world) and pawn:IsLocallyControlled() then
+    if valid(pawn) and valid(state.world) and state.world:GetFullName() == "World " .. state.map .. "." .. leaf
+        and same(pawn:GetWorld(), state.world) and pawn:IsLocallyControlled() then
         return pawn
     end
 end
@@ -79,13 +81,13 @@ end
 
 function projection.rows(state, phase, row)
     if not current then return {} end
-    if not same(local_pawn(state, phase), current.pawn) or not same(state.world, current.world) then
+    if current.map ~= state.map or not same(local_pawn(state, phase), current.pawn) or not same(state.world, current.world) then
         projection.clear()
         return {}
     end
     local actor, sequence = proof()
     if not actor then return {} end
-    return { row("native-guest-drop-projection", area, current.epoch, current.id, current.pawn:GetFullName(), actor, sequence) }
+    return { row("native-guest-drop-projection", current.map, current.epoch, current.id, current.pawn:GetFullName(), actor, sequence) }
 end
 
 local function fixture(pawn, id)
@@ -150,15 +152,15 @@ function projection.command(fields, state, phase)
         return fixture(pawn, fields[3])
     elseif command == "native-guest-drop-projection-sync" then
         local pawn = local_pawn(state, phase)
-        local epoch, id = fields[3], fields[4]
-        local source = { tonumber(fields[5]), tonumber(fields[6]), tonumber(fields[7]) }
-        if #fields ~= 7 or not pawn or not identifier(epoch) or not identifier(id) or not coordinate(source[1])
+        local area, epoch, id = fields[3], fields[4], fields[5]
+        local source = { tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]) }
+        if #fields ~= 8 or area ~= state.map or not pawn or not identifier(epoch) or not identifier(id) or not coordinate(source[1])
             or not coordinate(source[2]) or not coordinate(source[3])
             or type(SilverfishSyncNativeGuestDropProjection) ~= "function" then
             projection.clear()
             error("stock_drop_projection_snapshot_unqualified", 0)
         end
-        local cached = current and same(pawn, current.pawn) and current.epoch == epoch and current.id == id
+        local cached = current and same(pawn, current.pawn) and current.map == area and current.epoch == epoch and current.id == id
             and source[1] == current.source[1] and source[2] == current.source[2] and source[3] == current.source[3]
         if not cached then projection.clear() end
         if not valid(StaticFindObject(ammo_class)) then LoadAsset(ammo_class) end
@@ -169,7 +171,7 @@ function projection.command(fields, state, phase)
             projection.clear()
             error(detail, 0)
         end
-        current = { pawn = pawn, world = state.world, epoch = epoch, id = id, source = source, visual_z = visual_z }
+        current = { pawn = pawn, world = state.world, map = area, epoch = epoch, id = id, source = source, visual_z = visual_z }
         return "stock drop projection synchronized"
     end
 end

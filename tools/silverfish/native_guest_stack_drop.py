@@ -1,4 +1,4 @@
-"""Run the isolated stock 9mm spawn and retirement canary in Observatory."""
+"""Verify and retire the exact stock 9mm birth for a qualified native drop."""
 
 import asyncio
 import re
@@ -18,25 +18,23 @@ SETTLE_KEY = "native_guest_stack_drop_settle"
 SUCCESS = "stock_spawn_verified_and_retired"
 REFUSAL = "native_guest_stack_drop_"
 UNSAFE = "mutation_unverified_native_guest_stack_drop_"
-_LEVEL = OBSERVATORY + ".Observitory_P:PersistentLevel."
-_PAWN = re.compile(r"Player_FP_C " + re.escape(_LEVEL) + r"Player_FP_C_[0-9]{1,10}\Z")
-_ACTOR = re.compile(r"Ammo_Pistol_BP_C " + re.escape(_LEVEL) + r"Ammo_Pistol_BP_C_[0-9]{1,10}\Z")
 _STATUS = re.compile(r"[a-z0-9_]{1,100}\Z")
 
 
 def parse(fields: list[str], state: str, area: str) -> dict:
     if fields[:1] == [SETTLE]:
         return parse_settlement(fields, state, area)
-    if (len(fields) not in (10, 13) or fields[0] not in (ACTION, BIRTH) or state != "hosting" or area != OBSERVATORY
+    if (len(fields) not in (10, 13) or fields[0] not in (ACTION, BIRTH) or state != "hosting"
+            or not native_guest_drop_record.supported_map(area) or (fields[0] == ACTION and area != OBSERVATORY)
             or fields[1] != area):
         raise ValueError("Invalid isolated stock stack drop report")
     map_name, pawn, slot, guid, raw_count, flag, status, actor, new_guid = fields[1:10]
-    if (not _PAWN.fullmatch(pawn) or not native_host_save.SLOT.fullmatch(slot) or not valid_guid(guid)
+    if (not native_guest_drop_record.pawn_matches(area, pawn) or not native_host_save.SLOT.fullmatch(slot) or not valid_guid(guid)
             or not re.fullmatch(r"[1-9][0-9]{0,2}", raw_count) or int(raw_count) > 200
             or flag not in ("0", "1") or not _STATUS.fullmatch(status)):
         raise ValueError("Invalid stock stack drop identity or quantity")
     ok = flag == "1"
-    if ok and (status != SUCCESS or not _ACTOR.fullmatch(actor) or not valid_guid(new_guid) or new_guid == guid):
+    if ok and (status != SUCCESS or not native_guest_drop_record.actor_matches(area, actor) or not valid_guid(new_guid) or new_guid == guid):
         raise ValueError("The stock actor or stock-converted GUID was not verified")
     if not ok and (not status.startswith((REFUSAL, UNSAFE)) or (actor, new_guid) != ("-", "-")):
         raise ValueError("Invalid isolated stock stack drop refusal")
@@ -51,10 +49,10 @@ def parse(fields: list[str], state: str, area: str) -> dict:
 
 
 def parse_settlement(fields: list[str], state: str, area: str) -> dict:
-    if len(fields) != 10 or state != "hosting" or area != OBSERVATORY or fields[1] != area:
+    if len(fields) != 10 or state != "hosting" or not native_guest_drop_record.supported_map(area) or fields[1] != area:
         raise ValueError("Invalid isolated stack drop settlement")
     _, operation, pawn, drop_id, source, replacement, flag, status, count = fields[1:]
-    if (operation not in ("debit", "reclaim") or not _PAWN.fullmatch(pawn) or not native_guest_drop_record.valid_id(drop_id)
+    if (operation not in ("debit", "reclaim") or not native_guest_drop_record.pawn_matches(area, pawn) or not native_guest_drop_record.valid_id(drop_id)
             or not native_host_save.SLOT.fullmatch(source) or source == replacement
             or (operation == "debit" and not native_host_save.SLOT.fullmatch(replacement))
             or (operation == "reclaim" and replacement != "-") or flag not in ("0", "1") or count != flag
@@ -68,30 +66,36 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     if not valid_guid(guid) or type(count) is not int or not 1 <= count <= 200:
         raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
     game = host.last_game
+    area, epoch = game.get("map"), host.zone_epoch
     capability = CAPABILITY if fixture else native_guest_drop_record.CAPABILITY
-    if ((fixture and not host.fixtures) or not host.native_guest or not host.native_zones or host.native_profile is None
-            or host.stopping or host.transitioning or host.native_checkpoint_unsafe
-            or (game.get("state"), game.get("map"), game.get(capability)) != ("hosting", OBSERVATORY, 1)
+    if ((fixture and (not host.fixtures or area != OBSERVATORY)) or not host.native_guest or not host.native_zones
+            or host.native_profile is None or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or not native_guest_drop_record.supported_map(area) or (game.get("state"), game.get(capability)) != ("hosting", 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
     owner = host.native_recipients().get(character, {})
     pawn = owner.get("pawn")
     player = host.party["players"].get(character)
-    if (not owner.get("connected") or not isinstance(pawn, str) or not _PAWN.fullmatch(pawn) or not player
+    if (not owner.get("connected") or not native_guest_drop_record.pawn_matches(area, pawn) or not player
             or player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]):
         raise party.RuleError("native_guest_stack_drop_exact_standing_guest_required")
 
     revision = await host.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
     campaign = host.store.status()
     saved = native_inventory.saved_frame(host, campaign, character)
-    if not isinstance(saved, dict) or saved.get("map") != OBSERVATORY or campaign.get("revision") != revision:
-        raise RuntimeError("The isolated stack drop requires the guest's fresh Observatory frame")
+    if not isinstance(saved, dict) or saved.get("map") != area or campaign.get("revision") != revision:
+        raise RuntimeError("The isolated stack drop requires the guest's fresh source-map frame")
     frame = await asyncio.to_thread(native_host_save.guest_record, host.native_profile, saved, character)
     slot = frame["slot"]
+    owner = host.native_recipients().get(character, {})
+    if (host.transitioning or host.last_game.get("map") != area or host.zone_epoch != epoch
+            or not owner.get("connected") or owner.get("pawn") != pawn):
+        raise party.RuleError("native_guest_stack_drop_scope_changed")
+    arguments = (pawn, slot, guid, str(count)) if fixture else (pawn, slot, guid, str(count), area)
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(ACTION if fixture else BIRTH, pawn, slot, guid, str(count), timeout=6)
+            snapshot = await bridge.command(ACTION if fixture else BIRTH, *arguments, timeout=6)
         except RuntimeError as error:
             if str(error).startswith(REFUSAL):
                 host.native_checkpoint_unsafe = False
@@ -99,7 +103,7 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
             raise
         proof = snapshot.get(KEY, {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("slot"),
-             proof.get("guid"), proof.get("quantity")) != ("hosting", OBSERVATORY, OBSERVATORY, pawn, slot, guid, count)
+             proof.get("guid"), proof.get("quantity")) != ("hosting", area, area, pawn, slot, guid, count)
                 or type(proof.get("ok")) is not bool):
             raise RuntimeError("The stock stack drop returned a mismatched actor or frozen frame")
         host.last_game, host.last_seen = snapshot, time.monotonic()
@@ -110,7 +114,7 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
                 raise party.RuleError(reason)
             raise RuntimeError(reason or "The stock stack drop actor retirement was unverified")
         actor = proof.get("actor")
-        if (proof.get("status") != SUCCESS or not isinstance(actor, str) or not _ACTOR.fullmatch(actor)
+        if (proof.get("status") != SUCCESS or not native_guest_drop_record.actor_matches(area, actor)
                 or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid):
             raise RuntimeError("The stock stack drop actor and typed conversion did not verify")
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)

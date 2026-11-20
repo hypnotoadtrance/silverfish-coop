@@ -1,12 +1,12 @@
 local stack_drop = {}
 local guest_save = require("guest_save")
 local players = require("players")
+local maps = require("native_guest_drop_maps")
 
 local action = "native-guest-stack-drop-probe"
 local birth = "native-guest-stack-drop-birth"
 local settle = "native-guest-stack-drop-settle"
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local stock_actor_prefix = "Ammo_Pistol_BP_C " .. map .. ".Observitory_P:PersistentLevel.Ammo_Pistol_BP_C_"
+local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local settings = "/Script/Engine.Default__GameplayStatics"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -29,8 +29,14 @@ local function coordinate(value)
     return type(value) == "number" and value == value and math.abs(value) <= 1e7
 end
 
+local function hosting_map(state, phase)
+    local leaf = maps[state.map]
+    return enabled and phase == "hosting" and state.listening == true and state.server == false and leaf
+        and valid(state.world) and state.world:GetFullName() == "World " .. state.map .. "." .. leaf
+end
+
 local function qualified_owner(state, phase, name)
-    if not enabled or phase ~= "hosting" or not state.listening or state.server ~= false or state.map ~= map then return end
+    if not hosting_map(state, phase) then return end
     local checked, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
     if checked and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name) then return pawn, save end
 end
@@ -41,7 +47,8 @@ local function transfer(fields, state, phase)
     local x, y, z = tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10])
     local apply = SilverfishRecoverNativeInventoryBag
     if debit then apply = SilverfishApplyPreparedNativeInventory end
-    if #fields ~= 10 or (not debit and operation ~= "reclaim") or type(id) ~= "string" or #id ~= 32
+    if #fields ~= 11 or fields[11] ~= state.map or not hosting_map(state, phase)
+        or (not debit and operation ~= "reclaim") or type(id) ~= "string" or #id ~= 32
         or not id:match("^[0-9a-f]+$") or not slot_name(source) or source == replacement
         or (debit and not slot_name(replacement)) or (not debit and replacement ~= "-")
         or not coordinate(x) or not coordinate(y) or not coordinate(z) or type(apply) ~= "function" then
@@ -83,7 +90,9 @@ function stack_drop.command(fields, state, phase)
     observation = nil
     local name, slot, guid, raw_count = fields[3], fields[4], fields[5], fields[6]
     local count = math.tointeger(tonumber(raw_count))
-    if not enabled or #fields ~= 6 or phase ~= "hosting" or not state.listening or state.server ~= false or state.map ~= map
+    local expected_map = command == action and observatory or fields[7]
+    local expected_count = command == action and 6 or 7
+    if #fields ~= expected_count or not hosting_map(state, phase) or expected_map ~= state.map
         or type(name) ~= "string" or name == "" or not slot_name(slot) or not item_guid(guid)
         or not count or count < 1 or count > 200 or tostring(count) ~= raw_count
         or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then
@@ -99,6 +108,8 @@ function stack_drop.command(fields, state, phase)
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$") then
         error("mutation_unverified_native_guest_stack_drop_receipt", 0)
     end
+    local stock_actor_prefix = "Ammo_Pistol_BP_C " .. state.map .. "." .. maps[state.map]
+        .. ":PersistentLevel.Ammo_Pistol_BP_C_"
     if ok and (status ~= "stock_spawn_verified_and_retired" or actual_count ~= count or not item_guid(new_guid) or new_guid == guid
                 or type(actor) ~= "string" or actor:sub(1, #stock_actor_prefix) ~= stock_actor_prefix
                 or not actor:sub(#stock_actor_prefix + 1):match("^%d+$") or not coordinate(x) or not coordinate(y)
@@ -111,9 +122,9 @@ function stack_drop.command(fields, state, phase)
 end
 
 function stack_drop.rows(state, phase, status_row)
-    if not enabled or phase ~= "hosting" or state.map ~= map or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
+    if not hosting_map(state, phase) or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
     local rows = {status_row(birth .. "-capability", 1)}
-    if fixtures then rows[#rows + 1] = status_row(action .. "-capability", 1) end
+    if fixtures and state.map == observatory then rows[#rows + 1] = status_row(action .. "-capability", 1) end
     local row = observation
     if row then
         rows[#rows + 1] = status_row(row.command, row.map, row.pawn, row.slot, row.guid, row.count, row.ok and 1 or 0, row.status,
