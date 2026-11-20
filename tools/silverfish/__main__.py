@@ -286,7 +286,8 @@ def _events(directory: Path, limit: int) -> dict:
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
 
 
-async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False, headless=False) -> dict:
+async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False, headless=False,
+                            pause_fixture=False) -> dict:
     from . import embedded_title_plan, runtime
     from .service import MENU_HOST_OPTIONS, menu_host_start
     from .title_session import SessionPlan, TitleSession, host_plan, join_plan
@@ -312,7 +313,7 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
             expected = area if starting else None
             if embedded:
                 return embedded_title_plan.host_plan(opts.work, campaign, bind, port, mode, expected,
-                                                     headless=headless)
+                                                     headless=headless, pause_fixture=pause_fixture)
             return host_plan(opts.work, campaign, bind, port, headless=headless, expected_map=expected,
                              **MENU_HOST_OPTIONS, **starting)
 
@@ -320,7 +321,7 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
 
         def resolve_host(claim):
             if claim.host_settings is None:
-                return configured
+                return make_host_plan(opts.campaign, opts.bind, default_port)
             name, bind, port_text = claim.host_settings
             port = int(port_text) if port_text else default_port
             address = bind or opts.bind
@@ -336,7 +337,8 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         def make_join_plan(name, invite, character):
             guest = select_run(opts.work, "clients", name)
             if embedded:
-                return embedded_title_plan.guest_plan(opts.work, guest, invite, character, headless=headless)
+                return embedded_title_plan.guest_plan(opts.work, guest, invite, character, headless=headless,
+                                                      pause_fixture=pause_fixture)
             return join_plan(opts.work, guest, invite, character_id=character, headless=headless)
 
         fixed = make_join_plan(opts.profile, opts.invite.resolve(strict=True), opts.character) if opts.invite else None
@@ -357,24 +359,39 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         plans["join"] = replace(offered, resolve_claim=resolve_join)
 
     title = select_run(opts.work, "titles", opts.title_profile)
+    ready_callback = on_title_ready
+
+    def publish_ready():
+        nonlocal ready_callback
+        if ready_callback is not None:
+            ready_callback()
+            ready_callback = None
+
     with Control(title / "run") as control:
-        mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
-        profile = title / "game-user"
-        process = runtime.launch(opts.work, profile, mailbox, headless=headless, title_fixture=headless,
-                                 inspect_title_profile=on_title_ready is not None)
-        try:
-            if join_offered:
-                join_settings = TitleJoinSettings(opts.work, mailbox)
-            await TitleSession(runtime.Bridge(mailbox, process), plans, control=control,
-                               join_settings=join_settings, on_title_ready=on_title_ready,
-                               title_saved_directory=profile / "Saved" if on_title_ready is not None else None).run()
-        finally:
+        while True:
+            mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
+            profile = title / "game-user"
+            process = runtime.launch(opts.work, profile, mailbox, headless=headless, title_fixture=headless,
+                                     inspect_title_profile=on_title_ready is not None)
+            join_settings = None
             try:
-                if process.poll() is None:
-                    await runtime.stop_game(process)
+                if join_offered:
+                    join_settings = TitleJoinSettings(opts.work, mailbox)
+                session = TitleSession(
+                    runtime.Bridge(mailbox, process), plans, control=control, join_settings=join_settings,
+                    on_title_ready=publish_ready if on_title_ready is not None else None,
+                    title_saved_directory=profile / "Saved" if on_title_ready is not None else None,
+                )
+                await session.run()
             finally:
-                if join_settings is not None:
-                    await join_settings.close()
+                try:
+                    if process.poll() is None:
+                        await runtime.stop_game(process)
+                finally:
+                    if join_settings is not None:
+                        await join_settings.close()
+            if not session.return_to_title:
+                break
     return {"ok": True, "state": "stopped"}
 
 

@@ -127,7 +127,7 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
             address=(address, 31000), connected=True, game_access=True,
             game_packets_sent=0, game_packets_received=0, game_local_datagrams=0,
             request=AsyncMock(return_value={"ok": True, "gameplay": {}, "zone_epoch": "city-epoch", "zone": CITY}),
-            reset_game_endpoint=Mock(),
+            reset_game_endpoint=Mock(), session_end=None,
         )
 
         async def renew():

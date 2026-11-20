@@ -34,12 +34,19 @@ __all__ = [
 _ALPN = "silverfish-coop-direct/1"
 _TLS_NAME = "silverfish-coop.invalid"
 _ADMISSION_STREAM = 0
+_END_SESSION_STREAM = 1
+_END_SESSION_NOTICE_LIMIT = 128
+_END_SESSION_ACK = b"ack"
+_END_SESSION_TIMEOUT = 2.0
+GUEST_LEAVE = "native-session-leave"
+GUEST_LEAVE_CONFIRM = "native-session-leave-confirm"
 _MAX_ADMISSION = 4096
 _MAX_ACTION_BODY = 32 * 1024
 _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
+    GUEST_LEAVE: 40.0,
     "native-dialogue-choose": 20.0,
     "native-mosby-tape-convert": 20.0,
     "native-drill-test-results-convert": 20.0,
@@ -111,6 +118,11 @@ def checkpoint_action_timeout(payload: Action) -> float | None:
     if action in _QUEST_ACTIONS and isinstance(target, str) and target in _CHECKPOINT_QUESTS:
         return 20.0
     return _CHECKPOINT_ACTION_TIMEOUTS.get(action)
+
+
+def _valid_session_end(session: object, revision: object) -> bool:
+    return (isinstance(session, str) and len(session) == 32 and all(ch in "0123456789abcdef" for ch in session)
+            and type(revision) is int and 0 < revision < 2**53)
 
 
 class LinkError(ConnectionError):
@@ -424,6 +436,14 @@ class _HostProtocol(_LinkProtocol):
         self.host = host
         self.guest_id: str | None = None
         self._actions: dict[int, _IncomingAction] = {}
+        self._end_ack: asyncio.Event | None = None
+        self._end_ack_bytes = bytearray()
+
+    def send_session_end(self, body: bytes) -> asyncio.Event:
+        self._end_ack = asyncio.Event()
+        self._quic.send_stream_data(_END_SESSION_STREAM, body, end_stream=True)
+        self.transmit()
+        return self._end_ack
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.StreamDataReceived):
@@ -434,6 +454,13 @@ class _HostProtocol(_LinkProtocol):
                         self.host._spawn(self._respond, payload)
                     else:
                         self.close(error_code=_APP_ERROR, reason_phrase="host busy")
+            elif event.stream_id == _END_SESSION_STREAM and self._end_ack is not None:
+                if len(self._end_ack_bytes) + len(event.data) > len(_END_SESSION_ACK):
+                    self._end_ack = None
+                else:
+                    self._end_ack_bytes.extend(event.data)
+                    if event.end_stream and self._end_ack_bytes == _END_SESSION_ACK:
+                        self._end_ack.set()
             else:
                 self._read_action(event)
         elif isinstance(event, (events.StreamReset, events.StopSendingReceived)):
@@ -771,6 +798,26 @@ class HostLink:
         except Exception:
             _LOG.warning("Host link disconnect callback failed")
 
+    async def announce_session_end(self, session_id: str, revision: int) -> int:
+        """Send the committed terminal outcome on the exact admitted peers' reliable streams."""
+        if not _valid_session_end(session_id, revision):
+            raise ValueError("Invalid orderly session end")
+        body = _encode_action({"session_id": session_id, "revision": revision})
+        recipients = []
+        for protocol in tuple(self._protocols.values()):
+            if protocol.authorized and protocol.game_access and not protocol.terminated:
+                try:
+                    recipients.append(protocol.send_session_end(body))
+                except (OSError, RuntimeError):
+                    _LOG.warning("An admitted guest could not receive the committed session end")
+        if recipients:
+            try:
+                async with asyncio.timeout(_END_SESSION_TIMEOUT):
+                    await asyncio.gather(*(ack.wait() for ack in recipients))
+            except TimeoutError:
+                pass
+        return sum(ack.is_set() for ack in recipients)
+
     def _to_game(self, protocol: _HostProtocol, data: bytes) -> None:
         guest_id = protocol.guest_id
         if guest_id is None or self._protocols.get(guest_id) is not protocol:
@@ -840,6 +887,8 @@ class _ClientProtocol(_LinkProtocol):
         self.reply = asyncio.Event()
         self.response: Admission | None = None
         self._actions: dict[int, _OutgoingAction] = {}
+        self._session_end_bytes = bytearray()
+        self.session_end: tuple[str, int] | None = None
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.HandshakeCompleted):
@@ -856,6 +905,8 @@ class _ClientProtocol(_LinkProtocol):
                     except LinkError:
                         self.response = None
                     self.reply.set()
+            elif event.stream_id == _END_SESSION_STREAM:
+                self._read_session_end(event)
             else:
                 self._read_action_response(event)
         elif isinstance(event, (events.StreamReset, events.StopSendingReceived)):
@@ -874,6 +925,27 @@ class _ClientProtocol(_LinkProtocol):
             for action in self._actions.values():
                 if not action.response.done():
                     action.response.set_exception(LinkError("link disconnected during application request"))
+
+    def _read_session_end(self, event: events.StreamDataReceived) -> None:
+        if (not self.authorized or not self.game_access or self.session_end is not None
+                or len(self._session_end_bytes) + len(event.data) > _END_SESSION_NOTICE_LIMIT):
+            self.close(error_code=_APP_ERROR, reason_phrase="invalid session end notice")
+            return
+        self._session_end_bytes.extend(event.data)
+        if not event.end_stream:
+            return
+        try:
+            outcome = _decode_action(bytes(self._session_end_bytes))
+            session, revision = outcome.get("session_id"), outcome.get("revision")
+            if (outcome.keys() != {"session_id", "revision"} or not _valid_session_end(session, revision)
+                    or self.response is None or session != self.response.get("session_id")):
+                raise LinkError("invalid session end notice")
+        except LinkError:
+            self.close(error_code=_APP_ERROR, reason_phrase="invalid session end notice")
+            return
+        self.session_end = (session, revision)
+        self._quic.send_stream_data(_END_SESSION_STREAM, _END_SESSION_ACK, end_stream=True)
+        self.transmit()
 
     async def request(self, body: bytes, timeout: float) -> Action:
         if len(self._actions) >= _MAX_ACTIONS:
@@ -980,6 +1052,10 @@ class ClientLink:
     def connected(self) -> bool:
         protocol = self._protocol
         return bool(protocol and protocol.authorized and not protocol.terminated)
+
+    @property
+    def session_end(self) -> tuple[str, int] | None:
+        return self._protocol.session_end if self._protocol else None
 
     async def connect(
         self,

@@ -77,12 +77,12 @@ DEATH_PATCH_HASHES = {
 }
 
 
-def write_text(path: Path, data: str) -> None:
+def write_text(path: Path, data: str, *, newline: str | None = None) -> None:
     """Publish a complete file on the same volume; retry Windows sharing races."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(data, encoding="utf-8")
+        temporary.write_text(data, encoding="utf-8", newline=newline)
         for attempt in range(5):
             try:
                 temporary.replace(path)
@@ -313,7 +313,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False, native_mindcore_view: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
-           embedded_engine: bool = False, inspect_title_profile: bool = False,
+           embedded_engine: bool = False, inspect_title_profile: bool = False, pause_fixture: bool = False,
            embedded_startup: str | None = None) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
@@ -332,6 +332,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_TITLE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_ENGINE", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_STARTUP", None)
+    env.pop("SILVERFISH_COOP_PAUSE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
     env.pop("SILVERFISH_COOP_NATIVE_CQC_LOOT", None)
@@ -374,6 +375,10 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
                 or not re.fullmatch(r"[a-f0-9]{32}", embedded_startup) or embedded_startup == "0" * 32):
             raise ValueError("Invalid packaged embedded game startup identity")
         env["SILVERFISH_COOP_EMBEDDED_STARTUP"] = embedded_startup
+    if pause_fixture:
+        if not (headless and embedded_startup is not None):
+            raise ValueError("The Pause fixture requires a headless packaged role")
+        env["SILVERFISH_COOP_PAUSE_FIXTURES"] = "1"
     if inspect_title_profile:
         if port is not None:
             raise ValueError("A separate title profile must start without a listen port")
@@ -952,6 +957,13 @@ class Bridge:
                     if native_title_entry.STARTUP_KEY in data:
                         raise ValueError("Repeated embedded engine startup frame")
                     data[native_title_entry.STARTUP_KEY] = native_title_entry.parse_startup(fields, data)
+                elif fields[0] == "native-coop-pause" and len(fields) == 5:
+                    role, generation, state, serial = fields[1:]
+                    phase = {"host": "hosting", "guest": "connected"}.get(role)
+                    if (phase and data.get("state") == phase and re.fullmatch(r"[a-f0-9]{32}", generation)
+                            and ((state == "armed" and serial == "0")
+                                 or (state == "requested" and re.fullmatch(r"[1-9][0-9]{0,14}", serial)))):
+                        data["stock_pause_exit"] = {"role": role, "state": state, "press": int(serial)}
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",

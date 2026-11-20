@@ -198,13 +198,14 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         host.store = Mock()
         host.guest = {"guest_id": "peer", "character_id": GUEST, "lease_id": "lease", "disconnected": None}
         host.members = Mock(grace_seconds=90)
+        host.consume_guest_leave = lambda guest_id: False
 
         with self.assertRaisesRegex(party.RuleError, "native_transaction_busy"):
             Host.act(host, GUEST, OPERATION_ID, "interact", None)
         Host.disconnected(host, "peer")
         host.store.disconnect.assert_called_once_with("lease")
         MultiHost.disconnected(host, "peer")
-        host.members.disconnect.assert_called_once_with("peer")
+        host.members.disconnect.assert_called_once_with("peer", intentional=False)
         host.checkpoint.assert_not_called()
 
         host.stopping = True

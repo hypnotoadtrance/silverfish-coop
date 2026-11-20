@@ -172,15 +172,16 @@ class PartyMembers:
         self._sync_bindings()
         return Admission(member, lease["resumed"], enrollment)
 
-    def disconnect(self, guest_id: str) -> PartyMember | None:
-        """Reserve this guest only. Repeated link notices keep the original deadline."""
+    def disconnect(self, guest_id: str, *, intentional: bool = False) -> PartyMember | None:
+        """Reserve a transiently disconnected guest or expire an acknowledged deliberate departure."""
         member = self.get(guest_id)
         if member is None or member.disconnected_at is not None:
             return None
         now = self.clock()
-        self.store.disconnect(member.lease_id, grace_seconds=self.grace_seconds)
+        grace = 0 if intentional else self.grace_seconds
+        self.store.disconnect(member.lease_id, grace_seconds=grace)
         member.disconnected_at = now
-        member.grace_until = now + self.grace_seconds
+        member.grace_until = now + grace
         return member
 
     def expired(self) -> tuple[PartyMember, ...]:

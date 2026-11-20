@@ -9,6 +9,7 @@ import os
 import secrets
 import time
 import uuid
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
@@ -36,7 +37,7 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_mindcore_view
-from . import native_host_invitation, native_mindcore_fixture
+from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
@@ -98,6 +99,20 @@ def _pawn(state: dict, role: str) -> dict:
     health = pawn["health"]
     return {"map": state["map"], "location": pawn["location"],
             "health": max(0, health) if health is not None else None}
+
+
+@dataclass(frozen=True)
+class GuestLeave:
+    character: str
+    pawn: str
+    operation: str
+    epoch: str
+    revision: int
+    expires: float
+
+    def receipt(self, session: str) -> dict:
+        return {"session_id": session, "zone_epoch": self.epoch, "character_id": self.character,
+                "operation_id": self.operation, "revision": self.revision}
 
 
 def guest_arrival_positions(point: list[float], first: int = 0):
@@ -243,6 +258,9 @@ class Host:
         self.fall_origin = None
         self.native_pickup = NativePickup()
         self.native_requests = asyncio.Queue(maxsize=8)
+        self.prepared_guest_leaves: dict[str, GuestLeave] = {}
+        self.confirmed_guest_leaves: set[str] = set()
+        self.session_stop_reason: str | None = None
         self.pending_native_deaths: list[tuple[str, str, str | None]] = []
         initial_status = store.status()
         self.party = party.load_party(initial_status["world"].get("party"))
@@ -271,6 +289,8 @@ class Host:
         self.native_restart_attempted = 0
 
     def admit(self, request: dict) -> dict:
+        if self.stopping:
+            return {"accepted": False, "reason": "host_unavailable"}
         if self.transitioning:
             return {"accepted": False, "reason": "travel_in_progress"}
         if request["protocol_version"] != PROTOCOL or request["game_build"] != self.game_build:
@@ -328,6 +348,11 @@ class Host:
         if not self.guest or self.guest["guest_id"] != guest_id or self.stopping:
             return
         if self.guest["disconnected"] is not None:
+            return
+        if self.consume_guest_leave(guest_id):
+            self.store.disconnect(self.guest["lease_id"], grace_seconds=0)
+            self.guest["disconnected"] = time.monotonic() - DEFAULT_RECONNECT_GRACE
+            self.expired_characters.add(self.guest["character_id"])
             return
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
@@ -520,6 +545,71 @@ class Host:
         except (OSError, KeyError, ValueError) as error:
             self.control.event("native_host_save_prune_deferred", reason=str(error))
         return revision
+
+    async def end_session(self, bridge: Bridge, transport) -> dict:
+        """End this host generation only after its final paired checkpoint."""
+        if self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.last_game.get("state") != "hosting":
+            raise party.RuleError("native_session_end_unavailable")
+        self.transitioning = True
+        try:
+            if self.smg_holds:
+                await self.smg_holds.settle(bridge, stop_all=True)
+            required = frozenset(self.roles().values()) - {"host"} if self.persist_native_guest else frozenset()
+            revision = await self.checkpoint_native(bridge, require_guest_frames=required)
+        finally:
+            self.transitioning = False
+        self.session_stop_reason = "host_session_ended"
+        self.stopping = True
+        peers_acknowledged = 0
+        with contextlib.suppress(OSError, RuntimeError):
+            peers_acknowledged = await transport.announce_session_end(self.control.generation, revision)
+        with contextlib.suppress(OSError):
+            self.control.event("host_session_ended", revision=revision, peers_acknowledged=peers_acknowledged)
+        return {"revision": revision, "peers_acknowledged": peers_acknowledged}
+
+    def consume_guest_leave(self, guest_id: str) -> bool:
+        self.prepared_guest_leaves.pop(guest_id, None)
+        if guest_id not in self.confirmed_guest_leaves:
+            return False
+        self.confirmed_guest_leaves.discard(guest_id)
+        return True
+
+    async def guest_leave(self, bridge: Bridge, guest_id: str, character: str, request: dict) -> dict:
+        operation, epoch = request["operation_id"], request["target"]
+        confirming = request["action"] == link.GUEST_LEAVE_CONFIRM
+        prior = self.prepared_guest_leaves.get(guest_id)
+        if guest_id in self.confirmed_guest_leaves and prior and (prior.character, prior.operation, prior.epoch) == (character, operation, epoch):
+            return {"guest_leave": prior.receipt(self.control.generation)}
+        owner = self.native_recipients().get(character, {})
+        pawn = owner.get("pawn")
+        if (self.stopping or self.transitioning or self.native_checkpoint_unsafe or not self.persist_native_guest
+                or self.native_profile is None or self.last_game.get("state") != "hosting" or epoch != self.zone_epoch
+                or self.party["wipe"] or not owner.get("connected") or not pawn):
+            raise party.RuleError("native_session_leave_unavailable")
+        if prior and prior.expires > time.monotonic():
+            if (prior.character, prior.pawn, prior.operation, prior.epoch) != (character, pawn, operation, epoch):
+                raise party.RuleError("native_session_leave_pending")
+            if confirming:
+                self.confirmed_guest_leaves.add(guest_id)
+                with contextlib.suppress(OSError):
+                    self.control.event("guest_leave_confirmed", character_id=character, revision=prior.revision)
+            return {"guest_leave": prior.receipt(self.control.generation)}
+        if confirming:
+            raise party.RuleError("native_session_leave_checkpoint_required")
+        self.transitioning = True
+        try:
+            if self.smg_holds and character in self.smg_holds.strokes:
+                raise party.RuleError("native_session_leave_action_pending")
+            revision = await self.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+            if not self.authenticated_guest(guest_id) or self.native_recipients().get(character, {}).get("pawn") != pawn:
+                raise party.RuleError("native_session_leave_connection_changed")
+            prepared = GuestLeave(character, pawn, operation, epoch, revision, time.monotonic() + 12)
+            self.prepared_guest_leaves[guest_id] = prepared
+        finally:
+            self.transitioning = False
+        with contextlib.suppress(OSError):
+            self.control.event("guest_leave_checkpointed", character_id=character, revision=revision)
+        return {"guest_leave": prepared.receipt(self.control.generation)}
 
     def roles(self) -> dict[str, str]:
         roles = {"host": "host"}
@@ -1506,6 +1596,14 @@ class Host:
         if request == {"action": "snapshot"}:
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
+        if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
+            operation, epoch = request.get("operation_id"), request.get("target")
+            if (set(request) != {"action", "operation_id", "target"} or not isinstance(operation, str)
+                    or not party.REQUEST_ID.fullmatch(operation) or epoch != self.zone_epoch):
+                return {"ok": False, "error": "native_session_leave_invalid"}
+            return self.enqueue_native_request(guest_id, request)
+        if self.guest_leave_pending(guest_id):
+            return {"ok": False, "error": "native_session_leave_pending"}
         if action == native_smg_hold.ACTION and self.smg_holds and set(request) == {"action", "operation_id", "target"}:
             operation = request.get("operation_id")
             if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
@@ -1535,6 +1633,11 @@ class Host:
             return {"ok": False, "error": "native_actions_busy"}
         return await future
 
+    def guest_leave_pending(self, guest_id: str) -> bool:
+        prior = self.prepared_guest_leaves.get(guest_id)
+        return bool(guest_id in self.confirmed_guest_leaves or prior and prior.epoch == self.zone_epoch
+                    and prior.expires > time.monotonic())
+
     async def service_guest_native_requests(self, bridge: Bridge) -> None:
         if self.native_requests.empty():
             return
@@ -1547,7 +1650,11 @@ class Host:
                 raise party.RuleError("guest_not_active")
             _, character = identity
             action, target = request["action"], request["target"]
-            if action == "native-pickup":
+            if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
+                result = await self.guest_leave(bridge, guest_id, character, request)
+            elif self.guest_leave_pending(guest_id):
+                raise party.RuleError("native_session_leave_pending")
+            elif action == "native-pickup":
                 result = await self.native_pickup.claim(self, bridge, character, request["operation_id"], target)
             elif action == "native-shop-buy":
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
@@ -3060,11 +3167,13 @@ class Host:
     async def run(self, bridge: Bridge, transport) -> None:
         invites = (native_host_invitation.HostInvitationMailbox(bridge.directory, self.control.run, self.invite)
                    if self.native_events and self.native_zones else None)
+        pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host")
+                      if isinstance(bridge.process, EmbeddedEngine) and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
-            await self.run_session(bridge, transport, invites)
+            await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
             if heartbeat:
                 heartbeat.cancel()
@@ -3072,8 +3181,10 @@ class Host:
                     await heartbeat
             if invites is not None:
                 invites.close()
+            if pause_exit is not None:
+                pause_exit.close()
 
-    async def run_session(self, bridge: Bridge, transport, invites) -> None:
+    async def run_session(self, bridge: Bridge, transport, invites, *, pause_exit=None) -> None:
         loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
         wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
 
@@ -3085,6 +3196,9 @@ class Host:
 
         async def retain(operation, choices):
             return self.act("host", operation, "keep", None, retained=choices)
+
+        async def end_session(_operation):
+            return await self.end_session(bridge, transport)
 
         async def wire_action(action, _operation, target):
             if action == native_wire_quest.PREFLIGHT:
@@ -3190,6 +3304,11 @@ class Host:
                 except (ValueError, OSError, RuntimeError) as error:
                     self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             await self.service_requests(bridge, transport)
+            if pause_exit is not None:
+                can_end = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe
+                               or self.party.get("wipe")) and self.last_game.get("state") == "hosting"
+                           and time.monotonic() - self.last_seen <= 1.5)
+                await pause_exit.poll((self.control.generation, self.zone_epoch) if can_end else None, end_session)
             if invites is not None:
                 active = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.party.get("wipe"))
                           and time.monotonic() - self.last_seen <= 1.5
@@ -3229,14 +3348,23 @@ class Host:
 async def _acquire_embedded_game(work: Path, directory: Path, role: str, headless: bool,
                                  internal_port: int | None, options: dict) -> EmbeddedEngine:
     startup = os.environ.get("SILVERFISH_COOP_EMBEDDED_STARTUP")
-    expected = game_environment(work, headless, internal_port, embedded_engine=True, embedded_startup=startup, **options)
+    pause_fixture = os.environ.get("SILVERFISH_COOP_PAUSE_FIXTURES") == "1"
+    expected = game_environment(work, headless, internal_port, embedded_engine=True, embedded_startup=startup,
+                                pause_fixture=pause_fixture, **options)
     conditions = {name: expected.get(name) for name in os.environ.keys() | expected.keys()
                   if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
     return await EmbeddedEngine.acquire(work, directory, role=role, internal_port=internal_port,
                                         required_env=conditions)
 
 
-async def _stop_session_game(transport, process, embedded: EmbeddedEngine | None) -> None:
+async def _stop_session_game(transport, process, embedded: EmbeddedEngine | None, *, guest_left=False) -> None:
+    if guest_left and embedded is not None:
+        try:
+            await embedded.release()
+        finally:
+            if transport:
+                await transport.close()
+        return
     try:
         if transport:
             await transport.close()
@@ -3571,6 +3699,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     if controller:
                         controller.stopping = True
                         if (result == "stopped" and not controller.native_checkpoint_unsafe
+                                and controller.session_stop_reason != "host_session_ended"
                                 and controller.last_game.get("state") == "hosting" and process.poll() is None):
                             with contextlib.suppress(CampaignError, OSError, RuntimeError):
                                 if controller.smg_holds:
@@ -3586,7 +3715,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 control.event("host_cleanup_failed", error_type=type(error).__name__)
                 raise
             finally:
-                control.status(active=False, role="host", state=result, campaign=store.status())
+                control.status(active=False, role="host", state=result, campaign=store.status(),
+                               stop_reason=controller.session_stop_reason if controller else None)
 
 
 async def probe_transport(bridge: Bridge, item: str) -> dict:
@@ -3725,6 +3855,7 @@ class Client:
         self.bag_projection_key = None
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.stopping = False
+        self.session_stop_reason: str | None = None
 
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
@@ -3839,11 +3970,66 @@ class Client:
             await self.open_game_link(timeout=12, renew_endpoint=True)
 
     async def recover(self) -> dict:
+        if self.check_host_end():
+            return {"resumed": False, "host_session_ended": True}
         result = await self.connect(timeout=4) if not self.transport.connected else {"resumed": False}
         await self.refresh_gameplay()
-        if not self.server_transitioning:
+        if not self.stopping and not self.server_transitioning:
             await self.reconcile_game()
         return result
+
+    def check_host_end(self) -> bool:
+        if self.session_stop_reason == "host_session_ended":
+            return True
+        if self.stopping:
+            return False
+        notice = self.transport.session_end
+        if notice and notice[0] == self.host_session:
+            self.session_stop_reason = "host_session_ended"
+            self.stopping = True
+            with contextlib.suppress(OSError):
+                self.control.event("host_session_ended", revision=notice[1])
+            return True
+        return False
+
+    async def leave_session(self, operation_id: str | None = None) -> dict:
+        """Request an exact detached checkpoint before intentionally stopping this guest."""
+        if self.check_host_end() or self.stopping or not self.transport.game_access or not self.host_session or not self.zone_epoch:
+            raise party.RuleError("native_session_leave_unavailable")
+        if self.last_game.get("state") != "connected" or self.needs_travel or self.server_transitioning:
+            raise party.RuleError("native_session_leave_unavailable")
+        operation = uuid.uuid4().hex if operation_id is None else operation_id
+        if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+            raise party.RuleError("invalid_operation_id")
+        request = {"action": link.GUEST_LEAVE, "operation_id": operation, "target": self.zone_epoch}
+        reply = await self.transport.request(request, timeout=link.checkpoint_action_timeout(request))
+        if reply.get("ok") is not True:
+            raise party.RuleError(reply.get("error", "native_session_leave_unavailable"))
+        receipt = reply.get("guest_leave")
+        if (type(receipt) is not dict or receipt.keys() != {"session_id", "zone_epoch", "character_id", "operation_id", "revision"}
+                or (receipt["session_id"], receipt["zone_epoch"], receipt["character_id"], receipt["operation_id"])
+                    != (self.host_session, self.zone_epoch, self.invite["character_id"], operation)
+                or type(receipt["revision"]) is not int or receipt["revision"] <= 0):
+            raise RuntimeError("The host did not confirm the exact guest checkpoint")
+        confirmation = dict(request, action=link.GUEST_LEAVE_CONFIRM)
+        confirmed = False
+        try:
+            acknowledged = await self.transport.request(confirmation, timeout=7)
+            if acknowledged.get("ok") is True and acknowledged.get("guest_leave") == receipt:
+                confirmed = True
+            elif acknowledged.get("ok") is not True:
+                raise party.RuleError(acknowledged.get("error", "native_session_leave_unavailable"))
+            else:
+                raise RuntimeError("The host did not confirm the exact guest departure")
+        except link.LinkError:
+            # The exact durable save is already acknowledged. If the retirement notice
+            # is lost, the host preserves normal reconnect grace for this actor.
+            pass
+        self.session_stop_reason = "guest_left"
+        self.stopping = True
+        with contextlib.suppress(OSError):
+            self.control.event("guest_left", revision=receipt["revision"], retirement_confirmed=confirmed)
+        return {"revision": receipt["revision"], "retirement_confirmed": confirmed}
 
     async def gameplay_action(self, action: str, operation_id: str, target: str | None,
                               retained: dict | None = None) -> dict:
@@ -4139,6 +4325,8 @@ class Client:
                 and (stage == 1 or self.gameplay.get("host_world", {}).get(native_mosby_station_view.DOWNLOAD_READY) is True))
 
     async def refresh_gameplay(self) -> None:
+        if self.check_host_end():
+            return
         now = time.monotonic()
         if now >= self.next_snapshot:
             self.next_snapshot = now + 0.5
@@ -4410,16 +4598,20 @@ class Client:
                 self.control.respond(path, False, error=str(error))
 
     async def run(self) -> None:
+        pause_exit = (native_session_exit.PauseExit(self.bridge.directory, self.control, "guest")
+                      if isinstance(self.bridge.process, EmbeddedEngine) and self.invite.get("native_zones") else None)
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         try:
-            await self.run_session()
+            await self.run_session(pause_exit=pause_exit)
         finally:
+            if pause_exit is not None:
+                pause_exit.close()
             if held:
                 held.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await held
 
-    async def run_session(self) -> None:
+    async def run_session(self, *, pause_exit=None) -> None:
         async def claim_crate(operation, guid):
             return await self.gameplay_action("native-loot-claim", operation, guid)
 
@@ -4436,8 +4628,12 @@ class Client:
             if state is not None:
                 self.last_game = state
             await self.service_requests()
-            if self.transport.connected and not self.stopping:
+            if self.stopping or self.check_host_end():
+                break
+            if self.transport.connected:
                 await self.refresh_gameplay()
+            if self.stopping:
+                break
             repair_needed = (not self.transport.connected or self.needs_travel
                              or self.last_game.get("state") in {"disconnected", "ready"})
             if (not self.stopping and not self.suspended and repair_needed
@@ -4450,6 +4646,14 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            if pause_exit is not None:
+                can_leave = (active and self.transport.game_access and self.host_session and self.zone_epoch
+                             and self.expected_zone == self.last_game.get("map")
+                             and time.monotonic() - self.gameplay_seen < 2 and not self.gameplay.get("wipe"))
+                scope = (self.control.generation, self.host_session, self.zone_epoch) if can_leave else None
+                await pause_exit.poll(scope, self.leave_session)
+                if self.stopping:
+                    break
             await self.service_reload_input(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
@@ -4603,7 +4807,7 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             raise ValueError("Supply a character ID from the host catalog") from None
         invite["character_id"] = character_id
     with Control(directory / "run") as control:
-        process = transport = embedded = None
+        process = transport = embedded = client = None
         result = "stopped"
         try:
             control.status(active=True, role="client", state="starting")
@@ -4644,11 +4848,13 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             control.event("client_stopping", outcome=result, error_type=type(error).__name__)
             raise
         finally:
+            reason = client.session_stop_reason if client else None
             try:
-                await _stop_session_game(transport, process, embedded)
+                await _stop_session_game(transport, process, embedded, guest_left=reason == "guest_left")
             except (Exception, asyncio.CancelledError) as error:
                 result = "failed"
                 control.event("client_cleanup_failed", error_type=type(error).__name__)
                 raise
             finally:
-                control.status(active=False, role="client", state=result, character_id=invite["character_id"])
+                control.status(active=False, role="client", state=result, character_id=invite["character_id"],
+                               stop_reason=reason)

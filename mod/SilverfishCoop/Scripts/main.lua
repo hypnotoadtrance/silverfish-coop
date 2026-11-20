@@ -62,6 +62,7 @@ local native_fresh_campaign = require("native_fresh_campaign")
 local native_title_entry = require("native_title_entry")
 local native_title_panel = require("native_title_panel")
 local native_host_invite = require("native_host_invite")
+local native_coop_pause = require("native_coop_pause")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -451,6 +452,7 @@ local function run_command(fields, state, current_phase)
         native_host_dig_live.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
+    if command == "travel" or command == "leave" or command == "join" then native_coop_pause.clear() end
     if command == "travel" or command == "leave" or command == "join" then
         native_mosby_station.clear()
         native_mindcore.clear()
@@ -882,6 +884,7 @@ local function run_command(fields, state, current_phase)
         or native_host_dig_live.command(fields, state, current_phase)
         or native_title_panel.command(fields, state, current_phase)
         or native_host_invite.command(fields, state, current_phase)
+        or native_coop_pause.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -1012,6 +1015,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row, idle_sequence)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_title_panel.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_host_invite.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_coop_pause.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local vitals_ok, vitals_row = pcall(vitals.row, state, current_phase, status_row)
@@ -1312,8 +1316,10 @@ local function tick()
         state, current_phase = observe_session()
         if not state then return end
     end
+    local pause_checked, pause_failure = pcall(native_coop_pause.sync, state, current_phase)
+    if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)
-    write_status(state, current_phase, not projected and failure or nil)
+    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil)
 end
 
 players.start(bridge)
@@ -1326,6 +1332,7 @@ native_host_camera.start(bridge, players.is_downed)
 native_host_dig_live.start(bridge)
 native_title_panel.start(bridge)
 native_host_invite.start(bridge)
+native_coop_pause.start(bridge)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)

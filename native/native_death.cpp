@@ -30,6 +30,7 @@
 #include "host_landmine.hpp"
 #include "host_dig.hpp"
 #include "host_invitation_clipboard.hpp"
+#include "session_exit_input.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "guest_stack_drop.hpp"
@@ -1234,6 +1235,7 @@ namespace
             silverfish::native_zone::uninstall_hooks();
             silverfish::native_transport::uninstall_hooks();
             silverfish::native_stock_rest::uninstall_hooks();
+            silverfish::native_session_exit_input::uninstall_hooks();
             silverfish::native_guest_npc::uninstall_hooks();
             silverfish::native_guest_reload_input::uninstall_hooks();
             silverfish::native_inventory_view::uninstall_hooks();
@@ -1277,6 +1279,7 @@ namespace
             silverfish::native_zone::install_hooks();
             silverfish::native_transport::install_hooks();
             silverfish::native_stock_rest::install_hooks();
+            silverfish::native_session_exit_input::install_hooks();
             silverfish::native_guest_npc::install_hooks();
             silverfish::native_guest_reload_input::install_hooks();
             silverfish::native_inventory_view::install_hooks();

@@ -458,6 +458,24 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status()["last_failure"]["code"], "startup_stalled")
         self.assertTrue(self.bridge.alive)
 
+    async def test_only_the_verified_orderly_stop_requests_a_fresh_title(self):
+        child = Child("host")
+
+        async def start():
+            await child.start()
+            child.publish("stopped", stop_reason="host_session_ended")
+            return "host_session_ended"
+
+        session, task = self.supervise(host=SessionPlan(start, lambda: child.state, lambda state: True))
+        self.request("host", await self.wait(self.generation))
+        await child.started.wait()
+        child.ready()
+        await self.wait(lambda: self.status().get("state") == "ready")
+        self.assertFalse(session.return_to_title)
+        child.finish.set()
+        await task
+        self.assertTrue(session.return_to_title)
+
     async def test_stock_title_change_cancels_child_without_retiring_the_game(self):
         child = Child("host")
         _, task = self.supervise(host=child.plan())

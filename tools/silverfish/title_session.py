@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 
-from . import native_title_entry, runtime
+from . import native_session_exit, native_title_entry, runtime
 from .control import Control
 from .title_handoff import ACTIONS, TOKEN, Claim, TitleHandoff, _isolated_stock_title, _stock_title
 
@@ -32,7 +32,7 @@ class SessionPlan:
     Its progress uses the existing Control status envelope.
     """
 
-    start: Callable[..., Awaitable[None]]
+    start: Callable[..., Awaitable[str | None]]
     read_status: Callable[[], dict | None]
     ready: Callable[[dict], bool]
     producer_pid: Callable[[Claim], int | None] | None = None
@@ -146,6 +146,7 @@ class TitleSession:
         self._control_published_at = None
         self._control_generation = None
         self._local_request = None
+        self.return_to_title = False
 
     def cancel_start(self) -> bool:
         """Cancel only the pending start, allowing a new offer after child cleanup."""
@@ -321,9 +322,8 @@ class TitleSession:
 
         async def start():
             if plan.producer_pid is None:
-                await plan.start()
-            else:
-                await plan.start(claim)
+                return await plan.start()
+            return await plan.start(claim)
 
         task = asyncio.create_task(start())
         retired = False
@@ -371,7 +371,14 @@ class TitleSession:
                         while self._control is not None and not task.done():
                             self._poll_control()
                             await asyncio.wait((task,), timeout=self._poll_interval)
-                        await task
+                        reason = await task
+                        if reason in native_session_exit.ORDERLY_REASONS:
+                            final = _read_plan_status(plan)
+                            self.return_to_title = (
+                                _is_attempt(final, baseline, started_wall, claim.action, producer_pid())
+                                and final["generation"] == child_generation and final.get("active") is False
+                                and final.get("state") == "stopped" and final.get("stop_reason") == reason
+                            )
                         self._publish("stopped", attempt=attempt)
                         return True
                 else:

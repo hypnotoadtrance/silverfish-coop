@@ -84,7 +84,11 @@ class MultiHost(Host):
     def disconnected(self, guest_id: str) -> None:
         if self.stopping:
             return
-        member = self.members.disconnect(guest_id)
+        intentional = self.consume_guest_leave(guest_id)
+        member = self.members.disconnect(guest_id, intentional=intentional)
+        if member and intentional:
+            self.retirement_processed.add(member.lease_id)
+            return
         if member:
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=self.members.grace_seconds)
             if not self.transitioning and not self.native_checkpoint_unsafe and self.last_game.get("state") == "hosting":
