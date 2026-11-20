@@ -819,6 +819,24 @@ namespace
         return std::isfinite(direction[2]) && direction[2] > 0.0;
     }
 
+    void trace_carrier_hit(U::UObject* pawn, U::UFunction* function, const void* args, U::FFrame* frame)
+    {
+        if (!holder || holder->pawn.Get() != pawn || !trace_enabled()) return;
+        const auto name = [](U::UObject* value) {
+            return live(value) ? RC::to_utf8_string(value->GetFullName()) : std::string{"-"};
+        };
+        auto* own = object(parameter<U::FObjectProperty>(function, STR("MyComp"), 0), args);
+        auto* other = object(parameter<U::FObjectProperty>(function, STR("Other"), 8), args);
+        auto* part = object(parameter<U::FObjectProperty>(function, STR("OtherComp"), 0x10), args);
+        auto* normal = parameter<U::FStructProperty>(function, STR("HitNormal"), 0x38);
+        Point direction{};
+        if (args && normal && normal->GetSize() == sizeof(direction))
+            std::memcpy(direction.data(), normal->ContainerPtrToValuePtr<void>(args), sizeof(direction));
+        trace_release(*holder, "core_hit_candidate", std::format("exact={} params={} returned={} args={} own=[{}] other=[{}] "
+            "part=[{}] normal_z={:.3f}", function == script(pawn_class, STR("ReceiveHit")), function->GetNumParms(),
+            function->GetReturnProperty() != nullptr, args != nullptr, name(own), name(other), name(part), direction[2]), frame);
+    }
+
     void intercept(Iteration& call, U::UObject* value, U::UFunction* function, const void* args, U::FFrame* frame)
     {
         if (!available() || !function || !value || call.OriginalFunctionCallPrevented()) return;
@@ -840,6 +858,7 @@ namespace
         }
         if (name == hit_name)
         {
+            trace_carrier_hit(value, function, args, frame);
             // Stock ReceiveHit drops a prop when the carrier lands on it. A guest-driven
             // Core can trigger that branch when it brushes its own carrier's capsule.
             if (carried_core_self_contact(value, function, args))
