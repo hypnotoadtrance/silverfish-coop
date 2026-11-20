@@ -107,3 +107,56 @@ assert(row[1] == birth and row[2] == game.map and row[9] == actor)
 assert(not attempt(settle, "hosting") and recovered == 1)
 settle[11] = game.map
 assert(attempt(settle, "hosting") and recovered == 2)
+
+local host, canonical, controller, instance = object(6), object(7), object(8), object(9)
+local host_name = "exact host"
+local classes = {
+    ["/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"] = object(10),
+    ["/Game/Classes/Player/Player_FP.Player_FP_C"] = object(11),
+    ["/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"] = object(12),
+    ["/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"] = object(13),
+}
+local function stock_class(target, path)
+    function target:GetClass() return classes[path] end
+    function target:GetFullName() return path end
+end
+stock_class(controller, "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")
+stock_class(host, "/Game/Classes/Player/Player_FP.Player_FP_C")
+stock_class(instance, "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")
+stock_class(canonical, "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
+function controller:IsLocalController() return true end
+function controller:HasAuthority() return true end
+function controller:GetWorld() return game.world end
+function host:HasAuthority() return true end
+function host:GetWorld() return game.world end
+function host:K2_GetActorLocation() return location end
+host.Dead, host.Controller, host.Save = false, controller, canonical
+controller.Pawn, instance.SaveSlot_Ref = host, canonical
+function statics:GetGameInstance(target)
+    assert(target == controller)
+    return instance
+end
+local engine_object = StaticFindObject
+function StaticFindObject(path) return classes[path] or engine_object(path) end
+local host_downed = false
+function package.loaded.players.is_downed(target)
+    assert(target == host)
+    return host_downed
+end
+function SilverfishRecoverNativeInventoryBag(source, target, recipient)
+    assert(source == 3 and target == 7 and recipient == 6)
+    recovered = recovered + 1
+    return true, "recovered", 1
+end
+game.controller, game.local_pawn = controller, {name = host_name, pawn = host}
+settle[4] = host_name
+host_downed = true
+assert(not attempt(settle, "hosting") and recovered == 2)
+host_downed = false
+host.Save = detached
+assert(not attempt(settle, "hosting") and recovered == 2)
+host.Save = canonical
+assert(not attempt(settle, "connected") and recovered == 2)
+assert(attempt(settle, "hosting") and recovered == 3)
+row = stack_drop.rows(game, "hosting", status)[3]
+assert(row[1] == settle[2] and row[3] == "reclaim" and row[4] == host_name and row[9] == "recovered")

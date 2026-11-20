@@ -61,6 +61,7 @@ namespace
     struct Lease
     {
         U::FWeakObjectPtr pawn, world, driver, connection;
+        bool host{};
         std::string epoch, id;
         Position source{};
         double visual_z{};
@@ -154,11 +155,6 @@ namespace
 
     bool coordinate(double axis) { return std::isfinite(axis) && std::abs(axis) <= 1e7; }
 
-    U::UObject* local_pawn(std::uintptr_t address)
-    {
-        return input::current_guest_pawn(address);
-    }
-
     bool same_scene()
     {
         auto* pawn = lease.pawn.Get();
@@ -166,17 +162,19 @@ namespace
         auto* driver = lease.driver.Get();
         auto* connection = lease.connection.Get();
         auto* controller = object(pawn, STR("Controller"));
-        return mutable_actor(pawn) && live(world) && live(driver) && live(connection) && live(controller) &&
+        auto* current_connection = object(driver, STR("ServerConnection"));
+        const bool same_connection = lease.host ? !current_connection
+            : live(connection) && current_connection == connection && object(connection, STR("Driver")) == driver;
+        return mutable_actor(pawn) && live(world) && live(driver) && live(controller) && same_connection &&
             object(controller, STR("Pawn")) == pawn && static_cast<U::AActor*>(pawn)->GetWorld() == world &&
-            object(world, STR("NetDriver")) == driver && object(driver, STR("World")) == world &&
-            object(driver, STR("ServerConnection")) == connection && object(connection, STR("Driver")) == driver;
+            object(world, STR("NetDriver")) == driver && object(driver, STR("World")) == world;
     }
 
     bool scope_current()
     {
         auto* pawn = lease.pawn.Get();
         return Clock::now() < lease.expiry && same_scene() &&
-            local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn;
+            input::current_local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn;
     }
 
     void clear()
@@ -333,7 +331,7 @@ namespace
             (frame && (!caller || caller->Object() != pawn || caller->Node() != find<U::UFunction>(pawn_script_path))) ||
             object(pawn, STR("InteractionTarget_Component")) != box ||
             !boolean(pawn, STR("Holding_Interact"), true) || !near_source(pawn) ||
-            !input::guest_interaction_in_reach(pawn, actor, box) || sequence >= maximum_sequence ||
+            !input::local_interaction_in_reach(pawn, actor, box) || sequence >= maximum_sequence ||
             !input::consume_current_press(pawn)) return;
         lease.intent = lease.last_press = ++sequence;
         lease.intent_expiry = Clock::now() + heartbeat;
@@ -576,11 +574,12 @@ namespace
         Position source{};
         for (auto& axis : source) axis = lua.get_number();
         const double visual = lua.get_number();
-        auto* pawn = local_pawn(address);
+        auto* pawn = input::current_local_pawn(address);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         auto* driver = object(world, STR("NetDriver"));
         auto* connection = object(driver, STR("ServerConnection"));
-        if (!pawn || !live(world) || !silverfish::native_guest_drop_maps::contains(world) || !live(driver) || !live(connection) ||
+        if (!pawn || !live(world) || !silverfish::native_guest_drop_maps::contains(world) || !live(driver) ||
+            (connection && !live(connection)) ||
             !id_valid(epoch) || !id_valid(id) || !std::ranges::all_of(source, coordinate) ||
             !coordinate(visual) || visual > source[2] + 18 || visual < source[2] - 145)
         {
@@ -591,7 +590,8 @@ namespace
         auto* existing = static_cast<U::AActor*>(projection.object.Get());
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
-            lease.connection.Get() == connection && lease.source == source && mutable_actor(existing) &&
+            lease.host == (connection == nullptr) && lease.connection.Get() == connection &&
+            lease.source == source && mutable_actor(existing) &&
             live(projection.box.Get()) && object(existing, STR("Box")) == projection.box.Get())
         {
             lease.expiry = Clock::now() + heartbeat;
@@ -605,6 +605,7 @@ namespace
         lease.world = world;
         lease.driver = driver;
         lease.connection = connection;
+        lease.host = connection == nullptr;
         lease.epoch = epoch;
         lease.id = id;
         lease.source = source;
@@ -638,7 +639,7 @@ namespace
     {
         if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto address = static_cast<std::uintptr_t>(lua.get_integer());
-        if (!lease.visible || !scope_current() || local_pawn(address) != lease.pawn.Get() ||
+        if (!lease.visible || !scope_current() || input::current_local_pawn(address) != lease.pawn.Get() ||
             !lease.intent || Clock::now() >= lease.intent_expiry) return 0;
         lease.intent = 0;
         lua.set_string(lease.epoch);

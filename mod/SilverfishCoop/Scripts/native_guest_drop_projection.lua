@@ -25,7 +25,8 @@ end
 
 local function local_pawn(state, phase)
     local leaf = maps[state.map]
-    if not enabled or phase ~= "connected" or not leaf or state.server ~= true or state.listening ~= true then return end
+    local active = (phase == "connected" and state.server == true) or (phase == "hosting" and state.server == false)
+    if not enabled or not active or not leaf or state.listening ~= true then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
     if valid(pawn) and valid(state.world) and state.world:GetFullName() == "World " .. state.map .. "." .. leaf
         and same(pawn:GetWorld(), state.world) and pawn:IsLocallyControlled() then

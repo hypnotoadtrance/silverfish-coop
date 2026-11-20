@@ -44,7 +44,7 @@ local function owner(state)
     return instance, statics
 end
 
-local function canonical_host(state, phase)
+function host_save.canonical_host(state, phase)
     if phase ~= "hosting" or not state.listening or not state.local_pawn then return end
     local instance, statics = owner(state)
     if not instance then return end
@@ -113,7 +113,7 @@ end
 
 function host_save.capture(state, phase, slot)
     if not generation_slot(slot) then error("An exact co-op save generation slot is required", 0) end
-    local instance, pawn, statics = canonical_host(state, phase)
+    local instance, pawn, statics = host_save.canonical_host(state, phase)
     if not instance then error("The authoritative host does not have a canonical stock save", 0) end
     local save = instance.SaveSlot_Ref
     local observed = summary(save)
@@ -190,7 +190,7 @@ function host_save.rows(state, phase, status_row)
             end
         elseif phase == "hosting" then
             local instance = owner(state)
-            local _, pawn = canonical_host(state, phase)
+            local _, pawn = host_save.canonical_host(state, phase)
             receipt.arrival_seen = receipt.arrival_seen or os.time()
             if instance and (receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()
                 or (receipt.carry ~= nil and eather_remainder(instance) ~= receipt.carry)) then
@@ -206,7 +206,7 @@ function host_save.rows(state, phase, status_row)
     elseif phase ~= "hosting" or state.map ~= receipt.map then
         return {}
     else
-        local instance, pawn = canonical_host(state, phase)
+        local instance, pawn = host_save.canonical_host(state, phase)
         if not instance or receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()
             or receipt.pawn ~= pawn:GetFullName() then
             kind = "changed"

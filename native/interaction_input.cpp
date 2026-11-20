@@ -940,11 +940,23 @@ namespace silverfish::native_interaction_input
             pawn == scope.pawn.Get() && Clock::now() < scope.expires && live_scope(scope) && standing(pawn);
     }
 
-    Unreal::UObject* current_guest_pawn(std::uintptr_t requested)
+    Unreal::UObject* current_local_pawn(std::uintptr_t requested)
     {
-        if (!available() || scope.host || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;
+        if (!available() || Clock::now() >= scope.expires || !live_scope(scope)) return nullptr;
         auto* pawn = scope.pawn.Get();
         return pawn && reinterpret_cast<std::uintptr_t>(pawn) == requested ? pawn : nullptr;
+    }
+
+    Unreal::UObject* current_guest_pawn(std::uintptr_t requested)
+    {
+        auto* pawn = current_local_pawn(requested);
+        return pawn && !scope.host ? pawn : nullptr;
+    }
+
+    bool local_interaction_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
+    {
+        return pawn && current_local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn && standing(pawn) &&
+            actor && component && interaction_in_reach(pawn, actor, component);
     }
 
     bool guest_interaction_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)

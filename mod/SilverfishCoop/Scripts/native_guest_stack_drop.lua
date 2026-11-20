@@ -1,5 +1,6 @@
 local stack_drop = {}
 local guest_save = require("guest_save")
+local host_save = require("native_host_save")
 local players = require("players")
 local maps = require("native_guest_drop_maps")
 
@@ -41,6 +42,17 @@ local function qualified_owner(state, phase, name)
     if checked and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name) then return pawn, save end
 end
 
+local function reclaim_target(state, phase, name)
+    if state.local_pawn and name == state.local_pawn.name then
+        local instance, pawn = host_save.canonical_host(state, phase)
+        if valid(pawn) and pawn.Dead == false and players.is_downed(pawn) == false then
+            return pawn, instance.SaveSlot_Ref
+        end
+        return
+    end
+    return qualified_owner(state, phase, name)
+end
+
 local function transfer(fields, state, phase)
     local operation, name, id, source, replacement = table.unpack(fields, 3, 7)
     local debit = operation == "debit"
@@ -54,8 +66,9 @@ local function transfer(fields, state, phase)
         or not coordinate(x) or not coordinate(y) or not coordinate(z) or type(apply) ~= "function" then
         error("native_guest_stack_drop_settlement_unavailable", 0)
     end
-    local pawn, save = qualified_owner(state, phase, name)
-    if not pawn then error("native_guest_stack_drop_exact_guest_unavailable", 0) end
+    local qualify = debit and qualified_owner or reclaim_target
+    local pawn, save = qualify(state, phase, name)
+    if not pawn then error("native_guest_stack_drop_exact_recipient_unavailable", 0) end
     local origin = pawn:K2_GetActorLocation()
     if not origin or not coordinate(origin.X) or not coordinate(origin.Y) or not coordinate(origin.Z)
         or (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 > 250^2 then
