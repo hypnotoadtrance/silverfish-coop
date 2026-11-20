@@ -17,6 +17,12 @@ DECK_WEST_EDGE_X = -1732.3
 CARRY_PITCH = 3
 
 
+class StockCoreReleased(RuntimeError):
+    def __init__(self, label, hold):
+        super().__init__(f"The exact Core hold ended during {label}: {hold['reason']}")
+        self.hold = hold
+
+
 async def equip_stock_protection(run, guest_run, action, *, helmet_profile="basic-helmet"):
     # Put stock gear into the cloned fixture save before entering the hazard.
     torso_guid, head_guid = (uuid.uuid4().hex.upper() for _ in range(2))
@@ -70,7 +76,7 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
                            raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False,
-                           fixture_passengers=False, west_walkway=False, east_stairs=False):
+                           fixture_passengers=False, west_walkway=False, east_stairs=False, upper_approach=False):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -131,6 +137,9 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                                                for body in required_seats):
             raise RuntimeError(f"Stock damage downed a required rider during {label}")
         if lease and held.get("lease") == lease and held.get("state") in {"released", "mount_released", "failure"}:
+            if ((held.get("core"), held.get("pawn"), held.get("state")) == (core.CORE, guest_pawn, "released")
+                    and held.get("reason") in {"stock_core_released", "stock_core_released_by_engine"}):
+                raise StockCoreReleased(label, held)
             raise RuntimeError(f"The exact Core hold ended during {label}: {held.get('reason')}")
         if lease and ((held.get("lease"), held.get("pawn"), held.get("core"), held.get("state"))
                       != (lease, guest_pawn, core.CORE, "held") or replica.get("state") != "held"):
@@ -258,6 +267,23 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         lease = held["hold"]["lease"]
         return held
 
+    async def recover_stock_drop(released):
+        nonlocal lease
+        lease = None
+        # The previous movement pulse is bounded to 2.2 seconds.
+        await asyncio.sleep(2.25)
+        loose = await observe("find the released original Core on the same floor", lambda row, *_: (
+            row["guest_hold"].get("state") == "ready"
+            and abs(row["prop"]["position"][2] - row["carrier"]["location"][2]) < 135), timeout=5)
+        body, prop = loose["carrier"]["location"][:2], loose["prop"]["position"][:2]
+        distance = math.dist(body, prop)
+        if distance > 110:
+            approach = [b + (a - b) * 85 / distance for a, b in zip(body, prop, strict=True)]
+            await walk_to("return within reach of the released Core", approach, 18)
+        held = await regrip("pick up the same Core after the stock release", {"hold": released.hold})
+        proof.setdefault("stock_regrips", []).append({"release": released.hold, "pickup": held})
+        return held["hold"]["yaw"]
+
     async def observe_parked_core():
         previous = None
 
@@ -324,10 +350,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         assert regrouped["hold"]["lease"] == proof["landing"]["hold"]["lease"]
         proof["west_walkway"] = regrouped
 
-    async def climb_first_east_stair():
+    async def climb_east_stairs():
         if not east_stairs:
             return
-        route = proof["east_stair_path"] = await action(run, lift.FIXTURE, target="route-catwalk")
+        target = "route-upper-stairs" if upper_approach else "route-catwalk"
+        route = proof["east_stair_path"] = await action(run, lift.FIXTURE, target=target)
         points = route["points"]
         corridor = next((index for index, (x, y, z) in enumerate(points)
                          if x > 2500 and -1500 < y < -1050 and 2680 < z < 2740), None)
@@ -337,6 +364,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         distance = math.dist(end[:2], beyond[:2])
         if distance < 180 or abs(end[2] - beyond[2]) > 12:
             raise RuntimeError("The east corridor did not provide room for both riders")
+        last = len(points) - 1 if upper_approach else corridor
+        if upper_approach:
+            x, y, floor = points[last]
+            if not (1280 < x < 1680 and 1900 < y < 2250 and 4475 < floor < 4560):
+                raise RuntimeError("The stock path did not reach the upper stair approach")
 
         async def follow(seat, index, point):
             x, y, floor = point
@@ -347,28 +379,49 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         base = proof["west_walkway"]
         facing = base["hold"]["yaw"]
         south_doorway_was_crossed = False
-        for index, (x, y, floor) in enumerate(points[1:corridor + 1], 1):
+        lead_point = 1
+        index = 1
+        while index <= last:
+            x, y, floor = points[index]
             south_doorway = 500 < x < 760 and -2490 < y < -2400 and points[index - 1][1] > -2400
-            if south_doorway:
-                await walk_to("line up the Core with the south doorway", (625, -2320), 20)
-                await turn("aim the Core down the south doorway", -90, pitch=8)
-                frame = await walk_to("move the Core beyond the south wall before turning east", (625, -2535), 20,
-                                      reached=lambda row: row["prop"]["position"][1] < -2475)
-                proof["south_doorway"] = frame
-                facing = -90
-            else:
-                outward = math.degrees(math.atan2(y, x))
-                if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
-                    await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
-                    facing = outward
-                frame = await follow("carrier", index, (x, y, floor))
+            try:
+                if south_doorway:
+                    await walk_to("line up the Core with the south doorway", (625, -2320), 20)
+                    await turn("aim the Core down the south doorway", -90, pitch=8)
+                    frame = await walk_to("move the Core beyond the south wall before turning east", (625, -2535), 20,
+                                          reached=lambda row: row["prop"]["position"][1] < -2475)
+                    proof["south_doorway"] = frame
+                    facing = -90
+                else:
+                    outward = math.degrees(math.atan2(y, x))
+                    if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
+                        await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
+                        facing = outward
+                    frame = await follow("carrier", index, (x, y, floor))
+            except StockCoreReleased as released:
+                if not upper_approach or len(proof.get("stock_regrips", ())) >= 3:
+                    raise
+                facing = await recover_stock_drop(released)
+                south_doorway_was_crossed = True
+                continue
             south_doorway_was_crossed = south_doorway
             proof["east_stair_progress"] = {"point": index, "frame": frame}
-            if index > 1:
-                await follow("lead", index - 1, points[index - 1])
+            while lead_point < index and math.dist(frame["carrier"]["location"][:2], points[lead_point][:2]) > 118:
+                await follow("lead", lead_point, points[lead_point])
+                lead_point += 1
+            index += 1
+        if upper_approach:
+            finish = await observe("both players reach the upper stair approach with the same Core", lambda row, *_: (
+                all(4545 < row[seat]["location"][2] < 4665 for seat in ("lead", "carrier"))
+                and math.dist(row["lead"]["location"], row["carrier"]["location"]) < 800
+                and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 55))
+            assert finish["hold"]["lease"] == lease and finish["hold"]["core"] == base["hold"]["core"]
+            proof["upper_approach"] = finish
+            return
         forward = [a + 180 * (b - a) / distance for a, b in zip(end[:2], beyond[:2], strict=True)]
         await follow("carrier", corridor + 1, [*forward, end[2]])
-        await follow("lead", corridor, end)
+        for index in range(lead_point, corridor + 1):
+            await follow("lead", index, points[index])
         finish = await observe("both players reach the upper east corridor with the same Core", lambda row, *_: (
             all(row[seat]["location"][2] > base[seat]["location"][2] + 265 for seat in ("lead", "carrier"))
             and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 55))
@@ -401,7 +454,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         pickup = proof.get("upper_regrip") or proof["grab"]
         assert landed["hold"]["sequence"] > pickup["hold"]["sequence"]
         await cross_west_walkway()
-        await climb_first_east_stair()
+        await climb_east_stairs()
 
     proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
 

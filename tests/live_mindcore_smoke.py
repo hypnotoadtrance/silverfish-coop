@@ -155,7 +155,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
                    prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
                    raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False, fixture_passengers=False,
-                   west_walkway=False, route_probe=False, east_stairs=False):
+                   west_walkway=False, route_probe=False, east_stairs=False, upper_approach=False):
     upper_door = upper_door or upper_door_keycard
     if fixture_passengers and not fixture_loose_cargo:
         raise ValueError("Fixture passengers require the isolated loose-cargo setup")
@@ -163,6 +163,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("The west walkway requires a stock pickup at the upper stop")
     if east_stairs and not west_walkway:
         raise ValueError("The east stairs require the west walkway carry")
+    if upper_approach and not east_stairs:
+        raise ValueError("The upper approach requires the east stair carry")
     if sum((raise_before_ascent, park_on_deck, fixture_loose_cargo)) > 1:
         raise ValueError("Choose one lower deck positioning scenario")
     core_lift_carry = core_lift_carry or raise_before_ascent or park_on_deck or fixture_loose_cargo
@@ -750,7 +752,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                                    lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match,
                                    raise_before_ascent=raise_before_ascent, park_on_deck=park_on_deck,
                                    fixture_loose_cargo=fixture_loose_cargo, fixture_passengers=fixture_passengers,
-                                   west_walkway=west_walkway, east_stairs=east_stairs)
+                                   west_walkway=west_walkway, east_stairs=east_stairs, upper_approach=upper_approach)
             await action(run, "checkpoint")
             saved, lift_flags = await flags()
             assert tuple(row.get(core.FLAG, 0) for row in lift_flags) == (0, 0)
@@ -1108,6 +1110,8 @@ if __name__ == "__main__":
                         help="survey the stock navigation mesh from the west waypoint without moving any pawn")
     parser.add_argument("--core-lift-east-stairs", action="store_true",
                         help="continue the west walkway carry to the first east stair")
+    parser.add_argument("--core-lift-upper-approach", action="store_true",
+                        help="continue the east stair carry to the upper stair doorway")
     parser.add_argument("--guest-hazard-authority", action="store_true",
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
@@ -1125,4 +1129,5 @@ if __name__ == "__main__":
                          fixture_passengers=options.core_lift_fixture_passengers,
                          west_walkway=options.core_lift_west_walkway,
                          route_probe=options.core_lift_probe_route,
-                         east_stairs=options.core_lift_east_stairs))
+                         east_stairs=options.core_lift_east_stairs,
+                         upper_approach=options.core_lift_upper_approach))
