@@ -301,6 +301,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         proof["upper_regrip"] = await regrip("pick up the same Core from the parked upper deck", proof.get("deck_release"))
 
     async def disembark():
+        if "upper_regrip" in proof:
+            await turn("raise the Core above the upper rail before moving west", 180, pitch=68)
+            proof["upper_raised"] = await observe("verify the Core clears the upper rail", lambda row, *_: (
+                abs(row["prop"]["position"][1] - row["carrier"]["location"][1]) < 23
+                and row["prop"]["position"][2] >= UPPER_LANDING_Z + 154), timeout=5)
         await walk_to("align just inside the west edge of the upper deck", (-1720, EXIT_Y), 2.5, reached=on_deck)
         await turn("raise the Core outside the upper deck lip", 180, pitch=24)
         proof["upper_aligned"] = await observe("verify the Core is raised and centered before exiting", lambda row, *_: (
