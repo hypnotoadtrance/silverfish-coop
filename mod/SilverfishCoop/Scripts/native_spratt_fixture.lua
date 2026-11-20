@@ -1,7 +1,6 @@
 local aim = require("native_flood_jammer_aim_fixture")
 local wire = require("native_wire_quest")
 local guest_save = require("guest_save")
-local guest_npc = require("native_guest_npc")
 local fixture = {}
 
 local area = "/Game/Classes/Maps/Maps_Dungeons/Cistern_P"
@@ -78,6 +77,7 @@ function fixture.command(fields, state, phase)
     local pawn, save, controller, connection = exact_owner(state, phase, fields[3])
     if revive then
         if pawn.Dead ~= false or pawn.IsWeaponBlocked ~= true then error("stock_spratt_exact_downed_guest_required", 0) end
+        local guest_npc = require("native_guest_npc")
         return guest_npc.approach_revive(host, pawn, target, StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"))
     end
     local pose = aim.aim_target(state, phase, fields[3], fields[4], "native-spratt", target, target.CapsuleComponent, target.Mesh, true)
