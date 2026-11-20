@@ -125,10 +125,13 @@ async def open_coop(receipt: Receipt, config: Path) -> None:
 def main() -> int:
     try:
         receipt = read_inherited_receipt()
+    except (OSError, ValueError):
+        return 2
+    try:
         local = Path(os.environ["LOCALAPPDATA"]).resolve(strict=True)
         asyncio.run(open_coop(receipt, local / "SilverfishCoop" / "coordinator.json"))
     except (KeyError, OSError, ValueError, RuntimeError):
-        return 1
+        return 3
     return 0
 
 

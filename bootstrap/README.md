@@ -10,6 +10,8 @@ From a checkout, run `python bootstrap/package.py <new-archive.zip>` to assemble
 
 The archive ships disabled. An isolated lab can unpack `SilverfishCoopBootstrap` into the held replica's `SilverFish/Binaries/Win64/ue4ss/Mods` and add `SilverfishCoopBootstrap : 1` to that replica's `mods.txt`.
 
+Build the test coordinator with a matching Windows x64 Python environment, the repository requirements, and PyInstaller 6.22.3. Run `python bootstrap/build_coordinator.py <fresh-build-directory>`. The output in `dist` embeds the coordinator, Python dependencies, and the exact source used for invitation compatibility. Its local setup reads `%LOCALAPPDATA%\SilverfishCoop\coordinator.json` with schema `1`, the absolute `work` stage path, and `host` and `join` selections. The current Host selection includes `campaign`, numeric `bind`, and `port`. Join includes `profile`, an absolute `invite` imported under that co-op workspace, and a `character` UUID or `null`. Set either unused selection to `null`. The stock title adapter supplies one verified launch receipt over its inherited input pipe.
+
 ## Coordinator calls
 
 - `SilverfishReadCoopBootstrapOffer()` returns integer protocol version `1` and the current generation. A generation is a nonzero string of 32 lowercase hexadecimal characters. The coordinator issues a new ID for each new offer.
