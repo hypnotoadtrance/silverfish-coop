@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_computer_board as board, native_host_dig as dig, native_host_save
+from tools.silverfish import native_host_dig_live as custody, native_host_dig_live_fixture as dig_input
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.travel import BLACK_MARKET, CROSSROADS, LAKE
@@ -39,7 +40,7 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
     print(run, flush=True)
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_options = ("--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest",
-                    "--native-zones", "--native-expanded-zones")
+                    "--native-zones", "--native-expanded-zones", "--native-host-dig-live-fixtures")
     guest_options = ("--profile", name, "--headless", "--native-zones")
     jobs, evidence = [], {"verified": False, "routes": [], "board_input": []}
 
@@ -155,16 +156,23 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         for source, destination in zip(ROUTE, ROUTE[1:]):
             current = await follow(source, destination, current, character)
             if destination == CROSSROADS:
-                equipped = (await action(run, dig.ACQUIRE))[dig.KEY]
+                await wait(run, lambda doc: doc.get("game", {}).get(custody.KEY, {}).get("state") == "ready")
+                equipped = (await action(run, dig_input.ACTION, target="acquire"))[dig.KEY]
                 assert equipped["state"] == "equipped" and equipped["stock_f"] > 0, equipped
-                dug = (await action(run, dig.DIG, target=equipped["guid"]))[dig.KEY]
-                assert (dug["state"], dug["source"], dug["flag_value"], dug["holes"]) == ("collected", dig.SOURCE, 1, 1), dug
-                package = dug["package_guid"]
+                dug = await action(run, dig_input.ACTION, target="press")
+                escrow = dug[custody.CUSTODY]
+                assert (escrow["state"], escrow["source"], escrow["flag_value"], escrow["spade_guid"]) == (
+                    "escrowed", dig.SOURCE, 1, equipped["guid"]), escrow
+                collected = await action(run, dig_input.ACTION, target="collect")
+                owned = collected[custody.CUSTODY]
+                assert (owned["state"], owned["source"], owned["spade_guid"], collected[custody.KEY]["escrow_guid"]) == (
+                    "owned", dig.SOURCE, equipped["guid"], escrow["package_guid"]), collected
+                package = owned["package_guid"]
                 stock = (await inventory(run))[package]
                 assert (stock["source"], stock["class_path"], stock["quantity"], stock["stackable"]) == (
                     "backpack", dig.PACKAGE_CLASS, 1, False), stock
                 assert package not in await inventory(guest_run), dug
-                evidence["stock_dig"] = dug
+                evidence["stock_dig"] = {"escrow": escrow, "collected": owned}
 
         await action(run, SPEC.command("approach"), target=character)
         wrong_owner = await action(guest_run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)

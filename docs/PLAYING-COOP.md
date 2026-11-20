@@ -78,6 +78,8 @@ $sfCrossRoads = '/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P'
 
 Use the same invitation workflow and the campaign name `crossings`. The invitation carries the host's native travel, wall, and supported interaction settings. Keep the native feature flags for subsequent launches and omit the initial `--start-zone` when resuming after travel.
 
+On a matched C++ stage, `menu` opens a staged copy of the stock title with an in-game co-op panel. On the host, run `& $sfPython @sfCli menu --campaign expedition --port 7777` and press F7 to host. The host can also supply `--bind` for a LAN session. On a guest PC, run `& $sfPython @sfCli menu --profile scout --invite $sfInvite` and press F8 to join. F9 hides or restores the panel. The selected campaign or guest profile still comes from the command line in this trial build. [In-game integration](IN-GAME-INTEGRATION.md)
+
 Invitations from a current matched native stage also enable the guest's stock inventory, primary, and reload controls. For an older invitation, refresh it from the updated host or use the explicit guest flags below.
 
 | Option | Scope |
