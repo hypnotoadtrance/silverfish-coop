@@ -20,6 +20,7 @@ from tools.silverfish import native_host_save
 
 
 EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
+NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
 
 
 async def verify(work: Path, originals_path: Path):
@@ -93,56 +94,70 @@ async def verify(work: Path, originals_path: Path):
         return next((row["location"] for row in game.get("pawns", {}).values()
                      if row.get("name") == pawn and record.valid_position(row.get("location"))), None)
 
-    async def place(character, position, anchor=None):
+    async def place(character, position, anchor=None, preferred_lane=None):
         start = await wait(run, lambda frame: exact_position(frame, character) is not None)
         prior = exact_position(start, character)
         pawn = start["gameplay"]["native_pawns"]["guest"]
-        sequence = start["game"]["sequence"]
+        generation, epoch = start["generation"], start["zone_epoch"]
         attempts = []
-        samples = []
-        result = {"pawn": pawn, "attempts": attempts, "samples": samples}
+        result = {"pawn": pawn, "attempts": attempts}
         evidence.setdefault("placements", []).append(result)
-        lanes = (("far", ()), ("near", ("--amount", "4"))) if position == "far" else (("near", ()),)
-        for where, lane in lanes:
-            placed = await action(host, "native-exit-position", "--target", "guest", "--exit-position", where,
-                                  "--entrance", EXIT_TAG, "--exit-actor", EXIT_ACTOR, *lane, success=None)
-            attempts.append({"requested": where, "lane": lane[-1] if lane else None, "response": placed})
-            if placed.get("ok") is True:
-                assert (placed["target"], placed["position"], placed["entrance"], placed["exit_actor"]) == (
-                    "guest", where, EXIT_TAG, EXIT_ACTOR), placed
-                break
-            if placed.get("error") != "No verified stock floor at the requested expanded overlap position":
-                raise RuntimeError(f"The exact Observatory stock exit fixture declined placement: {attempts}")
+
+        def placement_point(frame):
+            if ((frame.get("generation"), frame.get("zone_epoch")) == (generation, epoch)
+                    and frame.get("gameplay", {}).get("native_pawns", {}).get("guest") == pawn):
+                return exact_position(frame, character)
+            return None
+
+        if position == "far":
+            candidates = (("far", None), ("near", 4))
         else:
-            raise RuntimeError(f"No authorized stock floor in the specified Observatory positions: {attempts}")
+            ordered = dict.fromkeys((preferred_lane, *NEAR_LANES)) if preferred_lane else NEAR_LANES
+            candidates = tuple(("near", lane) for lane in ordered)
 
-        def settled(frame):
-            point = exact_position(frame, character)
-            game, gameplay = frame.get("game", {}), frame.get("gameplay", {})
-            observed = game.get("sequence", 0)
-            if (point is None or gameplay.get("native_pawns", {}).get("guest") != pawn
-                    or (frame.get("generation"), frame.get("zone_epoch")) != (start["generation"], start["zone_epoch"])
-                    or observed <= (samples[-1]["sequence"] if samples else sequence)):
-                return False
-            travelled = math.dist(point, prior)
+        for where, lane in candidates:
+            before = await wait(run, lambda frame: placement_point(frame) is not None, timeout=8)
+            sequence = before["game"]["sequence"]
+            flags = ("--amount", str(lane)) if lane is not None else ()
+            placed = await action(host, "native-exit-position", "--target", "guest", "--exit-position", where,
+                                  "--entrance", EXIT_TAG, "--exit-actor", EXIT_ACTOR, *flags, success=None)
+            attempt = {"requested": where, "lane": lane, "response": placed}
+            attempts.append(attempt)
+            if placed.get("ok") is not True:
+                if placed.get("error") == "No verified stock floor at the requested expanded overlap position":
+                    continue
+                raise RuntimeError(f"The exact Observatory stock exit fixture declined placement: {attempts}")
+            assert (placed["target"], placed["position"], placed["entrance"], placed["exit_actor"]) == (
+                "guest", where, EXIT_TAG, EXIT_ACTOR), placed
+
+            samples = attempt["samples"] = []
+
+            def settled(frame):
+                point = placement_point(frame)
+                observed = frame.get("game", {}).get("sequence", 0)
+                if point is None or observed <= (samples[-1]["sequence"] if samples else sequence):
+                    return False
+                if samples and math.dist(samples[-1]["location"], point) > 18:
+                    samples.clear()
+                samples.append({"sequence": observed, "location": point})
+                return len(samples) >= 3
+
+            await wait(run, settled, timeout=15)
+            location = attempt["location"] = samples[-1]["location"]
             if anchor is None:
-                qualified = travelled > 75
+                attempt["displacement"] = math.dist(location, prior)
+                if attempt["displacement"] <= 75:
+                    continue
             else:
-                distance = math.dist(point, anchor)
-                qualified = distance > 340 if position == "far" else distance < 180
-            if not qualified:
-                samples.clear()
-                return False
-            if samples and math.dist(samples[-1]["location"], point) > 18:
-                samples.clear()
-            samples.append({"sequence": observed, "location": point})
-            return len(samples) >= 3
+                distance = attempt["distance_to_drop"] = math.dist(location, anchor)
+                in_range = distance > 340 if position == "far" else distance < 180
+                if not in_range:
+                    continue
+                result["distance_to_drop"] = distance
+            result.update(location=location, lane=lane, samples=samples)
+            return result
 
-        await wait(run, settled, timeout=15)
-        result["location"] = samples[-1]["location"]
-        if anchor:
-            result["distance_to_drop"] = math.dist(result["location"], anchor)
-        return result
+        raise RuntimeError(f"No exact Observatory lane settled at the required {position} distance: {attempts}")
 
     try:
         server = await start("host", "host", host, "--port", "0", *flags)
@@ -199,7 +214,7 @@ async def verify(work: Path, originals_path: Path):
         evidence["out_of_range_position"] = far["location"]
         refused = await action(owner, drop.RECLAIM, "--target", attempt, success=False)
         assert refused["error"] == "native_guest_stack_drop_out_of_range", refused
-        near = await place(owner_id, "near", anchor)
+        near = await place(owner_id, "near", anchor, preferred_lane=drop_site["lane"])
         assert near["pawn"] == far["pawn"], (far, near)
         evidence["reclaim_position"] = near["location"]
         recover = (drop.RECLAIM, "--target", attempt, "--operation-id", claim_id)
