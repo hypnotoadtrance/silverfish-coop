@@ -33,15 +33,17 @@ DATA = {
     "husk": ({"stock_initial", "stock_refresh"}, "NPC_Zomb_01_C",
              {"Husks_Scattered": 4, "Husks_SwarmSmall": 3, "Husks_SwarmLarge": 5}),
     "flayer": ({"stock_antfarm"}, "NPC_Flayer_C", {"Flayers": 2}),
+    "notdeer": ({"stock_antfarm"}, "NPC_NotDeer_C", {"NotDeer": 1}),
 }
 SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
+NOT_DEER_REPLICA = re.compile(r"NPC_NotDeer_C " + re.escape(LEVEL) + r"NPC_NotDeer_C_[0-9]{1,10}\Z")
 FLAYER_REPLAY_SHA = "8f17247a7b18f3e91ba33ec6c4bd72d711935a2217667a5933e8713084e93c95"
 FLAYER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999494537]
 FLAYER_GEOMETRY_REFUSAL = "stock_flayer_approach_no_verified_position "
 FLAYER_SHOT_REFUSAL = "stock_flayer_shot_no_stock_lane "
 
 
-def seed_flayer_replay(source: Path, destination: Path) -> dict:
+def seed_antfarm_replay(source: Path, destination: Path) -> dict:
     """Carry over only the verified stock frame and saved CrossRoads host spawn."""
     saved = json.loads((source / "save" / "campaign.json").read_text(encoding="utf-8"))
     old_world = saved["world"]
@@ -49,10 +51,10 @@ def seed_flayer_replay(source: Path, destination: Path) -> dict:
     frame = native_host_save.verify(source / "game-user", old_world)
     if (not frame or frame["map"] != MAP or frame["sha256"] != FLAYER_REPLAY_SHA
             or old_world.get("host") != expected_host):
-        raise ValueError("Flayer replay requires the verified d474f2cf stock frame and CrossRoads spawn")
+        raise ValueError("Antfarm replay requires the verified d474f2cf stock frame and CrossRoads spawn")
     content = native_host_save.slot_path(source / "game-user", frame["slot"]).read_bytes()
     if sha256(content).hexdigest() != FLAYER_REPLAY_SHA:
-        raise ValueError("The immutable Flayer replay frame changed while being read")
+        raise ValueError("The immutable Antfarm replay frame changed while being read")
 
     destination.mkdir(parents=True, exist_ok=False)
     profile = destination / "game-user"
@@ -65,11 +67,11 @@ def seed_flayer_replay(source: Path, destination: Path) -> dict:
         campaign.save_world({"map": MAP, "host": expected_host, "native_host_save": copied})
         created = campaign.status()
         if created["campaign_id"] == saved["campaign_id"] or created["characters"] or created["guest_count"]:
-            raise RuntimeError("The staged Flayer replay did not create fresh campaign identities")
+            raise RuntimeError("The staged Antfarm replay did not create fresh campaign identities")
     return {"frame": copied, "spawn": expected_host, "campaign_id": created["campaign_id"]}
 
 
-def verify_flayer_restore(run: Path, server: dict, seed: dict) -> dict:
+def verify_antfarm_restore(run: Path, server: dict, seed: dict) -> dict:
     events = (json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines())
     observed, = (event for event in events if event.get("event") == "native_host_save_restored"
                  and event.get("generation") == server.get("generation"))
@@ -137,6 +139,13 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         counters = ("natural_calls", "authority", "simulated", "other", "simulated_controllers", "ai_denials",
                     "antfarm_initialized")
         result.update(zip(counters, map(int, census[3:]), strict=True))
+        not_deer = [row for row in rows if row[0] == "native-campaign-npc-notdeer"]
+        if not_deer:
+            family, = not_deer
+            if (len(family) != 4 or family[1:3] != [MAP, viewer] or family[3] != "-" and
+                    (viewer != "client" or result["simulated"] != 1 or not NOT_DEER_REPLICA.fullmatch(family[3]))):
+                return None
+            result.update(family="notdeer", replica=None if family[3] == "-" else family[3])
         network = [row for row in rows if row[0] == "native-campaign-npc-network"]
         if network:
             net, = network
@@ -262,17 +271,24 @@ def stock_cohort(report: dict | None, replicate: bool, family: str = "husk") -> 
                 and report["authority"] >= report["cohort"]
                 and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0
                 and report["replicated"] == (report["cohort"] if replicate else 0)
-                and (not replicate or report.get("network", {}).get("authority_network_ready", 0) >= report["cohort"]))
+                and (not replicate or report.get("network", {}).get("authority_network_ready", 0) >= report["cohort"])
+                and (family != "notdeer" or (report.get("family") == "notdeer" and report["authority"] == 1
+                     and report.get("saved_squads", {}).get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer")))
 
 
-def client_replica(report: dict | None, cohort: int, require_denial: bool) -> bool:
+def client_replica(report: dict | None, cohort: int, require_denial: bool, family: str = "husk") -> bool:
+    saved = report.get("saved_squads", {}) if report else {}
     return bool(report and report["receipts"] == report["replicated"] == 0
                 and report["cohort"] == 0 and not report["members"]
                 and report["simulated"] >= cohort > 0
                 and report["authority"] == report["other"] == report["simulated_controllers"] == 0
                 and report.get("network", {}).get("local_authority_begins") == 0
                 and report["network"]["local_authority_initializes"] == 0
-                and (report["spawn_denials"] > 0 or not require_denial))
+                and (report["spawn_denials"] > 0 or not require_denial)
+                and (family != "notdeer" or (report.get("family") == "notdeer" and report["simulated"] == 1
+                     and report.get("replica") and report["stage"] == "stock_client_not_deer_load_denied"
+                     and saved.get("denials") == report["spawn_denials"]
+                     and saved.get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer")))
 
 
 def stock_guest_hit(report: dict, host: str, guest: str, members: list[str]) -> bool:
@@ -310,13 +326,13 @@ def stock_flayer_infection(server: dict, report: dict) -> bool:
 async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, timeout: float,
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
-                   stock_refresh: bool = False, flayer_replay: Path | None = None,
+                   stock_refresh: bool = False, antfarm_replay: Path | None = None,
                    projectile_tap: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
     campaign_root = work / "campaigns" / name
-    prepared = seed_flayer_replay(flayer_replay, campaign_root) if flayer_replay else None
+    prepared = seed_antfarm_replay(antfarm_replay, campaign_root) if antfarm_replay else None
     host = campaign_root / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
@@ -329,9 +345,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                  "SILVERFISH_COOP_NATIVE_NPC_HOSTILE", "SILVERFISH_COOP_NATIVE_FIXTURES",
                  "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH",
                  "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT",
-                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH"):
+                 "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH", "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"):
         environment.pop(flag, None)
-    if replicate:
+    if replicate and family != "notdeer":
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE"] = "1"
     if combat:
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT"] = "1"
@@ -343,6 +359,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH"] = "1"
         if flayer_veto:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
+    if family == "notdeer":
+        environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
+        environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
     flayer_combat = combat and family == "flayer"
@@ -351,8 +370,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                                        else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
                 "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat}
+    replay_key = family + "_replay"
     if prepared:
-        evidence["flayer_replay"] = {"prepared": prepared}
+        evidence[replay_key] = {"prepared": prepared}
     last_frames = {"host": None, "guest": None}
     client_history = {"frames": 0, "network_frames": 0, "max_local_authority": 0,
                       "max_local_begins": 0, "max_local_initializations": 0,
@@ -448,7 +468,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if not paired(server, client) or not stock_cohort(host_npcs, replicate, family) or not guest_npcs:
             return False
         if replicate:
-            return (client_replica(guest_npcs, host_npcs["cohort"], require_client_denial)
+            return (client_replica(guest_npcs, host_npcs["cohort"], require_client_denial, family)
                     and "first_client_local_birth_frame" not in evidence)
         return guest_npcs["replicated"] == guest_npcs["spawn_denials"] == guest_npcs["ai_denials"] == 0
 
@@ -568,7 +588,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         initial, _, _ = await wait("The CrossRoads host did not start",
                                    lambda server, _, __: server.get("state") == "hosting", 45)
         if prepared:
-            evidence["flayer_replay"]["adopted"] = verify_flayer_restore(host, initial, prepared)
+            evidence[replay_key]["adopted"] = verify_antfarm_restore(host, initial, prepared)
         invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
         client_flags = ("--native-guest-primary-input",) if projectile_tap else ()
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"], *client_flags)
@@ -657,7 +677,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 return (proved(server, client, current) and server["zone_epoch"] == evidence["zone_epoch"]
                         and client.get("character_id") == invitation["character_id"]
                         and all(current[viewer]["sequence"] > snapshot[viewer]["sequence"] for viewer in ("host", "guest"))
-                        and set(snapshot["host"]["members"]) == set(current["host"]["members"]))
+                        and set(snapshot["host"]["members"]) == set(current["host"]["members"])
+                        and (family != "notdeer" or snapshot["guest"]["replica"] == current["guest"]["replica"]))
 
             _, _, rejoined = await wait("The stock cohort did not survive the guest reconnect", after_reconnect, 24)
             evidence["reconnected"] = {"host": rejoined["host"], "guest": rejoined["guest"]}
@@ -710,6 +731,7 @@ if __name__ == "__main__":
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
     parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
+    parser.add_argument("--notdeer-replay", type=Path, help="replay the original stock NotDeer Antfarm frame from d474f2cf")
     parser.add_argument("--combat", action="store_true", help="observe a stock melee attack against the exact detached guest")
     parser.add_argument("--projectile-tap", action="store_true",
                         help="verify an ordinary guest Light Pistol tap against the exact restored stock Flayer cohort")
@@ -722,6 +744,13 @@ if __name__ == "__main__":
     parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
+    if options.cohort == "notdeer":
+        if (not options.notdeer_replay or not options.notdeer_replay.is_dir() or options.approach or options.combat
+                or options.join_only or options.stock_refresh or options.projectile_tap or options.flayer_replay):
+            parser.error("NotDeer requires --notdeer-replay and uses only stock publication, veto, and reconnect")
+        options.replicate = options.require_client_denial = True
+    elif options.notdeer_replay:
+        parser.error("--notdeer-replay requires --cohort notdeer")
     if options.combat or options.stock_refresh:
         if options.join_only:
             parser.error("--combat and --stock-refresh require full encounter verification")
@@ -753,4 +782,4 @@ if __name__ == "__main__":
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
                          join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
-                         flayer_replay=options.flayer_replay, projectile_tap=options.projectile_tap))
+                         antfarm_replay=options.flayer_replay or options.notdeer_replay, projectile_tap=options.projectile_tap))

@@ -10,6 +10,7 @@ local fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLI
 local combat_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT") == "1"
 local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == "1"
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
+local not_deer_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
@@ -17,12 +18,16 @@ local types = {
         stages = { stock_initial = true, stock_refresh = true }, combat_radii = { 550, 680, 820 } },
     flayer = { name = "NPC_Flayer_C", path = "/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C", limit = 2,
         stages = { stock_antfarm = true }, combat_radii = { 235, 275, 295 } },
+    notdeer = { name = "NPC_NotDeer_C", path = "/Game/Classes/NPCs/NPC_NotDeer.NPC_NotDeer_C", limit = 1,
+        stages = { stock_antfarm = true } },
 }
-local view = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-    and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW") == "flayer" and "flayer" or "husk"
+local requested_view = os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW")
+local view = "husk"
+if requested_view == "notdeer" and not_deer_enabled then view = "notdeer" end
+if requested_view == "flayer" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then view = "flayer" end
 
 local function read_family(pawn, host, family)
-    if family == "flayer" then return SilverfishReadCampaignNpc(pawn:GetAddress(), host, family) end
+    if family ~= "husk" then return SilverfishReadCampaignNpc(pawn:GetAddress(), host, family) end
     return SilverfishReadCampaignNpc(pawn:GetAddress(), host)
 end
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -471,7 +476,7 @@ function campaign_npc.command(fields, state, phase)
     end
     if fields[2] ~= "native-campaign-npc-approach" then return end
     local projectile = #fields == 5 and fields[4] == "projectile"
-    if not fixture or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
+    if not fixture or view == "notdeer" or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
         or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end
     approach = nil
     if projectile then shot_ticket, shot_aim = nil, nil end
@@ -518,7 +523,7 @@ local function family_rows(state, pawn, host, status_row, family, topic)
     local receipts, stage, spawner, stock_data, cohort, replicated, spawn_denials, ai_denials, natural_calls,
         authority, simulated, other, simulated_controllers, antfarm, roster, saved_calls, saved_denials,
         saved_stage, saved_spawner, saved_data, authority_network_ready, local_begins, local_initializations,
-        early_denials, last_actor, last_caller, last_script = read_family(pawn, host, family)
+        early_denials, last_actor, last_caller, last_script, replica = read_family(pawn, host, family)
     if type(receipts) ~= "number" then return {} end
     local viewer = host and "host" or "client"
     local rows = {
@@ -542,6 +547,10 @@ local function family_rows(state, pawn, host, status_row, family, topic)
     end
     for actor in roster:gmatch("[^\n]+") do
         rows[#rows + 1] = status_row(topic .. "-member", state.map, viewer, actor)
+    end
+    if topic == "native-campaign-npc" and family == "notdeer" then
+        rows[#rows + 1] = status_row("native-campaign-npc-notdeer", state.map, viewer,
+            not host and type(replica) == "string" and replica ~= "" and replica or "-")
     end
     return rows
 end

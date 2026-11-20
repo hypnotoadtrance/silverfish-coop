@@ -41,6 +41,7 @@ from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacit
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
+from .travel import CROSSROADS
 
 REPO = Path(__file__).resolve().parents[2]
 AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
@@ -1296,6 +1297,22 @@ class Bridge:
                     }
                 elif fields[0] == "native-campaign-npc-member" and len(fields) == 4 and "native_campaign_npc" in data:
                     data["native_campaign_npc"]["members"].append(fields[3])
+                elif fields[0] == "native-campaign-npc-notdeer":
+                    npc = data.get("native_campaign_npc", {})
+                    viewer = npc.get("viewer")
+                    if (len(fields) != 4 or "family" in npc or fields[1:3] != [npc.get("map"), npc.get("viewer")]
+                            or npc.get("map") != CROSSROADS or viewer not in ("host", "client")
+                            or (data.get("map"), data.get("mode"), data.get("state"), data.get("server_connection"))
+                            != (CROSSROADS, viewer, "hosting" if viewer == "host" else "connected", viewer == "client")):
+                        raise ValueError("Invalid stock NotDeer family report")
+                    replica = fields[3]
+                    if replica != "-":
+                        prefix = f"NPC_NotDeer_C {CROSSROADS}.CrossRoads_P:PersistentLevel.NPC_NotDeer_C_"
+                        serial = replica.removeprefix(prefix)
+                        if (npc["viewer"] != "client" or npc.get("simulated") != 1 or npc.get("simulated_controllers") != 0
+                                or not serial.isascii() or not serial.isdigit() or len(serial) > 10):
+                            raise ValueError("Invalid stock NotDeer replica identity")
+                    npc.update(family="notdeer", replica=None if replica == "-" else replica)
                 elif fields[0] == "native-campaign-npc-saved-squads" and len(fields) == 8:
                     data["native_campaign_npc_saved_squads"] = {
                         "map": fields[1], "viewer": fields[2], "observed_calls": int(fields[3]), "denials": int(fields[4]),
