@@ -72,6 +72,20 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
                    and state.get("zone_epoch") == host["zone_epoch"] and state.get("game", {}).get("map") == area, timeout=75)
         return host
 
+    async def restart_pair(host, guest, current, invite, stage):
+        await stop(run, host)
+        await stop(guest_run, guest)
+        port = current["endpoint"]["port"]
+        prior = current["generation"], current["zone_epoch"]
+        host = await launch(run, f"host-{stage}", "host", *host_options, "--port", str(port))
+        await wait(run, lambda doc: doc.get("state") == "hosting" and doc.get("generation") != prior[0])
+        renewed = await action(run, "refresh-invite", target=invite["guest_id"])
+        assert (renewed["guest_id"], renewed["character_id"]) == (invite["guest_id"], invite["character_id"]), renewed
+        guest = await launch(guest_run, f"guest-{stage}", "join", *guest_options, "--invite", renewed["invite_file"])
+        restored = await paired(BLACK_MARKET, invite["character_id"], prior)
+        assert restored["endpoint"]["port"] == port, restored["endpoint"]
+        return host, guest, restored
+
     async def follow(source, destination, previous, character):
         route, = (route for route in AUTHORED_ROUTES if (route.source, route.destination) == (source, destination))
         evidence["pending_route"] = (source, destination, route.entrance, route.actor)
@@ -132,7 +146,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         invite = await action(run, "invite", name="Missing Contact loopback", character="Courier")
         character = invite["character_id"]
         guest = await launch(guest_run, "guest", "join", *guest_options, "--invite", invite["invite_file"])
-        first = current = await paired(BLACK_MARKET, character)
+        current = await paired(BLACK_MARKET, character)
         await action(run, SPEC.command("approach"), target=character)
         offer = (await action(guest_run, SPEC.command("preflight")))[SPEC.key]
         assert (offer["step_after"], offer["xp_before"], offer["board"], offer["objective_qualified"]) == (None, 0, BOARD, False), offer
@@ -190,21 +204,39 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
             host_items, guest_items = await inventory(run), await inventory(guest_run)
             assert package not in guest_items, guest_items
             guest_items[package] = host_items.pop(package)
-            handoff = (await action(run, "native-missing-contact-handoff", target=character))[custody.CUSTODY]
+            handoff = (await action(run, custody.HANDOFF, target=character))[custody.CUSTODY]
             assert (handoff["owner"], handoff["package_guid"]) == (character, package), handoff
             assert await inventory(run) == host_items and await inventory(guest_run) == guest_items, handoff
-            same_handoff = (await action(run, "native-missing-contact-handoff", target=character))[custody.CUSTODY]
+            same_handoff = (await action(run, custody.HANDOFF, target=character))[custody.CUSTODY]
             assert same_handoff == handoff, (handoff, same_handoff)
             former_owner = await action(run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)
             assert former_owner["error"] == "stock_missing_contact_objective_required", former_owner
             assert await inventory(run) == host_items and await inventory(guest_run) == guest_items, former_owner
             evidence.update(stock_handoff=handoff, handoff_replay=same_handoff, former_owner_refusal=former_owner["error"])
 
+            unredeemed_balances = await balances(character)
+            host, guest, current = await restart_pair(host, guest, current, invite, "handoff-restart")
+            restored_party = party_state(current)
+            assert restored_party[custody.CUSTODY] == handoff, restored_party[custody.CUSTODY]
+            assert restored_party["native_quests"][SPEC.quest_id] == accepted, restored_party["native_quests"]
+            await action(run, SPEC.command("approach"), target="host")
+            await action(run, SPEC.command("approach"), target=character)
+            restored_refusal = await action(run, "native-quest-turnin", accepted=False, target=SPEC.quest_id)
+            assert restored_refusal["error"] == "stock_missing_contact_objective_required", restored_refusal
+            restored_inventory = await inventory(guest_run)
+            assert await inventory(run) == host_items and restored_inventory == guest_items, restored_inventory
+            evidence["handoff_restart"] = dict(generation=current["generation"], port=current["endpoint"]["port"],
+                                               custody=restored_party[custody.CUSTODY], package=restored_inventory[package],
+                                               former_owner_refusal=restored_refusal["error"])
+
         active = (await action(redeem_run, SPEC.command("preflight")))[SPEC.key]
         assert (active["step_after"], active["objective_guid"], active["objective_owner"], active["objective_qualified"]) == (
             1, package, owner_kind, True), active
         before = await balances(character)
         assert before[0][dig.FLAG] == 1 and before[1][dig.FLAG] == 0
+        if guest_turnin:
+            assert before == unredeemed_balances, (unredeemed_balances, before)
+            evidence["handoff_restart"]["stock_balances"] = before
         effective_reputation = {key: active["reputation"][key]["before"] for key in ("8", "4")}
         evidence["effective_reputation_before"] = effective_reputation
         await board_state(redeem_run, "armed", "focused")
@@ -219,7 +251,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         expected_reputation = {"8": effective_reputation["8"] + 40, "4": effective_reputation["4"] - 5}
         assert done["reputation"] == expected_reputation, done
         if guest_turnin:
-            completed = await action(run, "native-missing-contact-handoff", accepted=False, target=character)
+            completed = await action(run, custody.HANDOFF, accepted=False, target=character)
             assert completed["error"] == "stock_missing_contact_handoff_quest_already_completed", completed
             evidence.update(completed_handoff_refusal=completed["error"], duplicate_turn_in=await settlement_replay(redeem_run, done))
         assert package not in await inventory(run) and package not in await inventory(guest_run), done
@@ -236,14 +268,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         assert after == [expected_host, expected_guest], (before, after)
         evidence.update(stock_turn_in=done, stock_balances=after)
 
-        await stop(run, host)
-        await stop(guest_run, guest)
-        await launch(run, "host-restart", "host", *host_options, "--port", str(first["endpoint"]["port"]))
-        await wait(run, lambda doc: doc.get("state") == "hosting" and doc.get("generation") != first["generation"])
-        renewed = await action(run, "refresh-invite", target=invite["guest_id"])
-        await launch(guest_run, "guest-restart", "join", *guest_options, "--invite", renewed["invite_file"])
-        restarted = await paired(BLACK_MARKET, character, (current["generation"], current["zone_epoch"]))
-        assert restarted["endpoint"]["port"] == first["endpoint"]["port"], restarted["endpoint"]
+        await restart_pair(host, guest, current, invite, "restart")
         replay = await settlement_replay(redeem_run, done)
         assert await balances(character) == after
         assert package not in await inventory(run) and package not in await inventory(guest_run)
