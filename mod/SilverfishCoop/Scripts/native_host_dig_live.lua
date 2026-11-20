@@ -25,7 +25,7 @@ for _, name in ipairs({"Dirt", "Debris", "Grass", "MossyDirt", "Mud", "Sand"}) d
     allowed_material["PhysicalMaterial /Game/Classes/Libraries/PhysicMaterials/" .. kind .. "." .. kind] = true
 end
 
-local heartbeat, observed, captured
+local heartbeat, observed, captured, diagnostic
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -47,39 +47,56 @@ end
 local function scope(state, phase)
     local details = state.local_pawn
     local pawn, world = details and details.pawn, state.world
-    if not enabled or phase ~= "hosting" or state.map ~= map or state.listening ~= true or state.server ~= false
-        or not valid(world) or world:GetFullName() ~= world_name or not exact(pawn, pawn_path)
-        or details.name ~= pawn:GetFullName() or not pawn:HasAuthority() or not same(pawn:GetWorld(), world) then return end
+    if not enabled or phase ~= "hosting" or state.map ~= map then return nil, "outside_scope" end
+    if state.listening ~= true or state.server ~= false then return nil, "listen_host_unavailable" end
+    if not valid(world) or world:GetFullName() ~= world_name then return nil, "world_unqualified" end
+    if not exact(pawn, pawn_path) or details.name ~= pawn:GetFullName() or not pawn:HasAuthority()
+        or not same(pawn:GetWorld(), world) then return nil, "pawn_unqualified" end
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local instance = valid(statics) and statics:GetGameInstance(pawn)
-    local save = valid(instance) and instance.SaveSlot_Ref
-    if not exact(instance, instance_path) or not exact(save, save_path) or not same(save, pawn.Save)
-        or not same(pawn, instance["As Player FP"]) then return end
+    if not exact(instance, instance_path) then return nil, "game_instance_unqualified" end
+    local save = instance.SaveSlot_Ref
+    if not exact(save, save_path) or not same(save, pawn.Save) then return nil, "canonical_save_unqualified" end
+    if not same(pawn, instance["As Player FP"]) then return nil, "canonical_pawn_unqualified" end
     return {world = world, pawn = pawn, name = details.name, save = save, instance = instance, statics = statics}
 end
 
 local function fresh()
-    if not heartbeat then return false end
+    if not heartbeat then return false, "not_started" end
     local file = io.open(heartbeat, "rb")
-    if not file then return false end
-    local stamp = tonumber(file:read("*l"))
+    if not file then return false, "missing" end
+    local stamp = math.tointeger(tonumber(file:read("*l")))
     file:close()
+    if not stamp then return false, "invalid_timestamp" end
     local now = os.time()
-    return stamp and math.tointeger(stamp) and now >= stamp and now - stamp <= 2
+    if stamp > now then return false, "future_timestamp" end
+    if now - stamp > 2 then return false, "stale" end
+    return true, "fresh"
 end
 
 local function quest_eligible(ctx)
-    local key = FName(quest_name, EFindName.FNAME_Find)
-    if key:GetComparisonIndex() == 0 or key:ToString():lower() ~= quest_name:lower() then return false end
-    local row = wire.stock_row(ctx.save.ActiveQuests, key)
-    return row == nil or row[step_field] == 1
+    local existing = FName(quest_name, EFindName.FNAME_Find)
+    local registered = existing:GetComparisonIndex() ~= 0
+    -- CrossRoads can load before the Black Market quest board interns this key.
+    -- Intern the one authored name only and inspect the canonical TMap as usual.
+    local key = registered and existing or FName(quest_name, EFindName.FNAME_Add)
+    if key:GetComparisonIndex() == 0 or key:ToString():lower() ~= quest_name:lower() then
+        return false, "quest_name_unqualified"
+    end
+    local ok, row = pcall(wire.stock_row, ctx.save.ActiveQuests, key)
+    if not ok then return false, "quest_map_unqualified" end
+    if row == nil then return true, registered and "inactive" or "inactive_interned" end
+    if row[step_field] == 1 then return true, "accepted" end
+    return false, "quest_step_ineligible"
 end
 
 local function read(ctx)
-    if type(SilverfishReadNativeHostDigScope) ~= "function" then return end
+    if type(SilverfishReadNativeHostDigScope) ~= "function" then return nil, "native_read_unavailable" end
     local phase, serial, spade, actor, package, x, y, z, material, incidental, escrow, fault =
         SilverfishReadNativeHostDigScope(ctx.world:GetAddress(), ctx.pawn:GetAddress())
-    if not phases[phase] or math.type(serial) ~= "integer" or serial < 0 or serial >= 2^53 then return end
+    if phase == nil then return nil, "native_read_empty" end
+    if not phases[phase] then return nil, "native_phase_unqualified" end
+    if math.type(serial) ~= "integer" or serial < 0 or serial >= 2^53 then return nil, "native_serial_unqualified" end
     return {phase = phase, serial = serial, spade = spade, actor = actor, package = package, x = x, y = y, z = z,
         material = material, incidental = incidental, escrow = escrow, fault = fault, pawn = ctx.name, world = ctx.world}
 end
@@ -89,12 +106,23 @@ function dig.start(path)
 end
 
 function dig.sync(state, phase)
-    local ctx = scope(state, phase)
-    if not ctx or type(SilverfishRenewNativeHostDigScope) ~= "function" then return end
-    if fresh() and quest_eligible(ctx) then
-        SilverfishRenewNativeHostDigScope(ctx.world:GetAddress(), ctx.pawn:GetAddress())
+    local ctx, context_reason = scope(state, phase)
+    diagnostic = nil
+    if not enabled or phase ~= "hosting" or state.map ~= map then return end
+    diagnostic = {context = context_reason or "qualified", heartbeat = "-", quest = "-", arm = "-", read = "-"}
+    if not ctx then return end
+    local available, heartbeat_reason = fresh()
+    local eligible, quest_reason = quest_eligible(ctx)
+    diagnostic.heartbeat, diagnostic.quest = heartbeat_reason, quest_reason
+    if type(SilverfishRenewNativeHostDigScope) ~= "function" then
+        diagnostic.arm = "native_arm_unavailable"
+    elseif available and eligible then
+        local accepted, reason = SilverfishRenewNativeHostDigScope(ctx.world:GetAddress(), ctx.pawn:GetAddress())
+        diagnostic.arm = accepted == true and "armed"
+            or type(reason) == "string" and reason:match("^stock_[a-z0-9_]+$") or "native_arm_refused"
     end
-    local report = read(ctx)
+    local report, reason = read(ctx)
+    diagnostic.read = report and report.phase or reason
     if report then observed = report end
 end
 
@@ -172,21 +200,28 @@ function dig.capture_allowed(state, phase, token)
 end
 
 function dig.rows(state, phase, status_row)
+    local rows = {}
+    if diagnostic and enabled and phase == "hosting" and state.map == map then
+        local pawn = state.local_pawn and state.local_pawn.name or "-"
+        rows[1] = status_row("native-host-dig-live-diagnostic", map, pawn, diagnostic.context,
+            diagnostic.heartbeat, diagnostic.quest, diagnostic.arm, diagnostic.read)
+    end
     local ctx = scope(state, phase)
     local report = ctx and read(ctx)
-    if not report then return {} end
+    if not report then return rows end
     local generation = captured and same(captured.world, ctx.world) and same(captured.pawn, ctx.pawn)
         and captured.serial == report.serial and captured.identity == report.escrow and captured.slot
     local contact = report.material ~= "" and report.phase ~= "ready"
     local function present(value) return value ~= "" and value or "-" end
-    return {status_row("native-host-dig-live", map, ctx.name, report.phase, report.serial, present(report.spade),
+    rows[#rows + 1] = status_row("native-host-dig-live", map, ctx.name, report.phase, report.serial, present(report.spade),
         present(report.actor), present(report.package), contact and report.x or "-", contact and report.y or "-",
         contact and report.z or "-", present(report.material), report.incidental, present(report.escrow),
-        generation or "-", present(report.fault))}
+        generation or "-", present(report.fault))
+    return rows
 end
 
 function dig.clear()
-    observed, captured = nil, nil
+    observed, captured, diagnostic = nil, nil, nil
 end
 
 return dig

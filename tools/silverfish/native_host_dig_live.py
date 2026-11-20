@@ -12,12 +12,15 @@ from .travel import CROSSROADS
 
 TAG = "native-host-dig-live"
 KEY = "native_host_dig_live"
+DIAGNOSTIC = TAG + "-diagnostic"
+DIAGNOSTIC_KEY = KEY + "_diagnostic"
 CUSTODY = "native_host_dig_custody"
 HEARTBEAT = TAG + "-heartbeat"
 WAITING = "stock_live_dig_checkpoint_pending"
 _STATES = {"ready", "contact", "unclaimed", "escrowed", "collecting", "collected", "owned", "failed"}
 _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
+_STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
 _CUSTODY_FIELDS = {"state", "map", "source", "flag", "flag_value", "spade_guid", "contact", "material", "package_guid"}
 
 
@@ -54,6 +57,14 @@ def parse(fields: list[str], phase: str, area: str) -> dict:
                 contact=contact, material=None if material == "-" else material, incidental=int(incidental),
                 escrow_guid=None if escrow == "-" else escrow, slot=None if slot == "-" else slot,
                 fault=None if fault == "-" else fault)
+
+
+def parse_diagnostic(fields: list[str], phase: str, area: str) -> dict | None:
+    if (len(fields) != 8 or (phase, area, fields[1]) != ("hosting", CROSSROADS, CROSSROADS)
+            or (fields[2] != "-" and (len(fields[2]) > 360 or not stock._PAWN.fullmatch(fields[2])))
+            or any(not _STATUS.fullmatch(value) for value in fields[3:])):
+        return None
+    return dict(zip(("map", "pawn", "context", "heartbeat", "quest", "arm", "read"), fields[1:]))
 
 
 def escrow_frames(data: dict) -> list[dict]:

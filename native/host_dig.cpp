@@ -174,10 +174,15 @@ namespace
         U::UObject* instance{};
     };
 
-    Context qualify(Address world_address, Address pawn_address, bool require_spade = true, bool standing = true)
+    Context qualify(Address world_address, Address pawn_address, bool require_spade = true, bool standing = true,
+                    const char** reason = nullptr)
     {
+        const auto unavailable = [reason](const char* detail) {
+            if (reason) *reason = detail;
+            return Context{};
+        };
         auto* world = find<U::UWorld>(world_path);
-        if (!live(world) || address(world) != world_address) return {};
+        if (!live(world) || address(world) != world_address) return unavailable("stock_live_dig_native_world_unqualified");
         auto* level = object(world, STR("PersistentLevel"));
         auto* driver = object(world, STR("NetDriver"));
         auto* instance = object(world, STR("OwningGameInstance"));
@@ -188,19 +193,24 @@ namespace
         auto* local_class = find<U::UClass>(STR("/Script/Engine.LocalPlayer"));
         auto* spade = object(pawn, STR("EquipedItem"));
         if (!live(level) || !live(driver) || object(driver, STR("World")) != world ||
-            !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")) ||
-            !exact(instance, STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")) ||
-            !exact(pawn, STR("/Game/Classes/Player/Player_FP.Player_FP_C")) || address(pawn) != pawn_address ||
-            !exact(controller, STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")) ||
+            !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")))
+            return unavailable("stock_live_dig_native_listen_unqualified");
+        if (!exact(instance, STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")) ||
+            !exact(pawn, STR("/Game/Classes/Player/Player_FP.Player_FP_C")) || address(pawn) != pawn_address)
+            return unavailable("stock_live_dig_native_pawn_unqualified");
+        if (!exact(controller, STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")) ||
             !authority(controller) || !authority(pawn) || static_cast<U::AActor*>(controller)->GetWorld() != world ||
             static_cast<U::AActor*>(pawn)->GetWorld() != world || object(controller, STR("Pawn")) != pawn ||
-            !live(local) || !local_class || !local->IsA(local_class) || object(local, STR("PlayerController")) != controller ||
-            !exact(save, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")) || object(pawn, STR("Save")) != save ||
-            (standing && !boolean(pawn, STR("Dead"), false)) || !boolean(controller, STR("Loading"), false)) return {};
+            !live(local) || !local_class || !local->IsA(local_class) || object(local, STR("PlayerController")) != controller)
+            return unavailable("stock_live_dig_native_local_controller_unqualified");
+        if (!exact(save, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")) || object(pawn, STR("Save")) != save)
+            return unavailable("stock_live_dig_native_save_unqualified");
+        if ((standing && !boolean(pawn, STR("Dead"), false)) || !boolean(controller, STR("Loading"), false))
+            return unavailable("stock_live_dig_native_host_not_ready");
         if (require_spade && (!exact(spade, spade_class) || !authority(spade) || static_cast<U::AActor*>(spade)->GetWorld() != world ||
             object(spade, STR("Owner")) != pawn || object(spade, STR("Instigator")) != pawn ||
             object(spade, STR("Player_Ref")) != pawn || object(spade, STR("User")) != pawn ||
-            !boolean(spade, STR("HeldByPlayer"), true))) return {};
+            !boolean(spade, STR("HeldByPlayer"), true))) return unavailable("stock_live_dig_native_spade_unqualified");
         return {world, level, pawn, driver, save, spade, instance};
     }
 
@@ -690,12 +700,12 @@ namespace
         }
     }
 
-    Context read_live_context(const Lua& lua)
+    Context read_live_context(const Lua& lua, const char** reason = nullptr)
     {
         if (!ordinary || !ready() || !lua.is_integer(1) || !lua.is_integer(2)) return {};
         const auto world = lua.get_integer();
         const auto pawn = lua.get_integer();
-        return world > 0 && pawn > 0 ? qualify(static_cast<Address>(world), static_cast<Address>(pawn), false, false) : Context{};
+        return world > 0 && pawn > 0 ? qualify(static_cast<Address>(world), static_cast<Address>(pawn), false, false, reason) : Context{};
     }
 
     int dispatch_live_fixture(const Lua& lua)
@@ -715,8 +725,10 @@ namespace
     int renew_live(const Lua& lua)
     {
         if (lua.get_stack_size() != 2) return result(lua, false, "stock_live_dig_scope_arguments");
-        const auto ctx = read_live_context(lua);
-        if (!ctx.world || (live_pending() && !live_context(ctx))) return result(lua, false, "stock_live_dig_owner_unqualified");
+        const char* reason = "stock_live_dig_native_context_unavailable";
+        const auto ctx = read_live_context(lua, &reason);
+        if (!ctx.world) return result(lua, false, reason);
+        if (live_pending() && !live_context(ctx)) return result(lua, false, "stock_live_dig_native_custody_pending");
         if (!live_context(ctx))
         {
             const bool same_scene = live_dig.world.Get() == ctx.world && live_dig.driver.Get() == ctx.driver &&

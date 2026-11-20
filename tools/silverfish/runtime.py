@@ -1449,6 +1449,10 @@ class Bridge:
                     if native_host_dig_live.KEY in data:
                         raise ValueError("Duplicate live stock dig report")
                     data[native_host_dig_live.KEY] = native_host_dig_live.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_host_dig_live.DIAGNOSTIC:
+                    diagnostic = native_host_dig_live.parse_diagnostic(fields, data.get("state"), data.get("map"))
+                    if diagnostic is not None:
+                        data[native_host_dig_live.DIAGNOSTIC_KEY] = diagnostic
                 elif fields[0] == "native-host-landmine":
                     report = parse_host_landmine(fields)
                     if report:

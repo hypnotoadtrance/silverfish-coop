@@ -30,6 +30,11 @@ def custody(state):
 
 
 class DigReportTests(unittest.TestCase):
+    def test_diagnostic_belongs_to_the_current_listen_host(self):
+        fields = [dig.DIAGNOSTIC, CROSSROADS, PAWN, "qualified", "fresh", "inactive_interned", "armed", "ready"]
+        self.assertEqual(dig.parse_diagnostic(fields, "hosting", CROSSROADS)["read"], "ready")
+        self.assertIsNone(dig.parse_diagnostic(fields, "connected", CROSSROADS))
+
     def test_live_receipt_rejects_wrong_session_and_landmark(self):
         fields = [dig.TAG, CROSSROADS, PAWN, "unclaimed", "1", SPADE, ACTOR, "-",
                   *map(str, stock.SITE), MATERIAL, "1", ESCROW, SLOT, "-"]

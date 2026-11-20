@@ -53,6 +53,7 @@ local role = {map = map, world = world, listening = true, server = false,
 local phase, quest_step, renews, captured = "ready", nil, 0, false
 local material, package_name, package_guid = "", "", ""
 local heartbeat, serial, fail_ack = 100, 0, false
+local name_registered, arm_failure = false, nil
 local env = setmetatable({
     os = {getenv = function() return "1" end, time = function() return 100 end},
     io = {open = function(path, mode)
@@ -64,14 +65,17 @@ local env = setmetatable({
         return {stock_row = function() return quest_step and {[step_field] = quest_step} end}
     end,
     StaticFindObject = function(path) return identity[path] end,
-    EFindName = {FNAME_Find = 1},
+    EFindName = {FNAME_Find = 1, FNAME_Add = 2},
     FName = function(name, mode)
-        assert(name == "Note_Farmhouse" and mode == 1)
-        return {GetComparisonIndex = function() return 9 end, ToString = function() return "note_farmhouse" end}
+        assert(name == "Note_Farmhouse" and (mode == 1 or mode == 2))
+        if mode == 2 then name_registered = true end
+        local comparison = name_registered and 9 or 0
+        return {GetComparisonIndex = function() return comparison end, ToString = function() return "note_farmhouse" end}
     end,
     SilverfishRenewNativeHostDigScope = function(w, p)
         assert(w == world:GetAddress() and p == pawn:GetAddress())
         renews = renews + 1
+        if arm_failure then return false, arm_failure end
         return true
     end,
     SilverfishReadNativeHostDigScope = function(w, p)
@@ -102,30 +106,38 @@ local env = setmetatable({
 local dig = assert(loadfile("mod/SilverfishCoop/Scripts/native_host_dig_live.lua", "t", env))()
 dig.start("bridge/")
 local function sync() dig.sync(role, "hosting") end
-local function rows() return dig.rows(role, "hosting", table.pack) end
+local function row(tag)
+    for _, record in ipairs(dig.rows(role, "hosting", table.pack)) do
+        if record[1] == tag then return record end
+    end
+end
+local function report() return row("native-host-dig-live") end
+local function diagnosis() return row("native-host-dig-live-diagnostic") end
 local function allowed(token) return dig.capture_allowed(role, "hosting", token) end
 local function command(verb, ...)
     return dig.command({"nonce", "native-host-dig-live-" .. verb, pawn:GetFullName(), ...}, role, "hosting")
 end
 
 sync()
-assert(renews == 1 and allowed() and rows()[1][4] == "ready" and rows()[1][5] == 0)
+assert(renews == 1 and allowed() and report()[4] == "ready" and report()[5] == 0)
+assert(diagnosis().n == 8 and diagnosis()[4] == "qualified" and diagnosis()[6] == "inactive_interned"
+    and diagnosis()[7] == "armed" and diagnosis()[8] == "ready")
 heartbeat, quest_step = 97, 1
 sync()
-assert(renews == 1)
+assert(renews == 1 and diagnosis()[5] == "stale" and diagnosis()[6] == "accepted" and diagnosis()[7] == "-")
 heartbeat, quest_step = 100, -10
 sync()
-assert(renews == 1)
+assert(renews == 1 and diagnosis()[5] == "fresh" and diagnosis()[6] == "quest_step_ineligible")
 phase, serial, material, quest_step = "contact", 4, dirt, 1
 sync()
 assert(not allowed())
 phase = nil
 sync()
-assert(not allowed())
+assert(not allowed() and diagnosis()[8] == "native_read_empty")
 phase, package_name = "unclaimed", actor
 assert(not allowed("dig@4@escrowed@" .. escrow))
 assert(command("escrow", "4", slot))
-local record = rows()[1]
+local record = report()
 assert(record.n == 16 and record[4] == "unclaimed" and record[7] == actor and record[15] == slot)
 assert(allowed("dig@4@escrowed@" .. escrow))
 assert(not allowed("dig@5@escrowed@" .. escrow) and not allowed())
@@ -140,7 +152,11 @@ phase, quest_step = "owned", 1
 assert(allowed() and not allowed("dig@4@owned@" .. owned))
 dig.clear()
 assert(command("restore", slot, escrow, spade, contact[1], contact[2], contact[3], dirt))
-assert(rows()[1][4] == "escrowed" and allowed())
+assert(report()[4] == "escrowed" and allowed())
 assert(not pcall(command, "restore", slot, escrow, spade, contact[1] + 200, contact[2], contact[3], dirt))
+phase, arm_failure = nil, "stock_live_dig_native_listen_unqualified"
+sync()
+assert(not report() and diagnosis()[7] == arm_failure and diagnosis()[8] == "native_read_empty")
 role.server = true
-assert(#rows() == 0 and not pcall(command, "escrow", "4", slot))
+sync()
+assert(not report() and diagnosis()[4] == "listen_host_unavailable" and not pcall(command, "escrow", "4", slot))
