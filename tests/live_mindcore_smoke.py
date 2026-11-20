@@ -983,9 +983,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             return proof
 
         if cradle_carry:
+            from datasilo_core_lift import equip_stock_protection
             from datasilo_door_passage import verify_held_cradle_passage
 
             passage = proof["held_cradle_passage"] = {"card": await assert_key_custody(cards[0])}
+            passage["stock_carry_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
             installed = await verify_held_cradle_passage(run, guest_run, action, inactive, passage)
         else:
             installed = (await action(run, fixture.INSTALL))[core.SCENE]

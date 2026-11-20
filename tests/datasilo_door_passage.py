@@ -65,8 +65,8 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
             break
         if hold["state"] != "held" or before["health"] <= 0 or y >= 6650 or not 6660 < z < 6740:
             raise RuntimeError(f"The exact carrier did not reach the stock cradle while holding the Core: {before}")
-        duration = 200 if y < 5400 else 280 if y < 6200 else 150
-        direction = {"x": max(-.3, min(.3, -x / 140)), "y": .6, "milliseconds": duration, "continuous": True}
+        duration = 320 if y < 5400 else 400 if y < 6200 else 180
+        direction = {"x": max(-.3, min(.3, -x / 140)), "y": .8, "milliseconds": duration, "continuous": True}
         step = {"before": before, "input": direction, "samples": []}
         frames.append(step)
         result = await action(guest_run, "walk", **direction)
