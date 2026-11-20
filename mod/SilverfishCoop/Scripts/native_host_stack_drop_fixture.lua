@@ -2,6 +2,7 @@ local fixture = {}
 local host_save = require("native_host_save")
 local players = require("players")
 local maps = require("native_guest_drop_maps")
+local drop_items = require("native_guest_drop_items")
 
 local menu_command = "native-host-stack-drop-menu-fixture"
 local close_command = "native-host-stack-drop-menu-close-fixture"
@@ -10,7 +11,6 @@ local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPan
 local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
 local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
 local context_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
-local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -57,8 +57,13 @@ local function card_item(card)
     return exact(card, card_path) and card.Item or nil
 end
 
-local function qualified_stock_row(item, count)
-    return item and same(item[item_class], StaticFindObject(ammo_path)) and item[item_count] == count
+local function stock_payload(item, quantity)
+    if not item then return end
+    local class, ammo = item[item_class], math.tointeger(item[item_count])
+    if ammo == quantity and same(class, StaticFindObject(drop_items.ammo)) then return class, ammo end
+    if quantity == 1 and ammo and ammo >= 0 and same(class, StaticFindObject(drop_items.pistol)) then
+        return class, ammo, true
+    end
 end
 
 local function screen(controller, pawn, instance)
@@ -95,11 +100,15 @@ end
 local function stock_drop(instance, pawn, controller, guid, count, entry)
     local save = instance.SaveSlot_Ref
     local row, rows = select_row(save.PlayerBackpack, guid, row_item)
-    if not qualified_stock_row(row, count) then error("host_stack_drop_menu_fixture_stock_stack_unavailable", 0) end
+    local class, ammo, pistol = stock_payload(row, count)
+    if not class then error("host_stack_drop_menu_fixture_stock_stack_unavailable", 0) end
+    local function matches(item)
+        return item and same(item[item_class], class) and item[item_count] == ammo
+    end
     local panel, manager = open_stock_menu(controller, pawn, instance)
     local card = select_row(panel.Cards, guid, card_item)
     if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
-        or not qualified_stock_row(card.Item, count) then error("host_stack_drop_menu_fixture_card_unavailable", 0) end
+        or not matches(card.Item) then error("host_stack_drop_menu_fixture_card_unavailable", 0) end
 
     if entry == "ctrl_click" then
         manager.HoveredCard = card
@@ -117,8 +126,9 @@ local function stock_drop(instance, pawn, controller, guid, count, entry)
         if entry == "ctrl_click" then manager:DropItem() else manager:ActionDrop() end
         local after, remaining = select_row(save.PlayerBackpack, guid, row_item)
         if not same(instance.SaveSlot_Ref, save) or not same(pawn.Save, save) or remaining ~= rows
-            or not qualified_stock_row(after, count) then error("mutation_unverified_host_stack_drop_menu_fixture_debit", 0) end
+            or not matches(after) then error("mutation_unverified_host_stack_drop_menu_fixture_debit", 0) end
     end
+    if pistol then return "stock pistol drop invoked with stored ammo " .. tostring(ammo) end
     return "stock drop invoked without direct inventory mutation"
 end
 

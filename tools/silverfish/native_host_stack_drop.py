@@ -103,4 +103,11 @@ async def fixture(host, bridge, action: str, target: str) -> dict:
         raise party.RuleError("host_stock_drop_fixture_arguments_unavailable")
     snapshot = await bridge.command(action, *fields, timeout=5)
     host.last_game, host.last_seen = snapshot, time.monotonic()
+    if action == FIXTURE:
+        message = snapshot.get("ack", {}).get("message", "")
+        pistol = re.fullmatch(r"stock pistol drop invoked with stored ammo (0|[1-9][0-9]{0,9})", message)
+        if pistol and fields[1] == "1":
+            return {"native_host_stack_drop_fixture": True, "stored_ammo": int(pistol[1])}
+        if message != "stock drop invoked without direct inventory mutation":
+            raise party.RuleError("host_stock_drop_fixture_readback_unavailable")
     return {"native_host_stack_drop_fixture": True}

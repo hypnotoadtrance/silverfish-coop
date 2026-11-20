@@ -1,9 +1,10 @@
 local drop_items = {}
 
 drop_items.ammo = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+drop_items.pistol = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 drop_items.profiles = {
     [drop_items.ammo] = {actor = "Ammo_Pistol_BP_C", label = "9mm Ball", maximum = 200},
-    ["/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"] = {
+    [drop_items.pistol] = {
         actor = "Wep_LightPistol_C", label = "Light Pistol", maximum = 1,
     },
 }

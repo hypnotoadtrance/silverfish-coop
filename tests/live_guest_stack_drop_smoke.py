@@ -30,9 +30,11 @@ UNSUPPORTED_PISTOL = FIRE_CLASSES["light-pistol-suppressed"]
 async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
                  host_origin_menu=None, light_pistol=False):
     host_origin = host_origin or host_origin_menu is not None
-    claimant = "teammate" if light_pistol else claimant
+    claimant = "teammate" if light_pistol and not host_origin else claimant
     mode = (f"host-menu-{host_origin_menu}" if host_origin_menu else
             "host-origin" if host_origin else "light-pistol" if light_pistol else claimant)
+    if light_pistol and host_origin:
+        mode += "-light-pistol"
     item_class, quantity = (PISTOL, 1) if light_pistol else (record.ITEM, 9)
     actor_class = item_class.rsplit(".", 1)[1]
     name = f"manual-stack-drop-{mode}-" + uuid.uuid4().hex[:8]
@@ -97,6 +99,33 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         assert (report["guid"], report["status"], report["stored_ammo"], report["actor_ammo"]) == (
             guid, "backpack", 7, -1), report
         return report
+
+    async def drop_pistol_from_overlay(guid, items):
+        viewer = clients[owner]
+        await wait(viewer, lambda state: state.get("gameplay_fresh")
+                   and state.get("gameplay", {}).get(record.CAPABILITY) == 1)
+        await action(owner, "native-inventory-view-fixture")
+        await wait(viewer, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+        key = ("native-inventory-view-key-fixture", "--target")
+        for _ in range(next(index for index, item in enumerate(items) if item["guid"] == guid)):
+            await action(owner, *key, "down")
+        confirmation = (await action(owner, *key, "drop"))[record.VIEW]
+        assert (confirmation["state"], confirmation["guid"], confirmation["class_path"], confirmation["count"]) == (
+            "confirming", guid, PISTOL, 1), confirmation
+        pending = (await action(owner, *key, "confirm"))[record.VIEW]
+        assert pending == {**confirmation, "state": "dropping"}, pending
+        result = await wait(viewer, lambda state: (view := state.get("game", {}).get(record.VIEW, {})).get("sequence")
+                            == pending["sequence"] and view.get("state") in {"dropped", "refused"})
+        rendered = result["game"][record.VIEW]
+        assert rendered == {**pending, "state": "dropped"}, rendered
+        events = (await command("events", *owner, "--tail", "100"))["events"]
+        committed, = [event for event in events if event["event"] == "native_guest_inventory_stack_dropped"
+                      and event["view_sequence"] == pending["sequence"]]
+        assert committed["operation_id"] == committed["drop_id"], committed
+        evidence["guest_inventory_drop"] = {"confirmation": confirmation, "result": rendered, "event": committed}
+        await action(owner, *key, "back")
+        fields = ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map", "location")
+        return {field: committed[field] for field in fields}
 
     def saved():
         checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -238,7 +267,9 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get(probe.CAPABILITY) == 1)
         invite = await command("invite", *host, "--name", "Drop owner", "--character", "Drop owner")
         owner_id = invite["character_id"]
-        player = await start("owner", "join", owner, "--invite", invite["invite_file"], "--headless", "--native-zones")
+        owner_flags = ("--native-guest-inventory-view",) if light_pistol else ()
+        player = await start("owner", "join", owner, "--invite", invite["invite_file"], "--headless", "--native-zones",
+                             *owner_flags)
         initial = await bound(1)
         if other in clients:
             spare = await command("invite", *host, "--name", "Teammate", "--character", "Teammate")
@@ -275,8 +306,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert not saved()
             evidence["unsupported_selection"] = {"item": excluded, "requested_quantity": 1, "error": refused["error"]}
 
+            dropped = await drop_pistol_from_overlay(source, initial_items)
+            attempt = dropped["drop_id"]
+        else:
+            dropped = (await action(owner, drop.DROP, "--target", f"{source}|{quantity}",
+                                    "--operation-id", attempt))[drop.RESULT]
         request = (drop.DROP, "--target", f"{source}|{quantity}", "--operation-id", attempt)
-        dropped = (await action(owner, *request))[drop.RESULT]
         evidence["drop"] = dropped
         assert (dropped["state"], dropped["drop_id"], dropped["owner"], dropped["guid"], dropped["quantity"],
                 dropped["class_path"]) == ("dropped", attempt, owner_id, source, quantity, item_class), dropped
@@ -292,7 +327,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
         if host_origin:
             bootstrap = await collect(host, "host", "host", host_items, dropped, committed, typed, drop_site["lane"])
-            evidence["host_stock_ammo_setup"] = bootstrap
+            evidence["host_stock_pistol_setup" if light_pistol else "host_stock_ammo_setup"] = bootstrap
             guest_before = await inventory(owner, owner_id)
             assert guest_before == [item for item in initial_items if item["guid"] != source]
             host_before = await inventory(host, "host")
@@ -300,7 +335,10 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
             if host_origin_menu:
                 await wait(run, lambda state: state.get("game", {}).get(host_drop_input.SCOPE) is not None)
-                await action(host, host_drop_input.FIXTURE, "--target", f"{source}|9|{host_origin_menu}")
+                fixture = await action(host, host_drop_input.FIXTURE, "--target", f"{source}|{quantity}|{host_origin_menu}")
+                if light_pistol:
+                    assert fixture["stored_ammo"] == 7, fixture
+                    evidence["loaded_host"] = {"guid": source, "stored_ammo": fixture["stored_ammo"]}
                 await wait(run, lambda state: any(row.get("owner") == "host" and row.get("guid") == source
                            for row in state.get("gameplay", {}).get(record.STATE, {}).values()))
                 events = (await command("events", *host, "--tail", "50"))["events"]
@@ -312,11 +350,13 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                 await action(host, host_drop_input.CLOSE_FIXTURE, "--target", source)
             else:
                 host_drop_id = uuid.uuid4().hex
-                host_drop = (await action(host, drop.HOST_DROP, "--target", f"{source}|9", "--operation-id", host_drop_id))[drop.RESULT]
-            host_request = (drop.HOST_DROP, "--target", f"{source}|9", "--operation-id", host_drop_id)
+                host_drop = (await action(host, drop.HOST_DROP, "--target", f"{source}|{quantity}",
+                                          "--operation-id", host_drop_id))[drop.RESULT]
+            host_request = (drop.HOST_DROP, "--target", f"{source}|{quantity}", "--operation-id", host_drop_id)
             evidence["host_drop"] = host_drop
-            assert (host_drop["state"], host_drop["drop_id"], host_drop["owner"], host_drop["guid"], host_drop["quantity"]) == (
-                "dropped", host_drop_id, "host", source, 9), host_drop
+            assert (host_drop["state"], host_drop["drop_id"], host_drop["owner"], host_drop["guid"],
+                    host_drop["quantity"], host_drop["class_path"]) == (
+                "dropped", host_drop_id, "host", source, quantity, item_class), host_drop
             assert record.valid_position(host_drop["location"])
             assert math.dist(host_drop["location"], bootstrap["reclaim_position"]) < 180, host_drop
             assert (await action(host, *host_request))[drop.RESULT] == host_drop
@@ -326,6 +366,8 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert "escrow" in host_escrow and host_escrow["claim_id"] is None and "actor" not in host_escrow, host_escrow
             evidence["host_drop_pickup"] = await collect(
                 owner, owner_id, "guest", guest_before, host_drop, host_escrow, host_stack, drop_site["lane"])
+            if light_pistol:
+                evidence["loaded_recipient"] = await inspect_loaded_pistol(owner, source)
             duplicate = await action(host, drop.HOST_RECLAIM, "--target", host_drop_id, success=False)
             assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
             assert await inventory(host, "host") == host_items
@@ -445,9 +487,9 @@ if __name__ == "__main__":
     origin = parser.add_mutually_exclusive_group()
     origin.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
     origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu"),
-                        help="drop through the selected stock host inventory route, then pick up the stack as the guest")
-    origin.add_argument("--light-pistol", action="store_true",
-                        help="verify a loaded stock Light Pistol drop and pickup by a second guest")
+                        help="drop through the selected stock host inventory route, then pick up the item as the guest")
+    parser.add_argument("--light-pistol", action="store_true",
+                        help="drop a loaded pistol from the guest inventory overlay, then verify the selected pickup and host route")
     settings = parser.parse_args()
     if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
         parser.error("host-origin tests run separately from claimant-only tests")
