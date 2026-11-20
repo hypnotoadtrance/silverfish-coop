@@ -723,6 +723,8 @@ local indoor_door_fixtures = {
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"] = {
         map_name = "Shop_Gunsmith_P", spawn = {0, 200, 142},
         near = {tag = "South_Gunsmith", actor = "Dungeon_TransitionDoor_BP_C_1", range = 200, forward = {0, 1}},
+        far = {tag = "South_Gunsmith", actor = "Dungeon_TransitionDoor_BP_C_1",
+            floor = "StaticMeshActor_124", position = {-1250, 2250, -300}},
     },
 }
 
@@ -753,7 +755,7 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     end
     table.insert(ignore, 1, door)
     local candidates = {}
-    local indoor_top, indoor_bottom
+    local indoor_top, indoor_bottom, indoor_floor
     local indoor = headless and indoor_door_fixtures[state.map]
     local approach = indoor and indoor[far and "far" or "near"]
     if approach and tag == approach.tag then
@@ -770,9 +772,25 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
         -- Start the floor ray inside the room at the stock spawn height.
         indoor_top, indoor_bottom = point.Z + 40, point.Z - 200
         if far then
+            if approach.floor then
+                local floor = StaticFindObject(level .. approach.floor)
+                local component = valid(floor) and floor.StaticMeshComponent
+                local base = valid(component) and component:K2_GetComponentLocation()
+                if not valid(floor) or not same(floor:GetWorld(), state.world)
+                    or not same(floor:GetClass(), StaticFindObject("/Script/Engine.StaticMeshActor"))
+                    or not same(floor.RootComponent, component) or not same(component:GetOwner(), floor)
+                    or not vector(base) or math.abs(base.X - approach.position[1]) > 2
+                    or math.abs(base.Y - approach.position[2]) > 2 or math.abs(base.Z - approach.position[3]) > 2 then
+                    error("The stock interior floor for the distant guest moved", 0)
+                end
+                point, indoor_floor = base, component
+                indoor_top, indoor_bottom = base.Z + 180, base.Z - 65
+            end
             local dx, dy = point.X - origin.X, point.Y - origin.Y
             local forward, across = dx * direction.X + dy * direction.Y, dx * lateral_x + dy * lateral_y
-            candidates = {{forward, across}, {forward, across + 70}, {forward, across - 70}}
+            candidates = {{forward, across}, {forward, across + 70}, {forward, across - 70},
+                {forward + 70, across + 70}, {forward - 70, across + 70},
+                {forward + 70, across - 70}, {forward - 70, across - 70}}
         else
             local span, face = approach.range, approach.forward
             if math.abs(point.X - origin.X - span * face[1]) > 2
@@ -813,7 +831,7 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
         local surface = impact.Component and impact.Component:Get()
         if found == true and vector(impact.ImpactPoint) and vector(impact.ImpactNormal) and impact.ImpactNormal.Z >= .7
             and impact.ImpactPoint.Z < top - 1 and impact.ImpactPoint.Z >= bottom and valid(surface)
-            and surface:GetCollisionObjectType() == 0 then
+            and surface:GetCollisionObjectType() == 0 and (not indoor_floor or same(surface, indoor_floor)) then
             local z = impact.ImpactPoint.Z + extents + 2
             local squared = (x - origin.X)^2 + (y - origin.Y)^2 + (z - origin.Z)^2
             if (far and squared > 1900^2 or not far and squared <= 320^2)
