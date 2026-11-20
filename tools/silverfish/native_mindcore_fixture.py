@@ -65,6 +65,8 @@ async def perform(host, bridge, action, target, variant=None):
     if not host.fixtures or action not in (INSTALL, APPROACH, CARRY, DECK_LOAD):
         raise party.RuleError("native_mindcore_fixture_refused_arguments")
     invalid_target = (not isinstance(target, str) or target not in _CARRY_RESULT) if action == CARRY else target is not None
+    if action == DECK_LOAD and target == "east-corridor":
+        invalid_target = False
     if invalid_target:
         raise party.RuleError("native_mindcore_fixture_refused_arguments")
     seats = host.native_recipients()
@@ -96,7 +98,8 @@ async def perform(host, bridge, action, target, variant=None):
     if not dormant(host.last_game) or mindcore.LEDGER in host.party:
         raise party.RuleError("native_mindcore_fixture_refused_console_used")
     if action == DECK_LOAD:
-        snapshot = await bridge.command(action, host_pawn, timeout=7)
+        location = () if target is None else (target,)
+        snapshot = await bridge.command(action, host_pawn, *location, timeout=7)
         pose = snapshot.get(POSE_KEY, {})
         if not dormant(snapshot) or pose.get("core") != mindcore.CORE or not pose.get("simulating"):
             raise RuntimeError("The isolated lift load lost the exact loose stock Core")

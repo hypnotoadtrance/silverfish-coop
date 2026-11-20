@@ -92,10 +92,12 @@ async def stage_rider(host, bridge, target):
         # Land inside the south-west rail under stock gravity without starting inside the loose Core.
         "host-clear-corner": ("host", [-1698.0, -80.0, 250.0]),
         "guest-clear-corner": ("guest", [-1698.0, 80.0, 250.0]),
+        "host-east-corridor": ("host", [2816.0, -1335.0, 2810.0]),
+        "guest-east-corridor": ("guest", [2829.0, -1065.0, 2810.0]),
     }
     if (not host.fixtures or host.stopping or host.transitioning or game.get("map") != core.MAP
             or lift.get("state") != "active" or lift.get("stop") != "lower"
-            or target not in seats):
+            or not isinstance(target, str) or target not in seats):
         raise party.RuleError("The isolated lower lift approach is unavailable")
     role, location = seats[target]
     alias, binding = host.role_pawn(role)
@@ -106,5 +108,7 @@ async def stage_rider(host, bridge, target):
     restored = frame.get("pawns", {}).get(alias, {})
     if (frame.get("map"), restored.get("name")) != (core.MAP, pawn):
         raise RuntimeError("The isolated lift approach lost the exact active pawn")
+    if target.endswith("-east-corridor") and math.dist(restored["location"], location) > 55:
+        raise RuntimeError("The restored pawn did not land on the verified east corridor")
     host.last_game, host.last_seen = frame, time.monotonic()
     return {"pawn": pawn, "position": restored["location"]}

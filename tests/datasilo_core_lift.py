@@ -76,7 +76,8 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
                            raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False,
-                           fixture_passengers=False, west_walkway=False, east_stairs=False, upper_approach=False):
+                           fixture_passengers=False, west_walkway=False, east_stairs=False, upper_approach=False,
+                           stage_east=False):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -376,11 +377,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                                  (x, y), 25, seat=seat,
                                  reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
 
-        base = proof["west_walkway"]
+        base = proof["east_staged"] if stage_east else proof["west_walkway"]
         facing = base["hold"]["yaw"]
         south_doorway_was_crossed = False
-        lead_point = 1
-        index = 1
+        lead_point = corridor if stage_east else 1
+        index = corridor + 1 if stage_east else 1
         while index <= last:
             x, y, floor = points[index]
             south_doorway = 500 < x < 760 and -2490 < y < -2400 and points[index - 1][1] > -2400
@@ -460,6 +461,19 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
     proof["lower"] = await at_stop("lower stock lift", "lower")
     guest_local_pawn = proof["lower"]["guest_local"]["name"]
+    if stage_east:
+        proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD, target="east-corridor")
+        lead = await action(run, lift.STAGE_RIDER, target="host-east-corridor")
+        guest = await action(run, lift.STAGE_RIDER, target="guest-east-corridor")
+        assert (lead["pawn"], guest["pawn"]) == (host_pawn, guest_pawn)
+        await observe("both players stand on the east corridor beside the loose Core", lambda row, *_: (
+            all(2770 < row[seat]["location"][2] < 2820 for seat in ("lead", "carrier"))
+            and row["guest_hold"].get("state") == "ready" and row["prop"].get("simulating") is True
+            and math.dist(row["prop"]["position"][:2], (2829, -1205)) < 24
+            and 2690 < row["prop"]["position"][2] < 2760), timeout=8)
+        proof["east_staged"] = await regrip("pick up the original Core on the east corridor", None)
+        await climb_east_stairs()
+        return
     if fixture_passengers:
         proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD)
         proof["lower_parked"] = await observe_parked_core()
