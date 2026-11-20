@@ -9,6 +9,9 @@ local actions = {
 local session_path, request_path, loop, current, session, report
 local dismissed, submitted
 local input_keys = {}
+local settings_fixture, credits_fixture
+local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
+local initial_port, edited_port = "7777", "28181"
 
 local function valid(object)
     return object and object:IsValid()
@@ -122,6 +125,108 @@ local function choose(action, context)
     return false, report.reason
 end
 
+local function fixture_enabled()
+    return os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+end
+
+local function remove_settings_fixture()
+    local previous = settings_fixture
+    settings_fixture = nil
+    return previous and previous.editor.remove(previous.handle)
+end
+
+local function exact_credits(record)
+    local context, credits = record.context, record.dialog
+    local stack = context.controller.MenuStack
+    return stack and stack:GetArrayNum() == context.count + 1 and same(stack[context.count], context.menu)
+        and same(stack[context.count + 1], credits) and same(credits:GetClass(), StaticFindObject(credits_path))
+        and same(credits:GetOwningPlayer(), context.controller) and same(credits:GetOuter(), context.menu:GetOuter())
+        and credits:IsInViewport()
+end
+
+local function cover_settings_fixture(record, state, phase)
+    local context = record.context
+    local class = StaticFindObject(credits_path)
+    if not valid(class) then
+        LoadAsset(credits_path)
+        class = StaticFindObject(credits_path)
+    end
+    if not valid(class) or credits_fixture or not same_title(context, title.probe(state, phase)) then
+        error("title_settings_fixture_credits_unavailable", 0)
+    end
+    local created = {}
+    context.controller:OpenMenu(class, created)
+    local cover = {context = context, dialog = created.CreatedMenu}
+    if not exact_credits(cover) then error("title_settings_fixture_credits_open_unverified", 0) end
+    credits_fixture = cover
+    local read, read_error = pcall(record.editor.read, record.handle, state, phase)
+    local wrote, write_error = pcall(record.editor.write, record.handle, state, phase, initial_port)
+    local removed = remove_settings_fixture()
+    if read or wrote or read_error ~= "title_settings_editor_scope_changed"
+        or write_error ~= "title_settings_editor_scope_changed" or not removed then
+        error("title_settings_fixture_stale_scope_unverified", 0)
+    end
+    return "title_settings_fixture_stale_read_write_blocked_removed"
+end
+
+local function uncover_settings_fixture(state, phase)
+    local cover = credits_fixture
+    local before = cover and cover.context
+    if not before or phase ~= "ready" or state.map ~= before.map or state.server ~= false or state.clients ~= 0
+        or state.listening or state.local_pawn or not same(state.world, before.world)
+        or not same(state.controller, before.controller) or valid(state.world.NetDriver) or not exact_credits(cover) then
+        error("title_settings_fixture_credits_close_unqualified", 0)
+    end
+    local result = {}
+    before.controller:CloseMenu(result)
+    local stack = before.controller.MenuStack
+    if result.Success ~= true or (valid(cover.dialog) and cover.dialog:IsInViewport())
+        or not stack or stack:GetArrayNum() ~= before.count or not same(stack[before.count], before.menu) then
+        error("title_settings_fixture_credits_close_unverified", 0)
+    end
+    credits_fixture = nil
+    return "title_settings_fixture_credits_closed"
+end
+
+local function settings_fixture_command(fields, state, phase)
+    if not fixture_enabled() then error("title_settings_fixture_unavailable", 0) end
+    if #fields ~= 3 then error("title_settings_fixture_arguments", 0) end
+    local operation = fields[3]
+    if operation == "uncover" then return uncover_settings_fixture(state, phase) end
+    local context = title.probe(state, phase)
+    if not context then error("title_settings_fixture_title_unavailable", 0) end
+    if operation == "mount" then
+        if settings_fixture or credits_fixture then error("title_settings_fixture_already_open", 0) end
+        local editor = require("native_title_settings_widget")
+        local handle = editor.mount(state, phase, "port", "Host co-op\nUDP port", initial_port)
+        settings_fixture = {editor = editor, handle = handle, context = context}
+        return "title_settings_fixture_mounted"
+    end
+    local record = settings_fixture
+    if not record or not same_title(record.context, context) then error("title_settings_fixture_editor_unavailable", 0) end
+    local editor, handle = record.editor, record.handle
+    if operation == "observe" then
+        local value = editor.read(handle, state, phase)
+        if value ~= initial_port and value ~= edited_port then error("title_settings_fixture_readback_unverified", 0) end
+        return "title_settings_fixture_port=" .. value
+    end
+    if operation == "edit" then
+        if editor.write(handle, state, phase, edited_port) ~= edited_port then
+            error("title_settings_fixture_readback_unverified", 0)
+        end
+        return "title_settings_fixture_edited"
+    end
+    if operation == "focus" then
+        return "title_settings_fixture_focus=" .. (editor.focus(handle, state, phase) and "1" or "0")
+    end
+    if operation == "remove" then
+        if not remove_settings_fixture() then error("title_settings_fixture_remove_unverified", 0) end
+        return "title_settings_fixture_removed"
+    end
+    if operation == "cover" then return cover_settings_fixture(record, state, phase) end
+    error("title_settings_fixture_arguments", 0)
+end
+
 local function poll()
     if not session then return end
     local context = current and title.probe(current.state, current.phase)
@@ -152,6 +257,7 @@ function panel.sync(state, phase)
     current = nil
     if not session_path then return end
     local context = title.probe(state, phase)
+    if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
     local offer = context and read_offer()
     if not offer then
         remove_display()
@@ -175,10 +281,9 @@ function panel.sync(state, phase)
 end
 
 function panel.command(fields, state, phase)
+    if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
     if fields[2] ~= "native-title-panel-press-fixture" then return end
-    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" then
-        error("title_panel_fixture_unavailable", 0)
-    end
+    if not fixture_enabled() then error("title_panel_fixture_unavailable", 0) end
     local action = fields[3]
     if #fields ~= 3 or not keys[action] then error("title_panel_fixture_arguments", 0) end
     local accepted, reason = choose(action, title.probe(state, phase))
