@@ -32,6 +32,8 @@ The native worker waits up to 120 seconds on its private pipe and the exact coor
 
 ## Isolated verification
 
+For the headless handoff test, build a second adapter with `SILVERFISH_BOOTSTRAP_HEADLESS_PROOF=ON` and the same coordinator SHA-256. Put that adapter only on an isolated stock-layout replica. The stock installer rejects this adapter. The test publishes its private input marker only after the stock title offers co-op. The matched coordinator opens the private title and role with rendering, sound, mouse capture, and mouse lock disabled. The test still exercises the real coordinator process, both pipe records, the stock Quit action, and the staged gameplay startup. [Handoff smoke](../../tests/live_stock_handoff_smoke.py)
+
 Use a stock-layout replica and fresh isolated `-userdir` as described in the [bootstrap check](../README.md). Verify the title remains usable with the coordinator absent, a wrong hash, or a reparse point at the expected sibling. For a positive test, install the exact packaged worker, focus the replica, and press F7 once. Confirm one launch, the exact two IDs at the worker, stdin receipt EOF, the later readiness record, and the absence of an extra console window. A held key or repeated press for that generation leaves the process count steady.
 
 For readiness refusals, exercise a partial record, wrong identity, extra data, a process exit before readiness, and a live coordinator with no record. These paths leave the original title available and give the resumed coordinator responsibility for its own shutdown.
