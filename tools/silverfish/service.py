@@ -4658,8 +4658,8 @@ class Client:
                     result = await self.gameplay_action(action, request.get("operation_id") or path.stem,
                                                         request.get("target"), request.get("retained"))
                 elif action == "leave-session":
-                    if not isinstance(self.bridge.process, EmbeddedEngine) or not self.invite.get("native_zones"):
-                        raise ValueError("Open an integrated co-op guest session to leave it from the game")
+                    if not self.invite.get("native_zones"):
+                        raise ValueError("Open a native co-op guest session to save and leave")
                     result = await self.leave_session(request.get("operation_id") or path.stem)
                 elif action == "stop":
                     self.stopping = True

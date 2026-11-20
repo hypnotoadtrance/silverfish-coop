@@ -568,9 +568,15 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
 
             async def restart_guest():
                 nonlocal guest_job
-                await stop(guest_run, guest_job)
+                departure = await action(guest_run, "leave-session")
+                assert departure["retirement_confirmed"] is True
+                await asyncio.wait_for(asyncio.shield(guest_job), 18)
+                await wait(run, lambda state: state.get("game", {}).get("remote_clients") == 0
+                           and all(row["character_id"] != character
+                                   for row in state.get("campaign", {}).get("leases", ())), timeout=15)
                 guest_job = await start_guest()
                 await paired(core.MAP)
+                return departure
 
             proof["upper_door"] = await verify_passage(
                 run, guest_run, action, restart_guest, character, authority["generation"], authority["zone_epoch"])

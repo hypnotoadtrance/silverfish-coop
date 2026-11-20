@@ -113,7 +113,7 @@ async def verify_passage(run, guest_run, action, restart_guest, character, host_
     proof["live_passage"] = await cross(guest_pawn)
 
     old_generation = observe()[1]["generation"]
-    await restart_guest()
+    proof["guest_departure"] = await restart_guest()
     proof["fresh_peer_open"] = await settled_door("open")
     assert observe()[1]["generation"] != old_generation
     fresh_pawn = (await action(run, door.STAGE_PAWN, target="guest"))["pawn"]
