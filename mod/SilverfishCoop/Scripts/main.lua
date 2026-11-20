@@ -815,12 +815,14 @@ local function run_command(fields, state, current_phase)
         })
         return "authenticated host sun and sky projected"
     elseif command == "join" then
-        if #fields ~= 3 or not loopback_endpoint(argument) then
+        if (#fields ~= 3 and #fields ~= 6) or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
         end
         if role == "host" or state.server or leaving then
             error("Leave the current session before joining", 0)
         end
+        native_death.clear_client()
+        if #fields == 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end
         open_level(state.controller, argument, "")
         role = "client"
         was_connected = false
@@ -829,6 +831,7 @@ local function run_command(fields, state, current_phase)
         if #fields > 3 or (argument and argument ~= main_menu) then
             error("Expected the packaged title-screen map", 0)
         end
+        native_death.clear_client()
         guest_save.clear()
         vitals.reset()
         if state.map ~= main_menu or state.listening or role == "client" then

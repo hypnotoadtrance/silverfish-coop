@@ -4047,7 +4047,12 @@ class Client:
         else:
             self.transport.reset_game_endpoint()
         self.needs_travel = True
-        self.last_game = await self.bridge.command("join", self.endpoint)
+        visit = ()
+        if self.invite.get("native_zones"):
+            if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
+                raise RuntimeError("The native client requires an authenticated host and zone")
+            visit = (self.host_session, self.zone_epoch, self.expected_zone)
+        self.last_game = await self.bridge.command("join", self.endpoint, *visit)
         await self.wait_game_link(timeout)
 
     async def wait_game_link(self, timeout: float) -> None:

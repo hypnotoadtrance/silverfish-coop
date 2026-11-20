@@ -25,6 +25,7 @@ local sequence = 0
 local last_damage
 local friendly_fire
 local host_revived_health
+local client_visit, client_scope
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -32,6 +33,44 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function clear_client_scope()
+    if client_scope and type(SilverfishClearNativeClientDamageScope) == "function" then
+        pcall(SilverfishClearNativeClientDamageScope)
+    end
+    client_scope = nil
+end
+
+function native_death.clear_client()
+    clear_client_scope()
+    client_visit = nil
+end
+
+function native_death.admit_client(session, epoch, map)
+    local function token(value)
+        return type(value) == "string" and #value == 32 and value:match("^[a-f0-9]+$") and value:find("[^0]")
+    end
+    if not authored_routes or not token(session) or not token(epoch) or type(map) ~= "string"
+        or #map > 256 or not map:match("^/Game/Classes/Maps/[A-Za-z0-9_/]+$") then
+        error("The native client requires an authenticated host and zone", 0)
+    end
+    client_visit = {session = session, epoch = epoch, map = map}
+end
+
+local function refresh_client_scope(state, phase)
+    local visit = client_visit
+    local detail = state.local_pawn
+    local pawn = detail and detail.pawn
+    if not visit or phase ~= "connected" or state.map ~= visit.map or state.server ~= true
+        or not valid(pawn) or type(SilverfishSetNativeClientDamageScope) ~= "function" then
+        clear_client_scope()
+        return
+    end
+    local address = pawn:GetAddress()
+    local ok, armed = pcall(SilverfishSetNativeClientDamageScope, address, visit.session, visit.epoch)
+    if not ok or armed ~= true then clear_client_scope(); return end
+    client_scope = {pawn = pawn, address = address, name = detail.name}
 end
 
 local function active(state, phase)
@@ -212,6 +251,7 @@ function native_death.clear_scope()
 end
 
 function native_death.sync(state, phase)
+    refresh_client_scope(state, phase)
     local session_active = active(state, phase)
     local current = {}
     local ambiguous = false
@@ -544,6 +584,16 @@ function native_death.command(fields, state, phase)
 end
 
 function native_death.rows(state, phase, status_row)
+    local visit, scope = client_visit, client_scope
+    if visit and scope and phase == "connected" and state.map == visit.map and state.local_pawn
+        and same(scope.pawn, state.local_pawn.pawn) and type(SilverfishReadNativeClientDamageScope) == "function" then
+        local ok, armed, deal, direct, die, faults = pcall(
+            SilverfishReadNativeClientDamageScope, scope.address, visit.session, visit.epoch)
+        if ok and armed == true and type(scope.pawn.Dead) == "boolean" then
+            return {status_row("native-client-damage", visit.map, scope.name, scope.pawn.Dead and 1 or 0,
+                deal, direct, die, faults)}
+        end
+    end
     if not active(state, phase) then return {} end
     local rows = { status_row("native-death", hook_status, sequence, hook_failure, backend,
         scope_records["local"] and "party" or scope_records.guest and "guest" or "") }

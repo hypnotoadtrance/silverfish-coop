@@ -1958,6 +1958,15 @@ class Bridge:
                     }
                 elif fields[0] == "native-death-pawn" and len(fields) == 3:
                     data.setdefault("native_dead_flags", {})[fields[1]] = fields[2] == "1"
+                elif fields[0] == "native-client-damage" and len(fields) == 8:
+                    area, pawn, dead = fields[1:4]
+                    deal, direct, die, faults = map(int, fields[4:])
+                    if (data.get("state") != "connected" or data.get("map") != area
+                            or not pawn.startswith(f"Player_FP_C {area}.") or dead not in {"0", "1"}
+                            or min(deal, direct, die, faults) < 0 or "native_client_damage" in data):
+                        raise ValueError("Invalid native client damage report")
+                    data["native_client_damage"] = {"pawn": pawn, "dead": dead == "1", "blocked": deal + direct,
+                                                    "deal": deal, "direct": direct, "die": die, "output_faults": faults}
                 elif fields[0] == "native-friendly-fire" and len(fields) == 2:
                     data["native_friendly_fire"] = {"blocked": int(fields[1])}
                 elif fields[0] == "native-host-revive" and len(fields) == 2:

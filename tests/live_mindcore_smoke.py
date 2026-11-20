@@ -147,7 +147,7 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
-                   prepare_core_carry=False):
+                   prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False):
     upper_door = upper_door or upper_door_keycard
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
@@ -169,6 +169,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     if prepare_core_carry and (not resume or stock_input or lift_ride or upper_door or instructions
                                or carry_only or guest_carry or shared_core or stock_hazard_wipe):
         raise ValueError("Prepare the carry checkpoint separately from the verified dormant Savlo keycard checkpoint")
+    if core_lift_carry and (not resume or stock_input or lift_ride or upper_door or instructions
+                            or carry_only or guest_carry or shared_core or stock_hazard_wipe or prepare_core_carry):
+        raise ValueError("Test the continuous lift carry separately from the prepared dual-card checkpoint")
+    if guest_hazard_authority and (not resume or stock_input or lift_ride or upper_door or instructions
+                                   or carry_only or guest_carry or shared_core or stock_hazard_wipe
+                                   or prepare_core_carry or core_lift_carry):
+        raise ValueError("Test guest damage authority separately from the dormant Data Silo checkpoint")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -179,8 +186,14 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched stock Core handling fixture")
     if shared_core and not runtime.staged_script(work, "native_mindcore_replication.lua", "SetReplicateMovement"):
         raise ValueError("Use the matched Data Silo Core replication stage")
-    if lift_ride and not runtime.staged_script(work, "native_datasilo_lift.lua", "SilverfishDataSiloLiftGuardAvailable"):
+    if (lift_ride or core_lift_carry) and not runtime.staged_script(
+            work, "native_datasilo_lift.lua", "SilverfishDataSiloLiftGuardAvailable"):
         raise ValueError("Use the matched Data Silo lift stage")
+    if core_lift_carry and not all(runtime.staged_script(work, script, marker) for script, marker in (
+            ("native_mindcore_carry_view.lua", "local absolute_aim"),
+            ("native_mindcore_replication.lua", "SetReplicateMovement"),
+            ("players.lua", "walk-continuous"))):
+        raise ValueError("Use the matched stage with continuous stock movement and absolute Core carry look")
     if (lift_keycard or prepare_core_carry) and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
         raise ValueError("Use the matched stock Cistern lockpick stage")
     if upper_door and not runtime.staged_script(work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
@@ -210,7 +223,18 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 or savlo_claim.get("owner") != "host"
                 or any(source in claims for source in (pickup.CROSSROADS_LOCKPICK, pickup.CISTERN_OLD_NFTA_KEYCARD))):
             raise ValueError("Require the verified host Savlo card with the CrossRoads lockpick and Cistern card unclaimed")
-    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry:
+    if core_lift_carry:
+        claims = data["world"]["party"].get(pickup.STATE_KEY, {})
+        source_proof = runtime.read_json(inputs["proof"])
+        prepared = source_proof.get("carry_checkpoint", {})
+        cards = tuple(claims.get(source, {}) for source in (pickup.SAVLO_KEYCARD, pickup.CISTERN_OLD_NFTA_KEYCARD))
+        if (source_proof.get("verified") is not True or not isinstance(prepared, dict)
+                or prepared.get("stock_flags") != [0, 0]
+                or any(claim.get("owner") != "host" or not claim.get("guid")
+                       or prepared.get("cards", {}).get(claim.get("source"), {}).get("guid") != claim["guid"]
+                       for claim in cards)):
+            raise ValueError("Require both exact stock cards from the verified paired carry checkpoint")
+    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry or core_lift_carry or guest_hazard_authority:
         for index, frame in enumerate(native_host_save.references(data)):
             inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
@@ -664,6 +688,13 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             await verify_stock_hazard_wipe(authority)
             proof["verified"] = True
             return proof
+        if guest_hazard_authority:
+            from datasilo_core_lift import verify_guest_hazard_authority
+
+            await verify_guest_hazard_authority(run, guest_run, action, authority, character,
+                                                proof.setdefault("guest_hazard_authority", {}))
+            proof["verified"] = True
+            return proof
         if prepare_core_carry:
             await assert_key_custody(savlo_claim)
         if lift_keycard or prepare_core_carry:
@@ -678,6 +709,18 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if core_lift_carry:
+            from datasilo_core_lift import verify_core_lift
+
+            route_proof = proof["core_lift_carry"] = {"cards": [await assert_key_custody(claim) for claim in cards]}
+            await verify_core_lift(run, guest_run, action, inactive, character, route_proof,
+                                   lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match)
+            await action(run, "checkpoint")
+            saved, lift_flags = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in lift_flags) == (0, 0)
+            route_proof.update(checkpoint=saved["revision"], stock_flags=[0, 0])
+            proof["verified"] = True
+            return proof
         if prepare_core_carry:
             await action(run, "checkpoint")
             saved, dormant_flags = await flags()
@@ -1008,6 +1051,10 @@ if __name__ == "__main__":
                         help="verify stock lower-lift damage downs both players before a wipe to the host bed")
     parser.add_argument("--prepare-core-carry", action="store_true",
                         help="clone the verified Savlo checkpoint and acquire the Cistern card for the same host")
+    parser.add_argument("--core-lift-carry", action="store_true",
+                        help="carry the exact stock Core continuously from the lower floor onto the upper west landing")
+    parser.add_argument("--guest-hazard-authority", action="store_true",
+                        help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
@@ -1015,4 +1062,5 @@ if __name__ == "__main__":
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
                           lift_disembark=options.lift_disembark, upper_door=options.upper_door,
                          upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe,
-                         prepare_core_carry=options.prepare_core_carry))
+                         prepare_core_carry=options.prepare_core_carry, core_lift_carry=options.core_lift_carry,
+                         guest_hazard_authority=options.guest_hazard_authority))

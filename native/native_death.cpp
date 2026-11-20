@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -87,6 +89,8 @@ namespace
     constexpr auto die_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:Die");
     constexpr auto damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
     constexpr auto damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto direct_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
+    constexpr auto direct_damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
     constexpr auto mode_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:K2_OnMovementModeChanged");
     constexpr auto mode_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:K2_OnMovementModeChanged");
     constexpr auto landed_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:OnLanded");
@@ -95,6 +99,7 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto probe_timeout = std::chrono::seconds(2);
     constexpr auto scope_timeout = std::chrono::milliseconds(1250);
+    constexpr std::uint8_t autonomous_role = 2; // ENetRole::ROLE_AutonomousProxy in UE 5.4.
     constexpr std::uint8_t authority_role = 3; // ENetRole::ROLE_Authority in UE 5.4.
     constexpr std::uint8_t falling_mode = 3; // EMovementMode::MOVE_Falling in UE 5.4.
     constexpr double stock_fall_duration = 0.5;
@@ -105,6 +110,7 @@ namespace
     std::atomic<std::uint64_t> bridge_generation{};
     std::atomic<bool> hooks_ready{};
     std::atomic<bool> scope_hooks_ready{};
+    std::atomic<bool> client_damage_hooks_ready{};
 
     struct Probe
     {
@@ -1142,6 +1148,199 @@ namespace
         return out ? DamageOutputs{} : outputs;
     }
 
+    struct ClientDamageScope
+    {
+        ScopedPawn pawn;
+        ControllerBinding owner;
+        Unreal::FWeakObjectPtr world, instance, driver, connection;
+        FriendlyFire damage;
+        Unreal::UFunction* direct{};
+        Unreal::UFunction* die{};
+        std::uint64_t generation{};
+        std::string session, epoch;
+        std::int64_t deal_blocked{}, direct_blocked{}, die_blocked{}, output_faults{};
+
+        [[nodiscard]] bool accepts(Unreal::UFunction* callee) const
+        {
+            return callee && (callee == damage.damage || callee == direct || callee == die);
+        }
+    };
+
+    thread_local ClientDamageScope client_damage_scope;
+
+    [[nodiscard]] Unreal::UObject* object_value(Unreal::UObject* object, const Unreal::TCHAR* name)
+    {
+        return read_object(object_field(object, name), object);
+    }
+
+    [[nodiscard]] bool live_client_actor(Unreal::UObject* object, Unreal::UObject* world)
+    {
+        if (!live_object(object)) return false;
+        auto* role = reflected_field<Unreal::FByteProperty>(object, STR("Role"));
+        auto* ending = reflected_field<Unreal::FBoolProperty>(object, STR("bActorIsBeingDestroyed"));
+        return role && role->GetPropertyValueInContainer(object) == autonomous_role &&
+            ending && !ending->GetPropertyValueInContainer(object) &&
+            static_cast<Unreal::AActor*>(object)->GetWorld() == world;
+    }
+
+    [[nodiscard]] bool qualified_client_damage(const ClientDamageScope& scope)
+    {
+        if (!client_damage_hooks_ready.load(std::memory_order_acquire) || !ready() ||
+            scope.generation != bridge_generation.load(std::memory_order_acquire)) return false;
+        auto* pawn = scope.pawn.object.Get();
+        auto* controller = scope.owner.controller.Get();
+        auto* player = scope.owner.player.Get();
+        auto* world = scope.world.Get();
+        auto* instance = scope.instance.Get();
+        auto* driver = scope.driver.Get();
+        auto* connection = scope.connection.Get();
+        return live_object(world) && live_object(instance) && live_object(driver) && live_object(connection) &&
+            live_client_actor(pawn, world) && live_client_actor(controller, world) &&
+            same_controller(scope.owner, pawn) && object_value(player, STR("PlayerController")) == controller &&
+            only_object(array_field(instance, STR("LocalPlayers")), instance) == player &&
+            object_value(world, STR("OwningGameInstance")) == instance && object_value(world, STR("NetDriver")) == driver &&
+            object_value(driver, STR("World")) == world && object_value(driver, STR("ServerConnection")) == connection &&
+            object_value(connection, STR("Driver")) == driver;
+    }
+
+    [[nodiscard]] bool bind_client_damage(ClientDamageScope& scope, std::uintptr_t address)
+    {
+        auto* die = find_player_script(die_path, die_full_name);
+        auto* direct = find_player_script(direct_damage_path, direct_damage_full_name);
+        if (!die || die->GetNumParms() != 3 || !direct || direct->GetNumParms() != 4 ||
+            die->GetOuterPrivate() != direct->GetOuterPrivate() ||
+            !damage_argument<Unreal::FDoubleProperty>(direct, STR("Damage"), false) ||
+            !damage_argument<Unreal::FBoolProperty>(direct, STR("ForceScopeCancel"), false)) return false;
+        const auto damage = find_friendly_fire();
+        if (!damage.damage || damage.damage->GetOuterPrivate() != die->GetOuterPrivate()) return false;
+        scope.pawn = find_scoped_pawn(address, die);
+        auto* pawn = scope.pawn.object.Get();
+        if (!live_object(pawn) || !bind_controller(scope.owner, pawn, true)) return false;
+        auto* world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+        auto* controller = scope.owner.controller.Get();
+        auto* instance = object_value(world, STR("OwningGameInstance"));
+        auto* driver = object_value(world, STR("NetDriver"));
+        auto* connection = object_value(driver, STR("ServerConnection"));
+        auto* controller_type = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr,
+            STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"));
+        auto* instance_type = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, instance_path);
+        auto* connection_type = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr,
+            STR("/Script/Engine.NetConnection"));
+        if (!controller_type || !instance_type || !connection_type || controller->GetClassPrivate() != controller_type ||
+            !live_object(instance) || instance->GetClassPrivate() != instance_type ||
+            !live_object(connection) || !connection->IsA(connection_type)) return false;
+        scope.world = world;
+        scope.instance = instance;
+        scope.driver = driver;
+        scope.connection = connection;
+        scope.damage = damage;
+        scope.direct = direct;
+        scope.die = die;
+        scope.generation = bridge_generation.load(std::memory_order_acquire);
+        return qualified_client_damage(scope);
+    }
+
+    struct ClientDamageRequest
+    {
+        std::uintptr_t address{};
+        std::string session, epoch;
+    };
+
+    [[nodiscard]] bool client_damage_token(std::string_view value)
+    {
+        return value.size() == 32 && value.find_first_not_of('0') != std::string_view::npos &&
+            std::ranges::all_of(value, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    }
+
+    [[nodiscard]] ClientDamageRequest client_damage_request(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !client_damage_hooks_ready.load(std::memory_order_acquire) || !ready() ||
+            lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) || !lua.is_string(3)) return {};
+        auto address = lua.get_integer();
+        std::string session{lua.get_string()};
+        std::string epoch{lua.get_string()};
+        if (address <= 0 || !client_damage_token(session) || !client_damage_token(epoch)) return {};
+        return {static_cast<std::uintptr_t>(address), std::move(session), std::move(epoch)};
+    }
+
+    [[nodiscard]] bool current_client_damage(const ClientDamageRequest& request)
+    {
+        const auto& scope = client_damage_scope;
+        return request.address && scope.pawn.address == request.address && scope.session == request.session &&
+            scope.epoch == request.epoch && qualified_client_damage(scope);
+    }
+
+    int lua_set_client_damage(const Lua& lua)
+    {
+        auto request = client_damage_request(lua);
+        bool active = current_client_damage(request);
+        if (!active && request.address)
+        {
+            ClientDamageScope next;
+            next.session = std::move(request.session);
+            next.epoch = std::move(request.epoch);
+            if ((active = bind_client_damage(next, request.address))) client_damage_scope = std::move(next);
+        }
+        lua.set_bool(active);
+        lua.set_string(active ? "stock_client_damage_guarded" : "stock_client_damage_scope_unavailable");
+        return 2;
+    }
+
+    int lua_read_client_damage(const Lua& lua)
+    {
+        const bool active = current_client_damage(client_damage_request(lua));
+        const auto& scope = client_damage_scope;
+        lua.set_bool(active);
+        lua.set_integer(active ? scope.deal_blocked : 0);
+        lua.set_integer(active ? scope.direct_blocked : 0);
+        lua.set_integer(active ? scope.die_blocked : 0);
+        lua.set_integer(active ? scope.output_faults : 0);
+        return 5;
+    }
+
+    int lua_clear_client_damage(const Lua& lua)
+    {
+        const bool cleared = Unreal::IsInGameThreadRaw() && lua.get_stack_size() == 0;
+        if (cleared) client_damage_scope = {};
+        lua.set_bool(cleared);
+        return 1;
+    }
+
+    // Host damage and downing still run on the enrolled authority pawn. Client
+    // Blueprints can call these same wrappers locally before replication arrives.
+    bool intercept_client_damage(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee,
+                                 void* parameters, Unreal::FFrame* frame)
+    {
+        auto& scope = client_damage_scope;
+        if (!scope.accepts(callee) || scope.pawn.object.Get() != context || iteration.OriginalFunctionCallPrevented() ||
+            !qualified_client_damage(scope)) return false;
+        if (frame && frame->Object() != context) return false;
+
+        DamageOutputs outputs;
+        if (callee == scope.damage.damage && (parameters || frame))
+            outputs = damage_outputs(scope.damage, parameters, frame);
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return false;
+        if (callee == scope.damage.damage)
+        {
+            ++scope.deal_blocked;
+            if (outputs.total && outputs.lethal && outputs.total != outputs.lethal &&
+                reinterpret_cast<std::uintptr_t>(outputs.total) % alignof(double) == 0)
+            {
+                scope.damage.total_damage->SetPropertyValue(outputs.total, 0.0);
+                scope.damage.lethal->SetPropertyValue(outputs.lethal, false);
+            }
+            else
+            {
+                // Leave unknown addresses alone and still fence the duplicate local mutation.
+                ++scope.output_faults;
+            }
+        }
+        else if (callee == scope.direct) ++scope.direct_blocked;
+        else ++scope.die_blocked;
+        return true;
+    }
+
     void intercept_friendly_fire(Iteration& iteration, Unreal::UObject* context, void* parameters, Unreal::FFrame* frame)
     {
         const auto generation = bridge_generation.load(std::memory_order_acquire);
@@ -1195,6 +1394,7 @@ namespace
     void intercept_call(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee,
                         void* parameters, Unreal::FFrame* frame = nullptr)
     {
+        if (intercept_client_damage(iteration, context, callee, parameters, frame)) return;
         if (callee && callee == death_scope.friendly_fire.damage)
         {
             intercept_friendly_fire(iteration, context, parameters, frame);
@@ -1213,7 +1413,7 @@ namespace
         }
         auto* callee = frame.Node();
         if (context && callee && (callee == probe.die || callee == death_scope.die ||
-                                  callee == death_scope.friendly_fire.damage))
+                                  callee == death_scope.friendly_fire.damage || client_damage_scope.accepts(callee)))
         {
             // ProcessLocalScriptFunction receives the prepared callee frame on
             // UE 5.4. The caller has already consumed the argument expressions.
@@ -1271,6 +1471,7 @@ namespace
             invalidate_bridge();
             hooks_ready.store(false, std::memory_order_release);
             scope_hooks_ready.store(false, std::memory_order_release);
+            client_damage_hooks_ready.store(false, std::memory_order_release);
             for (const auto id : hooks)
             {
                 if (id != Hook::ERROR_ID)
@@ -1341,7 +1542,7 @@ namespace
             RC::Output::send<RC::LogLevel::Verbose>(
                 STR("[SilverfishCoopNative] Death lab hooks: event={}, internal={}, local-script={}\n"),
                 hooks[0], hooks[1], hooks[2]);
-            if (scoped_events && installed)
+            if ((scoped_events || client_damage) && installed)
             {
                 hooks[3] = Hook::RegisterLoadMapPreCallback(
                     [](Hook::TCallbackIterationData<bool>&, Unreal::UEngine*, Unreal::FWorldContext&,
@@ -1349,10 +1550,13 @@ namespace
                         if (Unreal::IsInGameThreadRaw())
                         {
                             death_scope = {};
+                            client_damage_scope = {};
                         }
                     },
                     {false, true, mod_name, STR("Clear death scope before travel")});
-                scope_hooks_ready.store(hooks[3] != Hook::ERROR_ID, std::memory_order_release);
+                scope_hooks_ready.store(scoped_events && hooks[3] != Hook::ERROR_ID, std::memory_order_release);
+                client_damage_hooks_ready.store(client_damage && hooks[0] != Hook::ERROR_ID && hooks[3] != Hook::ERROR_ID,
+                    std::memory_order_release);
             }
         }
 
@@ -1417,6 +1621,12 @@ namespace
             lua.register_function("SilverfishArmNativeDeath", lua_arm);
             lua.register_function("SilverfishDisarmNativeDeath", lua_disarm);
             lua.register_function("SilverfishTakeNativeDeathHit", lua_take_hit);
+            if (client_damage)
+            {
+                lua.register_function("SilverfishSetNativeClientDamageScope", lua_set_client_damage);
+                lua.register_function("SilverfishReadNativeClientDamageScope", lua_read_client_damage);
+                lua.register_function("SilverfishClearNativeClientDamageScope", lua_clear_client_damage);
+            }
             if (scoped_events)
             {
                 lua.register_function("SilverfishSetNativeDeathScope", lua_set_scope);
@@ -1472,6 +1682,7 @@ namespace
 
         const bool enabled = environment_equals("SILVERFISH_COOP_NATIVE_DEATH", "cpp");
         const bool scoped_events = enabled && environment_equals("SILVERFISH_COOP_NATIVE_EVENTS", "1");
+        const bool client_damage = enabled && environment_equals("SILVERFISH_COOP_NATIVE_ZONE", "1");
         std::array<Hook::GlobalCallbackId, 4> hooks{};
     };
 }
