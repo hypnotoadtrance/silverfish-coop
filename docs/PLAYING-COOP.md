@@ -26,6 +26,10 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 After the [stock title setup](../bootstrap/README.md#install-the-stock-title-entry), open co-op from the title. In the isolated title, press **F7** to open Host settings. Edit the campaign, UDP port, and numeric listening address. Use **F8** to move between fields, **F7** to start, or **F9** to return to the title panel. A blank field uses its configured default. The headless trial verified the fields and selected endpoint. Foreground keyboard and focus still need a live check.
 
+## Create an invitation while hosting
+
+Open the stock **Journal** in the active co-op campaign. Press **F7** to open the invite form. Enter the participant's name, their starter character's name, and the address they can reach. Use **F8** to advance through the fields. Leave the address blank to use the configured host address. On the review screen, press **F7** to create the invitation, then press **F7** again to copy it once it is ready. Share the invitation privately. It contains the guest credential. **F9** returns to the Journal.
+
 ## Join from the co-op title
 
 Press **F8**, paste the host's invitation text into the masked field, and press **F7** to load the host's character list. Use **F8** to cycle through your characters and the option to create one. **F7** selects the current character or opens creation. After selecting a character, leave the local profile blank to use its configured name, or enter a different name. Press **F7** to join. **F9** backs out of the current step.
