@@ -186,7 +186,9 @@ function replication.rows(state, phase, row)
         if not active or not active.state or not same(state.world, active.world)
             or not context_matches(active, scene(active.world, active.core, active.cradle)) then return {} end
         local position, stage = active.core:K2_GetActorLocation(), math.tointeger(active.cradle.Status)
+        local rotation = active.core:K2_GetActorRotation()
         if not position or not finite(position.X) or not finite(position.Y) or not finite(position.Z)
+            or not rotation or not finite(rotation.Pitch) or not finite(rotation.Yaw) or not finite(rotation.Roll)
             or not stage or stage < 0 or stage > 2 then return {} end
         local replicates, movement = bit(active.core.bReplicates), bit(active.core.bReplicateMovement)
         local overlap = bit(active.capsule:GetGenerateOverlapEvents())
@@ -199,7 +201,9 @@ function replication.rows(state, phase, row)
             stage, string.format("%.3f", position.X), string.format("%.3f", position.Y),
             string.format("%.3f", position.Z), active.origin,
             bit(active.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find))),
-            parent_kind(active.frame:GetAttachParent()), parent_kind(attachment and attachment.AttachComponent)) }
+            parent_kind(active.frame:GetAttachParent()), parent_kind(attachment and attachment.AttachComponent),
+            string.format("%.3f", rotation.Pitch), string.format("%.3f", rotation.Yaw),
+            string.format("%.3f", rotation.Roll)) }
     end)
     return ok and result or {}
 end

@@ -150,8 +150,12 @@ class MindCoreTests(unittest.IsolatedAsyncioTestCase):
         attached = mindcore.parse_replication([*row, "0", "deck", "deck"], "guest")
         self.assertFalse(attached["simulating"])
         self.assertEqual((attached["parent"], attached["replicated_parent"]), ("deck", "deck"))
+        carried = mindcore.parse_replication([*row, "1", "free", "free", "-4", "44.25", "16"], "guest")
+        self.assertEqual(carried["rotation"], {"pitch": -4.0, "yaw": 44.25, "roll": 16.0})
         with self.assertRaises(ValueError):
             mindcore.parse_replication([*row, "1", "unknown", "deck"], "guest")
+        with self.assertRaises(ValueError):
+            mindcore.parse_replication([*row, "1", "free", "free", "0", "nan", "0"], "guest")
         for index, value in ((3, "active"), (4, mindcore.CORE.removesuffix("_1") + "_2"), (7, "1"), (8, "1")):
             changed = row.copy()
             changed[index] = value
