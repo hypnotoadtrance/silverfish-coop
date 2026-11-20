@@ -11,9 +11,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <optional>
+#include <string>
 #include <string_view>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -24,6 +29,7 @@
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
+#include <Windows.h>
 
 namespace
 {
@@ -469,6 +475,77 @@ namespace
     std::array<Hooks::GlobalCallbackId, 4> hooks{Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID};
     U::FName grab_name{}, hold_name{}, stats_name{}, overlap_name{}, pickup_name{};
 
+    bool trace_enabled()
+    {
+        static const bool enabled = [] {
+            for (const auto* name : {L"SILVERFISH_COOP_HEADLESS", L"SILVERFISH_COOP_NATIVE_FIXTURES"})
+            {
+                wchar_t value[2]{};
+                if (GetEnvironmentVariableW(name, value, 2) != 1 || value[0] != L'1') return false;
+            }
+            return true;
+        }();
+        return enabled;
+    }
+
+    std::string trace_frame(U::FFrame* frame)
+    {
+        auto* function = frame ? frame->Node() : nullptr;
+        if (!live(function)) return "-";
+        const auto name = RC::to_utf8_string(function->GetFullName());
+        try
+        {
+            const auto& script = function->GetScript();
+            const auto start = reinterpret_cast<Address>(script.GetData());
+            const auto code = reinterpret_cast<Address>(frame->Code());
+            const int size = script.Num();
+            if (start && size > 0 && code >= start && code - start <= static_cast<Address>(size))
+                return std::format("{}+0x{:x}", name, code - start);
+        }
+        catch (...) { /* The caller name is still available without a bytecode offset. */ }
+        return name;
+    }
+
+    void trace_release(const Holder& current, std::string_view event, std::string_view detail,
+                       U::FFrame* frame = nullptr) noexcept
+    {
+        if (!trace_enabled()) return;
+        try
+        {
+            std::array<wchar_t, 4096> path{};
+            const auto length = GetEnvironmentVariableW(L"SILVERFISH_COOP_BRIDGE", path.data(), static_cast<DWORD>(path.size()));
+            if (!length || length >= path.size()) return;
+            const std::filesystem::path bridge(path.data());
+            if (!bridge.is_absolute() || bridge.parent_path().filename() != L"game-bridge") return;
+            std::ofstream stream(bridge / L"native-mindcore-release-trace.log", std::ios::app);
+            if (!stream) return;
+            const auto name = [](U::UObject* object) {
+                return live(object) ? RC::to_utf8_string(object->GetFullName()) : std::string{"-"};
+            };
+            const auto position = [](U::UObject* actor, const U::TCHAR* type) {
+                if (!exact(actor, type)) return std::string{"-"};
+                const auto p = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+                return std::format("{:.2f},{:.2f},{:.2f}", p.GetX(), p.GetY(), p.GetZ());
+            };
+            auto* pawn = current.pawn.Get();
+            auto* core = current.core.Get();
+            auto* mesh = object(core, STR("PropMesh"));
+            auto* parent = frame ? frame->PreviousFrame() : nullptr;
+            auto* event_frame = parent ? parent->PreviousFrame() : nullptr;
+            CollisionChannels channels;
+            constexpr std::uint8_t pawn_channel = 2;
+            const int pawn_response = component(mesh, core, STR("/Script/Engine.StaticMeshComponent")) && channels.bind()
+                ? channels.read(mesh, pawn_channel) : -1;
+            const auto time = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+            stream << std::format("{} {} detail={} holder=[{}] pawn_position=[{}] core=[{}] core_position=[{}] held_object=[{}] "
+                                  "carrier_collision={} core_pawn_response={} callee=[{}] caller=[{}] event=[{}]\n",
+                time, event, detail, name(pawn), position(pawn, pawn_class), name(core), position(core, core_class),
+                name(object(pawn, STR("HeldObject"))), current.collision.has_value(), pawn_response,
+                trace_frame(frame), trace_frame(parent), trace_frame(event_frame));
+        }
+        catch (...) { /* Diagnostics do not affect stock carry. */ }
+    }
+
     bool available()
     {
         return installed.load(std::memory_order_acquire) && U::IsInGameThreadRaw();
@@ -538,9 +615,11 @@ namespace
         holder.reset();
         if (previous && !restore_carrier_collision(*previous))
         {
+            trace_release(*previous, "released", "mutation_unverified_stock_core_collision_restore");
             status(pawn, "fault", "mutation_unverified_stock_core_collision_restore");
             return false;
         }
+        if (previous) trace_release(*previous, state, reason);
         status(pawn, state, reason);
         return true;
     }
@@ -725,6 +804,10 @@ namespace
     {
         if (!available() || !function || !value || call.OriginalFunctionCallPrevented()) return;
         const auto name = function->GetFName();
+        if (holder && trace_enabled() && value == holder->handle.Get() &&
+            name == U::FName{STR("ReleaseComponent"), U::FNAME_Find} &&
+            function == find<U::UFunction>(STR("/Script/Engine.PhysicsHandleComponent:ReleaseComponent")))
+            trace_release(*holder, "handle_release", bracket_pawn ? "mod_dispatch" : "stock_call", frame);
         if (name == pickup_name && !frame && guest.pawn.Get() == value &&
             Clock::now() < guest.expires && pickup_source(function, args))
         {
@@ -757,6 +840,13 @@ namespace
             return;
         }
         if (function != functions.grab || !args) return;
+        if (managed_holder && trace_enabled())
+        {
+            if (functions.dropping->GetPropertyValueInContainer(args))
+                trace_release(*holder, "stock_grab_release", "drop", frame);
+            else if (functions.throwing->GetPropertyValueInContainer(args))
+                trace_release(*holder, "stock_grab_release", "throw", frame);
+        }
         if (mount_host && functions.dropping->GetPropertyValueInContainer(args) &&
             !functions.throwing->GetPropertyValueInContainer(args) &&
             !functions.pickup->GetPropertyValueInContainer(args))
