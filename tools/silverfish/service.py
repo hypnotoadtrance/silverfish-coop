@@ -2637,6 +2637,17 @@ class Host:
                 elif action == "native-bag-projection-fixture" and self.fixtures:
                     snapshot = await bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": snapshot.get("native_bag_projection_interaction", {})}
+                elif action == native_guest_armor.DISGUISE_PROBE and self.native_guest and self.fixtures:
+                    character = self.roles().get(request.get("target") or "guest")
+                    owner = self.native_recipients().get(character)
+                    pawn = owner.get("pawn") if owner and owner.get("connected") else None
+                    if not pawn or self.last_game.get("map") != DEAD_BRIDGE or self.transitioning or self.stopping:
+                        raise ValueError("Choose an active stock guest in Dead Bridge")
+                    snapshot = await bridge.command(action, pawn, timeout=5)
+                    proof = snapshot.get("native_guest_disguise", {})
+                    if (proof.get("map"), proof.get("pawn")) != (DEAD_BRIDGE, pawn):
+                        raise RuntimeError("The stock disguise report did not verify the enrolled guest")
+                    result = {"native_guest_disguise": proof}
                 elif action == native_guest_armor.FIXTURE and self.native_guest and self.fixtures:
                     character = self.roles().get(request.get("target") or "guest")
                     guid = request.get("item_guid") or uuid.uuid4().hex.upper()

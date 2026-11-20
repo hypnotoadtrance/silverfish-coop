@@ -39,6 +39,7 @@ from .native_host_save import SLOT
 from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
+from .native_guest_armor import DISGUISE_PROBE, parse_recognition
 from .native_guest_melee import parse as parse_guest_melee
 from . import native_host_dig, native_host_dig_live, native_package_handoff_journal
 from . import native_title_entry
@@ -1125,6 +1126,11 @@ class Bridge:
                         data["native_guest_armor"] = report
                     else:
                         data.setdefault("native_guest_armor_projection", {})[report["pawn"]] = report
+                elif fields[0] == DISGUISE_PROBE:
+                    proof = parse_recognition(fields)
+                    if data.get("state") != "hosting" or data.get("map") != proof["map"] or "native_guest_disguise" in data:
+                        raise ValueError("Invalid stock disguise report scope")
+                    data["native_guest_disguise"] = proof
                 elif fields[0] in ("native-guest-helmet", "native-guest-helmet-projection"):
                     report = parse_guest_armor(fields)
                     if data.get("state") != "hosting" or data.get("map") != report["map"]:

@@ -6,12 +6,15 @@ import math
 import time
 
 from . import party
+from .enemy_loot_profiles import BY_MAP
 from .native_gold import valid_guid
+from .travel import DEAD_BRIDGE
 
 
 ACTION = "native-guest-armor-equip"
 HELMET_ACTION = "native-guest-helmet-equip"
 FIXTURE = "native-guest-armor-fixture"
+DISGUISE_PROBE = "native-guest-disguise-probe-fixture"
 CLASS_PATH = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
 HAZOP_CLASS_PATH = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 HUNTER_JACKET_PATH = "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"
@@ -19,6 +22,8 @@ HAZARD_SUIT_PATH = "/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSui
 DUST_FILTER_PATH = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"
 BASIC_HELMET_PATH = "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"
 GOGGLES_PATH = "/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"
+CONSCRIPT_UNIFORM_PATH = "/Game/Classes/Armor_Items/Armor_ConscriptUniform.Armor_ConscriptUniform_C"
+STANDARD_INFANTRY_HELMET_PATH = "/Game/Classes/Armor_Items/Helm_StandardInf.Helm_StandardInf_C"
 _APPLIED = {"equipped", "swapped", "reapplied", "already_applied"}
 
 
@@ -38,18 +43,22 @@ PROFILES = {
     "hazop": GearProfile(HAZOP_CLASS_PATH, 2.0, 0.2, 0.2, 0.1, 32.0),
     "hunter-jacket": GearProfile(HUNTER_JACKET_PATH, 1.2, 0.1, 0.05, 0.0, 25.0),
     "hazard-suit": GearProfile(HAZARD_SUIT_PATH, 10.5, 0.3, 0.5, 0.1, 28.0),
+    "conscript-uniform": GearProfile(CONSCRIPT_UNIFORM_PATH, 1.8, 0.15, 0.2, 0.1, 28.0),
 }
 HEAD_PROFILES = {
     "dust-filter": GearProfile(DUST_FILTER_PATH, 0.4, 0.1, 0.2, 0.5, voice_filter=True),
     "basic-helmet": GearProfile(BASIC_HELMET_PATH, 1.4, 0.1, 0.1, 0.0),
     "goggles": GearProfile(GOGGLES_PATH, 0.1, 0.0, 0.1, 0.0),
+    "standard-infantry-helmet": GearProfile(STANDARD_INFANTRY_HELMET_PATH, 2.4, 0.1, 0.2, 0.8, voice_filter=True),
 }
 CLASS_PATHS = frozenset(profile.class_path for profile in PROFILES.values())
 EQUIP_ACTIONS = {**dict.fromkeys(CLASS_PATHS, ACTION),
                  **dict.fromkeys((profile.class_path for profile in HEAD_PROFILES.values()), HELMET_ACTION)}
 SEED_PROFILES = {"basic-helmet": HEAD_PROFILES["basic-helmet"], "goggles": HEAD_PROFILES["goggles"],
                  "dust-filter": HEAD_PROFILES["dust-filter"],
-                 "hunter-jacket": PROFILES["hunter-jacket"], "hazard-suit": PROFILES["hazard-suit"]}
+                 "hunter-jacket": PROFILES["hunter-jacket"], "hazard-suit": PROFILES["hazard-suit"],
+                 "conscript-uniform": PROFILES["conscript-uniform"],
+                 "standard-infantry-helmet": HEAD_PROFILES["standard-infantry-helmet"]}
 
 
 def parse(fields):
@@ -92,6 +101,21 @@ def parse(fields):
             proof["voice_filter"] = fields[21] == "1"
         if proof["ok"] and not helmet_effects(proof):
             raise ValueError("Invalid combined stock armor and helmet stats")
+    return proof
+
+
+def parse_recognition(fields):
+    profile = BY_MAP[DEAD_BRIDGE]
+    if (len(fields) != 12 or fields[1] != DEAD_BRIDGE or fields[3] not in profile.actors
+            or not fields[2].startswith(f"Player_FP_C {profile.world}:PersistentLevel.")):
+        raise ValueError("Invalid State disguise fixture identity")
+    proof = {"map": fields[1], "pawn": fields[2], "npc": fields[3]}
+    for role, offset in (("host", 4), ("guest", 8)):
+        configured, compromised, recognized, relation = map(int, fields[offset:offset + 4])
+        if not (0 <= configured < 15 and compromised in (0, 1) and 0 <= recognized < 15 and 0 <= relation <= 6):
+            raise ValueError("Invalid stock disguise recognition")
+        proof[role] = {"configured": configured, "compromised": bool(compromised),
+                       "recognized": recognized, "relation": relation}
     return proof
 
 

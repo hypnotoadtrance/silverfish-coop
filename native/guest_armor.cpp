@@ -35,6 +35,9 @@ namespace
     constexpr auto helmet_base = STR("/Game/Classes/Armor_Items/Item_HelmetMaster_BP.Item_HelmetMaster_BP_C");
     constexpr auto armor_type = STR("/Game/Classes/Libraries/Structs/Armor_Struct.Armor_Struct");
     constexpr auto helmet_type = STR("/Game/Classes/Libraries/Structs/Helmet_Struct.Helmet_Struct");
+    constexpr auto faction_type = STR("/Game/Classes/Libraries/Enums_Lib/Factions_Enum.Factions_Enum");
+    constexpr auto configure_disguise = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Configure_Disguise");
+    constexpr std::uint8_t state_faction = 4;
     constexpr auto damage_type = STR("/Game/Classes/Libraries/Structs/Damage_Struct.Damage_Struct");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
     constexpr auto factory_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeDefaultItem");
@@ -74,6 +77,9 @@ namespace
         bool helmet{};
         const U::TCHAR* vox{};
         std::basic_string_view<U::TCHAR> passive{};
+        std::uint8_t disguise_faction{};
+        std::uint8_t flashlight{};
+        std::array<double, 3> light_origin{0.0, 0.0, 170.0};
     };
     constexpr std::array armor_profiles{
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"), "bomber",
@@ -92,6 +98,13 @@ namespace
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSuit_C"), "hazard-suit",
             10.5, 1.6, 1.2, 8.0, 5200, {0.15, 0.0, 0.2, 0.15, 0.3, 0.5, 0.1, 0.5, 0.4, 0.5, 0.25},
             false, nullptr, STR("Crafting")},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_ConscriptUniform.Armor_ConscriptUniform_C"), "conscript-uniform",
+            1.8, 1.1, 0.9, 8.0, 800, {0.05, 0.0, 0.1, 0.05, 0.15, 0.2, 0.1, 0.15, 0.0, 0.2, 0.05},
+            false, nullptr, {}, state_faction},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Helm_StandardInf.Helm_StandardInf_C"), "standard-infantry-helmet",
+            2.4, 1.0, 1.0, 0.0, 2500, {0.15, 0.0, 0.2, 0.1, 0.1, 0.1, 0.8, 0.1, 0.2, 0.2, 0.1}, true,
+            STR("/Game/Assets/Sounds/AudioEffects/GasMask_Filter_02.GasMask_Filter_02"), {}, state_faction, 2,
+            {11.287835, -14.388264, 168.1}},
     };
     constexpr auto& bomber = armor_profiles[0];
     constexpr std::size_t slashing = 4, poison = 6, acid = 9;
@@ -331,6 +344,13 @@ namespace
         return nullptr;
     }
 
+    bool faction_property(U::FByteProperty* property)
+    {
+        auto* type = property ? property->GetEnum().Get() : nullptr;
+        return type && type->GetPathName() == faction_type &&
+            type->GetNameByValue(state_faction).ToString() == STR("Factions_Enum::NewEnumerator4");
+    }
+
     U::UObject* armor_defaults(const ArmorProfile& profile)
     {
         auto* klass = find<U::UClass>(profile.path);
@@ -345,7 +365,8 @@ namespace
             type->GetPropertyValueInContainer(cdo) != (profile.helmet ? 6 : 7) ||
             !value || value->GetPropertyValueInContainer(cdo) != profile.value || !effects ||
             !boolean(cdo, STR("Stacks"), false)) return nullptr;
-        if (!profile.helmet && (!disguise || disguise->GetPropertyValueInContainer(cdo) != 0 ||
+        if (!profile.helmet && (!disguise || disguise->GetPropertyValueInContainer(cdo) != profile.disguise_faction ||
+            (profile.disguise_faction && !faction_property(disguise)) ||
             !field<U::FClassProperty>(cdo, STR("PowerArmor")) || object(cdo, STR("PowerArmor")))) return nullptr;
         if (profile.helmet)
         {
@@ -359,7 +380,14 @@ namespace
                 (profile.vox ? !exact(voice, chain_type) || voice->GetPathName() != profile.vox : voice != nullptr))
                 return nullptr;
             U::FScriptArrayHelper list(factions, factions->ContainerPtrToValuePtr<void>(cdo));
-            if (list.Num() || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
+            if (list.Num() != (profile.disguise_faction ? 1 : 0) ||
+                reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
+            if (profile.disguise_faction)
+            {
+                auto* faction = U::CastField<U::FByteProperty>(factions->GetInner());
+                if (!faction_property(faction) || faction->GetArrayDim() != 1 || faction->GetOffset_Internal() != 0 ||
+                    faction->GetPropertyValueInContainer(list.GetRawPtr()) != profile.disguise_faction) return nullptr;
+            }
         }
         U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
         if (profile.passive.empty()) return passives.Num() == 0 ? cdo : nullptr;
@@ -532,16 +560,18 @@ namespace
             if (!weight || weight->GetPropertyValueInContainer(defaults) != profile.weight || !source_visible || !target_visible ||
                 source_visible->GetPropertyValueInContainer(defaults) != profile.visibility ||
                 !hud || !boolean(defaults, STR("FullHUD"), false) || !source_light || !target_light ||
-                source_light->GetPropertyValueInContainer(defaults) != 0 ||
+                source_light->GetPropertyValueInContainer(defaults) != profile.flashlight ||
                 !source_origin || !target_origin || !vector_type || source_origin->GetStruct().Get() != vector_type ||
                 target_origin->GetStruct().Get() != vector_type || !x || !y || !z) return "native_guest_armor_helmet_stats_unqualified";
             const auto* origin = source_origin->ContainerPtrToValuePtr<void>(defaults);
-            if (x->GetPropertyValueInContainer(origin) != 0.0 || y->GetPropertyValueInContainer(origin) != 0.0 ||
-                z->GetPropertyValueInContainer(origin) != 170.0) return "native_guest_armor_helmet_light_unqualified";
+            if (x->GetPropertyValueInContainer(origin) != profile.light_origin[0] ||
+                y->GetPropertyValueInContainer(origin) != profile.light_origin[1] ||
+                z->GetPropertyValueInContainer(origin) != profile.light_origin[2])
+                return "native_guest_armor_helmet_light_unqualified";
             helm_weight->SetPropertyValueInContainer(next, profile.weight);
             target_visible->SetPropertyValueInContainer(next, profile.visibility);
             hud->SetPropertyValueInContainer(next, false);
-            target_light->SetPropertyValueInContainer(next, 0);
+            target_light->SetPropertyValueInContainer(next, profile.flashlight);
             target_origin->CopyCompleteValue(target_origin->ContainerPtrToValuePtr<void>(next), origin);
             return copy_resistance(defaults, profile, helm_resist, next);
         }
@@ -592,6 +622,46 @@ namespace
         const ArmorProfile* torso{};
         std::array<double, damage_fields.size()> combined{};
         bool voice_filter{};
+    };
+
+    struct DisguiseProjection
+    {
+        U::UFunction* configure{};
+        U::FByteProperty* faction{};
+        U::FBoolProperty* compromised{};
+        std::uint8_t prior_faction{};
+        bool prior_compromised{};
+
+        bool bind(U::UObject* pawn)
+        {
+            configure = find<U::UFunction>(configure_disguise);
+            faction = field<U::FByteProperty>(pawn, STR("Disguise"));
+            compromised = field<U::FBoolProperty>(pawn, STR("Disguise_Compromised"));
+            if (!configure || configure->GetOuterPrivate() != pawn->GetClassPrivate() ||
+                configure->GetNumParms() != 0 || configure->GetParmsSize() != 0 ||
+                configure->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+                !faction_property(faction) || !compromised) return false;
+            prior_faction = faction->GetPropertyValueInContainer(pawn);
+            prior_compromised = compromised->GetPropertyValueInContainer(pawn);
+            return true;
+        }
+
+        bool refresh(const Scope& scope, bool paired) const
+        {
+            if (!configure) return true;
+            // Stock Configure_Disguise reads the pawn's own worn rows and the shared reputation.
+            scope.pawn->ProcessEvent(configure, nullptr);
+            const auto configured = faction->GetPropertyValueInContainer(scope.pawn);
+            return scope.current() && (configured == 0 || (paired && configured == state_faction)) &&
+                compromised->GetPropertyValueInContainer(scope.pawn) == prior_compromised;
+        }
+
+        void rollback(U::UObject* pawn) const
+        {
+            if (!configure) return;
+            faction->SetPropertyValueInContainer(pawn, prior_faction);
+            compromised->SetPropertyValueInContainer(pawn, prior_compromised);
+        }
     };
 
     int report(const Lua& lua, bool ok, std::string_view status, const Report& result = {})
@@ -737,6 +807,14 @@ namespace
 
         const auto* torso = head ? other_profile : selected;
         const auto* helmet = head ? selected : other_profile;
+        const auto state_gear = [](const ArmorProfile* profile) {
+            return profile && profile->disguise_faction == state_faction;
+        };
+        const bool state_torso = state_gear(torso);
+        const bool state_helmet = state_gear(helmet);
+        DisguiseProjection disguise;
+        if ((state_torso || state_helmet || state_gear(previous)) && !disguise.bind(scope.pawn))
+            return report(lua, false, "native_guest_armor_disguise_schema_unqualified");
         // The stock character copies the selected class's voice filter to this pawn.
         auto* vox = helmet ? field<U::FObjectProperty>(scope.pawn, STR("Vox Effect")) : nullptr;
         auto* next_voice = helmet ? object(armor_defaults(*helmet), STR("VoxEffect")) : nullptr;
@@ -807,7 +885,13 @@ namespace
             proof.voice_filter = voice_slot && vox->GetObjectPropertyValue(voice_slot);
             return report(lua, true, status, proof);
         };
-        if (worn && matches()) return success("already_applied");
+        if (worn && matches())
+        {
+            if (disguise.refresh(scope, state_torso && state_helmet)) return success("already_applied");
+            disguise.rollback(scope.pawn);
+            return report(lua, false, scope.current() ? "native_guest_armor_disguise_rolled_back" :
+                          "mutation_unverified_guest_armor_disguise", proof);
+        }
 
         // The two saved rows remain independent. Only the guest pawn's derived stats combine them.
         if (!worn)
@@ -821,7 +905,8 @@ namespace
         if (voice_slot) vox->SetObjectPropertyValue(voice_slot, next_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, proof.carry_after);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, proof.minimum);
-        if (scope.current() && matches()) return success(previous ? "swapped" : worn ? "reapplied" : "equipped");
+        if (scope.current() && matches() && disguise.refresh(scope, state_torso && state_helmet) && matches())
+            return success(previous ? "swapped" : worn ? "reapplied" : "equipped");
 
         if (!worn)
         {
@@ -834,6 +919,7 @@ namespace
         if (voice_slot) vox->SetObjectPropertyValue(voice_slot, old_voice);
         projection.carry->SetPropertyValueInContainer(scope.pawn, old_carry);
         projection.minimum->SetPropertyValueInContainer(scope.pawn, old_minimum);
+        disguise.rollback(scope.pawn);
         const bool rolled_back = scope.current() && original_bag.matches(bag) && original_slot.matches(active) &&
             original_body.matches(body) && original_helm.matches(helm) && original_resist.matches(resist) &&
             projection.carry->GetPropertyValueInContainer(scope.pawn) == old_carry &&
@@ -880,7 +966,8 @@ namespace
             {
                 const auto name = lua.get_string();
                 if (name != "basic-helmet" && name != "dust-filter" && name != "goggles" &&
-                    name != "hunter-jacket" && name != "hazard-suit")
+                    name != "hunter-jacket" && name != "hazard-suit" &&
+                    name != "conscript-uniform" && name != "standard-infantry-helmet")
                     return report(lua, false, "native_guest_armor_fixture_profile_unavailable");
                 const auto selected = std::ranges::find(armor_profiles, name, &ArmorProfile::name);
                 if (selected == armor_profiles.end())

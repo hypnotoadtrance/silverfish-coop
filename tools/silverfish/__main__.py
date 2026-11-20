@@ -185,7 +185,7 @@ def parser() -> argparse.ArgumentParser:
         "native-broker-grant-manifest",
         "native-broker-drill-issue-fixture", "native-broker-drill-seed-fixture", "native-broker-drill-inspect",
         "native-weapon-roundtrip",
-        "native-guest-armor-equip", "native-guest-armor-fixture", "native-guest-helmet-equip",
+        "native-guest-armor-equip", "native-guest-armor-fixture", "native-guest-helmet-equip", "native-guest-disguise-probe-fixture",
         "native-guest-weapon-seed", "native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
         "native-guest-weapon-seed-ammo", "native-guest-weapon-reload",
         "native-guest-smg-hold-fixture", "native-guest-held-fire-fixture",

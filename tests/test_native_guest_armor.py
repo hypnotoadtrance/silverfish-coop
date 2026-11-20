@@ -4,7 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from tools.silverfish import link, native_guest_armor as armor, party
-from tools.silverfish.travel import RAIL_YARD
+from tools.silverfish.enemy_loot_profiles import BY_MAP
+from tools.silverfish.travel import DEAD_BRIDGE, RAIL_YARD
 
 
 class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
@@ -140,6 +141,27 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(armor.helmet_effects(dict(proof, status="equipped", carry_after=5.3)))
         self.assertFalse(armor.helmet_effects(dict(proof, combined_poison=.5)))
         self.assertFalse(armor.helmet_effects(dict(proof, torso_profile="bomber")))
+
+    def test_state_gear_has_distinct_stock_slots_and_recognition(self):
+        self.assertEqual(armor.EQUIP_ACTIONS[armor.CONSCRIPT_UNIFORM_PATH], armor.ACTION)
+        self.assertEqual(armor.EQUIP_ACTIONS[armor.STANDARD_INFANTRY_HELMET_PATH], armor.HELMET_ACTION)
+        map_profile = BY_MAP[DEAD_BRIDGE]
+        pawn = f"Player_FP_C {map_profile.world}:PersistentLevel.Player_FP_C_1"
+        helmet = armor.parse(["native-guest-helmet", DEAD_BRIDGE, pawn, "FA" * 16, "equip", "1", "equipped",
+                              "2", "1", "7.2", "6", "28", ".1", ".2", "standard-infantry-helmet", "-", "-",
+                              "conscript-uniform", ".25", ".4", ".9", "1"])
+        self.assertEqual(helmet["class_path"], armor.STANDARD_INFANTRY_HELMET_PATH)
+        self.assertFalse(armor.helmet_effects(dict(helmet, voice_filter=False)))
+        frame = [armor.DISGUISE_PROBE, DEAD_BRIDGE, pawn, map_profile.actors[0], "0", "0", "12", "5",
+                 "4", "0", "4", "0"]
+        proof = armor.parse_recognition(frame)
+        self.assertEqual(proof["host"], dict(configured=0, compromised=False, recognized=12, relation=5))
+        self.assertEqual(proof["guest"], dict(configured=4, compromised=False, recognized=4, relation=0))
+        for index, value in ((2, "foreign pawn"), (3, "foreign NPC"), (5, "2"), (10, "15"), (11, "7")):
+            with self.subTest(index=index, value=value), self.assertRaises(ValueError):
+                changed = frame.copy()
+                changed[index] = value
+                armor.parse_recognition(changed)
 
     async def test_hazard_suit_fixture_and_owned_equip_use_the_stock_body_profile(self):
         guid = "AB" * 16

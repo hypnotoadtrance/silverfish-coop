@@ -17,17 +17,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_dust_cabinet as cabinet
 from tools.silverfish.native_guest_armor import (
-    ACTION, BASIC_HELMET_PATH, CLASS_PATH, DUST_FILTER_PATH, FIXTURE, GOGGLES_PATH, HELMET_ACTION, SEED_PROFILES,
-    effects, helmet_effects,
+    ACTION, BASIC_HELMET_PATH, CLASS_PATH, CONSCRIPT_UNIFORM_PATH, DISGUISE_PROBE, DUST_FILTER_PATH, FIXTURE,
+    GOGGLES_PATH, HELMET_ACTION, SEED_PROFILES, STANDARD_INFANTRY_HELMET_PATH, effects, helmet_effects,
 )
-from tools.silverfish.travel import OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import DEAD_BRIDGE, OBSERVATORY, RAIL_YARD
 
 
-async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, gear_profiles=False):
+async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, gear_profiles=False, state_disguise=False):
     dust_filter = dust_filter or gear_profiles
-    kind = "gear" if gear_profiles else "helmet" if dust_filter else "armor"
+    kind = "disguise" if state_disguise else "gear" if gear_profiles else "helmet" if dust_filter else "armor"
     name = f"stock-guest-{kind}-" + uuid.uuid4().hex[:8]
-    area = RAIL_YARD if dust_filter else OBSERVATORY
+    area = DEAD_BRIDGE if state_disguise else RAIL_YARD if dust_filter else OBSERVATORY
     host = ("--campaign", name)
     client = ("--profile", name)
     run = work / "campaigns" / name / "run"
@@ -120,7 +120,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
 
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones")
     client_flags = ("--headless", "--native-zones")
-    if dust_filter:
+    if dust_filter or state_disguise:
         host_flags += ("--native-expanded-zones",)
         client_flags += ("--native-guest-inventory-view",)
     try:
@@ -134,6 +134,47 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
         initial = await inventory(client, character)
         assert all(row["source"] not in ("armor", "helmet") for row in initial.values()), initial
         evidence["initial_guest_inventory"] = initial
+
+        if state_disguise:
+            async def recognition():
+                return (await act(host, DISGUISE_PROBE, "--target", "guest"))["native_guest_disguise"]
+
+            before = await recognition()
+            assert before["host"]["configured"] == before["guest"]["configured"] == 0, before
+            uniform = await seed("conscript-uniform")
+            helmet = await seed("standard-infantry-helmet")
+            goggles = await seed("goggles")
+            await equip_from_overlay(uniform, "native_guest_armor")
+            armor_only = await recognition()
+            assert armor_only["guest"]["configured"] == 0, armor_only
+            await equip_from_overlay(helmet, "native_guest_helmet")
+            active = await recognition()
+            assert active["host"] == before["host"] and active["guest"]["configured"] == 4, active
+            assert (active["guest"]["recognized"], active["guest"]["compromised"]) == (4, False), active
+            assert active["guest"]["relation"] != active["host"]["relation"], active
+            saved = await inventory(client, character)
+            gear_row(saved, uniform, "armor", CONSCRIPT_UNIFORM_PATH)
+            gear_row(saved, helmet, "helmet", STANDARD_INFANTRY_HELMET_PATH)
+            assert await inventory(host, "host") == host_before
+            evidence["stock_recognition"] = {"before": before, "armor_only": armor_only, "active": active}
+
+            await stop(host, authority)
+            await stop(client, guest)
+            await launch(host, "host-restart", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)
+            await wait(run, lambda s: s.get("state") == "hosting" and s.get("generation") != first["generation"])
+            renewed = await act(host, "refresh-invite", "--target", invitation["guest_id"])
+            await launch(client, "guest-restart", "join", *client, "--invite", renewed["invite_file"], *client_flags)
+            await enroll()
+            await wait(run, lambda s: projection(s, helmet, head=True, torso="conscript-uniform"))
+            restored = await recognition()
+            assert (restored["guest"], restored["host"]) == (active["guest"], active["host"]), restored
+            assert await inventory(client, character) == saved and await inventory(host, "host") == host_before
+            await equip_from_overlay(goggles, "native_guest_helmet")
+            broken = await recognition()
+            assert (broken["guest"], broken["host"]) == (before["guest"], before["host"]), broken
+            evidence["stock_recognition"].update(restored=restored, incompatible_helmet=broken)
+            evidence["verified"] = True
+            return
 
         if dust_filter:
             await wait(run, lambda state: cabinet.observed(state.get("game", {}), "closed") != {})
@@ -347,6 +388,8 @@ if __name__ == "__main__":
     scenario.add_argument("--dust-filter", action="store_true", help="verify the exact railyard helmet through stock inventory input")
     scenario.add_argument("--gear-profiles", action="store_true",
                           help="verify stock Rail Yard Dust Filter pickup, headless gear seeds, helmet swaps and restart")
+    scenario.add_argument("--state-disguise", action="store_true",
+                          help="verify guest-only State gear recognition against a stock Dead Bridge NPC and restart")
     args = parser.parse_args()
     asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), stock_input=args.stock_input, dust_filter=args.dust_filter,
-                       gear_profiles=args.gear_profiles))
+                       gear_profiles=args.gear_profiles, state_disguise=args.state_disguise))
