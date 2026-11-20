@@ -40,28 +40,57 @@ ROUTE = (
 REPORT = "live-mindcore-verification.json"
 
 
-def baseline_inputs(work, baseline):
+def _route_proofs(rows):
+    if not isinstance(rows, list) or len(rows) != len(ROUTE):
+        return False
+    fields = ("source", "destination", "entrance", "kind", "actor")
+    for row, leg in zip(rows, ROUTE, strict=True):
+        if not isinstance(row, dict) or tuple(row.get(key) for key in fields) != leg:
+            return False
+        _, destination, _, kind, _ = leg
+        route, = [item for item in AUTHORED_ROUTES
+                  if (item.source, item.destination, item.entrance, item.kind, item.actor) == leg]
+        field = "Dungeon_TransitionDoor_BP_C" if kind == "door" else "LevelExit_Spawn_BP_C"
+        world = destination.rsplit("/", 1)[-1]
+        marker = f"{field} {destination}.{world}:PersistentLevel.{route.arrival_actor}"
+        if (row.get("arrival", {}).get("actor"), row.get("arrival", {}).get("placement")) != (marker, "arrow"):
+            return False
+    return True
+
+
+def baseline_inputs(work, baseline, *, resume=False):
+    prefix, report, area = ("mindcore-", REPORT, core.MAP) if resume else (
+        "drill-results-", "live-drill-test-results-verification.json", SCIENTIST_SHOP)
     if (baseline.resolve(strict=True) != baseline or baseline.is_junction()
             or baseline.parents[2] != work.parent or baseline.parent.name != "campaigns"
-            or not baseline.name.startswith("drill-results-")):
-        raise ValueError("Choose a verified Results campaign from an isolated sibling lab")
+            or not baseline.name.startswith(prefix)):
+        raise ValueError("Choose the requested exact campaign type from an isolated sibling lab")
     source = {
         "campaign": baseline / "save/campaign.json",
         "identity": baseline / "save/host-identity.json",
-        "proof": baseline / "run/live-drill-test-results-verification.json",
+        "proof": baseline / "run" / report,
     }
     for path in source.values():
         if path.resolve(strict=True) != path or path.is_symlink():
             raise ValueError("A Results input is outside its exact isolated campaign")
     data, proof = runtime.read_json(source["campaign"]), runtime.read_json(source["proof"])
-    receipt = proof["station"]["receipt"]
+    receipt = proof["source_results"] if resume else proof["station"]["receipt"]
     character, guid, blank = (receipt[key] for key in ("owner", "filled_guid", "blank_guid"))
     party = data["world"]["party"]
-    if (data["world"]["map"] != SCIENTIST_SHOP or proof.get("verified") is not True
-            or not drill_download_unlocked(party) or party.get(DRILL.ledger, {}).get(blank) != receipt
+    if (data["world"]["map"] != area or not drill_download_unlocked(party) or party.get(DRILL.ledger, {}).get(blank) != receipt
             or not core._conversion(party, character, guid) or core.LEDGER in party):
         raise ValueError("The checkpoint must have the verified Scientist Results and a fresh Data Silo console")
-    native_host_save.verify_checkpoint(baseline / "game-user", data)
+    profile = baseline / "game-user"
+    native_host_save.verify_checkpoint(profile, data)
+    if resume:
+        dormant = core.parse_scene(["native-mindcore-scene", core.MAP, core.CRADLE, core.UPLOADER, core.CORE, core.FLAG, "0", "0"])
+        frames = (data["world"]["native_host_save"], data["characters"][character]["state"]["native_guest_save"])
+        if (proof.get("dormant") != dormant or not _route_proofs(proof.get("routes"))
+                or frames[0]["slot"] == frames[1]["slot"]
+                or any(stock_flags(profile / "Saved/SaveGames", frame, core.MAP).get(core.FLAG, 0) != 0 for frame in frames)):
+            raise ValueError("Resume needs the exact dormant console, seven authored legs, and both original stage-zero frames")
+    elif proof.get("verified") is not True:
+        raise ValueError("The Scientist Results proof is unverified")
     guest_id = str(uuid.UUID(data["characters"][character]["guest_id"]))
     source["invite"] = baseline / "run/invites" / f"{guest_id}.invite.json"
     if source["invite"].resolve(strict=True) != source["invite"] or source["invite"].is_symlink():
@@ -70,10 +99,10 @@ def baseline_inputs(work, baseline):
     if (invitation.get("host"), invitation.get("guest_id"), invitation.get("character_id")) != (
             "127.0.0.1", guest_id, character):
         raise ValueError("The proof needs the exact loopback Results owner")
-    return data, source, receipt, guest_id
+    return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
-async def exercise(work, baseline, vanilla_saved):
+async def exercise(work, baseline, vanilla_saved, *, resume=False):
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -81,7 +110,7 @@ async def exercise(work, baseline, vanilla_saved):
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
-    data, inputs, conversion, guest_id = baseline_inputs(work, baseline)
+    data, inputs, conversion, guest_id, prior_routes = baseline_inputs(work, baseline, resume=resume)
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
     character, guid, blank = (conversion[key] for key in ("owner", "filled_guid", "blank_guid"))
     name = "mindcore-" + uuid.uuid4().hex[:8]
@@ -89,7 +118,10 @@ async def exercise(work, baseline, vanilla_saved):
     run, guest_run = campaign / "run", client / "run"
     run.mkdir(parents=True)
     print(run, flush=True)
-    proof = {"baseline": baseline.name, "routes": [], "source_results": conversion}
+    start_area = data["world"]["map"]
+    proof = {"baseline": baseline.name, "routes": prior_routes, "source_results": conversion}
+    if resume:
+        proof["resumed_dormant_checkpoint"] = data["revision"]
     jobs = []
 
     async def action(directory, verb, *, success=True, **fields):
@@ -198,12 +230,13 @@ async def exercise(work, baseline, vanilla_saved):
         (run / "invites").mkdir()
         shutil.copyfile(inputs["invite"], run / "invites" / f"{guest_id}.invite.json")
         host_job = start_host(0)
-        opening = await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == SCIENTIST_SHOP, timeout=55)
+        opening = await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == start_area, timeout=55)
         port = opening["endpoint"]["port"]
         guest_job = await start_guest()
-        authority = await paired(SCIENTIST_SHOP)
-        for leg in ROUTE:
-            authority = await travel(authority, leg)
+        authority = await paired(start_area)
+        if not resume:
+            for leg in ROUTE:
+                authority = await travel(authority, leg)
 
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
@@ -286,5 +319,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
+    parser.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
     options = parser.parse_args()
-    asyncio.run(exercise(*(value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))))
+    paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
+    asyncio.run(exercise(*paths, resume=options.resume))

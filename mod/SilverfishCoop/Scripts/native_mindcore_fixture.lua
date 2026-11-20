@@ -18,18 +18,28 @@ local function within(a, b, distance)
 end
 
 local function move_core(scene, pawn)
-    if pawn ~= scene.host:GetFullName() or scene.host.Dead ~= false or valid(scene.host.HeldObject)
-        or scene.status ~= 0 or scene.installed or scene.cradle.Powered ~= false then refuse("inactive_host_scope") end
+    if pawn ~= scene.host:GetFullName() then refuse("exact_host_pawn_changed") end
+    if scene.host.Dead ~= false then refuse("host_not_living") end
+    if valid(scene.host.HeldObject) then refuse("host_holding_object") end
+    -- Send_PowerSignal's Powered argument is transient. The stock USaveGame flag and
+    -- the cradle's live Status already agree in mindcore.scene.
+    if scene.status ~= 0 or scene.installed then refuse("console_not_dormant") end
     local cap = scene.cradle.Capsule
     local capsule_class = StaticFindObject("/Script/Engine.CapsuleComponent")
-    if not same(cap and cap:GetClass(), capsule_class) or not same(cap:GetOwner(), scene.cradle)
-        or not cap:GetGenerateOverlapEvents() or not scene.core:GetActorEnableCollision()
-        or cap:IsOverlappingActor(scene.core) ~= false or not scene.frame:GetGenerateOverlapEvents()
-        or scene.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= true then refuse("stock_overlap_unavailable") end
+    if not valid(cap) or not same(cap:GetClass(), capsule_class) or not same(cap:GetOwner(), scene.cradle) then
+        refuse("stock_capsule_unavailable")
+    end
+    if cap:GetGenerateOverlapEvents() ~= true then refuse("stock_capsule_overlap_disabled") end
+    if scene.core:GetActorEnableCollision() ~= true then refuse("stock_core_collision_disabled") end
+    if scene.frame:GetGenerateOverlapEvents() ~= true then refuse("stock_core_overlap_disabled") end
+    if cap:IsOverlappingActor(scene.core) ~= false then refuse("stock_core_already_overlapping") end
+    if scene.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= true then refuse("stock_core_not_simulating") end
 
     local center, source = cap:K2_GetComponentLocation(), scene.core:K2_GetActorLocation()
-    if not within(source, {X = 714.3901, Y = -1686.9511, Z = 118.3686}, 300)
-        or not within(center, scene.cradle:K2_GetActorLocation(), 100) then refuse("authored_geometry_unavailable") end
+    if not within(source, {X = 714.3901, Y = -1686.9511, Z = 118.3686}, 300) then
+        refuse("stock_core_displaced" .. (point(source) and string.format(":%.1f,%.1f,%.1f", source.X, source.Y, source.Z) or ""))
+    end
+    if not within(center, scene.cradle:K2_GetActorLocation(), 100) then refuse("stock_capsule_displaced") end
     local moved, result = pcall(function()
         return scene.core:K2_SetActorLocation({X = center.X, Y = center.Y, Z = center.Z}, false, {}, true)
     end)
