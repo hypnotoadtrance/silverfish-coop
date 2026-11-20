@@ -110,6 +110,17 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await coordinator.open_coop(receipt, self.config)
         launch.assert_not_called()
 
+    def test_join_can_be_configured_before_an_invitation_exists(self):
+        self.data["host"] = None
+        self.data["join"] = {"profile": "guest", "invite": None, "character": None}
+        self.write()
+        plan = coordinator.load_plan(self.config)
+        self.assertEqual((plan.interactive_join, plan.profile, plan.invite, plan.character), (True, "guest", None, None))
+        self.data["join"]["character"] = "a8d8d498-8d4c-4bb3-b39c-2f594a783a78"
+        self.write()
+        with self.assertRaisesRegex(ValueError, "after importing an invitation"):
+            coordinator.load_plan(self.config)
+
     def test_invitation_must_be_inside_the_coop_workspace(self):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)

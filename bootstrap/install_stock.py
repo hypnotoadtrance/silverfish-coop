@@ -252,15 +252,19 @@ def _plan(work: Path, build: str, host: dict | None, join: dict | None) -> dict:
         if type(join) is not dict or set(join) != {"profile", "invite", "character"}:
             raise ValueError("Invalid configured Join action")
         _run_path(work, "clients", join["profile"])
-        invite = _absolute(join["invite"])
-        if not invite.is_relative_to(work) or not invite.name.endswith(".invite.json"):
-            raise ValueError("Import the invitation into the private co-op workspace")
-        _ordinary(invite)
-        loaded = load_invite(invite, build)
-        chosen = loaded["character_id"] if join["character"] is None else join["character"]
-        if not isinstance(chosen, str) or str(UUID(chosen)) != chosen:
-            raise ValueError("Invalid configured guest character ID")
-        join = dict(join, invite=str(invite))
+        if join["invite"] is None:
+            if join["character"] is not None:
+                raise ValueError("Choose a character after importing an invitation")
+        else:
+            invite = _absolute(join["invite"])
+            if not invite.is_relative_to(work) or not invite.name.endswith(".invite.json"):
+                raise ValueError("Import the invitation into the private co-op workspace")
+            _ordinary(invite)
+            loaded = load_invite(invite, build)
+            chosen = loaded["character_id"] if join["character"] is None else join["character"]
+            if not isinstance(chosen, str) or str(UUID(chosen)) != chosen:
+                raise ValueError("Invalid configured guest character ID")
+            join = dict(join, invite=str(invite))
     return {"schema": 1, "work": str(work), "host": host, "join": join}
 
 
@@ -389,12 +393,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.host_campaign is None and (args.bind is not None or args.port is not None):
         parser.error("--bind and --port require --host-campaign")
-    if (args.join_profile is None) != (args.invite is None) or args.character is not None and args.invite is None:
-        parser.error("--join-profile and --invite are required together. --character requires an invitation.")
+    if args.invite is not None and args.join_profile is None or args.character is not None and args.invite is None:
+        parser.error("--invite requires --join-profile. --character requires an invitation.")
     host = None if args.host_campaign is None else {
         "campaign": args.host_campaign, "bind": args.bind or "127.0.0.1", "port": 7777 if args.port is None else args.port,
     }
-    join = None if args.invite is None else {"profile": args.join_profile, "invite": args.invite, "character": args.character}
+    join = None if args.join_profile is None else {"profile": args.join_profile, "invite": args.invite, "character": args.character}
     try:
         result = install(args.game, args.work, args.ue4ss, args.signatures, args.bootstrap, host=host, join=join)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, BadZipFile, NotImplementedError) as error:

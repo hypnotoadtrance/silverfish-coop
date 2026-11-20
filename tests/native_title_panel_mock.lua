@@ -1,5 +1,7 @@
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local descriptor, request = "bridge/title-handoff-session.tsv", "bridge/title-handoff-request.tsv"
+local join_request, join_response = "bridge/title-join-request.tsv", "bridge/title-join-response.tsv"
+local join_invite = "bridge/title-join-fixture.invite.json"
 local generation = string.rep("a", 32)
 local files, buttons, classes, flags = {}, {}, {}, {}
 local now, id, callback, display, writes = 100, 0, nil, nil, 0
@@ -35,16 +37,18 @@ end
 local layout, guid = object(), object()
 layout.GetViewportSize = function() return {X = 1280, Y = 720} end
 layout.GetViewportScale = function() return 1 end
-guid.NewGuid = function() return {A = 1, B = -1, C = 2, D = 3} end
+local next_guid = 3
+guid.NewGuid = function() return {A = 1, B = -1, C = 2, D = next_guid} end
 classes["/Script/UMG.Default__WidgetBlueprintLibrary"] = statics
 classes["/Script/UMG.Default__WidgetLayoutLibrary"] = layout
 classes["/Script/Engine.Default__KismetGuidLibrary"] = guid
 local editing
+local field_labels = {campaign = "Campaign", port = "UDP port", bind = "Listening IP", invite = "Join co-op",
+    character = "Create a character", profile = "Local profile"}
 local editor = {
     mount = function(frame, phase, field, caption, initial)
-        assert(not editing and frame.qualified and phase == "ready" and caption:find(field == "bind" and "Listening IP"
-            or field == "campaign" and "Campaign" or "UDP port", 1, true))
-        editing = {field = field, text = initial}
+        assert(not editing and frame.qualified and phase == "ready" and caption:find(field_labels[field], 1, true))
+        editing = {field = field, text = initial or ""}
         return editing
     end,
     read = function(handle, frame, phase)
@@ -68,6 +72,9 @@ env = setmetatable({
         if name == "native_title_host_form" then
             return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_host_form.lua", "t", env))()
         end
+        if name == "native_title_join_form" then
+            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_join_form.lua", "t", env))()
+        end
         if name == "native_title_settings_widget" then return editor end
         assert(name == "native_title_entry")
         return {probe = function(state, phase) if state.qualified and phase == "ready" then return context end end}
@@ -78,14 +85,14 @@ env = setmetatable({
             if not files[path] then return end
             return {read = function(_, size) return files[path]:sub(1, size) end, close = function() return true end}
         end
-        assert(mode == "wb" and path:sub(1, #request) == request)
+        assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request))
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
     os = {time = function() return now end, getenv = function(name) return flags[name] end,
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
-            assert(target == request)
+            assert(target == request or target == join_request)
             if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
@@ -154,7 +161,7 @@ press("F7")
 assert(writes == 1)
 
 offer("join", 108, string.rep("b", 32))
-press("F8")
+assert(not fixture("join"))
 assert(report()[3] == "unavailable" and writes == 1) -- Existing request was never overwritten.
 press("F9")
 assert(report()[3] == "hidden" and report()[5] == 0 and not display.mounted)
@@ -259,3 +266,55 @@ callback()
 native_keys.F7()
 callback()
 assert(files[request] == "2\t" .. event_generation .. "\t00000001ffffffff0000000200000003\thost\t\t\t\n")
+
+local function join_form_fixture(operation, value)
+    return pcall(panel.command, {"test", "native-title-join-form-fixture", operation, value}, state, "ready")
+end
+
+files[request] = nil
+local join_generation = string.rep("5", 32)
+local import_id = string.rep("a", 32)
+local original_character = "b9f344d2-2ed6-4fbf-a237-3c014586ab31"
+local created_character = "4ac79601-2979-4bdf-8d7e-155650143df0"
+flags.SILVERFISH_COOP_HEADLESS = "1"
+offer("join", 108, join_generation)
+assert(join_form_fixture("open"))
+assert(editing.field == "invite" and not files[request] and not files[join_request])
+local invite_payload = '{"credential":"private fixture token"}'
+files[join_invite] = invite_payload .. "\r\n"
+next_guid = 7
+local import_op = "00000001ffffffff0000000200000007"
+assert(join_form_fixture("import"))
+assert(not editing and not files[request])
+assert(files[join_request] == ("1\t%s\t%s\timport\t%d\n%s"):format(join_generation, import_op, #invite_payload, invite_payload))
+files[join_response] = ("1\t%s\t%s\tok\t%s\t1\n%s\tOld character\n"):format(join_generation, import_op, import_id, original_character)
+local ok, observed = join_form_fixture("observe")
+assert(ok and observed == "title_join_form_state=waiting") -- The worker has not taken the request.
+files[join_request] = nil
+local expected_catalog = files[join_response]
+files[join_response] = expected_catalog:gsub(join_generation, string.rep("6", 32), 1)
+ok, observed = join_form_fixture("observe")
+assert(ok and observed == "title_join_form_state=waiting") -- A previous generation cannot publish.
+files[join_response] = expected_catalog
+ok, observed = join_form_fixture("observe")
+assert(ok and observed == "title_join_form_state=catalog;count=1")
+assert(display.TextBlock_Notes.text:find("Old character", 1, true))
+allowed, reason = join_form_fixture("select", created_character)
+assert(not allowed and reason == "title_join_form_fixture_character_unavailable")
+
+next_guid = 8
+local create_op = "00000001ffffffff0000000200000008"
+assert(join_form_fixture("create", "New character"))
+assert(files[join_request] == ("1\t%s\t%s\tcreate\t%s\tNew character\n"):format(join_generation, create_op, import_id))
+assert(not files[request])
+files[join_request] = nil
+files[join_response] = ("1\t%s\t%s\tok\t%s\t2\n%s\tOld character\n%s\tNew character\n")
+    :format(join_generation, create_op, import_id, original_character, created_character)
+ok, observed = join_form_fixture("observe")
+assert(ok and observed == "title_join_form_state=catalog;count=2")
+assert(join_form_fixture("select", created_character) and editing.field == "profile")
+assert(join_form_fixture("profile", "my-guest-profile"))
+next_guid = 9
+assert(join_form_fixture("submit") and not editing)
+assert(files[request] == ("2\t%s\t00000001ffffffff0000000200000009\tjoin\t%s\tmy-guest-profile\t%s\n")
+    :format(join_generation, import_id, created_character))

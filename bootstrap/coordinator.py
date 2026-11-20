@@ -93,7 +93,7 @@ def load_plan(config_path: Path) -> SimpleNamespace:
     work = _qualified_path(config["work"], directory=True)
     host, join = config["host"], config["join"]
     plan = SimpleNamespace(work=work, title_profile="bootstrap", campaign=None, bind="127.0.0.1", port=7777,
-                           invite=None, profile="guest", character=None)
+                           invite=None, profile="guest", character=None, interactive_join=False)
     if host is not None:
         if (type(host) is not dict or set(host) != {"campaign", "bind", "port"}
                 or type(host["port"]) is not int or not 1 <= host["port"] <= 65535
@@ -105,12 +105,17 @@ def load_plan(config_path: Path) -> SimpleNamespace:
         if type(join) is not dict or set(join) != {"profile", "invite", "character"}:
             raise ValueError("Invalid configured Join action")
         plan.profile = _profile(join["profile"])
-        plan.invite = _qualified_path(join["invite"], directory=False)
-        if not plan.invite.is_relative_to(work) or not plan.invite.name.endswith(".invite.json"):
-            raise ValueError("Import the invitation into the private co-op workspace")
+        plan.interactive_join = join["invite"] is None
         character = join["character"]
-        if character is not None and (not isinstance(character, str) or str(uuid.UUID(character)) != character):
-            raise ValueError("Invalid configured guest character ID")
+        if plan.interactive_join:
+            if character is not None:
+                raise ValueError("Choose a character after importing an invitation")
+        else:
+            plan.invite = _qualified_path(join["invite"], directory=False)
+            if not plan.invite.is_relative_to(work) or not plan.invite.name.endswith(".invite.json"):
+                raise ValueError("Import the invitation into the private co-op workspace")
+            if character is not None and (not isinstance(character, str) or str(uuid.UUID(character)) != character):
+                raise ValueError("Invalid configured guest character ID")
         plan.character = character
     if host is None and join is None:
         raise ValueError("Enable a Host or Join action for the co-op title")

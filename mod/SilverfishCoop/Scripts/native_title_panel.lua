@@ -6,7 +6,7 @@ local keys = {host = "F7", join = "F8", hide = "F9"}
 local actions = {
     ["host"] = {host = true}, ["join"] = {join = true}, ["host,join"] = {host = true, join = true},
 }
-local session_path, request_path, loop, current, session, report
+local bridge_path, session_path, request_path, loop, current, session, report
 local dismissed, submitted
 local input_keys = {}
 local key_order = {"hide", "host", "join"}
@@ -43,7 +43,7 @@ local function read_offer()
     return {generation = generation, choices = choices, expires = expires}
 end
 
-local function close_host_form(owner)
+local function close_form(owner)
     local form = owner.form
     owner.form = nil
     if form then form.api.remove(form.draft) end
@@ -53,7 +53,7 @@ local function remove_display()
     local old = session
     session = nil
     if old then
-        close_host_form(old)
+        close_form(old)
         display.remove(old.widget)
     end
 end
@@ -89,7 +89,7 @@ local function request_id()
     if id:find("[^0]") then return id end
 end
 
-local function write_request(generation, action, host_values)
+local function write_request(generation, action, form_values)
     local pending = io.open(request_path, "rb")
     if pending then
         pending:close()
@@ -100,7 +100,7 @@ local function write_request(generation, action, host_values)
     local temporary = request_path .. "." .. id .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    local row = host_values and {"2", generation, id, "host", table.unpack(host_values)}
+    local row = form_values and {"2", generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
     local written = file:write(table.concat(row, "\t"), "\n")
     local closed = file:close()
@@ -128,7 +128,7 @@ local function active_offer(action, context)
     return latest
 end
 
-local function choose(action, context, host_values)
+local function choose(action, context, form_values)
     if not can_choose(context) then return false, "title_panel_not_ready" end
     if action == "hide" then
         dismissed = session.offer.generation
@@ -138,14 +138,14 @@ local function choose(action, context, host_values)
     end
     local latest, reason = active_offer(action, context)
     if not latest then return false, reason end
-    if write_request(latest.generation, action, host_values) then
+    if write_request(latest.generation, action, form_values) then
         submitted = latest.generation
-        close_host_form(session)
+        close_form(session)
         report = {state = "pending", choices = latest.choices}
         message("Direct IP co-op\nStarting " .. (action == "host" and "host" or "join") .. "...\nF9   Hide")
         return true
     end
-    close_host_form(session)
+    close_form(session)
     report = {state = "unavailable", choices = latest.choices, reason = "title_request_write_failed"}
     message("Could not start co-op. Try again or press F9 to hide.")
     return false, report.reason
@@ -158,13 +158,13 @@ local function handle_host_form(action, state, phase, context)
     if not form then
         if action ~= "host" then return false, "title_host_form_unavailable" end
         local api = require("native_title_host_form")
-        session.form = {api = api, draft = api.open(state, phase)}
+        session.form = {role = "host", api = api, draft = api.open(state, phase)}
         message("")
         report = {state = "ready", choices = offer.choices}
         return true
     end
     if action == "hide" then
-        close_host_form(session)
+        close_form(session)
         message(menu_text(offer))
         return true
     end
@@ -172,6 +172,30 @@ local function handle_host_form(action, state, phase, context)
     local values, failure = form.api.selection(form.draft, state, phase)
     if not values then return false, failure end
     return choose("host", title.probe(state, phase), values)
+end
+
+local function handle_join_form(action, state, phase, context)
+    local offer, reason = active_offer("join", context)
+    if not offer then return false, reason end
+    local form = session.form
+    if not form then
+        if action ~= "join" then return false, "title_join_form_unavailable" end
+        local api = require("native_title_join_form")
+        local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id)
+        session.form = {role = "join", api = api, draft = draft}
+        message("")
+        report = {state = "ready", choices = offer.choices}
+        return true
+    end
+    if form.role ~= "join" then return false, "title_join_form_unavailable" end
+    if action == "hide" then
+        close_form(session)
+        message(menu_text(offer))
+        return true
+    end
+    local accepted, failure, values = form.api.press(form.draft, action, state, phase)
+    if values then return choose("join", title.probe(state, phase), values) end
+    return accepted, failure
 end
 
 local function fixture_enabled()
@@ -193,7 +217,7 @@ local function host_form_fixture_command(fields, state, phase)
         return "title_host_form_open"
     end
     local form = session.form
-    if not form then error("title_host_form_unavailable", 0) end
+    if not form or form.role ~= "host" then error("title_host_form_unavailable", 0) end
     if operation == "campaign" then
         local suffix = value:match("^title%-host%-settings%-([0-9a-f]+)$")
         if not suffix or #suffix ~= 8 or not form.api.fixture_write(form.draft, state, phase, "campaign", value) then
@@ -216,6 +240,35 @@ local function host_form_fixture_command(fields, state, phase)
     local accepted, failure = handle_host_form(action, state, phase, context)
     if not accepted then error(failure, 0) end
     return operation == "submit" and "title_host_form_submitted" or "title_host_form_cancelled"
+end
+
+local function join_form_fixture_command(fields, state, phase)
+    if not fixture_enabled() then error("title_join_form_fixture_unavailable", 0) end
+    local operation, value = fields[3], fields[4]
+    local has_value = operation == "select" or operation == "create" or operation == "profile"
+    if #fields ~= (has_value and 4 or 3) then error("title_join_form_fixture_arguments", 0) end
+    local context = title.probe(state, phase)
+    local offer, reason = active_offer("join", context)
+    if not offer then error(reason, 0) end
+    if operation == "open" then
+        if session.form or settings_fixture or credits_fixture then error("title_join_form_already_open", 0) end
+        local accepted, failure = handle_join_form("join", state, phase, context)
+        if not accepted then error(failure, 0) end
+        return "title_join_form_open"
+    end
+    local form = session.form
+    if not form or form.role ~= "join" then error("title_join_form_unavailable", 0) end
+    if operation == "submit" or operation == "cancel" then
+        if operation == "submit" and form.draft.screen ~= "profile" then error("title_join_form_selection_unavailable", 0) end
+        local accepted, failure = handle_join_form(operation == "submit" and "host" or "hide", state, phase, context)
+        if not accepted then error(failure, 0) end
+        return operation == "submit" and "title_join_form_submitted" or "title_join_form_cancelled"
+    end
+    if operation == "observe" then form.api.poll(form.draft, state, phase) end
+    local accepted, failure = form.api.fixture(form.draft, operation, value, state, phase)
+    if not accepted then error(failure, 0) end
+    if operation == "observe" then return accepted end
+    return "title_join_form_" .. operation .. "_accepted"
 end
 
 local function remove_settings_fixture()
@@ -327,6 +380,11 @@ local function poll()
         return
     end
     local pending = submitted == session.offer.generation
+    local form = session.form
+    if form and form.role == "join" and form.draft.pending then
+        if not active_offer("join", context) then return end
+        form.api.poll(form.draft, current.state, current.phase)
+    end
     local selected, rises = nil, 0
     local focused = bound_keys and next(events) and SilverfishNativeGameWindowFocused() == true
     for _, action in ipairs(key_order) do
@@ -347,7 +405,9 @@ local function poll()
         end
     end
     if rises ~= 1 then return end
-    if session.form or selected == "host" then
+    if form and form.role == "join" or not form and selected == "join" then
+        handle_join_form(selected, current.state, current.phase, context)
+    elseif form or selected == "host" then
         handle_host_form(selected, current.state, current.phase, context)
     else
         choose(selected, context)
@@ -384,6 +444,7 @@ end
 function panel.command(fields, state, phase)
     if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-host-form-fixture" then return host_form_fixture_command(fields, state, phase) end
+    if fields[2] == "native-title-join-form-fixture" then return join_form_fixture_command(fields, state, phase) end
     if fields[2] ~= "native-title-panel-press-fixture" then return end
     if not fixture_enabled() then error("title_panel_fixture_unavailable", 0) end
     local action = fields[3]
@@ -401,6 +462,7 @@ end
 
 function panel.start(bridge)
     if loop or type(bridge) ~= "string" or bridge == "" then return end
+    bridge_path = bridge
     session_path = bridge .. "/title-handoff-session.tsv"
     request_path = bridge .. "/title-handoff-request.tsv"
     if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" and type(RegisterKeyBind) == "function"

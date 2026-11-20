@@ -97,6 +97,24 @@ class TitleHandoffTests(unittest.TestCase):
         self.assertEqual(claim, Claim("host", "a" * 32, generation, self.host, settings))
         self.assertNotIn(settings[0], repr(claim))
 
+    def test_version_two_join_uses_only_the_opaque_invite_and_exact_character(self):
+        generation = self.publish({"join": self.join})
+        invite = "b" * 32
+        character = "fc8fa10f-540b-4b9f-babe-fd4082a78f6d"
+        prefix = f"2\t{generation}\t{'a' * 32}\tjoin\t"
+        for data in (f"share.invite.json\tguest\t{character}", f"{invite}\t../guest\t{character}",
+                     f"{invite}\tguest\t{character.upper()}", f"{invite}\tguest\t{character}\tsecret"):
+            with self.subTest(data=data):
+                self.handoff.request_path.write_bytes((prefix + data + "\n").encode("ascii"))
+                self.assert_refused("malformed_request", ready(2))
+        self.handoff.request_path.write_bytes((prefix + f"{invite}\tguest\t{character}\n").encode("ascii"))
+        self.assertIsNone(self.handoff.poll(ready(2)))
+        claim = self.handoff.poll(ready(3))
+        self.assertEqual(claim, Claim("join", "a" * 32, generation, self.join,
+                                      join_settings=(invite, "guest", character)))
+        self.assertNotIn(invite, repr(claim))
+        self.assertNotIn(character, repr(claim))
+
     def test_rejects_stale_generation_and_unadvertised_action(self):
         original = self.publish({"join": self.join})
         current = self.publish({"host": self.host}, sequence=2)

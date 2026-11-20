@@ -210,6 +210,11 @@ class StockInstallerTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.config.exists() or self.mod.exists() or self.activation.exists())
 
+    def test_install_can_offer_interactive_join_before_import(self):
+        self.install(host=None, join={"profile": "later", "invite": None, "character": None})
+        plan = coordinator.load_plan(self.config)
+        self.assertEqual((plan.campaign, plan.profile, plan.invite, plan.interactive_join), (None, "later", None, True))
+
     def test_join_config_uses_a_validated_private_invite_without_copying_credentials(self):
         character = "ff7de067-5c91-4c8f-befd-3e5bde50bc69"
         invitation = self.work / "invitations" / "friend.invite.json"

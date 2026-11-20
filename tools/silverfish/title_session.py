@@ -118,7 +118,8 @@ class TitleSession:
     def __init__(self, bridge: runtime.Bridge, plans: Mapping[str, SessionPlan], *,
                  retire_title=None, on_title_ready: Callable[[], None] | None = None,
                  title_saved_directory: Path | None = None, poll_interval: float = .1,
-                 startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None):
+                 startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
+                 join_settings=None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -141,6 +142,7 @@ class TitleSession:
         self._starting = False
         self._cancel_requested = False
         self._control = control
+        self._join_settings = join_settings
         self._control_published_at = None
         self._control_generation = None
         self._local_request = None
@@ -264,6 +266,8 @@ class TitleSession:
                             self._poll_control()
                         await asyncio.sleep(self._poll_interval)
                         continue
+                if self._join_settings is not None:
+                    self._join_settings.poll(self._handoff.generation if offered else None)
                 self._poll_control(snapshot)
                 claim = self._handoff.poll(snapshot)
                 self._selected(claim)
@@ -285,19 +289,24 @@ class TitleSession:
                 self._control.respond(self._local_request[0], False, error="title_stock_title_unready")
                 self._local_request = None
             self._handoff.close()
+            if self._join_settings is not None:
+                self._join_settings.poll(None)
 
     async def _launch(self, claim: Claim, original_title: tuple) -> bool:
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
-        if plan.resolve_claim is not None:
-            try:
+        try:
+            if plan.resolve_claim is not None:
                 plan = plan.resolve_claim(claim)
                 if not isinstance(plan, SessionPlan):
                     raise ValueError("Expected a resolved title session plan")
-            except (OSError, TypeError, ValueError, RuntimeError):
-                self._last_failure = dict(attempt, code="title_settings_invalid")
-                self._publish("failed", attempt=attempt)
-                return False
+        except (OSError, TypeError, ValueError, RuntimeError):
+            self._last_failure = dict(attempt, code="title_settings_invalid")
+            self._publish("failed", attempt=attempt)
+            return False
+        finally:
+            if self._join_settings is not None:
+                self._join_settings.poll(None)
         baseline = _read_plan_status(plan).get("generation")
         started_wall, started = time.time(), time.monotonic()
         last_progress, deadline = started, started + self._startup_timeout

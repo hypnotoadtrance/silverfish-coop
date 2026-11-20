@@ -73,6 +73,7 @@ def parser() -> argparse.ArgumentParser:
     menu.add_argument("--bind", default="127.0.0.1", help="local address for Direct IP")
     menu.add_argument("--port", type=_port, default=7777)
     menu.add_argument("--invite", type=Path, help="invitation the title screen can join")
+    menu.add_argument("--interactive-join", action="store_true", help="offer Join before importing an invitation")
     menu.add_argument("--profile", default="guest", help="local guest profile")
     menu.add_argument("--character", help="host-owned character ID from the invitation's catalog")
 
@@ -286,10 +287,11 @@ def _events(directory: Path, limit: int) -> dict:
 async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False, headless=False) -> dict:
     from . import embedded_title_plan, runtime
     from .service import MENU_HOST_OPTIONS, menu_host_start
-    from .title_session import TitleSession, host_plan, join_plan
+    from .title_session import SessionPlan, TitleSession, host_plan, join_plan
 
-    if not (opts.campaign or opts.invite):
-        raise ValueError("Supply a campaign for Host, an invitation for Join, or both")
+    join_offered = bool(opts.invite or getattr(opts, "interactive_join", False))
+    if not (opts.campaign or join_offered):
+        raise ValueError("Set a campaign for Host or enable Join")
     if opts.character and not opts.invite:
         raise ValueError("Character selection requires an invitation")
     if not runtime.qualified_authored_routes(opts.work):
@@ -325,12 +327,33 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
             return make_host_plan(name or opts.campaign, str(ip_address(address)), port)
 
         plans["host"] = replace(configured, resolve_claim=resolve_host)
-    if opts.invite:
-        guest = select_run(opts.work, "clients", opts.profile)
-        invitation = opts.invite.resolve(strict=True)
-        plans["join"] = (embedded_title_plan.guest_plan(opts.work, guest, invitation, opts.character, headless=headless)
-                         if embedded else join_plan(opts.work, guest, invitation, character_id=opts.character,
-                                                    headless=headless))
+    join_settings = None
+    if join_offered:
+        from .title_join_settings import TitleJoinSettings
+
+        def make_join_plan(name, invite, character):
+            guest = select_run(opts.work, "clients", name)
+            if embedded:
+                return embedded_title_plan.guest_plan(opts.work, guest, invite, character, headless=headless)
+            return join_plan(opts.work, guest, invite, character_id=character, headless=headless)
+
+        fixed = make_join_plan(opts.profile, opts.invite.resolve(strict=True), opts.character) if opts.invite else None
+
+        def resolve_join(claim):
+            if claim.join_settings is None:
+                if fixed is None:
+                    raise ValueError("Import an invitation and choose a character before joining")
+                return fixed
+            import_id, name, character = claim.join_settings
+            invite = join_settings.resolve(claim.generation, import_id, character)
+            return make_join_plan(name or opts.profile, invite, character)
+
+        async def join_without_selection():
+            raise ValueError("A verified invitation and character selection are required")
+
+        offered = fixed or SessionPlan(join_without_selection, lambda: None, lambda _: False)
+        plans["join"] = replace(offered, resolve_claim=resolve_join)
+
     title = select_run(opts.work, "titles", opts.title_profile)
     with Control(title / "run") as control:
         mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
@@ -338,11 +361,18 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         process = runtime.launch(opts.work, profile, mailbox, headless=headless, title_fixture=headless,
                                  inspect_title_profile=on_title_ready is not None)
         try:
-            await TitleSession(runtime.Bridge(mailbox, process), plans, control=control, on_title_ready=on_title_ready,
+            if join_offered:
+                join_settings = TitleJoinSettings(opts.work, mailbox)
+            await TitleSession(runtime.Bridge(mailbox, process), plans, control=control,
+                               join_settings=join_settings, on_title_ready=on_title_ready,
                                title_saved_directory=profile / "Saved" if on_title_ready is not None else None).run()
         finally:
-            if process.poll() is None:
-                await runtime.stop_game(process)
+            try:
+                if process.poll() is None:
+                    await runtime.stop_game(process)
+            finally:
+                if join_settings is not None:
+                    await join_settings.close()
     return {"ok": True, "state": "stopped"}
 
 

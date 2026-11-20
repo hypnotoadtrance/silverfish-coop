@@ -21,7 +21,10 @@ TOKEN = re.compile(r"[0-9a-f]{32}")
 _REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(host|join)\r?\n")
 _HOST_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})"
                            rb"\t([A-Za-z0-9.:%_-]{0,64})\t([0-9]{0,5})\r?\n")
-_MAX_REQUEST_BYTES = len(b"2\t" + b"0" * 32 + b"\t" + b"0" * 32 + b"\thost\t\t\t\r\n") + 64 + 64 + 5
+_CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
+                           rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
+_MAX_REQUEST_BYTES = len(b"2\t" + b"0" * 32 + b"\t" + b"0" * 32 + b"\thost\t\t\t\r\n") + max(64 + 64 + 5, 32 + 64 + 36)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ class Claim:
     generation: str
     binding: object = field(repr=False)
     host_settings: tuple[str, str, str] | None = field(default=None, repr=False)
+    join_settings: tuple[str, str, str] | None = field(default=None, repr=False)
 
 
 def _stock_title(snapshot):
@@ -216,12 +220,16 @@ class TitleHandoff:
         except (FileNotFoundError, PermissionError):
             return None
 
-        choice, settings = _REQUEST.fullmatch(data), None
+        host_settings = join_settings = None
+        choice = _REQUEST.fullmatch(data)
         if choice:
             generation, request_id, action = (field.decode("ascii") for field in choice.groups())
         elif choice := _HOST_REQUEST.fullmatch(data):
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in choice.groups())
-            action, settings = "host", (campaign, bind, port)
+            action, host_settings = "host", (campaign, bind, port)
+        elif choice := _JOIN_REQUEST.fullmatch(data):
+            generation, request_id, invite, profile, character = (field.decode("ascii") for field in choice.groups())
+            action, join_settings = "join", (invite, profile, character)
         else:
             return self._refuse("malformed_request")
         if error := self._request_error(generation, request_id, action):
@@ -241,7 +249,7 @@ class TitleHandoff:
 
         if not _unlink(self.request_path):
             return None
-        claim = Claim(action, request_id, generation, self._bindings[action], settings)
+        claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings)
         self._claim = claim
         self.last_refusal = None
         self.close()
