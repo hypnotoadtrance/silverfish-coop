@@ -141,6 +141,43 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(armor.helmet_effects(dict(proof, combined_poison=.5)))
         self.assertFalse(armor.helmet_effects(dict(proof, torso_profile="bomber")))
 
+    async def test_hazard_suit_fixture_and_owned_equip_use_the_stock_body_profile(self):
+        guid = "AB" * 16
+        pawn = f"Player_FP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Player_FP_C_7"
+        self.assertEqual(armor.EQUIP_ACTIONS[armor.HAZARD_SUIT_PATH], armor.ACTION)
+        seed = armor.parse(["native-guest-armor", "area", pawn, guid, "seed", "1", "seeded",
+                            "3", "4", "-1", "-1", "-1", "-1", "-1", "hazard-suit", "-", "-"])
+        suit = armor.parse(["native-guest-armor", "area", pawn, guid, "equip", "1", "equipped",
+                            "4", "3", "12", "6.75", "28", ".3", ".5", "hazard-suit", "-", "-"])
+        host = self.host()
+        host.native_recipients = lambda: {"guest-id": {"connected": True, "pawn": pawn}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=tuple(
+            {"state": "hosting", "map": "area", "native_guest_armor": row} for row in (seed, suit))))
+        args = (host, bridge, "guest-id")
+        with self.assertRaisesRegex(party.RuleError, "native_guest_armor_unavailable"):
+            await armor.perform(*args, "a" * 32, armor.FIXTURE, guid, seed_kind="hazard-suit")
+        bridge.command.assert_not_awaited()
+
+        host.fixtures = True
+        seeded = await armor.perform(*args, "a" * 32, armor.FIXTURE, guid, seed_kind="hazard-suit")
+        self.assertEqual(seeded["native_guest_armor"]["class_path"], armor.HAZARD_SUIT_PATH)
+        bridge.command.assert_awaited_once_with(armor.FIXTURE, pawn, guid, "hazard-suit", timeout=5)
+
+        host.fixtures = False
+        result = await armor.perform(*args, "b" * 32, armor.ACTION, guid)
+        self.assertEqual(result["native_guest_armor"], suit)
+        self.assertTrue(armor.effects(suit))
+        self.assertFalse(armor.effects(dict(suit, acid=.2)))
+        self.assertEqual(await armor.perform(*args, "b" * 32, armor.ACTION, guid), result)
+        self.assertEqual(bridge.command.await_count, 2)
+
+        helmet = armor.parse(["native-guest-helmet", RAIL_YARD, pawn, "CD" * 16, "project", "1", "reapplied",
+                              "1", "1", "7", "7", "28", ".1", ".2", "dust-filter", "-", "-",
+                              "hazard-suit", ".4", ".7", ".6", "1"])
+        self.assertTrue(armor.helmet_effects(helmet))
+        self.assertFalse(armor.helmet_effects(dict(helmet, combined_acid=.5)))
+        self.assertFalse(armor.helmet_effects(dict(helmet, voice_filter=False)))
+
     async def test_goggles_replace_distinct_dust_filter_and_require_exact_guest_checkpoint(self):
         frame = ["native-guest-helmet", "area", "Player_FP_C area.World:PersistentLevel.Player_FP_C_1",
                  "AB" * 16, "equip", "1", "swapped", "2", "2", "5", "5.15", "32", "0", ".1",

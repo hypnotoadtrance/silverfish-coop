@@ -14,6 +14,7 @@
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -72,6 +73,7 @@ namespace
         std::array<double, damage_fields.size()> damage;
         bool helmet{};
         const U::TCHAR* vox{};
+        std::basic_string_view<U::TCHAR> passive{};
     };
     constexpr std::array armor_profiles{
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"), "bomber",
@@ -87,6 +89,9 @@ namespace
             0.1, 1.0, 1.0, 0.0, 30, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0}, true},
         ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"), "hunter-jacket",
             1.2, 0.9, 0.75, 5.0, 250, {0.0, 0.0, 0.05, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0}},
+        ArmorProfile{STR("/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSuit_C"), "hazard-suit",
+            10.5, 1.6, 1.2, 8.0, 5200, {0.15, 0.0, 0.2, 0.15, 0.3, 0.5, 0.1, 0.5, 0.4, 0.5, 0.25},
+            false, nullptr, STR("Crafting")},
     };
     constexpr auto& bomber = armor_profiles[0];
     constexpr std::size_t slashing = 4, poison = 6, acid = 9;
@@ -357,7 +362,13 @@ namespace
             if (list.Num() || reputation->ContainerPtrToValuePtr<U::FScriptMap>(cdo)->Num()) return nullptr;
         }
         U::FScriptArrayHelper passives(effects, effects->ContainerPtrToValuePtr<void>(cdo));
-        return passives.Num() == 0 ? cdo : nullptr;
+        if (profile.passive.empty()) return passives.Num() == 0 ? cdo : nullptr;
+        auto* text = U::CastField<U::FStrProperty>(effects->GetInner());
+        if (passives.Num() != 1 || !text || text->GetArrayDim() != 1 || text->GetOffset_Internal() != 0)
+            return nullptr;
+        const auto& passive = text->GetPropertyValue(passives.GetRawPtr(0));
+        return passive.Len() == static_cast<int>(profile.passive.size()) &&
+            std::basic_string_view<U::TCHAR>{*passive, profile.passive.size()} == profile.passive ? cdo : nullptr;
     }
 
     bool stock_gear_row(const Inventory& inventory, const void* row, U::UObject* cdo, const ArmorProfile& profile)
@@ -868,7 +879,7 @@ namespace
             if (named_seed)
             {
                 const auto name = lua.get_string();
-                if (name != "basic-helmet" && name != "goggles" && name != "hunter-jacket")
+                if (name != "basic-helmet" && name != "goggles" && name != "hunter-jacket" && name != "hazard-suit")
                     return report(lua, false, "native_guest_armor_fixture_profile_unavailable");
                 const auto selected = std::ranges::find(armor_profiles, name, &ArmorProfile::name);
                 if (selected == armor_profiles.end())

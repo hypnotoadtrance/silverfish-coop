@@ -8,16 +8,19 @@ local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local jacket = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
 local hazop = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 local hunter_jacket = "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"
+local hazard_suit = "/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSuit_C"
 local dust_filter = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"
 local basic_helmet = "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"
 local goggles = "/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"
-local seed_profiles = {["hunter-jacket"] = hunter_jacket, ["basic-helmet"] = basic_helmet, goggles = goggles}
+local seed_profiles = {
+    ["hunter-jacket"] = hunter_jacket, ["hazard-suit"] = hazard_suit, ["basic-helmet"] = basic_helmet, goggles = goggles,
+}
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local projected, observation = {body = {}, head = {}}, nil
 
 function armor.is_body_path(path)
-    return path == jacket or path == hazop or path == hunter_jacket
+    return path == jacket or path == hazop or path == hunter_jacket or path == hazard_suit
 end
 
 function armor.is_helmet_path(path)

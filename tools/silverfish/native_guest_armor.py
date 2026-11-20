@@ -15,6 +15,7 @@ FIXTURE = "native-guest-armor-fixture"
 CLASS_PATH = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
 HAZOP_CLASS_PATH = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 HUNTER_JACKET_PATH = "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"
+HAZARD_SUIT_PATH = "/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSuit_C"
 DUST_FILTER_PATH = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"
 BASIC_HELMET_PATH = "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"
 GOGGLES_PATH = "/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"
@@ -36,6 +37,7 @@ PROFILES = {
     "bomber": GearProfile(CLASS_PATH, 0.5, 0.2, 0.2, 0.0, 25.0),
     "hazop": GearProfile(HAZOP_CLASS_PATH, 2.0, 0.2, 0.2, 0.1, 32.0),
     "hunter-jacket": GearProfile(HUNTER_JACKET_PATH, 1.2, 0.1, 0.05, 0.0, 25.0),
+    "hazard-suit": GearProfile(HAZARD_SUIT_PATH, 10.5, 0.3, 0.5, 0.1, 28.0),
 }
 HEAD_PROFILES = {
     "dust-filter": GearProfile(DUST_FILTER_PATH, 0.4, 0.1, 0.2, 0.5, voice_filter=True),
@@ -46,7 +48,7 @@ CLASS_PATHS = frozenset(profile.class_path for profile in PROFILES.values())
 EQUIP_ACTIONS = {**dict.fromkeys(CLASS_PATHS, ACTION),
                  **dict.fromkeys((profile.class_path for profile in HEAD_PROFILES.values()), HELMET_ACTION)}
 SEED_PROFILES = {"basic-helmet": HEAD_PROFILES["basic-helmet"], "goggles": HEAD_PROFILES["goggles"],
-                 "hunter-jacket": PROFILES["hunter-jacket"]}
+                 "hunter-jacket": PROFILES["hunter-jacket"], "hazard-suit": PROFILES["hazard-suit"]}
 
 
 def parse(fields):
