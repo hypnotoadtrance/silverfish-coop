@@ -101,6 +101,7 @@ namespace
     constexpr auto controller_class = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto camera_class = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
+    constexpr auto blank_tape_class = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
     constexpr auto gunsmith_ammo_class = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto smuggler_mre_class = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
@@ -653,7 +654,7 @@ namespace
         return effect.instances >= 0;
     }
 
-    struct CameraReputation
+    struct ScientistReputation
     {
         static constexpr std::uint8_t commune = 2;
         Unreal::UFunction* apply{};
@@ -663,7 +664,7 @@ namespace
         {
             if (!context.camera_only) return true;
             auto* faction = field<Unreal::FByteProperty>(context.shop, STR("Rep Faction"));
-            // The unmodified Camera quote is at most ceil(125 * 2.5). The stock Skinflint branch starts above 1000.
+            // The qualified Scientist shelf quotes stay below the stock Skinflint threshold of 1000.
             if (!faction || faction->GetPropertyValueInContainer(context.shop) != commune || price > 313) return false;
             apply = find<Unreal::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddPlayerRep"));
             if (!apply || apply->GetOuterPrivate() != context.instance->GetClassPrivate() ||
@@ -812,6 +813,7 @@ namespace
         auto* finite = layout.finite;
         Unreal::FArrayProperty* shelf{};
         const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
+        const Unreal::UClass* blank_tape{};
         const Unreal::UClass* reusable_supply{};
         if (context.camera_only || (context.guards_neutral_purchase && !context.reception))
         {
@@ -823,7 +825,11 @@ namespace
                 shelf = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
                 if (!layout.is_array(shelf))
                     return response(lua, false, context.camera_only ? "shop_camera_shelf_unavailable" : "shop_gunsmith_shelf_unavailable");
-                if (context.camera_only) finite = nullptr;
+                if (context.camera_only)
+                {
+                    finite = nullptr;
+                    if (!context.host) blank_tape = find<Unreal::UClass>(blank_tape_class);
+                }
                 else
                 {
                     reusable_supply = find<Unreal::UClass>(context.smuggler ? smuggler_mre_class : gunsmith_ammo_class);
@@ -836,7 +842,7 @@ namespace
         std::set<Guid> seen;
         std::string rows;
         Offer selected;
-        int index = -1, listed = 0, supply_shelf_count = 0;
+        int index = -1, listed = 0, supply_shelf_count = 0, blank_tape_count = 0;
         for (auto* inventory : {shelf, finite})
         {
             if (!inventory) continue;
@@ -848,10 +854,14 @@ namespace
                 const auto* item = items.GetRawPtr(i);
                 const auto key = layout.identity(item);
                 if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
-                if (context.camera_only && layout.item_type(item) != camera) continue;
+                const auto* klass = layout.item_type(item);
+                const bool tape_offer = blank_tape && klass == blank_tape && inventory == shelf;
+                if (context.camera_only && klass != camera && !tape_offer) continue;
+                if (tape_offer && ++blank_tape_count > 1)
+                    return response(lua, false, "shop_scientist_blank_tape_shelf_ambiguous");
                 if (supply_shelf)
                 {
-                    if (layout.item_type(item) != reusable_supply) continue;
+                    if (klass != reusable_supply) continue;
                     ++supply_shelf_count;
                 }
                 if constexpr (Buying)
@@ -859,7 +869,10 @@ namespace
                 if (++listed > max_offers) return response(lua, false, "shop_offer_count_unavailable");
                 Offer row;
                 if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
-                if (context.camera_only && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
+                if (tape_offer && (row.stackable || row.quantity != 1 || row.value != 30 || row.price > 75 ||
+                                  layout.ammo->GetPropertyValueInContainer(item) != 0))
+                    return response(lua, false, "shop_scientist_exact_blank_tape_offer_unavailable");
+                if (context.camera_only && !tape_offer && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
                     return response(lua, false, "shop_exact_camera_offer_unavailable");
                 if (supply_shelf)
                 {
@@ -899,7 +912,7 @@ namespace
                     context.smuggler ? "shop_smuggler_skinflint_effect_unverified" :
                     "shop_gunsmith_skinflint_effect_unverified");
         }
-        CameraReputation reputation;
+        ScientistReputation reputation;
         if (!reputation.bind(context, wallet, selected.price))
             return response(lua, false, "shop_camera_reputation_unqualified");
 
@@ -926,7 +939,8 @@ namespace
             const auto minted = new_stock_guid(layout);
             if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
                 layout.owner_has(context.stock, minted))
-                return response(lua, false, context.camera_only ? "shop_camera_guid_unavailable" :
+                return response(lua, false, blank_tape && selected.klass == blank_tape ? "shop_scientist_blank_tape_guid_unavailable" :
+                    context.camera_only ? "shop_camera_guid_unavailable" :
                     context.smuggler ? "shop_smuggler_mre_guid_unavailable" : "shop_gunsmith_ammo_guid_unavailable");
             layout.replace_identity(transferred.get(), minted);
             selected.guid = minted;

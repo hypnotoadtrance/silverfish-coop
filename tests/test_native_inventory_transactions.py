@@ -9,6 +9,7 @@ from tools.silverfish import native_computer_board, native_finite_shop, party
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control
 from tools.silverfish.multi_host import MultiHost
+from tools.silverfish.native_tape_profiles import BLANK_CLASS
 from tools.silverfish.runtime import read_json, write_json
 from tools.silverfish.service import Host
 from tools.silverfish.travel import OBSERVATORY, SCIENTIST_SHOP
@@ -39,9 +40,10 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_native=AsyncMock(side_effect=checkpoint), native_pickup=Mock(),
         )
 
-    def shop_frame(self, area, pawn, state, wallet_delta=0):
-        item = native_finite_shop.CAMERA if area == SCIENTIST_SHOP else native_finite_shop.BALL_AMMO
-        offer = {"guid": GUID, "class_path": item, "quantity": 1, "value": 125, "price": 125}
+    def shop_frame(self, area, pawn, state, wallet_delta=0, *, item=None, guid=GUID, value=125, price=125):
+        if item is None:
+            item = native_finite_shop.CAMERA if area == SCIENTIST_SHOP else native_finite_shop.BALL_AMMO
+        offer = {"guid": guid, "class_path": item, "quantity": 1, "value": value, "price": price}
         return {"state": "hosting", "map": area, "native_finite_shop": {
             "state": state, "map": area, "pawn": pawn, "actor": native_finite_shop.MERCHANTS[area],
             "wallet_before": 1000, "wallet_after": 1000 + wallet_delta,
@@ -83,6 +85,48 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         result = await native_finite_shop.perform(host, bridge, "host", "native-finite-shop-buy", f"{GUID}@125", OPERATION_ID)
         self.assertEqual(result["native_finite_purchase"]["wallet_after"], 875)
         self.assertEqual(host.checkpoint_native.await_args.kwargs.get("require_guest_frames", frozenset()), frozenset())
+
+    async def test_scientist_guest_blank_reuses_stock_quote_and_commits_minted_guid(self):
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        host.checkpoint_native = AsyncMock(side_effect=[10, 11])
+        minted = "C" * 32
+        blank = {"item": BLANK_CLASS, "value": 30, "price": 47}
+        listing = self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank)
+        purchase = self.shop_frame(SCIENTIST_SHOP, PAWN, "purchased", -47, guid=minted, **blank)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[listing, purchase]))
+
+        purchase_action = (host, bridge, GUEST, "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
+        reply = await native_finite_shop.perform(*purchase_action)
+        receipt = reply["native_finite_purchase"]
+        self.assertEqual((receipt["offer_guid"], receipt["stock_source"], receipt["offers"][0]["guid"]),
+                         (GUID, "stock_shelf", minted))
+        self.assertEqual((receipt["wallet_after"], receipt["merchant_cash_after"]), (953, 547))
+        bridge.command.assert_awaited_with("native-finite-shop-buy", PAWN, GUID, "1", "47", "1000", timeout=7)
+        commit = host.checkpoint_native.await_args
+        self.assertEqual(commit.kwargs["require_guest_frames"], {GUEST})
+        self.assertEqual(commit.args[1]["receipts"][GUEST][0]["result"], reply)
+        self.assertEqual(await native_finite_shop.perform(*purchase_action), reply)
+        self.assertEqual((bridge.command.await_count, host.checkpoint_native.await_count), (2, 2))
+
+    async def test_scientist_blank_host_report_and_reused_shelf_guid_fail_closed(self):
+        blank = {"item": BLANK_CLASS, "value": 30, "price": 47}
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.shop_frame(SCIENTIST_SHOP, HOST_PAWN, "listed", **blank)))
+        with self.assertRaisesRegex(RuntimeError, "exact qualified stock offer"):
+            await native_finite_shop.perform(host, bridge, "host", "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertEqual(bridge.command.await_count, 1)
+
+        host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank),
+            self.shop_frame(SCIENTIST_SHOP, PAWN, "purchased", -47, **blank),
+        ]))
+        with self.assertRaisesRegex(RuntimeError, "mint a fresh stock blank tape GUID"):
+            await native_finite_shop.perform(host, bridge, GUEST, "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
+        self.assertEqual(host.party["receipts"], {})
+        self.assertEqual(host.checkpoint_native.await_count, 1)
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
 
     @staticmethod
     def enqueue(control, identifier, action, **arguments):

@@ -17,15 +17,18 @@ OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 GUNSMITH = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
 GUNSMITH_ACTOR = f"Shop_BP_C {GUNSMITH}.Shop_Gunsmith_P:PersistentLevel.Shop_BP_C_1"
 BALL_AMMO = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+BLANK_CLASS = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"
 MAPS = {"observatory": OBSERVATORY,
         "scav-bar": "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
         "black-market": "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01",
         "scientist": "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
         "gunsmith": GUNSMITH}
 CAMERA = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+SCIENTIST_ACTOR = f"Shop_BP_C {MAPS['scientist']}.Shop_Scientist_01:PersistentLevel.Shop_BP_C_2"
 
 
-async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool, merchant: str, *, shop_pages=False) -> None:
+async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool, merchant: str, *,
+                 shop_pages=False, scientist_blank=False) -> None:
     name = "finite-shop-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     host_run = campaign / "run"
@@ -43,6 +46,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     processes = []
     reusable = merchant in ("scientist", "gunsmith")
+    verify_balances = merchant == "gunsmith" or scientist_blank
     proof = None
 
     async def spawn(directory, filename, owner, *arguments):
@@ -89,9 +93,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         saves = campaign / "game-user" / "Saved" / "SaveGames"
         balances = {}
         for owner, frame in (("host", host_frame), ("guest", guest_frame)):
-            flags = stock_flags(saves, frame, GUNSMITH)
-            balances[owner] = {"cash": flags.get("Player_Cash", 0), "xp": flags.get("Player_Xp", 0),
-                               "faction": {key: value for key, value in flags.items() if key.startswith(("Rep_", "Adv_"))}}
+            flags = stock_flags(saves, frame, MAPS[merchant])
+            faction = {key: value for key, value in flags.items() if key.startswith(("Rep_", "Adv_"))}
+            if scientist_blank:
+                faction.setdefault("Rep_Commune", 0)
+            balances[owner] = {"cash": flags.get("Player_Cash", 0), "xp": flags.get("Player_Xp", 0), "faction": faction}
         return balances
 
     async def rendered_page(identity, listing, offset, previous_event, wallet):
@@ -144,16 +150,21 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         assert listing["wallet_before"] == listing["wallet_after"] == 100_000 and listing["offers"], listing
         assert listing["map"] == MAPS[merchant] and listing["actor"] == approach["actor"], listing
         if merchant == "scientist":
-            offer, = [row for row in listing["offers"] if row["class_path"] == CAMERA]
+            assert listing["actor"] == SCIENTIST_ACTOR and sum(row["class_path"] == CAMERA for row in listing["offers"]) == 1, listing
+            item_class = BLANK_CLASS if scientist_blank else CAMERA
+            offer, = [row for row in listing["offers"] if row["class_path"] == item_class]
+            if scientist_blank:
+                assert (offer["quantity"], offer["value"]) == (1, 30) and 0 < offer["price"] <= 75, offer
         elif merchant == "gunsmith":
             assert listing["actor"] == GUNSMITH_ACTOR, listing
             offer, = [row for row in listing["offers"] if row["class_path"] == BALL_AMMO]
             assert (offer["quantity"], offer["value"]) == (200, 600) and offer["price"] > 0, offer
-            before_balances = await saved_balances(invite["character_id"])
-            assert before_balances["host"]["cash"] == listing["wallet_before"], before_balances
         else:
             offer = listing["offers"][0] if shop_view else next(
                 row for row in listing["offers"] if row["price"] > 0 and "/Weapons/" not in row["class_path"])
+        if verify_balances:
+            before_balances = await saved_balances(invite["character_id"])
+            assert before_balances["host"]["cash"] == listing["wallet_before"], before_balances
         guid, price = offer["guid"], offer["price"]
         stale = await act(guest_target, "native-finite-shop-buy", "--target", f"{guid}@{price + 1}", expected=False)
         assert stale["error"] == "native_finite_shop_quote_changed", stale
@@ -209,8 +220,9 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         acquired, = [row for row in inventory["items"] if row["guid"] == acquire_guid]
         assert acquired["class_path"] == offer["class_path"] and acquired["quantity"] == offer["quantity"], acquired
         expected_wallet = purchase["wallet_after"]
-        if merchant == "gunsmith":
-            assert inventory["owner"] == invite["character_id"] and acquired["source"] == "backpack" and acquired["stackable"] is True, inventory
+        if verify_balances:
+            assert inventory["owner"] == invite["character_id"] and acquired["source"] == "backpack", inventory
+            assert acquired["stackable"] is (not scientist_blank), acquired
             assert stock["offers"] == listing["offers"] and all(row["guid"] != acquire_guid for row in stock["offers"]), stock
             retained_offer, = [row for row in stock["offers"] if row["guid"] == guid]
             assert purchase["merchant_cash_after"] == listing["merchant_cash_before"] + price, purchase
@@ -220,6 +232,13 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             paid_balances = await saved_balances(invite["character_id"])
             expected_balances = {**before_balances, "host": {**before_balances["host"], "cash": expected_wallet}}
             assert paid_balances == expected_balances, (before_balances, paid_balances)
+        if scientist_blank:
+            await act(host_target, "native-finite-shop-approach", "--target", "host")
+            host_listing = (await act(host_target, "native-finite-shop-list"))["native_finite_shop"]
+            host_camera, = host_listing["offers"]
+            assert host_listing["actor"] == SCIENTIST_ACTOR and host_camera["class_path"] == CAMERA, host_listing
+            denied_host = await act(host_target, "native-finite-shop-buy", "--target", f"{guid}@{price}", expected=False)
+            assert denied_host["error"] == "native_finite_shop_item_unavailable", denied_host
         if sell:
             quote = (await act(guest_target, "native-finite-shop-sale-quote", "--target", guid))["native_finite_sale_quote"]
             quote_row, = quote["offers"]
@@ -242,7 +261,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         returned = await wait(host_run, lambda state: state.get("state") == "hosting" and state.get("generation") != generation
                               and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         assert returned["game"]["native_wallet"] == expected_wallet and returned["endpoint"]["port"] == int(port), returned
-        if merchant == "gunsmith":
+        if verify_balances:
             rebound = await wait(guest_run, lambda state: state.get("state") == "connected"
                                  and state.get("host_session") == returned["generation"]
                                  and state.get("character_id") == invite["character_id"]
@@ -251,6 +270,10 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         after = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
         if merchant == "scientist":
             assert len([row for row in after["offers"] if row["class_path"] == CAMERA]) == 1, after
+            if scientist_blank:
+                restarted_offer, = [row for row in after["offers"] if row["class_path"] == BLANK_CLASS]
+                assert (restarted_offer["quantity"], restarted_offer["value"]) == (1, 30), restarted_offer
+                assert restarted_offer["guid"] != acquire_guid and after["merchant_cash_before"] == purchase["merchant_cash_after"], after
         elif merchant == "gunsmith":
             assert after["actor"] == GUNSMITH_ACTOR and after["map"] == GUNSMITH, after
             restarted_offer, = [row for row in after["offers"] if row["class_path"] == BALL_AMMO]
@@ -264,21 +287,25 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         assert [row for row in persisted["items"] if row["guid"] == acquire_guid] == ([] if sell else [acquired]), persisted
         proof = {"purchase": purchase, "inventory_row": acquired, "after_restart_offer_count": after["count"],
                  "stock_merchant_input": shop_view}
-        if merchant == "gunsmith":
-            assert rebound["game"]["map"] == GUNSMITH and persisted["owner"] == invite["character_id"], (rebound, persisted)
+        if verify_balances:
+            assert rebound["game"]["map"] == MAPS[merchant] and persisted["owner"] == invite["character_id"], (rebound, persisted)
             restored_balances = await saved_balances(invite["character_id"])
             assert restored_balances == paid_balances, (restored_balances, paid_balances)
-            proof["gunsmith"] = {"actor": GUNSMITH_ACTOR, "shelf_offer": offer, "shelf_offer_after_buy": retained_offer,
-                                 "shelf_offer_after_restart": restarted_offer, "port": int(port), "character": invite["character_id"],
-                                 "restart_generation": returned["generation"], "merchant_cash_after_restart": after["merchant_cash_before"],
-                                 "native_balances_before": before_balances, "native_balances_after": paid_balances,
-                                 "native_balances_restored": restored_balances}
+            lane = "scientist_blank" if scientist_blank else "gunsmith"
+            proof[lane] = {"actor": listing["actor"], "shelf_offer": offer, "shelf_offer_after_buy": retained_offer,
+                           "shelf_offer_after_restart": restarted_offer, "port": int(port), "character": invite["character_id"],
+                           "restart_generation": returned["generation"], "merchant_cash_after_restart": after["merchant_cash_before"],
+                           "native_balances_before": before_balances, "native_balances_after": paid_balances,
+                           "native_balances_restored": restored_balances}
+            if scientist_blank:
+                proof[lane]["host_camera_only"] = host_listing
+                proof[lane]["host_blank_purchase_error"] = denied_host["error"]
             if shop_view:
-                proof["gunsmith"]["stock_interact"] = opened
-                proof["gunsmith"]["overlay_selected_quote"] = view
+                proof[lane]["stock_interact"] = opened
+                proof[lane]["overlay_selected_quote"] = view
             if shop_pages:
                 proof["gunsmith"]["shop_pages"] = page_proof
-        if merchant == "scientist":
+        if merchant == "scientist" and not scientist_blank:
             equipped = await act(guest_target, "native-guest-weapon-equip", "--target", acquire_guid)
             report = equipped["native_guest_weapon"]
             assert (report["status"], report["guid"], report["kind"], report["class_path"]) == (
@@ -318,14 +345,17 @@ if __name__ == "__main__":
     options.add_argument("--vanilla-saved", type=Path)
     options.add_argument("--shop-view", "--shop-input", action="store_true")
     options.add_argument("--shop-pages", action="store_true", help="verify authenticated Gunsmith overlay page navigation when stock spans two pages")
+    options.add_argument("--scientist-blank", action="store_true", help="purchase the Scientist's exact guest Blank Data Tape shelf offer")
     options.add_argument("--sell", action="store_true")
     options.add_argument("--merchant", choices=MAPS, default="observatory")
     args = options.parse_args()
     if args.merchant == "scientist" and args.sell:
-        options.error("The Scientist smoke checks camera acquisition and equip")
+        options.error("The Scientist smoke checks reusable stock purchases")
+    if args.scientist_blank and args.merchant != "scientist":
+        options.error("--scientist-blank requires --merchant scientist")
     if args.merchant == "gunsmith" and args.sell:
         options.error("The Gunsmith smoke checks 9mm retention through restart")
     if args.shop_pages and args.merchant != "gunsmith":
         options.error("--shop-pages checks the Gunsmith stock profile")
     asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view or args.shop_pages, args.sell, args.merchant,
-                       shop_pages=args.shop_pages))
+                       shop_pages=args.shop_pages, scientist_blank=args.scientist_blank))

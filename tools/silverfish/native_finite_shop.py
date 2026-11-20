@@ -5,6 +5,7 @@ import time
 from . import party
 from .native_gold import valid_guid
 from .native_guest_consumable import MRE_CLASS
+from .native_tape_profiles import BLANK_CLASS
 from .travel import OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
@@ -40,7 +41,7 @@ def parse_item(fields: list[str]) -> dict:
             "value": int(fields[4]), "price": int(fields[5])}
 
 
-def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str) -> dict:
+def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *, guest: bool) -> dict:
     report = snapshot.get("native_finite_shop", {})
     offers = report.get("offers")
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
@@ -50,14 +51,19 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str) -
                 "wallet_before", "wallet_after", "merchant_cash_before", "merchant_cash_after"))):
         raise RuntimeError("The stock finite merchant did not return the exact authoritative report")
     guids = set()
+    blank_seen = False
     for offer in offers:
         guid, path = offer.get("guid"), offer.get("class_path")
         if (not valid_guid(guid) or guid in guids or type(path) is not str or not path.startswith("/Game/")
                 or len(path) > 512 or not 1 <= offer["quantity"] <= MAX_PRICE
                 or not 0 <= offer["price"] <= MAX_PRICE or type(offer.get("value")) is not int):
             raise RuntimeError("The finite merchant returned an invalid stock offer")
-        if area == SCIENTIST_SHOP and (path, offer["quantity"], offer["value"]) != (CAMERA, 1, 125):
-            raise RuntimeError("The Scientist Shop did not return an exact stock camera offer")
+        if area == SCIENTIST_SHOP:
+            item = (path, offer["quantity"], offer["value"])
+            if guest and item == (BLANK_CLASS, 1, 30) and offer["price"] <= 75 and not blank_seen:
+                blank_seen = True
+            elif item != (CAMERA, 1, 125):
+                raise RuntimeError("The Scientist Shop did not return an exact qualified stock offer")
         guids.add(guid)
     return report
 
@@ -70,7 +76,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         raise party.RuleError("native_finite_shop_unavailable")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_operation_id")
-    if character == "host":
+    guest = character != "host"
+    if not guest:
         if area != SCIENTIST_SHOP or action not in ACTIONS[:2]:
             raise party.RuleError("native_scientist_host_camera_purchase_only")
         pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
@@ -119,7 +126,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         if str(error).startswith("finite_shop_refused_"):
             raise party.RuleError(str(error)) from error
         raise
-    listing = matching_report(snapshot, area, pawn, "sale-quote" if sale else "listed")
+    listing = matching_report(snapshot, area, pawn, "sale-quote" if sale else "listed", guest=guest)
     if (listing["wallet_before"] != listing["wallet_after"] or listing["merchant_cash_before"] != listing["merchant_cash_after"]
             or sale and (len(listing["offers"]) != 1 or listing["offers"][0]["guid"] != guid
                          or listing["offers"][0]["price"] != listing["offers"][0]["value"])):
@@ -152,11 +159,14 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
-        proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased")
+        proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased", guest=guest)
         reported = proof["offers"]
-        shelf_class = {SCIENTIST_SHOP: CAMERA, GUNSMITH: BALL_AMMO, SMUGGLER: MRE_CLASS}.get(area)
-        if (not sale and shelf_class and len(reported) == 1
-                and offer["class_path"] == reported[0]["class_path"] == shelf_class):
+        shelf_classes = {SCIENTIST_SHOP: (CAMERA, BLANK_CLASS), GUNSMITH: (BALL_AMMO,), SMUGGLER: (MRE_CLASS,)}
+        if (not sale and len(reported) == 1 and offer["class_path"] == reported[0]["class_path"]
+                and offer["class_path"] in shelf_classes.get(area, ())):
+            if (area == SCIENTIST_SHOP and offer["class_path"] == BLANK_CLASS
+                    and any(row["guid"] == reported[0]["guid"] for row in listing["offers"])):
+                raise RuntimeError("The Scientist Shop did not mint a fresh stock blank tape GUID")
             proof["offer_guid"] = guid
             proof["stock_source"] = "limited_stock" if reported[0]["guid"] == guid else "stock_shelf"
             reported = [dict(reported[0], guid=guid)]
@@ -172,7 +182,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        required = frozenset({character}) if character != "host" else frozenset()
+        required = frozenset({character}) if guest else frozenset()
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:

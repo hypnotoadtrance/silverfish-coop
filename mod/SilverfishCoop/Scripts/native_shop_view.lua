@@ -22,7 +22,7 @@ register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01",
     "Shop_BlackMarket_01", "Shop_BP_C_1", "BlacMarket_ShopData", "Black Market merchant")
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01",
-    "Shop_Scientist_01", "Shop_BP_C_2", "Science_ShopData", "Scientist Shop camera", "Barter_BP_C_107")
+    "Shop_Scientist_01", "Shop_BP_C_2", "Science_ShopData", "Scientist Shop", "Barter_BP_C_107")
 register_merchant("/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P",
     "Shop_Gunsmith_P", "Shop_BP_C_1", "AmmoShopData", "Gunsmith shop", "Barter_BP_C_1")
 register_merchant(shopkeep.map, "Shop_ShopKeep_P", "Shop_BP_C_1", "StrangeJunkShopData", "ShopKeep limited stock", "Barter_BP_C_1")
