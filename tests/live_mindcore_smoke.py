@@ -849,9 +849,17 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             grabbing = await wait(run, active_carry, timeout=14)
             held = grabbing["game"][carry.AUTHORITY]
             await wait(guest_run, lambda state: state.get("game", {}).get(carry.VIEW, {}).get("state") == "held", timeout=12)
-            await wait(run, lambda state: active_carry(state)
-                       and state["game"][carry.AUTHORITY]["sequence"] > held["sequence"], timeout=14)
+            targeted = await wait(run, lambda state: active_carry(state)
+                                  and state["game"][carry.AUTHORITY]["sequence"] > held["sequence"]
+                                  and "grip_position" in state["game"][carry.AUTHORITY], timeout=14)
+            proof["carrier_grip"] = targeted["game"][carry.AUTHORITY]["grip_position"]
             after_grab = await shared_core_at(0, label="guest_held")
+            before_collision = host_before["host"].get("collision_responses")
+            if before_collision:
+                during_collision = after_grab["host"]["collision_responses"]
+                assert "block" in before_collision.values(), before_collision
+                assert "block" not in during_collision.values(), during_collision
+                assert after_grab["host"]["simulating"] is True
             # Move away from the Core on the stock approach before aiming sideways into the room.
             before_walk = runtime.read_json(run / "status.json")["game"]["pawns"]["guest"]["location"]
             motion = proof["guest_carry_motion"] = {}
@@ -899,6 +907,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             ), timeout=14)
             assert released["game"][carry.AUTHORITY]["reason"] == "stock_core_released"
             actual_release = await shared_core_at(0, label="guest_released")
+            if before_collision:
+                assert actual_release["host"]["collision_responses"] == before_collision
             assert await inventory(guest_run, character) == original_guest
             assert await inventory(run, "host") == original_host
             await action(run, "checkpoint")

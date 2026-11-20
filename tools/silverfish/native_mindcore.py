@@ -36,7 +36,7 @@ def parse_scene(fields: list[str]) -> dict:
 
 
 def parse_replication(fields: list[str], role: str) -> dict:
-    if (role not in ("host", "guest") or len(fields) not in (13, 16, 19)
+    if (role not in ("host", "guest") or len(fields) not in (13, 16, 19, 21)
             or tuple(fields[:3]) != ("native-mindcore-replication", MAP, role)):
         raise ValueError("Invalid exact Data Silo replication scope")
     state, core, replicates, movement, overlap, stage, x, y, z, source = fields[3:13]
@@ -59,11 +59,16 @@ def parse_replication(fields: list[str], role: str) -> dict:
         if simulating not in bits or parent not in parents or replicated_parent not in parents:
             raise ValueError("Invalid stock Data Silo Core attachment report")
         observed.update(simulating=bits[simulating], parent=parent, replicated_parent=replicated_parent)
-    if len(fields) == 19:
-        pitch, yaw, roll = (float(value) for value in fields[16:])
+    if len(fields) >= 19:
+        pitch, yaw, roll = (float(value) for value in fields[16:19])
         if not all(-360 <= value <= 360 for value in (pitch, yaw, roll)):
             raise ValueError("Invalid stock Data Silo Core rotation")
         observed["rotation"] = dict(pitch=pitch, yaw=yaw, roll=roll)
+    if len(fields) == 21:
+        responses = {"0": "ignore", "1": "overlap", "2": "block"}
+        if any(value not in responses for value in fields[19:]):
+            raise ValueError("Invalid stock Data Silo Core collision response")
+        observed["collision_responses"] = dict(world_static=responses[fields[19]], world_dynamic=responses[fields[20]])
     return observed
 
 

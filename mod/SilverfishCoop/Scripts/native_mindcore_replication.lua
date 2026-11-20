@@ -196,6 +196,10 @@ function replication.rows(state, phase, row)
         if hosting and (replicates ~= 1 or movement ~= 1) then observed = "replication_unverified" end
         if not hosting and overlap ~= 0 then observed = "guard_unverified" end
         local attachment = active.core.AttachmentReplication
+        local world_static = math.tointeger(active.frame:GetCollisionResponseToChannel(0))
+        local world_dynamic = math.tointeger(active.frame:GetCollisionResponseToChannel(1))
+        if not world_static or world_static < 0 or world_static > 2
+            or not world_dynamic or world_dynamic < 0 or world_dynamic > 2 then return {} end
         return { row("native-mindcore-replication", map, hosting and "host" or "guest", observed, core_name,
             replicates, movement, overlap,
             stage, string.format("%.3f", position.X), string.format("%.3f", position.Y),
@@ -203,7 +207,7 @@ function replication.rows(state, phase, row)
             bit(active.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find))),
             parent_kind(active.frame:GetAttachParent()), parent_kind(attachment and attachment.AttachComponent),
             string.format("%.3f", rotation.Pitch), string.format("%.3f", rotation.Yaw),
-            string.format("%.3f", rotation.Roll)) }
+            string.format("%.3f", rotation.Roll), world_static, world_dynamic) }
     end)
     return ok and result or {}
 end
