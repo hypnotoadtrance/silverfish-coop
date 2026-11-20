@@ -2259,10 +2259,11 @@ class Bridge:
             raise ValueError("Movement requires numeric x and y")
         if type(continuous) is not bool:
             raise ValueError("The continuous movement option must be Boolean")
+        limit = 3000 if continuous else 1000
         if (not math.isfinite(x) or not math.isfinite(y) or math.hypot(x, y) > 1.001
                 or math.hypot(x, y) < 0.01 or type(milliseconds) is not int
-                or not 50 <= milliseconds <= 1000):
-            raise ValueError("Use a normalized planar direction and a duration of 50 to 1000 ms")
+                or not 50 <= milliseconds <= limit):
+            raise ValueError(f"Use a normalized planar direction and a duration of 50 to {limit} ms")
         await self.command("walk-continuous" if continuous else "walk", str(x), str(y), str(milliseconds))
 
     async def restore(self, role: str, pawn: dict, *, binding: Assignment | None = None,

@@ -3,9 +3,29 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import runtime, service
+
+
+class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_walk_uses_the_native_three_second_limit(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        with patch.object(bridge, "command", new_callable=AsyncMock) as command:
+            await bridge.walk(0, 1, 3000, continuous=True)
+            command.assert_awaited_once_with("walk-continuous", "0", "1", "3000")
+            with self.assertRaisesRegex(ValueError, "50 to 3000 ms"):
+                await bridge.walk(0, 1, 3001, continuous=True)
+            command.assert_awaited_once()
+
+    async def test_discrete_walk_keeps_its_one_second_limit(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        with patch.object(bridge, "command", new_callable=AsyncMock) as command:
+            await bridge.walk(0, 1, 1000)
+            command.assert_awaited_once_with("walk", "0", "1", "1000")
+            with self.assertRaisesRegex(ValueError, "50 to 1000 ms"):
+                await bridge.walk(0, 1, 1001)
+            command.assert_awaited_once()
 
 
 class StageBackendTests(unittest.TestCase):
