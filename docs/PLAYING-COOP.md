@@ -4,9 +4,9 @@ Use Direct IP on Windows. The installed title entry opens the matched private co
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. Use the same Steam game build and the same trial ZIP, and follow the one-time setup from the extracted ZIP. Setup uses the pinned UE4SS release and Project Silverfish signatures. A fresh workspace needs roughly 5.2 GB for the private game copy. After setup, start Project Silverfish through Steam and press **F7** for **Open Co-op** on the stock title. [Trial ZIP setup](../bootstrap/README.md#install-from-a-trial-zip)
+Close the game on both PCs. Use the same Steam game build and the same trial ZIP. Extract it and double-click `Install.cmd` once on each PC. Setup includes the matching UE4SS loader and Project Silverfish signature. A fresh workspace needs roughly 5.2 GB for the private game copy. Start Project Silverfish through Steam and press **F7** for **Open Co-op** on the stock title. [Trial ZIP setup](../bootstrap/README.md#install-from-a-trial-zip)
 
-For two PCs on a LAN, enter the host PC's LAN IP and a UDP port in **Host** settings. Allow inbound UDP on that port on the host PC and use that LAN address in the invitation. The default `127.0.0.1` address works for a host and guest running on the same PC.
+Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, allow inbound UDP on the chosen port and use the host PC's LAN address in the invitation. Use `127.0.0.1` when both players run on the same PC.
 
 ## Stage the development build
 

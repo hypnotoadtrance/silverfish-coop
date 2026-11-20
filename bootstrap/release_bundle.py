@@ -16,26 +16,66 @@ from .embedded_runtime_build import git, load_lock
 REPO = Path(__file__).resolve().parents[1]
 PYINSTALLER_VERSION = "6.22.3"
 SOURCE_LIMIT = 2 * 1024**2
+INSTALL = br"""@echo off
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0Setup.ps1" %*
+set "result=%errorlevel%"
+pause
+exit /b %result%
+""".replace(b"\n", b"\r\n")
+START_HERE = br"""Project Silverfish Co-op | Windows Direct IP trial
+
+1. Both players close Project Silverfish. Extract this ZIP and run Install.cmd
+   once on each PC. The first install needs about 5.2 GB for the co-op profile.
+2. Launch through Steam. Press F7 for Open Co-op on the game title screen.
+3. The host presses F7 for Host. Keep the defaults or choose a UDP port.
+   In the host's campaign, open the Journal (J by default) and press F7 to
+   create a private invitation. Enter the address the guest can reach.
+4. On the other PC, choose Join (F8), paste the invitation, and pick a
+   character. Share the invitation only with the person you want to join.
+
+Both PCs need the same Steam game build and co-op ZIP. Use the host's LAN
+address on the same network. Across networks use a reachable host address
+and allow or forward the host's chosen UDP port (default 7777) if needed.
+If the connection briefly drops, leave both games running to let it recover.
+
+This is an in-development build. Keep a backup of co-op campaigns you want
+to retain. Co-op data lives under %LOCALAPPDATA%\SilverfishCoop\Trials.
+The title menu opens the private co-op profile automatically.
+
+Includes the matched UE4SS v4.0.0 loader and Project Silverfish signature.
+https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0
+"""
 SETUP = b"""[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)][string]$Game,
-    [Parameter(Mandatory=$true)][string]$Work,
-    [Parameter(Mandatory=$true)][string]$Ue4ss,
-    [Parameter(Mandatory=$true)][string]$Signatures,
+    [string]$Game,
+    [string]$Work,
+    [string]$Ue4ss,
+    [string]$Signatures,
     [string]$HostCampaign = 'coop',
-    [string]$Bind = '127.0.0.1',
+    [string]$Bind = '0.0.0.0',
     [ValidateRange(1,65535)][int]$Port = 7777,
     [string]$JoinProfile = 'guest'
 )
 $ErrorActionPreference = 'Stop'
+if (Get-Process -Name 'SilverFish-Win64-Shipping' -ErrorAction SilentlyContinue) {
+    Write-Host 'Close Project Silverfish, then run Install.cmd again.'
+    exit 1
+}
 $python = Join-Path $PSScriptRoot 'payload/runtime/python.exe'
 $setup = Join-Path $PSScriptRoot 'bootstrap/release_setup.py'
 $setupArguments = @(
-    '--game', $Game, '--work', $Work, '--ue4ss', $Ue4ss, '--signatures', $Signatures,
     '--host-campaign', $HostCampaign, '--bind', $Bind, '--port', $Port, '--join-profile', $JoinProfile
 )
+if ($Game) { $setupArguments += @('--game', $Game) }
+if ($Work) { $setupArguments += @('--work', $Work) }
+if ($Ue4ss) { $setupArguments += @('--ue4ss', $Ue4ss) }
+if ($Signatures) { $setupArguments += @('--signatures', $Signatures) }
 & $python -I -B $setup @setupArguments
-exit $LASTEXITCODE
+$result = $LASTEXITCODE
+if ($result -eq 0) {
+    Write-Host 'Installed. Launch Project Silverfish through Steam and press F7 on the title screen.'
+}
+exit $result
 """
 
 
@@ -177,6 +217,18 @@ def _runtime(source: Path, addon: Path, sources: dict[str, bytes]) -> tuple[dict
     return {f"{layout.RUNTIME}/{name}": data for name, data in files.items()}, image
 
 
+def _loader(ue4ss: Path, signatures: Path) -> dict[str, bytes]:
+    files = {f"{layout.LOADER}/{relative.as_posix()}": install_stock._pinned(ue4ss / relative, digest)
+             for relative, digest in install_stock.UE4SS_OFFICIAL.items()}
+    license_name = "ue4ss/LICENSE"
+    files[f"{layout.LOADER}/{license_name}"] = _read(ue4ss / license_name, 32 * 1024)
+    signature = install_stock.SIGNATURE.name
+    files[f"{layout.SIGNATURES}/{signature}"] = install_stock._pinned(
+        signatures / signature, install_stock.SIGNATURE_SHA256,
+    )
+    return files
+
+
 def _write_archive(output: Path, version: str, revision: str, files: dict[str, bytes]) -> None:
     records, names, total = {}, set(), 0
     for name, data in sorted(files.items()):
@@ -205,7 +257,8 @@ def _write_archive(output: Path, version: str, revision: str, files: dict[str, b
 
 
 def assemble(output: Path, *, version: str, revision: str, bootstrap: Path, cpp_addon: Path,
-             embedded_addon: Path, embedded_runtime: Path, cpp_addon_sha256: str | None = None) -> dict:
+             embedded_addon: Path, embedded_runtime: Path, ue4ss: Path, signatures: Path,
+             cpp_addon_sha256: str | None = None) -> dict:
     """Create a new, verified release archive for the selected Git revision."""
     if not layout.VERSION.fullmatch(version) or version.endswith("."):
         raise ValueError("Supply a version made from letters, numbers, dots, underscores, or hyphens")
@@ -226,8 +279,9 @@ def assemble(output: Path, *, version: str, revision: str, bootstrap: Path, cpp_
     with TemporaryDirectory(prefix=".coop-release-", dir=output.parent) as temporary:
         folder = Path(temporary)
         outer = _stock_bootstrap(bootstrap, sources, folder)
-        files = {**sources, **runtime, "Setup.ps1": SETUP, layout.STOCK_BOOTSTRAP: outer,
-                 layout.GAMEPLAY_ADDON: gameplay, layout.EMBEDDED_ADDON: addon}
+        files = {**sources, **runtime, **_loader(ue4ss.absolute(), signatures.absolute()),
+                 "Install.cmd": INSTALL, "Setup.ps1": SETUP, "START-HERE.txt": START_HERE,
+                 layout.STOCK_BOOTSTRAP: outer, layout.GAMEPLAY_ADDON: gameplay, layout.EMBEDDED_ADDON: addon}
         archive = folder / "release.zip"
         _write_archive(archive, version, revision, files)
         with archive.open("rb") as stream:
@@ -241,7 +295,7 @@ def assemble(output: Path, *, version: str, revision: str, bootstrap: Path, cpp_
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for argument in ("output", "bootstrap", "cpp-addon", "embedded-addon", "embedded-runtime"):
+    for argument in ("output", "bootstrap", "cpp-addon", "embedded-addon", "embedded-runtime", "ue4ss", "signatures"):
         parser.add_argument("--" + argument, type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--revision", required=True)

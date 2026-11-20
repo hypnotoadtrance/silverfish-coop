@@ -70,6 +70,20 @@ class SetupTests(unittest.TestCase):
                                     host_campaign="coop", bind="127.0.0.1", port=7777, join_profile="guest")
         self.manifest = {"version": "test-1", "files": {setup.GAMEPLAY_ADDON: {"sha256": "a" * 64}}}
 
+    def test_find_game_in_secondary_steam_library(self):
+        steam = self.root / "Steam"
+        library = self.root / "Game Drive" / "SteamLibrary"
+        game = library / "steamapps/common/Project Silverfish"
+        shipping = game / runtime.SHIPPING
+        shipping.parent.mkdir(parents=True)
+        shipping.touch()
+        (game / runtime.MANIFEST).touch()
+        apps = steam / "steamapps"
+        apps.mkdir(parents=True)
+        path = str(library).replace("\\", "\\\\")
+        (apps / "libraryfolders.vdf").write_text(f'"libraryfolders"\n{{\n    "path" "{path}"\n}}', encoding="utf-8")
+        self.assertEqual(setup._find_game((steam,), shipping=runtime.SHIPPING, manifest=runtime.MANIFEST), game)
+
     def mocked_setup(self, *, present):
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "local-data")}))

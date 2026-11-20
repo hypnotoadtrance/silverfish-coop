@@ -18,6 +18,12 @@ GAMEPLAY_ADDON = "payload/native-gameplay.dll"
 EMBEDDED_ADDON = "payload/embedded-addon.dll"
 RUNTIME = "payload/runtime"
 PYTHON = RUNTIME + "/python.exe"
+LOADER = "payload/loader"
+SIGNATURES = "payload/signatures"
+LOADER_FILES = frozenset({
+    LOADER + "/dwmapi.dll", LOADER + "/ue4ss/UE4SS.dll", LOADER + "/ue4ss/UE4SS-settings.ini",
+    LOADER + "/ue4ss/LICENSE", SIGNATURES + "/FText_Constructor.lua",
+})
 FIXED_SOURCES = frozenset({
     "bootstrap/release_setup.py", "bootstrap/install_stage.py", "bootstrap/install_stock.py",
     "bootstrap/package.py", "bootstrap/SilverfishCoopBootstrap/Scripts/main.lua",
@@ -25,8 +31,10 @@ FIXED_SOURCES = frozenset({
     "mod/SilverfishCoop/Scripts/native_title_display.lua", "tools/__init__.py", "tools/silverfish/__init__.py",
     "tools/silverfish/embedded_startup.py",
 })
-SETUP_FILES = FIXED_SOURCES | {"Setup.ps1", STOCK_BOOTSTRAP, GAMEPLAY_ADDON, EMBEDDED_ADDON, PYTHON,
-                              RUNTIME + "/runtime-manifest.json"}
+SETUP_FILES = FIXED_SOURCES | LOADER_FILES | {
+    "Install.cmd", "Setup.ps1", "START-HERE.txt", STOCK_BOOTSTRAP, GAMEPLAY_ADDON, EMBEDDED_ADDON,
+    PYTHON, RUNTIME + "/runtime-manifest.json",
+}
 SOURCE_PREFIXES = {"tools/silverfish/": ".py", "mod/SilverfishCoop/Scripts/": ".lua"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -148,6 +156,41 @@ def verify_release(root: Path) -> dict:
     return result
 
 
+def _steam_roots():
+    import winreg
+
+    for hive, key, name in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as entry:
+                path, _ = winreg.QueryValueEx(entry, name)
+        except OSError:
+            continue
+        if isinstance(path, str) and path:
+            yield Path(path)
+    for variable in ("ProgramFiles(x86)", "ProgramFiles"):
+        if path := os.environ.get(variable):
+            yield Path(path) / "Steam"
+
+
+def _find_game(roots, *, shipping: Path, manifest: Path) -> Path | None:
+    libraries = list(dict.fromkeys(roots))
+    for steam in tuple(libraries):
+        try:
+            with (steam / "steamapps/libraryfolders.vdf").open(encoding="utf-8-sig") as stream:
+                content = stream.read(1024 * 1024)
+        except (OSError, UnicodeError):
+            continue
+        libraries.extend(Path(path.replace("\\\\", "\\")) for path in re.findall(r'^\s*"path"\s+"([^"\r\n]+)"', content, re.M))
+    for library in dict.fromkeys(libraries):
+        game = library / "steamapps/common/Project Silverfish"
+        if (game / shipping).is_file() and (game / manifest).is_file():
+            return game
+    return None
+
+
 def _install_bundle(root: Path, manifest: dict, args) -> dict:
     from bootstrap import install_stage, install_stock
     from tools.silverfish import runtime
@@ -167,7 +210,7 @@ def _install_bundle(root: Path, manifest: dict, args) -> dict:
     host = {"campaign": args.host_campaign, "bind": str(ip_address(args.bind)), "port": args.port}
     join = {"profile": args.join_profile, "invite": None, "character": None}
 
-    # Validate the external loader and stock bootstrap before a private stage copy.
+    # Validate the loader and stock bootstrap before a private stage copy.
     install_stock._ordinary(game, directory=True)
     for relative, digest in install_stock.UE4SS_OFFICIAL.items():
         install_stock._pinned(ue4ss / relative, digest)
@@ -191,9 +234,9 @@ def _install_bundle(root: Path, manifest: dict, args) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for argument in ("game", "work", "ue4ss", "signatures"):
-        parser.add_argument("--" + argument, type=Path, required=True)
+        parser.add_argument("--" + argument, type=Path)
     parser.add_argument("--host-campaign", default="coop")
-    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7777)
     parser.add_argument("--join-profile", default="guest")
     args = parser.parse_args()
@@ -204,8 +247,26 @@ def main() -> None:
             raise ValueError("Run Setup.ps1 from the extracted Windows bundle")
         manifest = verify_release(root)
         sys.path.insert(0, str(root))
+        from tools.silverfish import runtime
+
+        if args.game is None:
+            args.game = _find_game(_steam_roots(), shipping=runtime.SHIPPING, manifest=runtime.MANIFEST)
+            if args.game is None:
+                print("In Steam, open Project Silverfish > Manage > Browse local files.", file=sys.stderr)
+                folder = input("Paste that folder path and press Enter: ").strip().strip('"')
+                if not folder:
+                    raise ValueError("Choose the installed Project Silverfish folder")
+                args.game = Path(folder)
+        local = os.environ.get("LOCALAPPDATA")
+        if not local:
+            raise ValueError("The local Windows profile directory is unavailable")
+        args.work = args.work or Path(local) / "SilverfishCoop" / "Trials" / manifest["version"]
+        args.ue4ss = args.ue4ss or root / LOADER
+        args.signatures = args.signatures or root / SIGNATURES
+        print(f"Preparing Project Silverfish Co-op in {args.work}. The first install copies about 5.2 GB.",
+              file=sys.stderr, flush=True)
         result = _install_bundle(root, manifest, args)
-    except (OSError, ValueError, RuntimeError, BadZipFile) as error:
+    except (OSError, ValueError, RuntimeError, BadZipFile, EOFError) as error:
         parser.exit(1, f"Co-op setup failed: {error}\n")
     print(json.dumps(result))
 
