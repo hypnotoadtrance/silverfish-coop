@@ -178,6 +178,7 @@ Run the commands below on the PC with the targeted launcher. Use `--campaign` fo
 - `drop-link` suspends automatic retries until the guest requests `reconnect`. Use it to test the 90-second reservation. Actions remain scoped to the local launcher through its workspace.
 
 For a bounded movement test, use `action --profile scout walk --x 0 --y 1 --milliseconds 300`, then read the guest and host pawn positions again.
+Add `--continuous` to supply stock movement input on each available game frame. The command uses the same world direction and duration bounds.
 
 The authored campaign supports local reads for the current native scope. Use the quoted item IDs and the live position for any subsequent interaction.
 
