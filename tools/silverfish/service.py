@@ -4077,11 +4077,6 @@ class Client:
             # The exact durable save is already acknowledged. If the retirement notice
             # is lost, the host preserves normal reconnect grace for this actor.
             pass
-        if not isinstance(self.bridge.process, EmbeddedEngine):
-            try:
-                await self.leave_for_rejoin(self.last_game)
-            except (OSError, RuntimeError, TimeoutError) as error:
-                self.control.event("guest_native_leave_incomplete", reason=str(error))
         self.session_stop_reason = "guest_left"
         self.stopping = True
         with contextlib.suppress(OSError):
@@ -4934,6 +4929,11 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         finally:
             reason = client.session_stop_reason if client else None
             try:
+                if reason == "guest_left" and embedded is None:
+                    try:
+                        await client.leave_for_rejoin(client.last_game)
+                    except (OSError, RuntimeError, TimeoutError) as error:
+                        control.event("guest_native_leave_incomplete", reason=str(error))
                 await _stop_session_game(transport, process, embedded, guest_left=reason == "guest_left")
             except (Exception, asyncio.CancelledError) as error:
                 result = "failed"
