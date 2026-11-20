@@ -70,8 +70,7 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepare.await_args.args[2]["dropped"], [GUID])
         self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({OWNER})})
         self.assertEqual(record.active_frames(host.party, {OWNER}), [escrow])
-        self.assertEqual(drop.visible_drops(host.party, OTHER, MAP), drop.visible_drops(host.party, OWNER, MAP))
-        self.assertNotIn("escrow", drop.visible_drops(host.party, OWNER, MAP)[DROP])
+        self.assertNotIn("escrow", drop.visible_drops(host.party, MAP)[DROP])
         host.party["receipts"].clear()
         self.assertEqual(await drop.perform(host, bridge, OWNER, drop.DROP, GUID + "|9", DROP), result)
         bridge.command.assert_awaited_once()
@@ -220,8 +219,8 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
                       "characters": {OWNER: {"state": {"native_guest_save": source}}, OTHER: {"state": {}}}}
         native_host_save.verify_checkpoint(host.native_profile, checkpoint)
         self.assertEqual(record.active_frames(host.party, {OWNER, OTHER}), [escrow, crossing])
-        self.assertEqual(list(drop.visible_drops(host.party, OWNER, record.CROSSROADS)), [other_id])
-        self.assertEqual(list(drop.visible_drops(host.party, OTHER, MAP)), [DROP])
+        self.assertEqual(list(drop.visible_drops(host.party, record.CROSSROADS)), [other_id])
+        self.assertEqual(list(drop.visible_drops(host.party, MAP)), [DROP])
 
         newer["escrow"] = {**crossing, "map": MAP}
         with self.assertRaisesRegex(ValueError, "Invalid or duplicate stock stack drop escrow"):

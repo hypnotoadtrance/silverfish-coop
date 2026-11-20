@@ -135,7 +135,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         if position == "far":
             candidates = (("far", None), ("near", 4))
         else:
-            ordered = dict.fromkeys((preferred_lane, *NEAR_LANES)) if preferred_lane else NEAR_LANES
+            ordered = dict.fromkeys((preferred_lane, None, *NEAR_LANES)) if preferred_lane else NEAR_LANES
             candidates = tuple(("near", lane) for lane in ordered)
 
         for where, lane in candidates:
@@ -173,7 +173,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                     continue
             else:
                 distance = attempt["distance_to_drop"] = math.dist(location, anchor)
-                in_range = distance > 340 if position == "far" else distance < 180
+                in_range = distance > 340 if position == "far" else distance < 205
                 if not in_range:
                     continue
                 result["distance_to_drop"] = distance

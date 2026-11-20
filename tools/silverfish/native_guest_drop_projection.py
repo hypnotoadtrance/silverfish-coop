@@ -67,7 +67,7 @@ def _host_desired(host, admission: str):
             or host.native_checkpoint_unsafe or host.party.get("wipe")
             or (game.get("state"), game.get(record.CAPABILITY)) != ("hosting", 1)):
         return None
-    rows = visible_drops(host.party, "host", game.get("map"))
+    rows = visible_drops(host.party, game.get("map"))
     return _nearby_projection(game, rows, host.control.generation, host.zone_epoch, "host", admission)
 
 

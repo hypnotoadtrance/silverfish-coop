@@ -748,8 +748,8 @@ class Host:
             view["shared_wallet"] = balance
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
-            view[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(
-                self.party, "host", self.last_game.get("map"))
+            view[native_guest_drop_record.CAPABILITY] = 1
+            view[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
@@ -1620,10 +1620,6 @@ class Host:
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
-        if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
-            gameplay[native_guest_drop_record.CAPABILITY] = 1
-            gameplay[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(
-                self.party, character, self.last_game.get("map"))
         if "native_pawns" in gameplay:
             positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(

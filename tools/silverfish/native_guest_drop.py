@@ -20,7 +20,7 @@ RESULT = "native_guest_stack_drop"
 _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
-def visible_drops(state: dict, _viewer: str, area: str | None) -> dict:
+def visible_drops(state: dict, area: str | None) -> dict:
     return {drop_id: record.visible(row, drop_id) for drop_id, row in state.get(record.STATE, {}).items()
             if row["map"] == area and row["claim_id"] is None}
 
