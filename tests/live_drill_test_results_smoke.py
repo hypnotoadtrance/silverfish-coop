@@ -136,6 +136,21 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
                 for owner, frame in zip(("host", "guest"), frames, strict=True)
                 for all_flags in (stock_flags(root, frame, area),)}
 
+    async def capture_flags():
+        manifest = campaign / "save/campaign.json"
+        profile = campaign / "game-user"
+        for _ in range(6):
+            data = runtime.read_json(manifest)
+            try:
+                native_host_save.verify_checkpoint(profile, data)
+                return data, flags(data)
+            except (FileNotFoundError, native_host_save.CampaignFormatError):
+                # A newer commit can retire this reader's generation between the two file reads.
+                if runtime.read_json(manifest)["revision"] == data["revision"]:
+                    raise
+                await asyncio.sleep(.05)
+        raise RuntimeError("Could not read the committed paired stock flags")
+
     def local_pawn(state):
         return state.get("game", {}).get("pawns", {}).get("local", {})
 
@@ -292,7 +307,7 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
             BLANK_CLASS, "backpack", 1)
         assert sum(row["class_path"] == BLANK_CLASS for row in guest_items.values()) == 1
         await action(host_run, "checkpoint")
-        stock_before = flags(saved())
+        _, stock_before = await capture_flags()
         assert (stock_before["host"]["Mosby_DrillTest"], stock_before["host"]["Mosby_SM_Readings"]) == (1, 2), stock_before
 
         await action(host_run, DRILL.verb("approach"), target="host")
@@ -316,7 +331,7 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
         delivered = await displayed("exchanged", second, 30)
         filled = delivered["filled_guid"]
         assert filled == uuid.uuid5(uuid.NAMESPACE_URL, f"{DRILL.namespace}:{character}:{blank}").hex.upper() and filled != blank
-        durable = saved()
+        durable, stock_after = await capture_flags()
         receipt = durable["world"]["party"][DRILL.ledger][blank]
         assert (receipt["owner"], receipt["blank_guid"], receipt["filled_guid"], receipt["map"], receipt["station"],
                 receipt["class_path"], receipt["mosby_drill_test"]) == (character, blank, filled, SCIENTIST_SHOP, DRILL.station,
@@ -328,7 +343,7 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
         assert {guid: row for guid, row in expected_guest.items() if guid != filled} == {
             guid: row for guid, row in guest_items.items() if guid != blank}
         assert await inventory(host_run, "host") == host_items
-        assert flags(durable) == stock_before
+        assert stock_after == stock_before
         assert durable["world"]["party"]["native_quests"][DRILL_QUEST] == initial["world"]["party"]["native_quests"][DRILL_QUEST]
 
         contested = await action(host_run, DRILL.verb("convert"), expected=False, target=blank)
@@ -352,9 +367,9 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
         assert await inventory(host_run, "host") == host_items
         await action(host_run, DRILL.verb("approach"), target="guest")
         restarted_replay = await repeat_exchange(blank, receipt)
-        after = saved()
+        after, restart_flags = await capture_flags()
         assert after["world"]["party"][DRILL.ledger] == {blank: receipt}
-        assert flags(after) == stock_before
+        assert restart_flags == stock_before
         commits = [event for event in events() if event["event"] == DRILL.key + "_committed"]
         assert len(commits) == 1 and commits[0]["filled_guid"] == filled, commits
         evidence.update(restart={"port": port, "generation": restarted["generation"], "filled_guid": filled,
