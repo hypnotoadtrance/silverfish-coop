@@ -197,6 +197,9 @@ def _stock_image(stock_work, work):
     if (not worker_bytes.startswith(b"MZ") or not adapter_bytes.startswith(b"MZ")
             or fingerprint.encode("ascii") not in adapter_bytes):
         raise ValueError("The stock title adapter and packaged worker pin differ")
+    if b"SilverfishReadCoopBootstrapTestKey" not in adapter_bytes:
+        raise ValueError("The headless handoff test requires the replica-only proof adapter. "
+                         "Use live_stock_bootstrap_smoke.py --coordinator-ready for the release adapter.")
     return stock_exe, game_exe, worker, fingerprint
 
 

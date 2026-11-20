@@ -87,9 +87,14 @@ Keep stages, saves, host identity keys, invitations, and extracted assets outsid
 
 ## Tests
 
+For day-to-day changes, run the affected test module first. Reuse the staged loader and native add-ons when their source and pins still match. For a live gameplay change, start from a copied campaign checkpoint near the affected scene and run that mechanic's smoke test. Run the full suite and rebuild the Windows ZIP when preparing a trial build.
+
 ```powershell
+& $sfPython -m unittest tests.test_runtime -q
 & $sfPython -m unittest discover -s tests -v
 ```
+
+Use the release stock adapter for the quick `live_stock_bootstrap_smoke.py --coordinator-ready` check. The full headless stock-title handoff requires the separately built replica-only adapter and a matching coordinator. [Bootstrap tests](bootstrap/native/README.md)
 
 Run the optional Windows integration test against an existing staged workspace.
 
