@@ -1175,9 +1175,11 @@ class Bridge:
                     if dialogue_progress is not None:
                         raise ValueError("Duplicate stock dialogue progress")
                     dialogue_progress = fields
-                elif fields[0] in ("native-borough-barter", native_borough_barter.CRAFT_ACTION):
+                elif fields[0] in ("native-borough-barter", native_borough_barter.CRAFT_ACTION, native_borough_barter.OFFER_TAG):
                     if fields[0] == native_borough_barter.CRAFT_ACTION:
                         key, proof = "native_crafting_bench", native_borough_barter.parse_crafting(fields)
+                    elif fields[0] == native_borough_barter.OFFER_TAG:
+                        key, proof = native_borough_barter.OFFER_KEY, native_borough_barter.parse_offer(fields)
                     else:
                         key, proof = "native_borough_barter", native_borough_barter.parse(fields)
                     if key in data or (data.get("state"), data.get("map")) != ("hosting", proof["map"]):

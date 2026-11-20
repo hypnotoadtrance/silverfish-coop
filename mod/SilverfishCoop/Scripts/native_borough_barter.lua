@@ -20,15 +20,17 @@ end
 
 function barter.command(fields, state, phase, players)
     local seed = fields[2] == "native-crafting-bench-scrap-fixture"
-    local crafting = seed or fields[2] == "native-crafting-bench"
+    local preview = fields[2] == "native-crafting-bench-preflight"
+    local crafting = seed or preview or fields[2] == "native-crafting-bench"
     if not crafting and fields[2] ~= "native-borough-mama-trade" then return end
     local area = crafting and observatory or map
     local exchange = SilverfishTradeNativeBoroughMama
     if crafting then exchange = SilverfishTradeNativeCraftingBench end
     if seed then exchange = SilverfishSeedNativeCraftingScrap end
+    if preview then exchange = SilverfishPreviewNativeCraftingBench end
     report = nil
     local name, input = fields[3], fields[4]
-    if (seed and #fields ~= 3 or not seed and (#fields ~= 4 or not guid(input)))
+    if ((seed or preview) and #fields ~= 3 or not (seed or preview) and (#fields ~= 4 or not guid(input)))
         or phase ~= "hosting" or state.map ~= area or state.server ~= false
         or not players or type(exchange) ~= "function" then refuse("arguments") end
     local qualified, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
@@ -56,6 +58,15 @@ function barter.command(fields, state, phase, players)
     end
     local before = wire.stock_flag(instance, "Player_Cash")
     if not math.tointeger(before) then refuse("wallet_unavailable") end
+    if preview then
+        local ok, outcome, board_guid, armor_guid = exchange(pawn:GetAddress(), save:GetAddress(), stock:GetAddress())
+        if ok ~= true then error(tostring(outcome), 0) end
+        if not guid(armor_guid) or not (outcome == "offer" and guid(board_guid) and board_guid ~= armor_guid
+            or outcome == "missing" and board_guid == "-") then refuse("offer_unverified") end
+        report = {world = state.world, map = area, pawn = pawn, name = name, post = post, input = board_guid,
+            offer = outcome, armor_guid = armor_guid}
+        return "exact guest workbench offer verified"
+    end
     if seed then
         local ok, result = exchange(pawn:GetAddress(), save:GetAddress(), stock:GetAddress())
         if ok ~= true or result ~= "seeded" then error(tostring(result), 0) end
@@ -79,6 +90,10 @@ end
 function barter.rows(state, phase, status_row)
     if not report or phase ~= "hosting" or state.map ~= report.map or not same(report.world, state.world)
         or not valid(report.pawn) or not valid(report.post) then return {} end
+    if report.offer then
+        return {status_row("native-crafting-bench-offer", observatory, report.name, report.post:GetFullName(),
+            report.offer, report.input, report.armor_guid)}
+    end
     if report.armor_guid then
         return {status_row("native-crafting-bench", observatory, report.name, report.post:GetFullName(), "exchanged", report.input,
             board, 1, report.output, scrap, 1, report.wallet, report.wallet, 0, report.armor_guid)}

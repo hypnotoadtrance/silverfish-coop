@@ -60,6 +60,7 @@ NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION,
+                        native_borough_barter.CRAFT_PREFLIGHT,
                         *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
                         native_mindcore.PREFLIGHT, native_mindcore.UPLOAD,
                         native_prototype_drill.PREFLIGHT,
@@ -1767,6 +1768,8 @@ class Host:
                 result = await self.dialogue_sessions.act(self, bridge, character, action, target, request["operation_id"])
             elif action in (native_borough_barter.ACTION, native_borough_barter.CRAFT_ACTION):
                 result = await native_borough_barter.trade(self, bridge, character, target, request["operation_id"], action=action)
+            elif action == native_borough_barter.CRAFT_PREFLIGHT:
+                result = await native_borough_barter.preflight(self, bridge, character)
             elif action in native_mosby_tape.PREFLIGHTS or action == native_mosby_tape.READINGS_PREFLIGHT:
                 result = await native_mosby_tape.preflight(self, bridge, character, action, target)
             elif action == native_mindcore.PREFLIGHT:

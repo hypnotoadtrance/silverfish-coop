@@ -9,6 +9,23 @@ local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local box_class = "/Script/Engine.BoxComponent"
 local camera_class = "/Script/Engine.CameraComponent"
 local widget_class = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
+local workbench = {
+    map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P",
+    world = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P",
+    class = "/Game/Assets/StaticMeshes/Mesh_Props/Furnature/CraftingBench_BP.CraftingBench_BP_C",
+    title = "Observatory Workbench", label = "Electron Scrap",
+}
+workbench.path = workbench.world .. ":PersistentLevel.StaticMeshActor_51"
+workbench.station = "CraftingBench_BP_C " .. workbench.path
+local workbench_messages = {
+    focused = "Interact to inspect the workbench recipe.",
+    checking = "Checking your workbench recipe...",
+    offer = "Exchange one Computer Board for one Electron Scrap.\nInteract again to confirm.",
+    missing = "Bring one Computer Board in your backpack.\nInteract to check again.",
+    trading = "Exchanging the selected Computer Board...",
+    exchanged = "Electron Scrap added to your backpack.",
+    unavailable = "The workbench needs an eligible recipe and an equipped Hazard Suit.\nInteract to check again.",
+}
 local events, heartbeat, download_heartbeat, is_downed
 local binding, session, widget, shown
 local last_sequence = 0
@@ -28,14 +45,14 @@ local function reject(reason) error("native_mosby_station_" .. reason, 0) end
 local function guid(value) return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value:find("[^0]") end
 
 local function context(state, phase)
-    local profile = profiles[state.map]
+    local profile = profiles[state.map] or (state.map == workbench.map and workbench)
     if not enabled or not events or phase ~= "connected" or not profile or state.server ~= true or not state.listening
         or not valid(state.world) or state.world:GetFullName() ~= "World " .. profile.world then return end
     local pawn, controller = state.local_pawn and state.local_pawn.pawn, state.controller
     local station = StaticFindObject(profile.path)
     if not exact(pawn, pawn_class) or not valid(controller) or not pawn:IsLocallyControlled() or not controller:IsLocalController()
         or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
-        or state.local_pawn.name ~= pawn:GetFullName() or not exact(station, station_class)
+        or state.local_pawn.name ~= pawn:GetFullName() or not exact(station, profile.class or station_class)
         or station:GetFullName() ~= profile.station or not same(station:GetWorld(), state.world) or station:IsActorBeingDestroyed() then return end
     local access = station
     local box = station.Box
@@ -107,6 +124,7 @@ local function display(current, status)
     local message = messages[status]
     if status == "offer" then message = "Exchange one Blank Data Tape for one " .. profile.label .. " tape.\nInteract again to confirm." end
     if status == "exchanged" then message = profile.label .. " added to your backpack." end
+    if profile == workbench then message = workbench_messages[status] end
     message = profile.title .. "\n\n" .. message
     if shown == message and valid(widget) then return true end
     if not valid(widget) then

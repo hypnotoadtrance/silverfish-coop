@@ -433,7 +433,7 @@ namespace
         return result;
     }
 
-    template <bool crafting>
+    template <bool crafting, bool preview = false>
     int trade(const Lua& lua)
     {
         const auto& profile = crafting ? bench : mama;
@@ -445,15 +445,20 @@ namespace
             const auto push_guid = [&](const Guid& value) {
                 lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", value[0], value[1], value[2], value[3]));
             };
-            push_guid(id);
+            if constexpr (preview)
+            {
+                if (id == Guid{}) lua.set_string("-");
+                else push_guid(id);
+            }
+            else push_guid(id);
             if constexpr (crafting) push_guid(armor);
             return crafting ? 4 : 3;
         };
-        if (!enabled() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_integer(3) || !lua.is_string(4)) return result(false, "borough_barter_refused_arguments");
+        if (!enabled() || lua.get_stack_size() != (preview ? 3 : 4) || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || (!preview && !lua.is_string(4))) return result(false, "borough_barter_refused_arguments");
         const auto pawn = lua.get_integer(), save = lua.get_integer(), stock = lua.get_integer();
-        const auto payment = parse_guid(lua.get_string());
-        if (pawn <= 0 || save <= 0 || stock <= 0 || stock == save || payment == Guid{})
+        const auto payment = preview ? Guid{} : parse_guid(lua.get_string());
+        if (pawn <= 0 || save <= 0 || stock <= 0 || stock == save || (!preview && payment == Guid{}))
             return result(false, "borough_barter_refused_identity");
 
         auto* world = find<U::UWorld>(crafting ? observatory_path : world_path);
@@ -498,12 +503,29 @@ namespace
             !input_units || !bool_value(defaults, STR("Stacks"), defaults, false))
             return result(false, "borough_barter_refused_inventory_schema");
 
+        const auto expected_units = crafting ? input_units->GetPropertyValueInContainer(defaults) : 0;
+        const auto exact_ingredient = [&](const void* row) {
+            return layout.klass(row) == ingredient && layout.units->GetPropertyValueInContainer(row) == expected_units &&
+                layout.matches_defaults(row, defaults);
+        };
+        if constexpr (preview)
+        {
+            Guid board{};
+            if (!layout.rows(owner.save, [&](const void* row, int index) {
+                    if (index >= 0 && board == Guid{} && exact_ingredient(row)) board = layout.identity(row);
+                })) return result(false, "borough_barter_refused_inventory_bounds");
+            if (board == Guid{}) return result(true, "missing");
+            int matches{};
+            if (!layout.rows(owner.save, [&](const void* row, int) { matches += layout.identity(row) == board; }) || matches != 1)
+                return result(false, "borough_barter_refused_exact_owned_computer_board");
+            return result(true, "offer", board);
+        }
+
         int source_index = -1, source_count = 0;
         bool existing_reward{};
         int merge_index = -1, merge_units{};
         Guid merge_id{};
         auto* award_defaults = award->GetClassDefaultObject().Get();
-        const auto expected_units = crafting ? input_units->GetPropertyValueInContainer(defaults) : 0;
         if (!layout.rows(owner.save, [&](const void* row, int index) {
                 if (layout.klass(row) == award)
                 {
@@ -520,8 +542,7 @@ namespace
                 }
                 if (layout.identity(row) != payment) return;
                 ++source_count;
-                if (layout.klass(row) == ingredient && layout.units->GetPropertyValueInContainer(row) == expected_units &&
-                    layout.matches_defaults(row, defaults)) source_index = index;
+                if (exact_ingredient(row)) source_index = index;
             }) || source_count != 1 || source_index < 0)
             return result(false, crafting ? "borough_barter_refused_exact_owned_computer_board" :
                 "borough_barter_refused_exact_owned_copper_wire");
@@ -610,6 +631,7 @@ namespace silverfish::borough_barter
     {
         lua.register_function("SilverfishTradeNativeBoroughMama", trade<false>);
         lua.register_function("SilverfishTradeNativeCraftingBench", trade<true>);
+        lua.register_function("SilverfishPreviewNativeCraftingBench", trade<true, true>);
         lua.register_function("SilverfishSeedNativeCraftingScrap", seed_crafting_scrap);
     }
 }

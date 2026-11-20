@@ -17,6 +17,7 @@ from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS, SCIENTIST
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish import native_borough_barter as barter
+from tools.silverfish import native_mosby_station_view as station_view
 
 
 QUEST = "Clt_ComputerBoard"
@@ -78,7 +79,7 @@ def stock_flags(save_root, frame, area):
     return flags
 
 
-async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_bench=False, crafting_merge=False):
+async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_bench=False, crafting_merge=False, crafting_input=False):
     name = "computer-board-" + uuid.uuid4().hex[:8]
     campaign, profile = ("--campaign", name), ("--profile", name)
     campaign_dir = work / "campaigns" / name
@@ -91,7 +92,8 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     processes = []
     proof = {"stock_routes": [], "stock_board_input": stock_board_input,
-             "crafting_bench": crafting_bench or crafting_merge, "crafting_merge": crafting_merge}
+             "crafting_bench": crafting_bench or crafting_merge or crafting_input,
+             "crafting_merge": crafting_merge or crafting_input, "crafting_input": crafting_input}
     character = None
 
     async def command(*arguments, expected=True):
@@ -241,7 +243,24 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         assert await asyncio.wait_for(process.wait(), 18) == 0, process.returncode
 
     async def craft_board(guid):
+        def view(state):
+            return state.get("game", {}).get(station_view.KEY, {})
+
+        async def press(pending, outcome):
+            pressed = (await action(profile, station_view.FIXTURE))[station_view.KEY]
+            assert (pressed["station"], pressed["state"]) == (barter.BENCH, pending), pressed
+            proof.setdefault("stock_workbench_presses", []).append({"pressed": pressed})
+            state = await wait(guest_run, lambda row: view(row).get("sequence") == pressed["sequence"]
+                               and view(row).get("state") != pending, timeout=10)
+            rendered = view(state)
+            proof["stock_workbench_presses"][-1]["rendered"] = rendered
+            assert (rendered["station"], rendered["state"]) == (barter.BENCH, outcome), rendered
+            return rendered
+
         proof["crafting_approach_fixture"] = await action(campaign, barter.CRAFT_APPROACH)
+        if crafting_input:
+            await wait(guest_run, lambda state: view(state).get("state") in ("armed", "focused"))
+            await press("checking", "unavailable")
         refused = await action(profile, barter.CRAFT_ACTION, "--target", guid, expected=False)
         assert refused["error"] == "borough_barter_refused_detached_worn_crafting", refused
         assert guid in await inventory(profile, character)
@@ -251,7 +270,7 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         host_before = await inventory(campaign, "host")
         before = await inventory(profile, character)
         existing = None
-        if crafting_merge:
+        if crafting_merge or crafting_input:
             await action(campaign, barter.CRAFT_SCRAP_FIXTURE)
             seeded = await inventory(profile, character)
             existing, = seeded.keys() - before.keys()
@@ -260,11 +279,21 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
             before = seeded
             proof["prior_scrap"] = before[existing]
         operation = uuid.uuid4().hex
+        if crafting_input:
+            offered = await press("checking", "offer")
+            assert offered["board_guid"] == guid and guid in await inventory(profile, character), offered
+            rendered = await press("trading", "exchanged")
+            events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            confirmed, = (row for row in events if (row["event"], row.get("sequence"), row.get("state")) == (
+                "native_mosby_station_input", rendered["sequence"], "exchanged"))
+            operation = confirmed["operation_id"]
         request = (barter.CRAFT_ACTION, "--target", guid, "--operation-id", operation)
         exchanged = (await action(profile, *request))["native_crafting_bench"]
         assert (exchanged["armor_guid"], exchanged["give"]["guid"]) == (armor, guid), exchanged
         assert exchanged["wallet_before"] == exchanged["wallet_after"], exchanged
         received = exchanged["receive"]["guid"]
+        if crafting_input:
+            assert rendered["scrap_guid"] == received and rendered["open"] == offered["sequence"], rendered
         items = await inventory(profile, character)
         expected_quantity = 3 if existing else 1
         assert not existing or received == existing, exchanged
@@ -275,7 +304,7 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         assert await inventory(campaign, "host") == host_before
         assert (await action(profile, *request))["native_crafting_bench"] == exchanged
         assert await inventory(profile, character) == items
-        if crafting_merge:
+        if existing:
             proof["merged_scrap"] = items[received]
         proof.update(exchange=exchanged, repeat_verified=True, verified=True)
 
@@ -298,7 +327,7 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         assert (row["class_path"], row["source"], row["quantity"], row["stackable"]) == (ITEM, "backpack", 1, False), row
         proof["stock_pickup"] = {"interaction": entry, "claim": claimed, "inventory": row}
 
-        if crafting_bench or crafting_merge:
+        if crafting_bench or crafting_merge or crafting_input:
             await craft_board(guid)
             return
 
@@ -420,6 +449,8 @@ if __name__ == "__main__":
     scenario.add_argument("--stock-board-input", action="store_true", help="use the stock Interact path at both bounty boards")
     scenario.add_argument("--crafting-bench", action="store_true", help="exchange the stock pickup at the Observatory workbench")
     scenario.add_argument("--crafting-bench-merge", action="store_true", help="merge the stock workbench output into a guest stack")
+    scenario.add_argument("--crafting-bench-input", action="store_true", help="use stock Interact to inspect and confirm the workbench recipe")
     arguments = options.parse_args()
     asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, stock_board_input=arguments.stock_board_input,
-                         crafting_bench=arguments.crafting_bench, crafting_merge=arguments.crafting_bench_merge))
+                         crafting_bench=arguments.crafting_bench, crafting_merge=arguments.crafting_bench_merge,
+                         crafting_input=arguments.crafting_bench_input))

@@ -86,6 +86,18 @@ class CraftingBenchTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = SimpleNamespace(command=AsyncMock(return_value={
             "state": "hosting", "map": dialogue.OBSERVATORY, "native_crafting_bench": self.proof}))
 
+    async def test_offer_reads_exact_guest_board_without_checkpointing(self):
+        fields = [barter.OFFER_TAG, dialogue.OBSERVATORY, self.pawn, barter.BENCH, "offer", PAYMENT, "C" * 32]
+        offer = barter.parse_offer(fields)
+        self.assertEqual(offer["board_guid"], PAYMENT)
+        self.bridge.command.return_value = {"state": "hosting", "map": dialogue.OBSERVATORY, barter.OFFER_KEY: offer}
+        self.assertEqual(await barter.preflight(self.host, self.bridge, "guest"), {barter.OFFER_KEY: offer})
+        self.bridge.command.assert_awaited_once_with(barter.CRAFT_PREFLIGHT, self.pawn, timeout=5)
+        self.host.checkpoint_native.assert_not_awaited()
+        fields[-1] = PAYMENT
+        with self.assertRaises(ValueError):
+            barter.parse_offer(fields)
+
     def test_parser_rejects_wrong_bench_or_recipe_and_aliased_armor(self):
         self.assertEqual(self.proof["receive"], {"guid": REWARD, "class_path": barter.SCRAP, "quantity": 1})
         for index, value in [(3, barter.BENCH.removesuffix("51") + "63"), (10, "2"), (12, "59"), (14, PAYMENT)]:

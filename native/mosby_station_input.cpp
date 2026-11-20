@@ -22,10 +22,19 @@ namespace
     using Lua = RC::LuaMadeSimple::Lua;
     using Clock = std::chrono::steady_clock;
     using Address = std::uintptr_t;
+    constexpr auto station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
+    constexpr auto callback_path = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C:SendInteractionToActor");
+    constexpr auto cradle_class = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C");
+    constexpr auto cradle_callback = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C:SendInteractionToActor");
+    constexpr auto workbench_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Furnature/CraftingBench_BP.CraftingBench_BP_C");
+    constexpr auto workbench_callback = STR("/Game/Assets/StaticMeshes/Mesh_Props/Furnature/CraftingBench_BP.CraftingBench_BP_C:SendInteractionToActor");
     struct Profile
     {
         const U::TCHAR* world;
         const U::TCHAR* station;
+        const U::TCHAR* actor_class{station_class};
+        const U::TCHAR* callback{callback_path};
+        const U::TCHAR* box{STR("Box")};
         bool cradle{};
     };
     constexpr std::array profiles{
@@ -36,12 +45,12 @@ namespace
         Profile{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_DownloadStation_BP_C_1")},
         Profile{STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P"),
-            STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.MindCore_Cradle_BP_C_1"), true},
+            STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.MindCore_Cradle_BP_C_1"),
+            cradle_class, cradle_callback, STR("Button_Tape"), true},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.StaticMeshActor_51"),
+            workbench_class, workbench_callback},
     };
-    constexpr auto station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
-    constexpr auto callback_path = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C:SendInteractionToActor");
-    constexpr auto cradle_class = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C");
-    constexpr auto cradle_callback = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C:SendInteractionToActor");
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto box_class = STR("/Script/Engine.BoxComponent");
     constexpr auto component_class = STR("/Script/Engine.SceneComponent");
@@ -85,15 +94,14 @@ namespace
 
     U::UObject* stock_box(U::UObject* station, U::UObject* pawn, const Profile& profile)
     {
-        const auto* exact_type = profile.cradle ? cradle_class : station_class;
-        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(exact_type) || station->GetPathName() != profile.station)
+        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(profile.actor_class) || station->GetPathName() != profile.station)
             return nullptr;
         auto* world = static_cast<U::AActor*>(station)->GetWorld();
         auto* destroying = field<U::FBoolProperty>(station, STR("bActorIsBeingDestroyed"));
         if (!live(world) || !pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world || world->GetPathName() != profile.world ||
             !destroying || destroying->GetPropertyValueInContainer(station)) return nullptr;
         auto* type = find<U::UClass>(box_class);
-        auto* property = field<U::FObjectProperty>(station, profile.cradle ? STR("Button_Tape") : STR("Box"));
+        auto* property = field<U::FObjectProperty>(station, profile.box);
         if (!type || !property || property->GetPropertyClass().Get() != type) return nullptr;
         auto* box = read(property, station);
         return live(box) && box->GetClassPrivate() == type && box->GetOuterPrivate() == station ? box : nullptr;
@@ -167,7 +175,7 @@ namespace silverfish::mosby_station_input
         const auto now = Clock::now();
         if (!actor || actor != scope.station.Get() || !function || !parameters || now >= scope.expires || !scope.profile ||
             call.OriginalFunctionCallPrevented() ||
-            function != find<U::UFunction>(scope.profile->cradle ? cradle_callback : callback_path)) return;
+            function != find<U::UFunction>(scope.profile->callback)) return;
         auto* scoped = scope.pawn.Get();
         auto* pawn = scoped ? active_guest(reinterpret_cast<Address>(scoped)) : nullptr;
         auto* box = pawn && scope.profile ? stock_box(actor, pawn, *scope.profile) : nullptr;

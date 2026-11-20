@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import party
+from . import native_borough_barter as barter, party
 from .native_gold import valid_guid
 from .native_tape_profiles import BLANK_CLASS, BY_MAP, BY_STATION, INSTRUCTIONS
 
@@ -13,7 +13,17 @@ KEY = "native_mosby_station_view"
 HEARTBEAT = "native-mosby-station-heartbeat"
 DOWNLOAD_HEARTBEAT = "native-mindcore-download-heartbeat"
 DOWNLOAD_READY = "native_mindcore_instructions_ready"
-ORDINARY_MAPS = frozenset(BY_MAP) - {INSTRUCTIONS.map}
+
+@dataclass(frozen=True)
+class Workbench:
+    map: str = barter.OBSERVATORY
+    station: str = barter.BENCH
+    namespace: str = "silverfish-observatory-workbench"
+
+
+WORKBENCH = Workbench()
+PROFILES = {**BY_MAP, WORKBENCH.map: WORKBENCH}
+ORDINARY_MAPS = frozenset(PROFILES) - {INSTRUCTIONS.map}
 FIXTURE = "native-mosby-station-fixture"
 RENDER = "native-mosby-station-render"
 WAITING = {"view": "checking", "trade": "trading"}
@@ -22,7 +32,7 @@ STATES = {"waiting", "armed", "focused", "checking", "trading", "offer", "missin
 
 def parse(fields: list[str]) -> dict:
     _, area, pawn, station, state, seq, open_seq, blank, product = fields
-    profile = BY_MAP.get(area)
+    profile = PROFILES.get(area)
     sequence, opened = int(seq), int(open_seq)
     if (not profile or station != profile.station or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
             or state not in STATES or not 0 <= opened <= sequence < 2**53 or (not valid_guid(blank) and blank != "-")
@@ -34,8 +44,12 @@ def parse(fields: list[str]) -> dict:
             or state in ("checking", "missing", "unavailable") and (not sequence or blank != "-")
             or state in ("waiting", "armed", "focused") and (sequence or blank != "-" or product != "-")):
         raise ValueError("Invalid local stock station input proof")
-    return dict(map=area, pawn=pawn, station=station, state=state, sequence=sequence, open=opened,
-                blank_guid=None if blank == "-" else blank, filled_guid=None if product == "-" else product)
+    result = dict(map=area, pawn=pawn, station=station, state=state, sequence=sequence, open=opened)
+    if profile is WORKBENCH:
+        result.update(board_guid=None if blank == "-" else blank, scrap_guid=None if product == "-" else product)
+    else:
+        result.update(blank_guid=None if blank == "-" else blank, filled_guid=None if product == "-" else product)
+    return result
 
 
 def parse_intent(fields):
@@ -43,7 +57,8 @@ def parse_intent(fields):
         return
     _, raw_sequence, raw_open, kind, pawn, station, blank = fields
     if (not all(value.isascii() and value.isdigit() and len(value) <= 16 for value in (raw_sequence, raw_open))
-            or not pawn.startswith("Player_FP_C ") or len(pawn) > 512 or station not in BY_STATION):
+            or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
+            or (station not in BY_STATION and station != WORKBENCH.station)):
         return
     sequence, opened = int(raw_sequence), int(raw_open)
     if (0 < opened <= sequence < 2**53 and (kind == "view" and opened == sequence and blank == "-"
@@ -67,7 +82,7 @@ class StationView:
 
     async def sync(self, snapshot, epoch, active, action):
         events = self.bridge.native_mosby_station_requests()
-        profile = BY_MAP.get(snapshot.get("map"))
+        profile = PROFILES.get(snapshot.get("map"))
         if not active or not epoch or not profile:
             self.offer = self.pending = None
             return snapshot
@@ -81,8 +96,9 @@ class StationView:
             return snapshot
         sequence, opened, kind, pawn, blank, station = self.pending[2]
         state = snapshot.get(KEY, {})
+        payment_key, product_key = ("board_guid", "scrap_guid") if profile is WORKBENCH else ("blank_guid", "filled_guid")
         if (sequence <= self.latest or station != profile.station or pawn != snapshot.get("pawns", {}).get("local", {}).get("name")
-                or tuple(state.get(field) for field in ("pawn", "station", "state", "sequence", "open", "blank_guid")) != (
+                or tuple(state.get(field) for field in ("pawn", "station", "state", "sequence", "open", payment_key)) != (
                     pawn, station, WAITING[kind], sequence, opened, blank)):
             return snapshot
         self.pending = None
@@ -94,29 +110,45 @@ class StationView:
         product = None
         try:
             if kind == "view":
-                preflight = profile.verb("preflight")
-                proof = (await action(preflight, operation, None)).get(profile.key, {})
-                if (tuple(proof.get(field) for field in ("operation", "map", "station", "state", "filled_guid")) != (
-                        preflight, profile.map, station, "offer", None)
-                        or profile == INSTRUCTIONS and proof.get("console_status") != 2
-                        or proof.get("give") != {"class_path": BLANK_CLASS, "quantity": 1, "cash": 0}
-                        or proof.get("receive") != {"class_path": profile.product, "quantity": 1, "cash": 0}):
-                    raise RuntimeError("The host did not verify the exact stock tape offer")
-                blank = proof.get("blank_guid")
+                if profile is WORKBENCH:
+                    proof = (await action(barter.CRAFT_PREFLIGHT, operation, None)).get(barter.OFFER_KEY, {})
+                    if (proof.get("map"), proof.get("bench"), proof.get("state")) not in (
+                            (profile.map, station, "offer"), (profile.map, station, "missing")):
+                        raise RuntimeError("The host did not verify the exact workbench offer")
+                else:
+                    preflight = profile.verb("preflight")
+                    proof = (await action(preflight, operation, None)).get(profile.key, {})
+                    if (tuple(proof.get(field) for field in ("operation", "map", "station", "state", "filled_guid")) != (
+                            preflight, profile.map, station, "offer", None)
+                            or profile == INSTRUCTIONS and proof.get("console_status") != 2
+                            or proof.get("give") != {"class_path": BLANK_CLASS, "quantity": 1, "cash": 0}
+                            or proof.get("receive") != {"class_path": profile.product, "quantity": 1, "cash": 0}):
+                        raise RuntimeError("The host did not verify the exact stock tape offer")
+                blank = proof.get(payment_key)
                 if blank is not None and not valid_guid(blank):
-                    raise RuntimeError("The host did not verify an owned blank tape GUID")
+                    raise RuntimeError("The host did not verify the owned exchange item")
                 outcome = "offer" if blank else "missing"
             else:
                 if not previous or previous.identity != identity or previous.blank != blank or previous.expires <= now:
                     raise party.RuleError("native_mosby_station_stale_confirmation")
-                converted = await action(profile.verb("convert"), operation, blank)
-                product = converted.get("filled_guid")
-                if (converted.get("effect") not in (profile.effect + "_exchanged", profile.effect + "_already_exchanged")
-                        or converted.get("blank_guid") != blank or not valid_guid(product) or product == blank
-                        or profile == INSTRUCTIONS and converted.get("console_status") != 2
-                        or not profile.requires_active_quest and (converted.get("map"), converted.get("station"),
-                            converted.get("class_path")) != (profile.map, station, profile.product)):
-                    raise RuntimeError("The host did not verify the exchange of the exact selected blank tape")
+                if profile is WORKBENCH:
+                    converted = (await action(barter.CRAFT_ACTION, operation, blank)).get("native_crafting_bench", {})
+                    received = converted.get("receive", {})
+                    product = received.get("guid")
+                    if ((converted.get("map"), converted.get("bench"), converted.get("state")) != (profile.map, station, "exchanged")
+                            or converted.get("give") != {"guid": blank, "class_path": barter.BOARD, "quantity": 1}
+                            or received != {"guid": product, "class_path": barter.SCRAP, "quantity": 1}
+                            or not valid_guid(product) or product == blank):
+                        raise RuntimeError("The host did not verify the exact workbench exchange")
+                else:
+                    converted = await action(profile.verb("convert"), operation, blank)
+                    product = converted.get("filled_guid")
+                    if (converted.get("effect") not in (profile.effect + "_exchanged", profile.effect + "_already_exchanged")
+                            or converted.get("blank_guid") != blank or not valid_guid(product) or product == blank
+                            or profile == INSTRUCTIONS and converted.get("console_status") != 2
+                            or not profile.requires_active_quest and (converted.get("map"), converted.get("station"),
+                                converted.get("class_path")) != (profile.map, station, profile.product)):
+                        raise RuntimeError("The host did not verify the exchange of the exact selected blank tape")
                 outcome = "exchanged"
         except (ValueError, OSError, RuntimeError) as error:
             outcome, blank, product = "unavailable", None, None
@@ -124,7 +156,7 @@ class StationView:
         try:
             rendered = await self.bridge.command(RENDER, str(sequence), str(opened), outcome, blank or "-", product or "-", timeout=3)
             proof = rendered.get(KEY, {})
-            if tuple(proof.get(field) for field in ("map", "pawn", "station", "state", "sequence", "open", "blank_guid", "filled_guid")) != (
+            if tuple(proof.get(field) for field in ("map", "pawn", "station", "state", "sequence", "open", payment_key, product_key)) != (
                     profile.map, pawn, station, outcome, sequence, opened, blank, product):
                 raise RuntimeError("The player did not verify the exact stock station response")
             if outcome == "offer":

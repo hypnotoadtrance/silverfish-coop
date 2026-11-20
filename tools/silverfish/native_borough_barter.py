@@ -14,6 +14,9 @@ COPPER = "/Game/Classes/Items/Item_CopperWire.Item_CopperWire_C"
 AMMO = "/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C"
 AMMO_COUNT = 25
 CRAFT_ACTION = "native-crafting-bench"
+CRAFT_PREFLIGHT = "native-crafting-bench-preflight"
+OFFER_TAG = "native-crafting-bench-offer"
+OFFER_KEY = "native_crafting_bench_offer"
 CRAFT_APPROACH = "native-crafting-bench-approach-fixture"
 CRAFT_SCRAP_FIXTURE = "native-crafting-bench-scrap-fixture"
 BENCH = "CraftingBench_BP_C " + native_dialogue.LEVEL + "StaticMeshActor_51"
@@ -57,6 +60,36 @@ def parse_crafting(fields: list[str]) -> dict:
             "wallet_before": wallet, "wallet_after": wallet, "reputation_change": 0,
             "give": {"guid": payment, "class_path": BOARD, "quantity": 1},
             "receive": {"guid": reward, "class_path": SCRAP, "quantity": 1}}
+
+
+def parse_offer(fields: list[str]) -> dict:
+    tag, area, pawn, bench, state, board, armor = fields
+    if ((tag, area, bench) != (OFFER_TAG, OBSERVATORY, BENCH)
+            or not pawn.startswith("Player_FP_C " + native_dialogue.LEVEL) or len(pawn) > 512
+            or not valid_guid(armor) or armor == board
+            or not (state == "offer" and valid_guid(board) or state == "missing" and board == "-")):
+        raise ValueError("Invalid stock workbench offer")
+    return dict(map=area, pawn=pawn, bench=bench, state=state, board_guid=None if board == "-" else board, armor_guid=armor)
+
+
+async def preflight(host, bridge, character: str) -> dict:
+    sessions = host.dialogue_sessions
+    if not sessions or OBSERVATORY not in sessions.maps:
+        raise party.RuleError("native_crafting_bench_unavailable")
+    scope = sessions.member_scope(host, character)
+    if scope[2] != OBSERVATORY:
+        raise party.RuleError("native_crafting_bench_unavailable")
+    try:
+        current = await bridge.command(CRAFT_PREFLIGHT, scope[3], timeout=5)
+    except RuntimeError as error:
+        if str(error).startswith("borough_barter_refused_"):
+            raise party.RuleError(str(error)) from error
+        raise
+    proof = current.get(OFFER_KEY, {})
+    if (current.get("state"), current.get("map"), proof.get("pawn")) != ("hosting", OBSERVATORY, scope[3]):
+        raise RuntimeError("The workbench did not verify the exact guest offer")
+    host.last_game, host.last_seen = current, time.monotonic()
+    return {OFFER_KEY: proof}
 
 
 async def trade(host, bridge, character: str, payment: str, operation: str, *, action: str = ACTION) -> dict:
