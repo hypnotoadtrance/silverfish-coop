@@ -14,7 +14,7 @@ local cancel_press = "BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentB
 local reasons = {quit_to_menu = true, save_and_quit = true}
 
 local offer_path, eligibility_path, input_path, request_path
-local bound, written_eligibility, requested, fixture_menu, fixture_status
+local bound, written_eligibility, requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -97,7 +97,7 @@ end
 
 function pause.clear()
     revoke()
-    fixture_menu, fixture_status = nil, nil
+    fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil
 end
 
 local function qualified(state, phase)
@@ -109,7 +109,7 @@ local function qualified(state, phase)
         and (bound.role ~= scene.role or bound.address ~= scene.address) then return end
     if not bound or bound.generation ~= generation then
         bound = {generation = generation, role = scene.role, address = scene.address}
-        requested, fixture_menu, fixture_status = nil, nil, nil
+        requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil, nil
     end
     scene.generation = generation
     local role = scene.role == "guest" and "client" or "host"
@@ -150,9 +150,35 @@ end
 
 local function reject(reason) error("native_coop_pause_fixture_" .. reason, 0) end
 
-local function menu_for(value, class, scene)
-    return exact(value, class) and same(value:GetOwningPlayer(), scene.controller)
-        and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport() and value:IsVisible()
+local function owned_pause(value, scene)
+    return exact(value, pause_class) and same(value:GetOwningPlayer(), scene.controller)
+        and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport()
+end
+
+local function confirmation(stack, scene)
+    local count = stack and stack:GetArrayNum()
+    local anchored = count == 2 and same(stack[1], fixture_menu)
+    local top = count and count > 0 and stack[count]
+    local class = valid(top) and top:GetClass()
+    local owner = valid(top) and top:GetOwningPlayer()
+    local outer = valid(top) and top:GetOuter()
+    local instance = scene.world.OwningGameInstance
+    local owned = same(owner, scene.controller) and "local" or valid(owner) and "other" or "unbound"
+    local abode = same(outer, instance) and "instance" or same(outer, scene.world) and "world" or valid(outer) and "other" or "unbound"
+    local mounted, visible = valid(top) and top:IsInViewport() == true, valid(top) and top:IsVisible() == true
+    local dialog = exact(top, confirmation_class)
+    local same_world = false
+    if dialog and (abode == "instance" or abode == "world") then
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        same_world = valid(statics) and same(statics:GetGameInstance(top), instance)
+            and same(statics:GetPlayerController(top, 0), scene.controller)
+    end
+    local label = valid(class) and class:GetFullName():match("([^./: ]+)$") or "-"
+    label = label:sub(1, 70):gsub("[^%w_%-]", "?")
+    fixture_diagnostic = table.concat({"count=" .. tostring(count or "-"), "pause=" .. tostring(anchored and true or false),
+        "class=" .. label, "owner=" .. owned, "outer=" .. abode, "world=" .. tostring(same_world and true or false),
+        "viewport=" .. tostring(mounted and true or false), "visible=" .. tostring(visible and true or false)}, ":")
+    if anchored and dialog and owned ~= "other" and same_world and mounted and visible then return top end
 end
 
 function pause.command(fields, state, phase)
@@ -166,6 +192,7 @@ function pause.command(fields, state, phase)
     local stack = scene.controller.MenuStack
     local count = stack and stack:GetArrayNum()
     if action == "open" then
+        fixture_confirmation, fixture_diagnostic = nil, nil
         if count ~= 0 then reject("stock_menu_open") end
         local class = StaticFindObject(pause_class)
         if not valid(class) then LoadAsset(pause_class); class = StaticFindObject(pause_class) end
@@ -173,28 +200,30 @@ function pause.command(fields, state, phase)
         local created = {}
         scene.controller:OpenMenu(class, created)
         local menus = scene.controller.MenuStack
-        if not menus or menus:GetArrayNum() ~= 1 or not menu_for(menus[1], pause_class, scene)
-            or not same(menus[1], created.CreatedMenu) then reject("stock_pause_open_unverified") end
+        if not menus or menus:GetArrayNum() ~= 1 or not owned_pause(menus[1], scene)
+            or not menus[1]:IsVisible() or not same(menus[1], created.CreatedMenu) then reject("stock_pause_open_unverified") end
         fixture_menu = menus[1]
-    elseif not count or not menu_for(fixture_menu, pause_class, scene) or not same(stack[1], fixture_menu) then
+    elseif not count or not owned_pause(fixture_menu, scene) or not same(stack[1], fixture_menu) then
         reject("exact_stock_pause_unavailable")
     elseif action == "prompt" then
-        if count ~= 1 then reject("stock_pause_covered") end
+        if count ~= 1 or not fixture_menu:IsVisible() then reject("stock_pause_covered") end
         fixture_menu[prompt_press](fixture_menu)
-        local menus = scene.controller.MenuStack
-        if not menus or menus:GetArrayNum() ~= 2 or not same(menus[1], fixture_menu)
-            or not menu_for(menus[2], confirmation_class, scene) then reject("stock_confirmation_unverified") end
+        fixture_confirmation = confirmation(scene.controller.MenuStack, scene)
+        if not fixture_confirmation then reject("stock_confirmation_unverified:" .. fixture_diagnostic) end
     elseif action == "save_and_quit" then
-        if count ~= 1 or not valid(fixture_menu.Button_SaveAndQuit)
+        if count ~= 1 or not fixture_menu:IsVisible() or not valid(fixture_menu.Button_SaveAndQuit)
             or not fixture_menu.Button_SaveAndQuit:IsVisible()
             or fixture_menu:Get_Button_SaveAndQuit_bIsEnabled() ~= true then reject("stock_save_and_quit_unavailable") end
         fixture_menu[save_press](fixture_menu)
         consume(scene)
     else
-        local confirm = count == 2 and stack[2]
-        if not menu_for(confirm, confirmation_class, scene) or confirm.Dismissed ~= false then reject("stock_confirmation_unavailable") end
+        local confirm = confirmation(stack, scene)
+        if not same(confirm, fixture_confirmation) or confirm.Dismissed ~= false then
+            reject("stock_confirmation_unavailable:" .. fixture_diagnostic)
+        end
         local press = action == "confirm" and confirm_press or cancel_press
         confirm[press](confirm)
+        fixture_confirmation = nil
         consume(scene)
     end
     fixture_status = action
@@ -207,6 +236,7 @@ function pause.rows(state, phase, row)
     if not scene or scene.address ~= bound.address or scene.role ~= bound.role then return {} end
     local lines = {row("native-coop-pause", bound.role, bound.generation, requested and "requested" or "armed", requested or 0)}
     if fixture_status then lines[#lines + 1] = row("native-coop-pause-fixture", bound.role, fixture_status) end
+    if fixture_diagnostic then lines[#lines + 1] = row("native-coop-pause-fixture-diagnostic", bound.role, fixture_diagnostic) end
     return lines
 end
 

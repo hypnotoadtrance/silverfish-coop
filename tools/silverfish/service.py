@@ -2990,6 +2990,10 @@ class Host:
                     result = self.act("host", request.get("operation_id") or path.stem,
                                       action, request.get("target"), request.get("amount"),
                                       retained=request.get("retained"))
+                elif action == "leave-session":
+                    if not isinstance(bridge.process, EmbeddedEngine) or not self.native_zones:
+                        raise ValueError("Open an integrated co-op campaign to end it from the game")
+                    result = await self.end_session(bridge, transport)
                 elif action == "checkpoint" or action == "stop":
                     result = {"revision": await self.checkpoint_native(bridge)}
                     self.control.event("checkpoint_saved", revision=result["revision"], command_id=path.stem)
@@ -3305,10 +3309,12 @@ class Host:
                     self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             await self.service_requests(bridge, transport)
             if pause_exit is not None:
+                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                 can_end = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe
                                or self.party.get("wipe")) and self.last_game.get("state") == "hosting"
-                           and time.monotonic() - self.last_seen <= 1.5)
-                await pause_exit.poll((self.control.generation, self.zone_epoch) if can_end else None, end_session)
+                           and pawn and time.monotonic() - self.last_seen <= 1.5)
+                scope = (self.control.generation, self.zone_epoch, pawn) if can_end else None
+                await pause_exit.poll(scope, end_session)
             if invites is not None:
                 active = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.party.get("wipe"))
                           and time.monotonic() - self.last_seen <= 1.5
@@ -4587,6 +4593,10 @@ class Client:
                 elif action in ("interact", "buy", "keep", *GUEST_NATIVE_ACTIONS):
                     result = await self.gameplay_action(action, request.get("operation_id") or path.stem,
                                                         request.get("target"), request.get("retained"))
+                elif action == "leave-session":
+                    if not isinstance(self.bridge.process, EmbeddedEngine) or not self.invite.get("native_zones"):
+                        raise ValueError("Open an integrated co-op guest session to leave it from the game")
+                    result = await self.leave_session(request.get("operation_id") or path.stem)
                 elif action == "stop":
                     self.stopping = True
                     result = {"stopping": True}
@@ -4647,10 +4657,11 @@ class Client:
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
             if pause_exit is not None:
+                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                 can_leave = (active and self.transport.game_access and self.host_session and self.zone_epoch
-                             and self.expected_zone == self.last_game.get("map")
+                             and pawn and self.expected_zone == self.last_game.get("map")
                              and time.monotonic() - self.gameplay_seen < 2 and not self.gameplay.get("wipe"))
-                scope = (self.control.generation, self.host_session, self.zone_epoch) if can_leave else None
+                scope = (self.control.generation, self.host_session, self.zone_epoch, pawn) if can_leave else None
                 await pause_exit.poll(scope, self.leave_session)
                 if self.stopping:
                     break

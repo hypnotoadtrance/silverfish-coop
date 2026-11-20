@@ -351,18 +351,33 @@ namespace
             widget_status(widget, STR("/Script/UMG.Widget:IsVisible")) == true;
     }
 
-    bool belongs(U::UObject* widget, const Seat& seat)
+    std::optional<U::UObject*> widget_player(U::UObject* widget)
     {
-        if (!live(widget) || widget->GetWorld() != seat.world.Get() ||
-            widget->GetOuterPrivate() != seat.instance.Get()) return false;
         auto* function = find<U::UFunction>(STR("/Script/UMG.Widget:GetOwningPlayer"));
         auto* result = function ? U::CastField<U::FObjectProperty>(function->GetReturnProperty()) : nullptr;
         if (!result || result->GetOffset_Internal() != 0 || function->GetNumParms() != 1 ||
             function->GetParmsSize() != sizeof(U::UObject*) || !function->HasAnyFunctionFlags(U::FUNC_Native))
-            return false;
+            return {};
         U::UObject* controller{};
         widget->ProcessEvent(function, &controller);
-        return controller == seat.controller.Get();
+        return controller;
+    }
+
+    bool pause_belongs(U::UObject* widget, const Seat& seat)
+    {
+        return live(widget) && widget->GetWorld() == seat.world.Get() &&
+            widget->GetOuterPrivate() == seat.instance.Get() && widget_player(widget) == seat.controller.Get();
+    }
+
+    bool confirmation_context(U::UObject* dialog, const Seat& seat)
+    {
+        if (dialog->GetWorld() != seat.world.Get() ||
+            (dialog->GetOuterPrivate() != seat.instance.Get() && dialog->GetOuterPrivate() != seat.world.Get()))
+            return false;
+        // Unlike the Pause menu, the stock graph creates Confirmation with OwningPlayer=None.
+        // The exact local stack and the sole Confirmed listener below prove its relationship to Pause.
+        const auto player = widget_player(dialog);
+        return player && (!*player || *player == seat.controller.Get());
     }
 
     bool confirm_binds(U::UObject* dialog, U::UObject* pause)
@@ -439,7 +454,7 @@ namespace
             published->seat.current(published->lease);
         if (!lease && repeat) lease = published->lease;
         Seat seat;
-        if (!lease || !seat.bind(widget, *lease) || !belongs(widget, seat) ||
+        if (!lease || !seat.bind(widget, *lease) || !pause_belongs(widget, seat) ||
             object_field(widget, STR("As Game Instance FP")) != seat.instance.Get()) return;
         ObjectArray stack(seat.controller.Get(), STR("MenuStack"));
         const int count = stack.size();
@@ -449,8 +464,8 @@ namespace
         {
             if (top != widget || !mounted(widget)) return;
         }
-        else if (count < 2 || stack.at(count - 2) != widget || !exact(top, confirm_path) ||
-            !belongs(top, seat) || !mounted(top) || !bool_field(top, STR("Dismissed"), true) ||
+        else if (count < 2 || stack.at(count - 2) != widget || !exact(top, confirm_path) || stack.count(top) != 1 ||
+            !confirmation_context(top, seat) || !mounted(top) || !bool_field(top, STR("Dismissed"), true) ||
             !confirm_binds(top, widget)) return;
 
         // Both callbacks must be stopped before the stock save or level preparation can run.
@@ -483,7 +498,7 @@ namespace
         {
             // The stock confirmation click must finish its own stock CloseMenu first.
             if (!menu || count == 0 || stack.at(count - 1) != menu || stack.count(menu) != 1 ||
-                !belongs(menu, exit.seat) || !mounted(menu)) return;
+                !pause_belongs(menu, exit.seat) || !mounted(menu)) return;
             if (!stock_close(controller))
             {
                 pending.reset();

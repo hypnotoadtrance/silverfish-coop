@@ -161,7 +161,7 @@ def parser() -> argparse.ArgumentParser:
     action = commands.add_parser("action", help="perform a supported local action")
     _target(action)
     action.add_argument("action", choices=[
-        "checkpoint", "drop-link", "reconnect", "stop", "walk", "interact", "test-damage", "travel",
+        "checkpoint", "drop-link", "reconnect", "stop", "leave-session", "walk", "interact", "test-damage", "travel",
         "buy", "test-quest-reward", "vitals-probe", "vitals-reset", "quest-probe", "rest", "keep",
         "native-death-probe", "native-damage-probe", "native-inventory-probe", "native-guest-damage",
         "native-exit-position", "native-exit-wall-probe", "native-host-damage", "native-friendly-fire",
