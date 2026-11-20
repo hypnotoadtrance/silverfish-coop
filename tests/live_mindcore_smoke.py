@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
 from tools.silverfish import native_mindcore_view as console
+from tools.silverfish import native_mindcore_carry as carry
 from tools.silverfish import native_mosby_station_view as download_view
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
@@ -106,11 +107,13 @@ def baseline_inputs(work, baseline, *, resume=False):
 
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
-                   carry_only=False, shared_core=False):
+                   carry_only=False, shared_core=False, guest_carry=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
         raise ValueError("Run the Core handling proof separately from the Instructions exchange")
+    if guest_carry and (carry_only or instructions):
+        raise ValueError("Run the guest Core interaction separately")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -389,6 +392,66 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         await action(run, "checkpoint")
         dormant_checkpoint, dormant_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
+        if guest_carry:
+            await action(run, carry.APPROACH_FIXTURE, target=character)
+            readied = await wait(guest_run, lambda state: (
+                state.get("game", {}).get(carry.VIEW, {}).get("state") == "ready"
+                and math.dist(state["game"]["pawns"]["local"]["location"], [714.39, -1467, 134.85]) <= 20
+            ), timeout=20)
+            assert readied["character_id"] == character
+            host_before = await shared_core_at(0, label="before_guest_grab")
+            await action(guest_run, carry.FIXTURE, target="grab")
+
+            def active_carry(state):
+                game = state.get("game", {})
+                row = game.get(carry.AUTHORITY, {})
+                return (row.get("state") == "held" and row.get("core") == core.CORE
+                        and row.get("pawn") == game.get("native_guest_save", {}).get("pawn"))
+
+            grabbing = await wait(run, active_carry, timeout=14)
+            held = grabbing["game"][carry.AUTHORITY]
+            await wait(guest_run, lambda state: state.get("game", {}).get(carry.VIEW, {}).get("state") == "held", timeout=12)
+            await wait(run, lambda state: active_carry(state)
+                       and state["game"][carry.AUTHORITY]["sequence"] > held["sequence"], timeout=14)
+            after_grab = await shared_core_at(0, label="guest_held")
+            guest_pawn = readied["game"]["pawns"]["local"]["name"]
+            await action(guest_run, carry.FIXTURE, target="turn")
+            turned = await wait(run, lambda state: active_carry(state)
+                                and math.dist(state["game"][core.REPLICATION]["position"],
+                                              after_grab["host"]["position"]) >= 20, timeout=18)
+            assert turned["game"][carry.AUTHORITY]["lease"] == held["lease"]
+            turned_scene = await shared_core_at(0, label="guest_turned_core")
+            before_walk = runtime.read_json(guest_run / "status.json")["game"]["pawns"]["local"]["location"]
+            await action(guest_run, "walk", x=0, y=1, milliseconds=2500)
+            walked = await wait(guest_run, lambda state: (
+                (pawn := state.get("game", {}).get("pawns", {}).get("local", {})).get("name") == guest_pawn
+                and math.dist(pawn["location"], before_walk) >= 20
+            ), timeout=12)
+            assert walked["game"][carry.VIEW]["state"] == "held"
+            await wait(run, lambda state: active_carry(state)
+                       and math.dist(state["game"][core.REPLICATION]["position"],
+                                     turned_scene["host"]["position"]) >= 20, timeout=14)
+            await shared_core_at(0, label="guest_walked_with_core")
+            await action(guest_run, carry.FIXTURE, target="release")
+            released = await wait(run, lambda state: (
+                (row := state.get("game", {}).get(carry.AUTHORITY, {})).get("state") == "released"
+                and row.get("lease") == held["lease"] and row.get("pawn") == held["pawn"]
+            ), timeout=14)
+            actual_release = await shared_core_at(0, label="guest_released")
+            await action(run, "checkpoint")
+            saved, released_flags = await flags()
+            assert saved["revision"] > dormant_checkpoint["revision"]
+            assert tuple(row.get(core.FLAG, 0) for row in released_flags) == (0, 0)
+            assert core.LEDGER not in saved["world"]["party"]
+            proof.update(verified=True, guest_carry={key: {
+                name: value for name, value in row.items() if name != "lease"
+            } for key, row in (("held", held), ("turn", turned["game"][carry.AUTHORITY]),
+                               ("release", released["game"][carry.AUTHORITY]))},
+                carry_checkpoint=saved["revision"], carry_stock_flags=[0, 0],
+                guest_core_displacement_uu=round(math.dist(host_before["guest"]["position"],
+                                                           actual_release["guest"]["position"]), 3))
+            return proof
+
         if carry_only:
             proof["stock_carry"] = {}
             poses = proof["core_poses"] = {"before": await core_poses()}
@@ -554,7 +617,9 @@ if __name__ == "__main__":
     parser.add_argument("--instructions", action="store_true", help="buy a second blank and use the compiled console's stock exchange")
     parser.add_argument("--carry-only", action="store_true", help="grab, move, and release the Core with stock gameplay")
     parser.add_argument("--shared-core", action="store_true", help="verify the guest sees the authoritative exact Core")
+    parser.add_argument("--guest-carry", action="store_true", help="use real guest Interact and aim to carry the exact Core")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
-                         instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core))
+                         instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
+                         guest_carry=options.guest_carry))

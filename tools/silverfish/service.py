@@ -36,7 +36,7 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_mindcore_view
+from . import native_mindcore_carry, native_mindcore_view
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -218,6 +218,8 @@ class Host:
         self.native_zones = native_zones
         self.native_guest_controls = native_guest_controls and native_guest and native_zones and native_backend == "cpp"
         self.smg_holds = native_smg_hold.Authority(self) if guest_held_fire and self.native_guest_controls else None
+        self.mindcore_carry = (native_mindcore_carry.Authority(self)
+                               if native_guest and native_zones and native_backend == "cpp" else None)
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -679,6 +681,9 @@ class Host:
         view["host_world"] = self.native_world_state()
         if native_mindcore._ready(self.last_game, 2) and native_mosby_tape.instructions_download_unlocked(self.party):
             view["host_world"][native_mosby_station_view.DOWNLOAD_READY] = True
+        carry = getattr(self, "mindcore_carry", None)
+        if carry and (frame := carry.public()) is not None:
+            view[native_mindcore_carry.PUBLIC] = frame
         balance = self.last_game.get("native_wallet")
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
@@ -1604,6 +1609,16 @@ class Host:
             return self.enqueue_native_request(guest_id, request)
         if self.guest_leave_pending(guest_id):
             return {"ok": False, "error": "native_session_leave_pending"}
+        if action == native_mindcore_carry.ACTION and self.mindcore_carry:
+            try:
+                if set(request) != {"action", "operation_id", "target"} or not native_mindcore_carry.token(request.get("operation_id")):
+                    raise ValueError("Invalid Core carry operation")
+                carry = native_mindcore_carry.Request.parse(request["target"])
+            except ValueError as error:
+                return {"ok": False, "error": str(error)}
+            if carry.edge == "aim":
+                return self.mindcore_carry.aim(character, carry)
+            return self.enqueue_native_request(guest_id, request)
         if action == native_smg_hold.ACTION and self.smg_holds and set(request) == {"action", "operation_id", "target"}:
             operation = request.get("operation_id")
             if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
@@ -1699,6 +1714,8 @@ class Host:
                 result = await native_mindcore.preflight(self, bridge, character, target)
             elif action == native_mindcore.UPLOAD:
                 result = await native_mindcore.upload(self, bridge, character, target, request["operation_id"])
+            elif action == native_mindcore_carry.ACTION and self.mindcore_carry:
+                result = await self.mindcore_carry.operate(character, native_mindcore_carry.Request.parse(target))
             elif action == native_prototype_drill.PREFLIGHT:
                 result = await native_prototype_drill.preflight(self, bridge, character, action, target)
             elif action in native_mosby_tape.CONVERSIONS:
@@ -2644,6 +2661,8 @@ class Host:
                     target = request.get("target") or "guest"
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
                                                            profile=native_mosby_tape.APPROACHES[action])
+                elif action == native_mindcore_carry.APPROACH_FIXTURE and self.fixtures:
+                    result = await native_mindcore_carry.approach_fixture(self, bridge, request.get("target"))
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH,
                                 native_mindcore_fixture.CARRY) and self.fixtures:
                     result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))
@@ -3170,6 +3189,8 @@ class Host:
             await asyncio.sleep(.4)
 
     async def run(self, bridge: Bridge, transport) -> None:
+        if self.mindcore_carry:
+            self.mindcore_carry.bridge = bridge
         invites = (native_host_invitation.HostInvitationMailbox(bridge.directory, self.control.run, self.invite)
                    if self.native_events and self.native_zones else None)
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host")
@@ -3188,6 +3209,8 @@ class Host:
                 invites.close()
             if pause_exit is not None:
                 pause_exit.close()
+            if self.mindcore_carry:
+                self.mindcore_carry.close()
 
     async def run_session(self, bridge: Bridge, transport, invites, *, pause_exit=None) -> None:
         loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
@@ -3222,6 +3245,8 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            if self.mindcore_carry:
+                self.mindcore_carry.maintain()
             try:
                 dig_pending = await native_host_dig_live.settle(self, bridge)
             except (OSError, ValueError, RuntimeError):
@@ -3837,6 +3862,7 @@ class Client:
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
+        self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
         self.last_primary_intent = 0
         self.last_inventory_use = 0
         self.last_inventory_split = 0
@@ -4565,6 +4591,13 @@ class Client:
                             or (proof.get("map"), proof.get("station")) != (area, native_mosby_tape.BY_MAP[area].station)):
                         raise RuntimeError("The stock tape station press did not verify")
                     result = {native_mosby_station_view.KEY: proof}
+                elif action == native_mindcore_carry.FIXTURE and self.mindcore_carry:
+                    pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                    target = request.get("target")
+                    if self.last_game.get("map") != native_mindcore.MAP or not pawn or target not in ("grab", "release", "turn"):
+                        raise ValueError("Select an exact staged guest Core carry input")
+                    self.last_game = await self.bridge.command(action, pawn, target, timeout=6)
+                    result = {"input": target}
                 elif action == native_mindcore_view.FIXTURE and self.mindcore_view:
                     if not self.mindcore_stage_ready() or request.get("target") is not None:
                         raise ValueError("The exact stock MindCore upload is unavailable")
@@ -4617,6 +4650,8 @@ class Client:
         finally:
             if pause_exit is not None:
                 pause_exit.close()
+            if self.mindcore_carry:
+                self.mindcore_carry.close()
             if held:
                 held.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -4667,6 +4702,8 @@ class Client:
                 if self.stopping:
                     break
             await self.service_reload_input(active)
+            if self.mindcore_carry:
+                await self.mindcore_carry.poll(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
             if self.loot_view:

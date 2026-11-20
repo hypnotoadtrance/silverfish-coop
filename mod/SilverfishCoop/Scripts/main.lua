@@ -22,6 +22,8 @@ local native_dialogue = require("native_dialogue")
 local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
+local native_mindcore_carry = require("native_mindcore_carry")
+local native_mindcore_carry_view = require("native_mindcore_carry_view")
 local native_mindcore_fixture = require("native_mindcore_fixture")
 local native_mindcore_replication = require("native_mindcore_replication")
 local native_mindcore_view = require("native_mindcore_view")
@@ -440,6 +442,7 @@ local function run_command(fields, state, current_phase)
         error("stock_live_dig_checkpoint_pending", 0)
     end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
+        native_mindcore_carry.clear()
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
         native_guest_mre.reset()
@@ -459,6 +462,7 @@ local function run_command(fields, state, current_phase)
         native_mindcore.clear()
         native_mindcore_fixture.clear()
         native_mindcore_replication.clear()
+        native_mindcore_carry_view.clear()
         native_mindcore_view.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
@@ -901,6 +905,8 @@ local function run_command(fields, state, current_phase)
         or native_mosby_tape.command(fields, state, current_phase)
         or native_mindcore.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
+        or native_mindcore_carry.command(fields, state, current_phase)
+        or native_mindcore_carry_view.command(fields, state, current_phase)
         or native_mindcore_view.command(fields, state, current_phase)
         or native_prototype_drill.command(fields, state, current_phase)
         or native_mosby_station.command(fields, state, current_phase)
@@ -1066,6 +1072,8 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore_carry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore_carry_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1314,6 +1322,8 @@ local function tick()
         native_dialogue.sync(state, current_phase)
         native_mosby_station.sync(state, current_phase)
         native_mindcore_fixture.sync(state, current_phase)
+        native_mindcore_carry.sync(state, current_phase)
+        native_mindcore_carry_view.sync(state, current_phase)
         native_mindcore_view.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
         return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
@@ -1343,6 +1353,8 @@ native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)
 native_mosby_station.start(bridge, players.is_downed)
+native_mindcore_carry.start(bridge)
+native_mindcore_carry_view.start(bridge, players.is_downed)
 native_mindcore_replication.start(function() return role == "client" and not leaving end)
 native_mindcore_view.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
