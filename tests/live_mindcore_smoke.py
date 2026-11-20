@@ -147,8 +147,10 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
                    lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
-                   prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False):
+                   prepare_core_carry=False, core_lift_carry=False, guest_hazard_authority=False,
+                   raise_before_ascent=False):
     upper_door = upper_door or upper_door_keycard
+    core_lift_carry = core_lift_carry or raise_before_ascent
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -171,7 +173,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Prepare the carry checkpoint separately from the verified dormant Savlo keycard checkpoint")
     if core_lift_carry and (not resume or stock_input or lift_ride or upper_door or instructions
                             or carry_only or guest_carry or shared_core or stock_hazard_wipe or prepare_core_carry):
-        raise ValueError("Test the continuous lift carry separately from the prepared dual-card checkpoint")
+        raise ValueError("Test the lift carry separately from the prepared dual-card checkpoint")
     if guest_hazard_authority and (not resume or stock_input or lift_ride or upper_door or instructions
                                    or carry_only or guest_carry or shared_core or stock_hazard_wipe
                                    or prepare_core_carry or core_lift_carry):
@@ -258,7 +260,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
 
     def start_host(port):
         task = asyncio.create_task(service.host_game(work, campaign, "127.0.0.1", port, True, True,
-            native_events=True, native_guest=True, native_zones=True, expanded_zones=True))
+            native_events=True, native_guest=True, native_zones=True, expanded_zones=True, guest_regen=raise_before_ascent))
         jobs.append((run, task))
         return task
 
@@ -714,7 +716,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
 
             route_proof = proof["core_lift_carry"] = {"cards": [await assert_key_custody(claim) for claim in cards]}
             await verify_core_lift(run, guest_run, action, inactive, character, route_proof,
-                                   lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match)
+                                   lift_pose_matches=lift_pose_matches, lift_riders_match=lift_riders_match,
+                                   raise_before_ascent=raise_before_ascent)
             await action(run, "checkpoint")
             saved, lift_flags = await flags()
             assert tuple(row.get(core.FLAG, 0) for row in lift_flags) == (0, 0)
@@ -1021,12 +1024,17 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 except (OSError, RuntimeError, TimeoutError, ValueError):
                     task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        proof["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
+        current_originals = saved_hashes(vanilla_saved)
+        proof["original_saves_changed_paths"] = sorted(
+            path for path in originals.keys() | current_originals.keys() if originals.get(path) != current_originals.get(path)
+        )
+        proof["original_saves_verified"] = not proof["original_saves_changed_paths"]
         proof["baseline_verified"] = initial_inputs == {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
         isolated = proof["original_saves_verified"] and proof["baseline_verified"]
         proof["verified"] = isolated and proof.get("verified", False)
         runtime.write_json(run / REPORT, proof)
-        assert isolated
+        assert isolated, (f"Changed original files: {proof['original_saves_changed_paths']}. "
+                          f"Source checkpoint matched: {proof['baseline_verified']}")
     return proof
 
 
@@ -1052,7 +1060,9 @@ if __name__ == "__main__":
     parser.add_argument("--prepare-core-carry", action="store_true",
                         help="clone the verified Savlo checkpoint and acquire the Cistern card for the same host")
     parser.add_argument("--core-lift-carry", action="store_true",
-                        help="carry the exact stock Core continuously from the lower floor onto the upper west landing")
+                        help="regrip the exact stock Core and carry it through the lift to the upper west landing")
+    parser.add_argument("--core-lift-raise-before-ascent", action="store_true",
+                        help="try raising the held Core before the lower lift starts moving")
     parser.add_argument("--guest-hazard-authority", action="store_true",
                         help="verify stock lower-floor damage downs the guest through the host only")
     options = parser.parse_args()
@@ -1063,4 +1073,5 @@ if __name__ == "__main__":
                           lift_disembark=options.lift_disembark, upper_door=options.upper_door,
                          upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe,
                          prepare_core_carry=options.prepare_core_carry, core_lift_carry=options.core_lift_carry,
-                         guest_hazard_authority=options.guest_hazard_authority))
+                         guest_hazard_authority=options.guest_hazard_authority,
+                         raise_before_ascent=options.core_lift_raise_before_ascent))
