@@ -244,15 +244,17 @@ local function press_fixture(current, operation)
     end
 end
 
-local function turn_fixture(current)
-    local pitch, yaw = camera_aim(current)
-    if not pitch then refuse("fixture_camera_aim") end
+local function turn_fixture(current, pitch, yaw)
+    local previous_pitch, previous_yaw = camera_aim(current)
+    if not previous_pitch then refuse("fixture_camera_aim") end
     local control, relative = copy_rotation(current.controller:GetControlRotation()), copy_rotation(current.camera.RelativeRotation)
     if not control or not relative then refuse("fixture_camera_pose") end
-    local expected = (yaw + 25 + 180) % 360 - 180
-    set_aim(current, {Pitch = pitch, Yaw = expected, Roll = 0})
+    pitch = pitch or previous_pitch
+    yaw = yaw or (previous_yaw + 25 + 180) % 360 - 180
+    set_aim(current, {Pitch = pitch, Yaw = yaw, Roll = 0})
     local proof = sample_aim(current)
-    if not proof or math.abs((proof.yaw - expected + 180) % 360 - 180) > .25 then
+    if not proof or math.abs(proof.pitch - pitch) > .25
+        or math.abs((proof.yaw - yaw + 180) % 360 - 180) > .25 then
         restore_aim(current, control, relative)
         refuse("fixture_camera_turn_readback")
     end
@@ -261,15 +263,22 @@ end
 function view.command(fields, state, phase)
     if fields[2] ~= fixture then return end
     local operation = fields[4]
-    if not headless or #fields ~= 4 or (operation ~= "grab" and operation ~= "release" and operation ~= "turn")
+    local absolute_aim = operation == "turn" and #fields == 6
+    if not headless or (#fields ~= 4 and not absolute_aim)
+        or (operation ~= "grab" and operation ~= "release" and operation ~= "turn")
         or type(SilverfishProbeNativeInteractInput) ~= "function" then refuse("fixture_unavailable") end
+    local pitch, yaw
+    if absolute_aim then
+        pitch, yaw = tonumber(fields[5]), tonumber(fields[6])
+        if not bounded(pitch, 89.9) or not bounded(yaw, 180) then refuse("fixture_camera_aim") end
+    end
     local current, why = context(state, phase)
     if not current or current.name ~= fields[3] then refuse("fixture_scope:" .. (why or "pawn")) end
     current = lease(current, os.time())
     if not current or current.state ~= (operation == "grab" and "ready" or "held") or not arm(current) then
         refuse("fixture_lease")
     end
-    if operation == "turn" then turn_fixture(current) else press_fixture(current, operation) end
+    if operation == "turn" then turn_fixture(current, pitch, yaw) else press_fixture(current, operation) end
     return "stock guest MindCore " .. operation .. " observed"
 end
 

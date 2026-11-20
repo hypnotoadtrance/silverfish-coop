@@ -4698,9 +4698,14 @@ class Client:
                 elif action == native_mindcore_carry.FIXTURE and self.mindcore_carry:
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     target = request.get("target")
-                    if self.last_game.get("map") != native_mindcore.MAP or not pawn or target not in ("grab", "release", "turn"):
+                    operation, *aim = target.split("@") if isinstance(target, str) else ("",)
+                    if (self.last_game.get("map") != native_mindcore.MAP or not pawn
+                            or operation not in ("grab", "release", "turn")
+                            or aim and (operation != "turn" or len(aim) != 2)):
                         raise ValueError("Select an exact staged guest Core carry input")
-                    self.last_game = await self.bridge.command(action, pawn, target, timeout=6)
+                    if aim:
+                        native_mindcore_carry.angles(*aim)
+                    self.last_game = await self.bridge.command(action, pawn, operation, *aim, timeout=6)
                     result = {"input": target, "aim": self.last_game.get(native_mindcore_carry.AIM)}
                 elif action == native_datasilo_lift.FIXTURE and request.get("target") == "guard":
                     if self.last_game.get(native_datasilo_lift.KEY, {}).get("state") != "guarded":

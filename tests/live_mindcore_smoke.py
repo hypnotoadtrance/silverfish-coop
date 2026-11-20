@@ -146,7 +146,8 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
-                   lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False):
+                   lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False,
+                   prepare_core_carry=False):
     upper_door = upper_door or upper_door_keycard
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
@@ -165,6 +166,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     if stock_hazard_wipe and (not resume or stock_input or lift_ride
                               or upper_door or instructions or carry_only or guest_carry or shared_core):
         raise ValueError("Run the stock hazard wipe separately from the dormant lower lift checkpoint")
+    if prepare_core_carry and (not resume or stock_input or lift_ride or upper_door or instructions
+                               or carry_only or guest_carry or shared_core or stock_hazard_wipe):
+        raise ValueError("Prepare the carry checkpoint separately from the verified dormant Savlo keycard checkpoint")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -177,7 +181,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use the matched Data Silo Core replication stage")
     if lift_ride and not runtime.staged_script(work, "native_datasilo_lift.lua", "SilverfishDataSiloLiftGuardAvailable"):
         raise ValueError("Use the matched Data Silo lift stage")
-    if lift_keycard and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
+    if (lift_keycard or prepare_core_carry) and not runtime.staged_script(work, "native_cistern_lockpick.lua", lockpick.FIXTURE):
         raise ValueError("Use the matched stock Cistern lockpick stage")
     if upper_door and not runtime.staged_script(work, "native_datasilo_door.lua", "SilverfishDataSiloDoorGuardAvailable"):
         raise ValueError("Use the matched upper Data Silo door stage")
@@ -197,7 +201,16 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         claims = data["world"]["party"].get(pickup.STATE_KEY, {})
         if any(source in claims for source in (pickup.FORT_LETO_LOCKER_KEY, pickup.SAVLO_KEYCARD)):
             raise ValueError("Use a dormant checkpoint with the placed Fort Leto key and Trench keycard unclaimed")
-    if upper_door_keycard or stock_hazard_wipe:
+    if prepare_core_carry:
+        claims = data["world"]["party"].get(pickup.STATE_KEY, {})
+        savlo_claim = claims.get(pickup.SAVLO_KEYCARD)
+        source_proof = runtime.read_json(inputs["proof"])
+        stock_savlo = source_proof.get("upper_door_keycard", {}).get("savlo_card", {}).get("claim")
+        if (source_proof.get("verified") is not True or not savlo_claim or stock_savlo != savlo_claim
+                or savlo_claim.get("owner") != "host"
+                or any(source in claims for source in (pickup.CROSSROADS_LOCKPICK, pickup.CISTERN_OLD_NFTA_KEYCARD))):
+            raise ValueError("Require the verified host Savlo card with the CrossRoads lockpick and Cistern card unclaimed")
+    if upper_door_keycard or stock_hazard_wipe or prepare_core_carry:
         for index, frame in enumerate(native_host_save.references(data)):
             inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
@@ -651,7 +664,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             await verify_stock_hazard_wipe(authority)
             proof["verified"] = True
             return proof
-        if lift_keycard:
+        if prepare_core_carry:
+            await assert_key_custody(savlo_claim)
+        if lift_keycard or prepare_core_carry:
             authority = await retrieve_lift_key(authority)
         if upper_door_keycard:
             authority = await retrieve_savlo_keycard(authority)
@@ -663,6 +678,28 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if prepare_core_carry:
+            await action(run, "checkpoint")
+            saved, dormant_flags = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0)
+            ledger = saved["world"]["party"][pickup.STATE_KEY]
+            nfta_claim = ledger[pickup.CISTERN_OLD_NFTA_KEYCARD]
+            assert ledger[pickup.SAVLO_KEYCARD] == savlo_claim
+            assert (nfta_claim["owner"], nfta_claim["guid"]) == ("host", proof["lift_stock_key"]["guid"])
+            arrival = proof["lift_key_routes"][-1]["arrival"]
+            positions = {"host": saved["world"]["host"], "guest": saved["characters"][character]["state"]}
+            assert arrival["destination"] == core.MAP and len(proof["lift_key_routes"]) == 12
+            for pose in positions.values():
+                assert pose["map"] == core.MAP and pose["health"] > 0 and pose["location"][2] > 8000
+                assert math.dist(pose["location"], arrival["location"]) < 350
+            proof["carry_checkpoint"] = {
+                "revision": saved["revision"],
+                "cards": {claim["source"]: await assert_key_custody(claim) for claim in (savlo_claim, nfta_claim)},
+                "positions": {seat: {key: pose[key] for key in ("health", "location")} for seat, pose in positions.items()},
+                "stock_flags": [0, 0],
+            }
+            proof["verified"] = True
+            return proof
         if upper_door:
             from datasilo_door_passage import verify_passage
 
@@ -762,6 +799,15 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                                 and abs((row["yaw"] - aim["yaw"] + 180) % 360 - 180) <= 1, timeout=5)
             assert turned["game"][carry.AUTHORITY]["lease"] == held["lease"]
             await shared_core_at(0, label="guest_turned_core")
+            pitch = round(aim["pitch"] + (8 if aim["pitch"] <= 80 else -8), 3)
+            yaw = round((aim["yaw"] - 15 + 180) % 360 - 180, 3)
+            await action(guest_run, carry.FIXTURE, target=f"turn@{pitch:.3f}@{yaw:.3f}")
+            aimed = await wait(run, lambda state: active_carry(state)
+                               and (row := state["game"][carry.AUTHORITY])["lease"] == held["lease"]
+                               and row["sequence"] > turned["game"][carry.AUTHORITY]["sequence"]
+                               and abs(row["pitch"] - pitch) <= 1
+                               and abs((row["yaw"] - yaw + 180) % 360 - 180) <= 1, timeout=5)
+            await shared_core_at(0, label="guest_aimed_core")
             await action(guest_run, carry.FIXTURE, target="release")
             released = await wait(run, lambda state: (
                 (row := state.get("game", {}).get(carry.AUTHORITY, {})).get("state") == "released"
@@ -779,6 +825,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             proof.update(verified=True, guest_carry={key: {
                 name: value for name, value in row.items() if name != "lease"
             } for key, row in (("held", held), ("turn", turned["game"][carry.AUTHORITY]),
+                               ("aim", aimed["game"][carry.AUTHORITY]),
                                ("release", released["game"][carry.AUTHORITY]))},
                 carry_checkpoint=saved["revision"], carry_stock_flags=[0, 0], inventories_verified=True,
                 guest_core_displacement_uu=round(math.dist(host_before["guest"]["position"],
@@ -959,10 +1006,13 @@ if __name__ == "__main__":
                         help="collect the stock Savlo keycard and unlock the upper door with genuine Interact")
     parser.add_argument("--stock-hazard-wipe", action="store_true",
                         help="verify stock lower-lift damage downs both players before a wipe to the host bed")
+    parser.add_argument("--prepare-core-carry", action="store_true",
+                        help="clone the verified Savlo checkpoint and acquire the Cistern card for the same host")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
                           lift_disembark=options.lift_disembark, upper_door=options.upper_door,
-                         upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe))
+                         upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe,
+                         prepare_core_carry=options.prepare_core_carry))
