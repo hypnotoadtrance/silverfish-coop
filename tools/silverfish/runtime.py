@@ -40,7 +40,7 @@ from . import native_smg_hold
 from .native_guest_weapon import PRIMARY_KINDS
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_melee import parse as parse_guest_melee
-from . import native_host_dig, native_host_dig_live
+from . import native_host_dig, native_host_dig_live, native_package_handoff_journal
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
@@ -1275,6 +1275,8 @@ class Bridge:
                             or fields[2] not in {"journal", "editing", "pending", "exported", "refused"}):
                         raise ValueError("Invalid host invitation Journal scope")
                     data["native_host_invite_journal"] = fields[2]
+                elif fields[0] in (native_package_handoff_journal.JOURNAL_ROW, native_package_handoff_journal.INTENT_ROW):
+                    native_package_handoff_journal.parse(fields, data)
                 elif fields[0] == "native-mosby-station-view":
                     data[native_mosby_station_view.KEY] = native_mosby_station_view.parse(fields)
                 elif fields[0] == "native-mosby-readings":

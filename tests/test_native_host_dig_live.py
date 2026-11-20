@@ -111,7 +111,7 @@ class PackageHandoffTests(unittest.IsolatedAsyncioTestCase):
         state = dict(state="hosting", map=BLACK_MARKET, pawns=pawns)
         self.host = SimpleNamespace(native_host_dig_live=True, persist_native_guest=True, native_profile=True,
                                     transitioning=False, stopping=False, native_checkpoint_unsafe=False,
-                                    last_game=state, last_seen=time.monotonic(), party=data,
+                                    last_game=state, last_seen=time.monotonic(), party=data, zone_epoch="a" * 32,
                                     roles=lambda: {"host": "host", "guest": GUEST_ID},
                                     native_recipients=lambda: {GUEST_ID: {"alias": "guest", "pawn": "guest pawn", "connected": True}},
                                     checkpoint_native=AsyncMock(return_value=49), control=Mock())

@@ -20,6 +20,12 @@ local errors = {
     operation_limit = "Close the Journal and try again.",
 }
 local keys = {{"confirm", "F7"}, {"next", "F8"}, {"back", "F9"}}
+local handoff_maps = {
+    ["/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"] = true,
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"] = true,
+}
+local handoff_screens = {package_choosing = "choosing", package_submitting = "submitting",
+    package_transferred = "transferred", package_refused = "refused"}
 local bridge, offer_path, request_path, response_path, loop, current, session, fixture_menu
 local queued = {}
 
@@ -91,6 +97,16 @@ local function token(value)
     return type(value) == "string" and #value == 32 and value:match("^[0-9a-f]+$") and value:find("[^0]")
 end
 
+local function package_guid(value)
+    return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value:find("[^0]")
+end
+
+local function character_id(value)
+    return type(value) == "string" and #value == 36 and value:find("[1-9a-f]")
+        and value:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+        and value == value:lower()
+end
+
 local function read_file(path, limit)
     local file = io.open(path, "rb")
     if not file then return end
@@ -157,27 +173,111 @@ local function render(active, state, phase, screen, hint, initial)
         editor.focus(active.handle, state, phase)
         return
     end
+    if screen == "journal" then
+        local actions = {}
+        if active.offer then actions[#actions + 1] = "F7   Invite a co-op player" end
+        if active.package then actions[#actions + 1] = "F8   Give the sealed package" end
+        if #actions > 0 then active.widget = display.mount(active.context, table.concat(actions, "\n")) end
+        return
+    end
     local captions = {
-        journal = "F7   Invite a co-op player",
         review = "Create this invitation?\nF7 Create   F9 Back",
         pending = "Creating invitation…\nF9 Back",
         exported = "Invitation ready\nF7 Copy   F9 Back",
         refused = (hint or "Could not create invitation.") .. "\nF7 Try again   F9 Back",
+        package_submitting = "Giving the sealed package…",
+        package_transferred = "Sealed package given.\nF9 Back",
+        package_refused = "Could not give the sealed package.\nF9 Back",
     }
+    if screen == "package_choosing" then
+        local recipient = active.package.recipients[active.selected]
+        local next_recipient = #active.package.order > 1 and "   F8 Next" or ""
+        active.widget = display.mount(active.context,
+            "Give the sealed package to " .. recipient .. "?\nF7 Give" .. next_recipient .. "   F9 Back")
+        return
+    end
     active.widget = display.mount(active.context, hint and screen == "exported" and hint .. "\nF7 Copy   F9 Back" or captions[screen])
 end
 
 local function scope(state, phase)
     if not bridge then return end
     local context = journal(state, phase)
-    local offer = context and read_offer()
-    if not offer then reset(); return end
-    if not session or not same_journal(session.context, context) or not same_offer(session.offer, offer) then
+    if not context then reset(); return end
+    local offer = read_offer()
+    if not session or not same_journal(session.context, context) then
         reset()
         session = {context = context, offer = offer, values = {}}
         render(session, state, phase, "journal")
+    elseif session.offer ~= offer and not same_offer(session.offer, offer) then
+        session.offer = offer
+        session.op, session.export, session.retry, session.failure, session.deadline = nil, nil, nil, nil, nil
+        session.values = {}
+        if not handoff_screens[session.screen] then render(session, state, phase, "journal") end
     end
     return session
+end
+
+local function handoff_command(verb, arguments, state, phase)
+    local active = scope(state, phase)
+    if not active or not handoff_maps[state.map] then error("stock_missing_contact_handoff_journal_unavailable", 0) end
+    if verb == "native-package-handoff-clear" then
+        if #arguments ~= 2 then error("stock_missing_contact_handoff_journal_arguments", 0) end
+        local had_offer = active.package ~= nil
+        active.package, active.selected = nil, nil
+        if active.screen == "package_choosing" or active.screen == "journal" and had_offer then
+            render(active, state, phase, "journal")
+        end
+        return "package handoff offer cleared"
+    end
+    local id = arguments[3]
+    if verb == "native-package-handoff-result" then
+        local outcome = arguments[4]
+        if #arguments ~= 4 or (outcome ~= "transferred" and outcome ~= "refused") then
+            error("stock_missing_contact_handoff_journal_arguments", 0)
+        end
+        if active.result and active.result.offer == id and active.result.outcome == outcome then
+            return "package handoff result shown"
+        end
+        if not active.intent or id ~= active.intent.offer then
+            error("stock_missing_contact_handoff_journal_result_unavailable", 0)
+        end
+        active.package, active.selected, active.intent = nil, nil, nil
+        active.result = {offer = id, outcome = outcome}
+        render(active, state, phase, "package_" .. outcome)
+        return "package handoff result shown"
+    end
+    local guid = arguments[4]
+    if #arguments < 6 or #arguments > 12 or #arguments % 2 ~= 0 or not token(id) or not package_guid(guid) then
+        error("stock_missing_contact_handoff_journal_arguments", 0)
+    end
+    if active.intent then error("stock_missing_contact_handoff_journal_pending", 0) end
+    local offer = {id = id, guid = guid, order = {}, recipients = {}}
+    for index = 5, #arguments, 2 do
+        local character, label = arguments[index], arguments[index + 1]
+        local length = type(label) == "string" and #label <= 384 and utf8.len(label)
+        if not character_id(character) or offer.recipients[character] or not length or length == 0 or length > 120
+            or label:find("[%z\1-\31\127]") or not label:find("%S") then
+            error("stock_missing_contact_handoff_journal_arguments", 0)
+        end
+        offer.order[#offer.order + 1], offer.recipients[character] = character, label
+    end
+    local prior = active.package
+    if prior and prior.id == id then
+        if prior.guid ~= guid or #prior.order ~= #offer.order then
+            error("stock_missing_contact_handoff_journal_arguments", 0)
+        end
+        for index, character in ipairs(offer.order) do
+            if prior.order[index] ~= character or prior.recipients[character] ~= offer.recipients[character] then
+                error("stock_missing_contact_handoff_journal_arguments", 0)
+            end
+        end
+        return "package handoff offer installed"
+    end
+    active.package, active.selected = offer, nil
+    if active.screen == "journal" or active.screen == "package_choosing" then
+        render(active, state, phase, "journal")
+    end
+    return "package handoff offer installed"
 end
 
 local function valid_input(field, value)
@@ -298,6 +398,36 @@ end
 
 local function press(active, action, state, phase)
     local screen = active.screen
+    if screen == "journal" and action == "next" and active.package then
+        active.selected = active.package.order[1]
+        render(active, state, phase, "package_choosing")
+        return true
+    end
+    if handoff_screens[screen] then
+        if action == "back" and screen ~= "package_submitting" then
+            active.selected, active.result = nil, nil
+            render(active, state, phase, "journal")
+            return true
+        end
+        if screen == "package_choosing" and action == "next" then
+            local order = active.package.order
+            for index, character in ipairs(order) do
+                if character == active.selected then
+                    active.selected = order[index % #order + 1]
+                    render(active, state, phase, "package_choosing")
+                    return true
+                end
+            end
+        end
+        if screen == "package_choosing" and action == "confirm" and active.package.recipients[active.selected]
+            and valid(active.widget) and active.widget:IsInViewport() and active.widget:IsVisible() then
+            active.intent = {offer = active.package.id, character = active.selected}
+            render(active, state, phase, "package_submitting")
+            return true
+        end
+        return false, "stock_missing_contact_handoff_journal_action_unavailable"
+    end
+    if not active.offer then return false, "native_host_invite_offer_unavailable" end
     if action == "back" then
         active.op, active.export, active.retry, active.failure = nil, nil, nil, nil
         active.values = {}
@@ -316,7 +446,7 @@ local function press(active, action, state, phase)
 end
 
 local function report(active)
-    if not active or active.screen == "journal" then return "journal" end
+    if not active or active.screen == "journal" or handoff_screens[active.screen] then return "journal" end
     if active.screen == "pending" or active.screen == "exported" or active.screen == "refused" then return active.screen end
     return "editing"
 end
@@ -360,7 +490,10 @@ local function fixture_close(state, phase)
 end
 
 function invite.command(arguments, state, phase)
-    if arguments[2] ~= "native-host-invite-fixture" then return end
+    local verb = arguments[2]
+    if verb == "native-package-handoff-offer" or verb == "native-package-handoff-result"
+        or verb == "native-package-handoff-clear" then return handoff_command(verb, arguments, state, phase) end
+    if verb ~= "native-host-invite-fixture" then return end
     if not fixture_enabled() or not bridge then error("native_host_invite_fixture_unavailable", 0) end
     local operation, value = arguments[3], arguments[4]
     local expected = operation == "participant" or operation == "starter" or operation == "address" and value ~= nil
@@ -370,6 +503,18 @@ function invite.command(arguments, state, phase)
     local context = journal(state, phase)
     if not same_journal(fixture_menu, context) then error("native_host_invite_journal_unavailable", 0) end
     local active = scope(state, phase)
+    local package_action
+    if active then
+        if operation == "handoff-open" and active.screen == "journal" and active.package then package_action = "next" end
+        if operation == "handoff-next" and active.screen == "package_choosing" then package_action = "next" end
+        if operation == "handoff-confirm" and active.screen == "package_choosing" then package_action = "confirm" end
+        if operation == "handoff-back" and handoff_screens[active.screen] then package_action = "back" end
+    end
+    if package_action then
+        local accepted, failure = press(active, package_action, state, phase)
+        if not accepted then error(failure, 0) end
+        return "native_host_invite_" .. operation .. "_accepted"
+    end
     if operation == "observe" then
         if active then progress(active, state, phase) end
         local output = "native_host_invite_phase=" .. report(active)
@@ -377,7 +522,7 @@ function invite.command(arguments, state, phase)
         if active and active.failure then output = output .. ";error=" .. active.failure end
         return output
     end
-    if not active then error("native_host_invite_offer_unavailable", 0) end
+    if not active or not active.offer then error("native_host_invite_offer_unavailable", 0) end
     local action
     if operation == "begin" and active.screen == "journal" then action = "confirm" end
     if operation == "submit" and active.screen == "review" then action = "confirm" end
@@ -400,7 +545,17 @@ function invite.rows(state, phase, status_row)
     local context = journal(state, phase)
     if not context then return {} end
     local active = session and same_journal(session.context, context) and session or nil
-    return {status_row("native-host-invite-journal", state.map, report(active))}
+    local rows = {status_row("native-host-invite-journal", state.map, report(active))}
+    if not handoff_maps[state.map] then return rows end
+    local pawn = context.pawn:GetFullName()
+    local intent = active and active.intent
+    local offer = intent and intent.offer or active and active.package and active.package.id or "-"
+    local handoff_state = active and handoff_screens[active.screen] or "idle"
+    rows[#rows + 1] = status_row("native-package-handoff-journal", state.map, pawn, handoff_state, offer)
+    if intent then
+        rows[#rows + 1] = status_row("native-package-handoff-intent", state.map, pawn, intent.offer, intent.character)
+    end
+    return rows
 end
 
 function invite.sync(state, phase)
@@ -419,7 +574,11 @@ local function poll()
     if not active then return end
     local action
     for _, key in ipairs(keys) do
-        if events[key[1]] == active then
+        local event = events[key[1]]
+        local package_action = handoff_screens[active.screen] or active.screen == "journal" and key[1] == "next"
+        if event and event.session == active and event.screen == active.screen
+            and (package_action and event.package == active.package and event.selected == active.selected
+                or not package_action and event.offer == active.offer) then
             if action then return end
             action = key[1]
         end
@@ -437,7 +596,10 @@ function invite.start(path)
         or type(SilverfishNativeGameWindowFocused) ~= "function" or not (Key.F7 and Key.F8 and Key.F9) then return end
     for _, key in ipairs(keys) do
         RegisterKeyBind(Key[key[2]], function()
-            if session and current then queued[key[1]] = session end
+            if session and current then
+                queued[key[1]] = {session = session, screen = session.screen, offer = session.offer,
+                    package = session.package, selected = session.selected}
+            end
         end)
     end
     loop = LoopInGameThreadWithDelay(32, function()

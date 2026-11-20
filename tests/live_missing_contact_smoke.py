@@ -27,9 +27,12 @@ SPEC = board.MISSING_CONTACT
 BOARD = board.BOARDS[BLACK_MARKET]
 BALANCES = ("Player_Cash", "Player_Xp", "Rep_Freelancer", "Rep_State", "Adv_Freelancer", dig.FLAG)
 ROUTE = (BLACK_MARKET, LAKE, CROSSROADS, LAKE, BLACK_MARKET)
+JOURNAL_FIXTURE = "native-package-handoff-journal-fixture"
+JOURNAL_STATE = "native_package_handoff_journal"
 
 
-async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = False) -> None:
+async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = False, journal_handoff: bool = False) -> None:
+    guest_turnin = guest_turnin or journal_handoff
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original single-player Saved directory")
@@ -42,7 +45,8 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
     host_options = ("--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest",
                     "--native-zones", "--native-expanded-zones", "--native-host-dig-live-fixtures")
     guest_options = ("--profile", name, "--headless", "--native-zones")
-    jobs, evidence = [], {"verified": False, "guest_turnin": guest_turnin, "routes": [], "board_input": []}
+    jobs, evidence = [], {"verified": False, "guest_turnin": guest_turnin, "journal_handoff": journal_handoff,
+                          "routes": [], "board_input": []}
 
     async def action(directory, verb, *, accepted=True, **request):
         reply = await submit(directory, verb, **request)
@@ -122,6 +126,50 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         page = (await action(directory, "native-inventory-list"))["native_inventory"]
         assert page["next_offset"] is None, page
         return {item["guid"]: {key: value for key, value in item.items() if key != "index"} for item in page["items"]}
+
+    async def journal_transfer(owned, host_items, guest_items):
+        async def press_journal(operation):
+            result = await action(run, JOURNAL_FIXTURE, target=operation)
+            assert result["native_package_handoff_journal_fixture"] == operation, result
+
+        async def journal_status(*states):
+            def shown(status):
+                game = status.get("game", {})
+                row = game.get(JOURNAL_STATE, {})
+                pawn = game.get("pawns", {}).get("local", {}).get("name")
+                return (game.get("native_host_invite_journal") == "journal"
+                        and row.get("state") in states and pawn and row.get("pawn") == pawn)
+
+            return await wait(run, shown)
+
+        proof = evidence["stock_journal"] = {}
+        await press_journal("open")
+        await journal_status("idle")
+        await press_journal("handoff-open")
+        choosing = (await journal_status("choosing"))["game"][JOURNAL_STATE]
+        assert choosing["offer_id"], choosing
+        proof["choosing"] = choosing
+
+        await press_journal("handoff-back")
+        canceled = await journal_status("idle")
+        assert party_state(canceled)[custody.CUSTODY] == owned, canceled
+        assert await inventory(run) == host_items and await inventory(guest_run) == guest_items
+        proof["canceled"] = canceled["game"][JOURNAL_STATE]
+
+        await press_journal("handoff-open")
+        reopened = (await journal_status("choosing"))["game"][JOURNAL_STATE]
+        assert reopened == choosing, (choosing, reopened)
+        await press_journal("handoff-confirm")
+        settled = await journal_status("transferred", "refused")
+        result = settled["game"][JOURNAL_STATE]
+        proof["result"] = result
+        assert (result["state"], result["offer_id"]) == ("transferred", None), result
+        handoff = party_state(settled)[custody.CUSTODY]
+
+        await press_journal("close")
+        await wait(run, lambda status: "native_host_invite_journal" not in status.get("game", {}))
+        proof["closed"] = True
+        return handoff
 
     async def settlement_replay(directory, receipt):
         replay = await action(directory, "native-quest-turnin", target=SPEC.quest_id)
@@ -203,8 +251,11 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         if guest_turnin:
             host_items, guest_items = await inventory(run), await inventory(guest_run)
             assert package not in guest_items, guest_items
+            if journal_handoff:
+                handoff = await journal_transfer(owned, host_items, guest_items)
+            else:
+                handoff = (await action(run, custody.HANDOFF, target=character))[custody.CUSTODY]
             guest_items[package] = host_items.pop(package)
-            handoff = (await action(run, custody.HANDOFF, target=character))[custody.CUSTODY]
             assert (handoff["owner"], handoff["package_guid"]) == (character, package), handoff
             assert await inventory(run) == host_items and await inventory(guest_run) == guest_items, handoff
             same_handoff = (await action(run, custody.HANDOFF, target=character))[custody.CUSTODY]
@@ -297,5 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--guest-turnin", action="store_true", help="Hand the stock package to the guest for board redemption")
+    parser.add_argument("--journal-handoff", action="store_true", help="Use the stock Journal to hand off the guest's package")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), guest_turnin=args.guest_turnin))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), guest_turnin=args.guest_turnin,
+                         journal_handoff=args.journal_handoff))

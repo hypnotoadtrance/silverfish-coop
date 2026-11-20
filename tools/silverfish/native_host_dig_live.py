@@ -116,7 +116,12 @@ def _handoff_pawns(host, character):
     return sender, recipient
 
 
-async def handoff(host, bridge, target):
+def _handoff_near(sender, recipient):
+    first, second = sender.get("location"), recipient.get("location")
+    return location(first) and location(second) and math.dist(first, second) <= _HANDOFF_RANGE
+
+
+async def handoff(host, bridge, target, *, journal_intent=None):
     """Commit the exact sealed package to one enrolled guest's backpack."""
     from .native_computer_board import MISSING_CONTACT
 
@@ -139,19 +144,24 @@ async def handoff(host, bridge, target):
         return {CUSTODY: custody}
     if owner != "host":
         raise party.RuleError(_HANDOFF_REFUSAL + "wrong_owner")
-    first, second = sender.get("location"), recipient.get("location")
-    if not location(first) or not location(second) or math.dist(first, second) > _HANDOFF_RANGE:
+    if not _handoff_near(sender, recipient):
         raise party.RuleError(_HANDOFF_REFUSAL + "out_of_range")
 
     host.transitioning = True
     required = frozenset({character})
     area, guid = host.last_game["map"], custody["package_guid"]
+    epoch = host.zone_epoch
     names = sender["name"], recipient["name"]
     try:
         await host.checkpoint_native(bridge, require_guest_frames=required)
         current = _handoff_pawns(host, character)
-        if host.last_game["map"] != area or tuple(pawn["name"] for pawn in current) != names:
+        if (host.last_game["map"], host.zone_epoch) != (area, epoch) or tuple(pawn["name"] for pawn in current) != names:
             raise party.RuleError(_HANDOFF_REFUSAL + "participant_changed")
+        if journal_intent is not None:
+            from .native_package_handoff_journal import INTENT
+
+            if host.last_game.get(INTENT) != journal_intent:
+                raise party.RuleError(_HANDOFF_REFUSAL + "journal_changed")
         host.native_checkpoint_unsafe = True
         try:
             snapshot = await bridge.command(HANDOFF, *names, character, guid, timeout=5)

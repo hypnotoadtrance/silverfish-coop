@@ -54,6 +54,10 @@ end
 
 local state = {map = "/Game/Classes/Maps/Observatory", world = world, controller = controller,
     local_pawn = {pawn = pawn}, listening = true, server = false}
+function pawn:GetFullName()
+    local level = state.map:match("[^/]+$")
+    return "Player_FP_C " .. state.map .. "." .. level .. ":PersistentLevel.Player_FP_C_0"
+end
 local flags = {SILVERFISH_COOP_HEADLESS = "1", SILVERFISH_COOP_NATIVE_FIXTURES = "1"}
 local time = 100
 local offer = "bridge/host-invite-offer.tsv"
@@ -66,7 +70,8 @@ local payload = '{"credential":"private only"}'
 local display = {}
 function display.mount(context, caption)
     assert(context.menu == stack[#stack] and context.controller == controller and type(caption) == "string")
-    view = {caption = caption, visible = true}
+    view = object()
+    view.caption, view.visible = caption, true
     return view
 end
 function display.remove(widget) widget.visible = false end
@@ -224,4 +229,101 @@ assert(copies == 1 and report() == "refused")
 world.NetDriver.ServerConnection = object()
 tick()
 assert(not report() and not view.visible)
-print("Qualified host invitation Lua mock passed")
+
+local market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local package_guid = string.rep("C", 32)
+local first_offer, second_offer = string.rep("d", 32), string.rep("e", 32)
+local scout = "11e3913f-d53e-43c3-bbe9-893b5a38ebaf"
+local courier = "d117a077-d233-4b16-8673-24585da3f398"
+local scout_label, courier_label = "Courier (Guest 1)", "Courier (Guest 2)"
+
+local function handoff_command(verb, ...)
+    return pcall(module.command, {"bridge", "native-package-handoff-" .. verb, ...}, state, "hosting")
+end
+
+local function install_offer(offer_id, last_label)
+    return handoff_command("offer", offer_id, package_guid, scout, scout_label, courier, last_label or courier_label)
+end
+
+local function package_status(expected_state, offer_id, selected)
+    local rows = module.rows(state, "hosting", table.pack)
+    local journal, intent = rows[2], rows[3]
+    assert(journal and #journal == 5 and journal[1] == "native-package-handoff-journal"
+        and journal[2] == market and journal[3] == pawn:GetFullName()
+        and journal[4] == expected_state and journal[5] == (offer_id or "-"))
+    if selected then
+        assert(intent and #intent == 5 and intent[1] == "native-package-handoff-intent"
+            and intent[2] == market and intent[3] == pawn:GetFullName()
+            and intent[4] == offer_id and intent[5] == selected)
+    else
+        assert(not intent)
+    end
+end
+
+world.NetDriver.ServerConnection = nil
+controller:CloseMenu({})
+tick()
+assert(not install_offer(first_offer))
+controller:OpenMenu(registered[journal_class], {})
+tick()
+assert(not install_offer(first_offer) and #module.rows(state, "hosting", table.pack) == 1)
+controller:CloseMenu({})
+state.map = market
+controller:OpenMenu(registered[journal_class], {})
+tick()
+package_status("idle")
+assert(install_offer(first_offer) and view.caption:find("F8   Give", 1, true))
+press("F8")
+assert(view.caption:find(scout_label, 1, true))
+press("F8")
+assert(view.caption:find(courier_label, 1, true))
+assert(install_offer(first_offer) and view.caption:find(courier_label, 1, true))
+assert(not install_offer(first_offer, "Changed label"))
+package_status("choosing", first_offer)
+hooks.F7()
+assert(install_offer(second_offer))
+game_tick()
+package_status("idle", second_offer)
+assert(view.caption:find("F8   Give", 1, true))
+press("F8")
+press("F8")
+assert(view.caption:find(courier_label, 1, true))
+view.visible = false
+press("F7")
+package_status("choosing", second_offer)
+view.visible = true
+press("F7")
+package_status("submitting", second_offer, courier)
+time = 109
+tick()
+assert(not handoff_command("result", first_offer, "transferred"))
+assert(handoff_command("clear"))
+package_status("submitting", second_offer, courier)
+assert(handoff_command("result", second_offer, "transferred"))
+assert(handoff_command("result", second_offer, "transferred"))
+package_status("transferred")
+assert(view.caption:find("package given", 1, true))
+press("F9")
+package_status("idle")
+controller:CloseMenu({})
+tick()
+assert(not report())
+
+flags.SILVERFISH_COOP_HEADLESS = "1"
+module = build()
+assert(action("open"))
+package_status("idle")
+assert(not action("handoff-open"))
+assert(install_offer(first_offer))
+assert(action("handoff-open") and action("handoff-next"))
+assert(action("handoff-back"))
+package_status("idle", first_offer)
+assert(action("handoff-open") and action("handoff-confirm"))
+package_status("submitting", first_offer, scout)
+assert(action("close"))
+assert(not report() and not handoff_command("result", first_offer, "transferred"))
+assert(action("open"))
+package_status("idle")
+assert(action("close"))
+
+print("Qualified host invitation and package handoff Lua mock passed")

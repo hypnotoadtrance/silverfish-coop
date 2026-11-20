@@ -232,6 +232,7 @@ def parser() -> argparse.ArgumentParser:
         "native-depot-documents-preflight", "native-depot-documents-approach",
         "native-brandy-preflight", "native-brandy-approach",
         "native-missing-contact-preflight", "native-missing-contact-approach", "native-missing-contact-handoff",
+        "native-package-handoff-journal-fixture",
         "native-stolen-bag-preflight", "native-stolen-bag-approach", "native-stolen-bag-xp-fixture",
         "native-black-box-preflight", "native-black-box-approach", "native-black-box-xp-fixture",
         "native-dead-drop-preflight", "native-dead-drop-approach", "native-dead-drop-xp-fixture",

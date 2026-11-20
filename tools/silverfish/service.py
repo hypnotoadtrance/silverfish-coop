@@ -31,7 +31,7 @@ from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_guest_melee
-from . import native_host_dig, native_host_dig_live, native_host_landmine
+from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
@@ -2752,6 +2752,8 @@ class Host:
                         self, bridge, request.get("target"), request.get("operation_id") or path.stem)
                 elif action == native_host_dig_live.HANDOFF:
                     result = await native_host_dig_live.handoff(self, bridge, request.get("target"))
+                elif action == native_package_handoff_journal.FIXTURE and self.fixtures:
+                    result = await native_package_handoff_journal.fixture(self, bridge, request.get("target"))
                 elif action in native_host_landmine.ACTIONS and self.fixtures:
                     result = await native_host_landmine.perform(self, bridge, action, request.get("target"),
                                                                  request.get("operation_id") or path.stem)
@@ -3346,6 +3348,7 @@ class Host:
     async def run_session(self, bridge: Bridge, transport, invites, *, pause_exit=None) -> None:
         loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
         wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
+        package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
 
         async def claim_crate(operation, guid):
             return await native_loot.perform(self, bridge, "host", "claim", guid, operation)
@@ -3489,6 +3492,8 @@ class Host:
                           and time.monotonic() - self.last_seen <= 1.5
                           and self.last_game.get("native_host_invite_journal") is not None)
                 invites.poll(self.control.generation, self.zone_epoch, active)
+            if package_journal is not None:
+                await package_journal.poll(self, bridge)
             if not self.stopping:
                 await self.settle_wipe(bridge, transport)
                 if self.wipe_view:
