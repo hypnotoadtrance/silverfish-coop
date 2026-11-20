@@ -692,9 +692,15 @@ namespace
             return;
         }
         const auto flag = flags.flag_value(ctx.instance, live_dig.package_flag.c_str());
+        const auto buried = flags.flag_value(ctx.instance, buried_flag);
         const auto artifact = flags.flag_value(ctx.instance, STR("Artifact_Value")).first;
-        if (live_dig.inventory_called && !guid.empty() && !live_dig.package.Get() && flag == std::pair{1, true} &&
-            flags.flag_value(ctx.instance, buried_flag) == std::pair{1, true} && flags.amount(ctx.instance) == live_dig.wallet &&
+        const auto wallet = flags.amount(ctx.instance);
+        auto* package = live_dig.package.Get();
+        // The retired stock actor can remain in the weak object table until GC.
+        // Require loss of live authority alongside the stock inventory and save proofs.
+        const bool retired = !authority(package);
+        if (live_dig.inventory_called && !guid.empty() && retired && flag == std::pair{1, true} &&
+            buried == std::pair{1, true} && wallet == live_dig.wallet &&
             std::int64_t{artifact} == std::int64_t{live_dig.artifact_value} + 50)
         {
             live_dig.package_guid = std::move(guid);
@@ -702,10 +708,16 @@ namespace
         }
         else if (Clock::now() >= live_dig.pickup_until)
         {
-            if (guid.empty() && !flag.second && valid_package(ctx, live_dig.package.Get()) &&
-                flags.amount(ctx.instance) == live_dig.wallet && artifact == live_dig.artifact_value)
+            if (guid.empty() && !flag.second && valid_package(ctx, package) &&
+                buried == std::pair{1, true} && wallet == live_dig.wallet && artifact == live_dig.artifact_value)
                 live_dig.state = live_dig.before_pickup;
-            else fail_live("stock_pickup_custody_unverified");
+            else if (!live_dig.inventory_called) fail_live("stock_pickup_inventory_callback_unverified");
+            else if (guid.empty()) fail_live("stock_pickup_canonical_package_missing");
+            else if (!retired) fail_live("stock_pickup_actor_not_retired");
+            else if (flag != std::pair{1, true}) fail_live("stock_pickup_actor_permanent_flag_unverified");
+            else if (buried != std::pair{1, true}) fail_live("stock_pickup_buried_permanent_flag_unverified");
+            else if (wallet != live_dig.wallet) fail_live("stock_pickup_wallet_changed");
+            else fail_live("stock_pickup_artifact_value_unverified");
         }
     }
 
