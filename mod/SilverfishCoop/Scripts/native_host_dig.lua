@@ -14,6 +14,7 @@ local package_class = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Pack
 local position = {X = 1665.2142939210705, Y = 5811.305953931523, Z = 339.15110679941967}
 local spade_position = {X = 6651.893485940875, Y = 13362.280305292443, Z = 380.8485755771449}
 local flag_name = "BurriedItem_BP_C_1-CrossRoads_P-"
+local spade_flag = "MeleeWep_Spade_C_3-CrossRoads_P-"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -29,6 +30,15 @@ local current, proof, acquiring
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 local function exact(value, path) return valid(value) and same(value:GetClass(), StaticFindObject(path)) end
+local function stock_valid(value)
+    if not valid(value) then return false end
+    local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local check = StaticFindObject("/Script/Engine.KismetSystemLibrary:IsValid")
+    if not valid(library) or not valid(check) then return nil end
+    -- UObject's UE4SS method does not test the engine pending-kill state.
+    local result = library:CallFunction(check, value)
+    if type(result) == "boolean" then return result end
+end
 local function need(ok, reason, dirty)
     if not ok then error((dirty and "mutation_unverified_" or "") .. "stock_host_dig_" .. reason, 0) end
     return ok
@@ -83,9 +93,10 @@ local function context(state, phase)
     end
 end
 
-local function key()
-    local result = FName(flag_name, EFindName.FNAME_Add)
-    return need(result:GetComparisonIndex() ~= 0 and result:ToString() == flag_name and result, "flag_key_unavailable")
+local function key(name)
+    name = name or flag_name
+    local result = FName(name, EFindName.FNAME_Add)
+    return need(result:GetComparisonIndex() ~= 0 and result:ToString() == name and result, "flag_key_unavailable")
 end
 
 local function row_guid(row)
@@ -131,18 +142,38 @@ local function held(ctx, class)
     end
 end
 
+local function placed_spade_fate(ctx, pending)
+    local actor = StaticFindObject(spade_path)
+    if not valid(actor) then return "missing", "-" end
+    if actor:GetAddress() ~= pending.source then return nil, "replaced" end
+    local alive = stock_valid(actor)
+    if alive == false then return "destroyed", "engine-invalid" end
+    if alive ~= true or not exact(actor, spade_class) or not same(actor:GetWorld(), ctx.world)
+        or actor.Item_RespawnMode ~= pending.mode then return nil, "identity-unavailable" end
+    if actor:IsActorBeingDestroyed() then return "destroyed", "destroying" end
+    local hidden, collision = actor.bHidden, actor:GetActorEnableCollision()
+    local box = actor.Box
+    local box_collision = owned(box, actor, "BoxComponent") and box:GetAddress() == pending.box
+        and box:GetCollisionEnabled()
+    local details = ("hidden=%s,collision=%s,box=%s"):format(tostring(hidden), tostring(collision), tostring(box_collision))
+    if hidden == true and collision == false and box_collision == 0 then return "dormant", details end
+    return nil, details
+end
+
 local function read_acquisition(ctx, pending)
     local type_ref = StaticFindObject(spade_class)
     local amount, row = inventory(ctx.save, type_ref)
     local guest_amount = inventory(ctx.detached, type_ref)
-    local placed = StaticFindObject(spade_path)
-    local retired = not valid(placed) or same(placed, pending.source) and placed:IsActorBeingDestroyed()
+    local fate, scene = placed_spade_fate(ctx, pending)
+    local value, permanent = wire.stock_flag(ctx.instance, pending.flag)
+    local retired = fate and (pending.mode == 2 and permanent and value == 1 or pending.mode ~= 2 and not permanent)
     local actor = ctx.pawn.EquipedItem
     local bindings = same(ctx.pawn.Save, ctx.save) and same(ctx.guest.Save, ctx.detached)
     local slot = amount == 1 and row and row.source == "PlayerEquipment" and row.index == 0 and row.ammo == -1
     local equipped, guid = held(ctx, type_ref)
-    if retired and guest_amount == 0 and bindings and slot and equipped and row.guid == guid then
-        return guid
+    if retired and guest_amount == 0 and bindings and slot and equipped and equipped:GetAddress() ~= pending.source
+        and row.guid == guid then
+        return guid, nil, {fate = fate, mode = pending.mode, flag = permanent and value or "-"}
     end
     if pending.samples >= 2 and not pending.retried and retired and slot and guest_amount == 0 and bindings
         and not valid(actor) and ctx.pawn.IsChangingAmmo == false and ctx.pawn.UsingItem == false
@@ -155,8 +186,8 @@ local function read_acquisition(ctx, pending)
     local instigator = valid(actor) and same(actor.Instigator, ctx.pawn)
     local reference = valid(actor) and same(actor.Player_Ref, ctx.pawn)
     local user = valid(actor) and same(actor.User, ctx.pawn)
-    return nil, ("pickup=%s,rows=%s,row=%s/%s/%s,index=%s,actor=%s,owned=%s/%s/%s/%s,held=%s,ammo=%s,guest=%s,save=%s,retry=%s"):format(
-        retired and "retired" or "live", tostring(amount), row and row.source or "-", row and row.index or "-",
+    return nil, ("pickup=%s/%s,mode=%s,flag=%s,rows=%s,row=%s/%s/%s,index=%s,actor=%s,owned=%s/%s/%s/%s,held=%s,ammo=%s,guest=%s,save=%s,retry=%s"):format(
+        fate or "live", scene, pending.mode, permanent and value or "-", tostring(amount), row and row.source or "-", row and row.index or "-",
         row and row.ammo or "-", tostring(ctx.save.PlayerEquipIndex),
         valid(actor) and actor:GetFullName():match("^%S+") or "-",
         tostring(owner == true), tostring(instigator == true), tostring(reference == true), tostring(user == true),
@@ -170,9 +201,9 @@ local function settle_acquisition(ctx)
     if not same(pending.world, ctx.world) or not same(pending.pawn, ctx.pawn) or not same(pending.save, ctx.save)
         or not same(pending.guest, ctx.guest) or not same(pending.detached, ctx.detached) then return end
     pending.samples = pending.samples + 1
-    local guid, diagnosis = read_acquisition(ctx, pending)
+    local guid, diagnosis, source = read_acquisition(ctx, pending)
     if guid then
-        proof = {status = "equipped", guid = guid, flag = 0, stock_f = pending.sequence}
+        proof = {status = "equipped", guid = guid, flag = 0, stock_f = pending.sequence, source = source}
         acquiring = nil
     elseif os.time() >= pending.expires then
         proof = {status = "failed", guid = "-", flag = 0, stock_f = pending.sequence,
@@ -331,7 +362,7 @@ end
 
 local function site_retired(ctx)
     local source = StaticFindObject(source_path)
-    return not valid(source) or exact(source, buried_class) and same(source:GetWorld(), ctx.world)
+    return stock_valid(source) == false or exact(source, buried_class) and same(source:GetWorld(), ctx.world)
         and source:IsActorBeingDestroyed()
 end
 
@@ -357,14 +388,22 @@ function dig.command(fields, state, phase)
         need(not present and not valid(ctx.pawn.EquipedItem) and slot and not valid(slot[item_class])
             and ctx.instance.GamePlay_Config.AutoEquip == true and inventory(ctx.save, spade_type) == 0,
             "stock_spade_autoequip_unavailable")
-        need(exact(actor, spade_class) and actor:HasAuthority() and same(actor:GetWorld(), ctx.world)
+        need(exact(actor, spade_class) and stock_valid(actor) == true and actor:HasAuthority() and same(actor:GetWorld(), ctx.world)
             and not actor:IsActorBeingDestroyed(), "placed_stock_spade_identity")
         local actual = vector(actor:K2_GetActorLocation())
         need(actual and squared(actual, spade_position) <= 25, "placed_stock_spade_position:" .. coordinates(actual))
         need(actor.Physics == false and actor.Stacks == false and actor.Ammo == -1, "placed_stock_spade_shape")
+        local mode = actor.Item_RespawnMode
+        local source_flag = key(spade_flag)
+        local _, consumed = wire.stock_flag(ctx.instance, source_flag)
+        need((mode == 0 or mode == 1 or mode == 2) and not consumed and actor.bHidden == false
+            and actor:GetActorEnableCollision() == true and owned(actor.Box, actor, "BoxComponent")
+            and actor.Box:GetCollisionEnabled() ~= 0, "placed_stock_spade_state")
+        local source_address, box_address = actor:GetAddress(), actor.Box:GetAddress()
         local sequence = stock_f(ctx, actor, actor.Box, "spade")
         acquiring = {world = ctx.world, pawn = ctx.pawn, save = ctx.save, guest = ctx.guest, detached = ctx.detached,
-            source = actor, sequence = sequence, samples = 0, expires = os.time() + 3}
+            source = source_address, box = box_address, mode = mode, flag = source_flag,
+            sequence = sequence, samples = 0, expires = os.time() + 3}
         proof = {status = "acquiring", guid = "-", flag = 0, stock_f = sequence}
         return "ordinary stock Interact dispatched for the placed spade"
     end
@@ -404,7 +443,7 @@ function dig.command(fields, state, phase)
     local amount, row = inventory(ctx.save, package_type)
     local _, held_after = held(ctx, spade_type)
     need(amount == 1 and row.source == "PlayerBackpack" and (row.ammo == 0 or row.ammo == 1)
-        and held_after == identity and (not valid(actor) or actor:IsActorBeingDestroyed())
+        and held_after == identity and (stock_valid(actor) == false or actor:IsActorBeingDestroyed())
         and inventory(ctx.detached, package_type) == 0,
         "stock_package_custody", true)
     proof.status, proof.stock_f, proof.package_guid = "collected", sequence, row.guid
@@ -445,9 +484,11 @@ function dig.rows(state, phase, status_row)
         end
     end
     local hit = proof.contact or {X = "-", Y = "-", Z = "-"}
+    local source = proof.source
     return {status_row("native-host-dig", map, ctx.name, proof.status, proof.guid, flag_name, proof.flag,
         proof.actor_name or "-", proof.package_guid or "-", hit.X, hit.Y, hit.Z,
-        proof.material or "-", proof.holes or "-", proof.incidental or "-", proof.stock_f or "-", proof.fault or "-")}
+        proof.material or "-", proof.holes or "-", proof.incidental or "-", proof.stock_f or "-", proof.fault or "-",
+        source and source.fate or "-", source and source.mode or "-", source and source.flag or "-")}
 end
 
 function dig.clear()

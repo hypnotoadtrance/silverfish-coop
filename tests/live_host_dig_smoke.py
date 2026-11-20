@@ -90,6 +90,15 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
 
         acquired = (await action(run, dig.ACQUIRE))[dig.KEY]
         assert acquired["state"] == "equipped" and acquired["stock_f"] > 0 and acquired["flag_value"] == 0, acquired
+        source = acquired["spade_source"]
+        assert source["fate"] in ("destroyed", "missing", "dormant") and source["flag"] == dig.SPADE_FLAG, source
+        after_spade = dict(baseline[0])
+        if source["mode"] == 2:
+            assert source["flag_value"] == 1 and dig.SPADE_FLAG not in after_spade, source
+            after_spade[dig.SPADE_FLAG] = 1
+        else:
+            assert source["mode"] in (0, 1) and source["flag_value"] is None, source
+        assert flags(invitation["character_id"]) == (after_spade, baseline[1])
         tool = acquired["guid"]
         assert (await rows(run))[tool]["class_path"] == dig.SPADE_CLASS
         evidence["stock_spade"] = acquired
@@ -105,7 +114,7 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
             dig.PACKAGE_CLASS, "backpack", 1, False), package
         assert await rows(guest_run) == guest_items
         settled = flags(invitation["character_id"])
-        assert settled == (dict(baseline[0], **{dig.FLAG: 1}), baseline[1]), (settled, baseline)
+        assert settled == (dict(after_spade, **{dig.FLAG: 1}), baseline[1]), (settled, after_spade)
         evidence["stock_dig"] = found
         evidence["package"] = package
 

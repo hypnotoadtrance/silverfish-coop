@@ -18,6 +18,7 @@ ACTIONS = (ACQUIRE, DIG, INSPECT)
 WORLD = f"{CROSSROADS}.CrossRoads_P"
 SOURCE = f"BurriedItem_BP_C {WORLD}:PersistentLevel.BurriedItem_BP_C_1"
 FLAG = "BurriedItem_BP_C_1-CrossRoads_P-"
+SPADE_FLAG = "MeleeWep_Spade_C_3-CrossRoads_P-"
 PACKAGE_CLASS = "/Game/Classes/Items/Key_Items/Package_Item_FarmHouse.Package_Item_FarmHouse_C"
 SPADE_CLASS = "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"
 SITE = (1665.2142939210705, 5811.305953931523, 339.15110679941967)
@@ -29,9 +30,9 @@ _PHASES = {"acquiring", "equipped", "pressed", "dug", "collected", "restored", "
 
 
 def parse(fields: list[str], phase: str, area: str) -> dict:
-    if len(fields) != 17:
+    if len(fields) not in (17, 20):
         raise ValueError("Invalid stock host dig report size")
-    tag, reported, pawn, state, tool, flag, flag_value, actor, package, x, y, z, material, holes, incidental, press, fault = fields
+    tag, reported, pawn, state, tool, flag, flag_value, actor, package, x, y, z, material, holes, incidental, press, fault = fields[:17]
     unidentified_tool = (state == "acquiring" or state == "failed" and press != "-")
     if (tag != TAG or (phase, area, reported) != ("hosting", CROSSROADS, CROSSROADS) or _PAWN.fullmatch(pawn) is None
             or state not in _PHASES or (tool != "-" if unidentified_tool else not valid_guid(tool))
@@ -53,12 +54,20 @@ def parse(fields: list[str], phase: str, area: str) -> dict:
                and (flag_value, actor, package, holes, incidental) != ("0", "-", "-", "-", "-")
             or unidentified_tool and contact is not None):
         raise ValueError("Invalid stock host dig readback")
-    return {"map": area, "pawn": pawn, "state": state, "guid": None if unidentified_tool else tool,
-            "flag": flag, "flag_value": int(flag_value),
-            "source": SOURCE, "actor": None if actor == "-" else actor, "package_guid": None if package == "-" else package,
-            "contact": contact, "material": None if material == "-" else material,
-            "holes": None if holes == "-" else int(holes), "incidental": None if incidental == "-" else int(incidental),
-            "stock_f": None if press == "-" else int(press), "fault": None if fault == "-" else fault}
+    report = {"map": area, "pawn": pawn, "state": state, "guid": None if unidentified_tool else tool,
+              "flag": flag, "flag_value": int(flag_value),
+              "source": SOURCE, "actor": None if actor == "-" else actor, "package_guid": None if package == "-" else package,
+              "contact": contact, "material": None if material == "-" else material,
+              "holes": None if holes == "-" else int(holes), "incidental": None if incidental == "-" else int(incidental),
+              "stock_f": None if press == "-" else int(press), "fault": None if fault == "-" else fault}
+    if len(fields) == 20 and (state == "equipped" or fields[17:] != ["-", "-", "-"]):
+        fate, mode, present = fields[17:]
+        if (state != "equipped" or fate not in ("missing", "destroyed", "dormant") or mode not in ("0", "1", "2")
+                or present != ("1" if mode == "2" else "-")):
+            raise ValueError("Invalid stock placed spade retirement")
+        report["spade_source"] = {"fate": fate, "mode": int(mode), "flag": SPADE_FLAG,
+                                  "flag_value": None if present == "-" else 1}
+    return report
 
 
 async def perform(host, bridge, action: str, target: str | None, operation_id: str) -> dict:
@@ -128,7 +137,7 @@ async def perform(host, bridge, action: str, target: str | None, operation_id: s
                 report = frame(snapshot)
             if report.get("state") == "failed":
                 raise RuntimeError(report.get("fault"))
-            if report.get("state") != "equipped" or not valid_guid(report.get("guid")):
+            if report.get("state") != "equipped" or not valid_guid(report.get("guid")) or not report.get("spade_source"):
                 raise RuntimeError("Stock Interact did not equip the exact placed spade")
         else:
             if report.get("state") != "pressed" or report.get("guid") != target:
