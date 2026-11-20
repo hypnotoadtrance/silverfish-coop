@@ -1,4 +1,5 @@
 import asyncio
+import os
 import secrets
 import time
 import unittest
@@ -22,6 +23,7 @@ from tools.silverfish.link import (
 )
 from tools.silverfish.runtime import MAP
 from tools.silverfish.service import Client, Host
+from tools.silverfish.udp_ownership import verify_loopback_socket
 
 
 class DatagramInbox(asyncio.DatagramProtocol):
@@ -127,6 +129,9 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertTrue(self.client.connected)
         self.assertTrue(self.host.connected(self.request["guest_id"]))
+        if os.name == "nt":
+            address = self.client._protocol._transport.get_extra_info("sockname")
+            verify_loopback_socket(os.getpid(), address[1])
         for size in (1, 1024, 1200, 4097, 16_384):
             await self.exchange(size)
 

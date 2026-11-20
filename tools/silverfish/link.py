@@ -930,10 +930,10 @@ class _ClientProtocol(_LinkProtocol):
 @asynccontextmanager
 async def _open_client_protocol(client: ClientLink, address: Address, configuration: QuicConfiguration):
     connection = QuicConnection(configuration=configuration)
-    # Use a connected UDP socket so the OS selects the source address for this host.
-    # A loopback destination then keeps the QUIC client socket bound to loopback too.
+    # Windows reports an implicit bind as wildcard even for a connected loopback peer.
+    local = (address[0], 0) if _is_loopback(address[0]) else None
     transport, protocol = await asyncio.get_running_loop().create_datagram_endpoint(
-        lambda: _ClientProtocol(client, connection), remote_addr=address,
+        lambda: _ClientProtocol(client, connection), local_addr=local, remote_addr=address,
     )
     try:
         protocol.connect(transport.get_extra_info("peername"))
