@@ -879,7 +879,8 @@ namespace
             if (named_seed)
             {
                 const auto name = lua.get_string();
-                if (name != "basic-helmet" && name != "goggles" && name != "hunter-jacket" && name != "hazard-suit")
+                if (name != "basic-helmet" && name != "dust-filter" && name != "goggles" &&
+                    name != "hunter-jacket" && name != "hazard-suit")
                     return report(lua, false, "native_guest_armor_fixture_profile_unavailable");
                 const auto selected = std::ranges::find(armor_profiles, name, &ArmorProfile::name);
                 if (selected == armor_profiles.end())

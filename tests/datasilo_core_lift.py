@@ -14,15 +14,18 @@ EXIT_Y = 64.0
 CARRY_PITCH = 3
 
 
-async def equip_stock_protection(run, guest_run, action):
+async def equip_stock_protection(run, guest_run, action, *, helmet_profile="basic-helmet"):
     # Put stock gear into the cloned fixture save before entering the hazard.
     torso_guid, head_guid = (uuid.uuid4().hex.upper() for _ in range(2))
     await action(run, armor.FIXTURE, target="guest", item_guid=torso_guid, kind="hazard-suit")
     torso = (await action(guest_run, armor.ACTION, target=torso_guid))["native_guest_armor"]
-    await action(run, armor.FIXTURE, target="guest", item_guid=head_guid, kind="basic-helmet")
+    await action(run, armor.FIXTURE, target="guest", item_guid=head_guid, kind=helmet_profile)
     helmet = (await action(guest_run, armor.HELMET_ACTION, target=head_guid))["native_guest_helmet"]
-    assert (torso["guid"], torso["profile"], helmet["guid"]) == (torso_guid, "hazard-suit", head_guid)
-    assert math.isclose(helmet["combined_acid"], 0.6, abs_tol=1e-9)
+    assert (torso["guid"], torso["profile"], helmet["guid"], helmet["profile"]) == (
+        torso_guid, "hazard-suit", head_guid, helmet_profile)
+    body, head = armor.PROFILES["hazard-suit"], armor.HEAD_PROFILES[helmet_profile]
+    assert math.isclose(helmet["combined_acid"], body.acid + head.acid, abs_tol=1e-9)
+    assert math.isclose(helmet["combined_poison"], body.poison + head.poison, abs_tol=1e-9)
     return {"torso": torso, "helmet": helmet}
 
 
@@ -187,6 +190,8 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             after = await observe(label, stopped)
             end = after[seat]["location"][:2]
             step.update(after=end, prop=after["prop"]["position"], health=after[seat]["health"])
+            if math.dist(point, end) <= tolerance and (not reached or reached(after)):
+                return after
             progressed = distance - math.dist(point, end)
             stalled = stalled + 1 if progressed < min(4, distance / 4) else 0
             if stalled >= 3:
@@ -202,7 +207,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                 return False
         return True
 
-    proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action)
+    proof["stock_fixture_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
 
     proof["lower"] = await at_stop("lower stock lift", "lower")
     guest_local_pawn = proof["lower"]["guest_local"]["name"]
@@ -224,8 +229,10 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     await walk_to("cross north of the scrap pile", (-560, 215), 30)
     await walk_to("reach the shelf north of the pile face", (-650, 250), 12)
     await walk_to("round the pile face on its shallow shelf", (-710, 300), 12)
-    await walk_to("cross the shallow shelf", (-770, 300), 12)
-    await walk_to("clear the second pile face", (-805, 245), 12)
+    await walk_to("reach the edge of the shallow shelf", (-755, 318), 16)
+    await walk_to("round the shelf lip to the northeast", (-715, 395), 14)
+    await walk_to("cross above the second pile face", (-795, 465), 16)
+    await walk_to("clear the far side of the second pile", (-900, 450), 20)
     await walk_to("reach the west side of the lower lift", (-1900, 170), 17)
     await turn("trail the Core on the west approach", 90)
     await walk_to("west approach to the lower lift", (-1900, EXIT_Y), 9)

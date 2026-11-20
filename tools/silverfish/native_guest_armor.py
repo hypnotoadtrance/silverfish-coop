@@ -48,6 +48,7 @@ CLASS_PATHS = frozenset(profile.class_path for profile in PROFILES.values())
 EQUIP_ACTIONS = {**dict.fromkeys(CLASS_PATHS, ACTION),
                  **dict.fromkeys((profile.class_path for profile in HEAD_PROFILES.values()), HELMET_ACTION)}
 SEED_PROFILES = {"basic-helmet": HEAD_PROFILES["basic-helmet"], "goggles": HEAD_PROFILES["goggles"],
+                 "dust-filter": HEAD_PROFILES["dust-filter"],
                  "hunter-jacket": PROFILES["hunter-jacket"], "hazard-suit": PROFILES["hazard-suit"]}
 
 

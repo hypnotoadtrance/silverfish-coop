@@ -14,6 +14,7 @@ local basic_helmet = "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C"
 local goggles = "/Game/Classes/Armor_Items/Helm_Goggles.Helm_Goggles_C"
 local seed_profiles = {
     ["hunter-jacket"] = hunter_jacket, ["hazard-suit"] = hazard_suit, ["basic-helmet"] = basic_helmet, goggles = goggles,
+    ["dust-filter"] = dust_filter,
 }
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
