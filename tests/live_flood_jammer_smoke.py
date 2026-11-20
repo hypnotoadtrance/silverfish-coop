@@ -443,6 +443,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         assert ready["step_after"] == 2 and ready["xp_after"] == offer["xp_after"], ready
         if spratt:
             assert ready["objective_qualified"] is True, ready
+            assert ready["reputation"] == offer["reputation"], (offer, ready)
         elif not lenny:
             assert ready["reputation"][faction]["after"] == offer["reputation"][faction]["after"] + 10, (offer, ready)
             assert ready["reputation"]["5"]["after"] == offer["reputation"]["5"]["after"], (offer, ready)
@@ -454,6 +455,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
             elif lenny:
                 assert before["host"]["LennyDead"] == 1 and baseline["host"]["LennyDead"] == 0, (baseline, before)
                 assert before["host"]["Player_Kills"] == baseline["host"]["Player_Kills"] + 1, (baseline, before)
+            elif spratt:
+                # Spratt inherits Count_PlayerKill. The stock NPC death graph applies it to the canonical save.
+                kills = baseline["host"]["Player_Kills"]
+                assert before["host"] == {**baseline["host"], "Player_Kills": kills + 1}, (baseline, before)
+                evidence["stock_player_kills"] = {"before": kills, "after": before["host"]["Player_Kills"]}
             else:
                 assert before["host"] == baseline["host"], (baseline, before)
             assert before["guest"] == baseline["guest"], (baseline, before)
@@ -494,6 +500,10 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         assert (repeated["effect"], repeated["wallet"], repeated["objective"]) == (
             "native_quest_already_settled", settled["wallet"], proof,
         ), repeated
+        if spratt:
+            replay_balances = await balances()
+            assert replay_balances == paid, (paid, replay_balances)
+            evidence["stock_player_kills"]["after_replay"] = replay_balances["host"]["Player_Kills"]
         evidence["same_session_replay"] = repeated["effect"]
 
         await stop(host, authority)
@@ -516,7 +526,10 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         assert (replay["effect"], replay["wallet"], replay["objective"]) == (
             "native_quest_already_settled", settled["wallet"], proof,
         ), replay
-        assert await balances() == paid
+        restored_balances = await balances()
+        assert restored_balances == paid
+        if spratt:
+            evidence["stock_player_kills"]["after_restart"] = restored_balances["host"]["Player_Kills"]
         evidence.update(same_port_restart={"port": port, "generation": restarted["generation"], "character": character,
                                           "quest": restored, weapon_label: restored_weapon, "replay": replay["effect"]}, verified=True)
     except BaseException as error:
