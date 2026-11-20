@@ -994,7 +994,8 @@ local function write_status(state, current_phase, failure)
             last_guest_xp.before, last_guest_xp.after)
     end
     if not failure then
-        for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        local idle_sequence = role == "idle" and sequence or nil
+        for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row, idle_sequence)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_title_panel.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

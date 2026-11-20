@@ -1,5 +1,6 @@
 """Decode the staged stock title-screen entry point."""
 
+from pathlib import PureWindowsPath
 import re
 
 
@@ -7,6 +8,8 @@ TAG = "native-title-entry"
 KEY = "native_title_entry"
 PANEL_TAG = "native-title-panel"
 PANEL_KEY = "native_title_panel"
+STARTUP_TAG = "embedded-engine-startup"
+STARTUP_KEY = "embedded_engine_startup"
 MAP = "/Game/Classes/Maps/MainMenu_P"
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -47,3 +50,15 @@ def parse_panel(fields: list[str], phase: str, area: str) -> dict:
         raise ValueError("Unexpected co-op title panel state")
     return dict(map=area, state=state, actions=actions.split(","), mounted=mounted == "1",
                 reason=None if reason == "-" else reason)
+
+
+def parse_startup(fields: list[str], snapshot: dict) -> dict:
+    if (len(fields) != 4 or fields[:2] != [STARTUP_TAG, MAP]
+            or (snapshot.get("mode"), snapshot.get("state"), snapshot.get("map")) != ("idle", "ready", MAP)
+            or snapshot.get(KEY, {}).get("state") != "ready"
+            or not 0 < snapshot.get("sequence", 0) < 2**53 or fields[2] != str(snapshot["sequence"])):
+        raise ValueError("Unexpected embedded engine startup frame")
+    directory = fields[3]
+    if not directory.isprintable() or len(directory) > 4096 or not PureWindowsPath(directory).is_absolute():
+        raise ValueError("Invalid effective Unreal save directory")
+    return dict(map=MAP, sequence=snapshot["sequence"], saved_directory=directory)

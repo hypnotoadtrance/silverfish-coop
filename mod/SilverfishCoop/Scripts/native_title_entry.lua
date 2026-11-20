@@ -8,6 +8,7 @@ local widget_path = "/Game/Classes/GUI/MainMenu_Widget.MainMenu_Widget_C"
 local instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local viewport_path = "/Script/Engine.GameViewportClient"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 
 local function valid(object)
     return object and object:IsValid()
@@ -105,12 +106,35 @@ local function bit(value)
     return value and 1 or 0
 end
 
-function title.rows(state, phase, status_row)
+local function string_value(value)
+    return type(value) == "userdata" and value:ToString() or value
+end
+
+local function saved_directory()
+    local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not valid(system) then return end
+    local path = string_value(system:GetProjectSavedDirectory())
+    if type(path) ~= "string" or path == "" or path:find("%c") then return end
+    if not path:match("^%a:[/\\]") and not path:match("^[/\\][/\\]") then
+        local paths = StaticFindObject("/Script/Engine.Default__BlueprintPathsLibrary")
+        if not valid(paths) then return end
+        path = string_value(paths:ConvertRelativePathToFull(path, ""))
+    end
+    if type(path) == "string" and #path <= 4096 and not path:find("%c")
+        and (path:match("^%a:[/\\]") or path:match("^[/\\][/\\]")) then return path end
+end
+
+function title.rows(state, phase, status_row, idle_sequence)
     local report = observe(state, phase)
     if not report then return {} end
-    return {status_row("native-title-entry", report.map, report.state, name(report.controller), name(report.menu),
+    local rows = {status_row("native-title-entry", report.map, report.state, name(report.controller), name(report.menu),
         name(report.viewport), report.count or "-", bit(report.top), bit(report.mounted), bit(report.visible),
         report.reason or "-")}
+    if embedded and idle_sequence and report.state == "ready" then
+        local ok, path = pcall(saved_directory)
+        if ok and path then rows[#rows + 1] = status_row("embedded-engine-startup", map, idle_sequence, path) end
+    end
+    return rows
 end
 
 return title
