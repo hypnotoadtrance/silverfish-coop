@@ -39,22 +39,48 @@ SQUAD_PREFIX = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/"
 NOT_DEER_REPLICA = re.compile(r"NPC_NotDeer_C " + re.escape(LEVEL) + r"NPC_NotDeer_C_[0-9]{1,10}\Z")
 FLAYER_REPLAY_SHA = "8f17247a7b18f3e91ba33ec6c4bd72d711935a2217667a5933e8713084e93c95"
 FLAYER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999494537]
+NOT_DEER_REPLAY_SHA = "ede8b0f6f1fbfb138ce2e9efb85fe3db77ff4f920207b68f6f464ec6bd116cf2"
+NOT_DEER_REPLAY_SPAWN = [13850.0, -200.0, 132.14999820909]
+NOT_DEER_SAVED_MARKER = "PersistentLevel.AI_Spawner_Squad_BP_C_40"
+CELL_PATH = re.compile(rb"/Game/Classes/AntFarm/AntfarmData/Cells(?:Overworld|Dungeons|SafeZones)/[A-Za-z0-9_]+\0")
 FLAYER_GEOMETRY_REFUSAL = "stock_flayer_approach_no_verified_position "
 FLAYER_SHOT_REFUSAL = "stock_flayer_shot_no_stock_lane "
 
 
-def seed_antfarm_replay(source: Path, destination: Path) -> dict:
+def verify_not_deer_saved_cell(content: bytes) -> dict:
+    cells = list(CELL_PATH.finditer(content))
+    crossroads, = [index for index, match in enumerate(cells) if match[0].endswith(b"/CrossRoadsData\0")]
+    cell = content[cells[crossroads].start():cells[crossroads + 1].start()]
+    squads = cell.split(b"SquadId_2_699B8DEB421ADB46A48403863511BC91\0")
+    not_deer, = [squad for squad in squads[1:]
+                if b"/Game/Classes/Libraries/DataAssets/Squads/Monsters/NotDeer\0" in squad]
+    wanted = (b"Factions_Enum::NewEnumerator3\0", b"AntfarmUnitSave\0", b"/Game/Classes/NPCs/NPC_NotDeer\0", b"NPC_NotDeer_C\0",
+              b"LastKnownLocation_22_7F5EE2E8461E909EDF92CCAAB6AA5FEC\0", MAP.encode("ascii") + b"\0",
+              NOT_DEER_SAVED_MARKER.encode("ascii") + b"\0", b"DestinationLevel_37_E7348C5D4D5E30EC44EA24BEA733F46C\0")
+    remaining = not_deer
+    for field in wanted:
+        _, found, remaining = remaining.partition(field)
+        if not found:
+            raise ValueError("The pinned CrossRoads cell lacks its typed stock NotDeer unit or stock last-known marker")
+    return {"cell": "CrossRoadsData", "squad": f"{SQUAD_PREFIX}NotDeer.NotDeer", "saved_marker": NOT_DEER_SAVED_MARKER}
+
+
+def seed_antfarm_replay(source: Path, destination: Path, family: str) -> dict:
     """Carry over only the verified stock frame and saved CrossRoads host spawn."""
+    digest, spawn = {"flayer": (FLAYER_REPLAY_SHA, FLAYER_REPLAY_SPAWN),
+                     "notdeer": (NOT_DEER_REPLAY_SHA, NOT_DEER_REPLAY_SPAWN)}[family]
     saved = json.loads((source / "save" / "campaign.json").read_text(encoding="utf-8"))
     old_world = saved["world"]
-    expected_host = {"map": MAP, "location": FLAYER_REPLAY_SPAWN, "health": 250.0}
+    expected_host = {"map": MAP, "location": spawn, "health": 250.0}
     frame = native_host_save.verify(source / "game-user", old_world)
-    if (not frame or frame["map"] != MAP or frame["sha256"] != FLAYER_REPLAY_SHA
+    if (not frame or frame["map"] != MAP or frame["sha256"] != digest
             or old_world.get("host") != expected_host):
-        raise ValueError("Antfarm replay requires the verified d474f2cf stock frame and CrossRoads spawn")
+        name = "validation-ec15ee08" if family == "notdeer" else "validation-d474f2cf"
+        raise ValueError(f"Antfarm replay requires the verified {name} stock frame and CrossRoads spawn")
     content = native_host_save.slot_path(source / "game-user", frame["slot"]).read_bytes()
-    if sha256(content).hexdigest() != FLAYER_REPLAY_SHA:
+    if sha256(content).hexdigest() != digest:
         raise ValueError("The immutable Antfarm replay frame changed while being read")
+    source_cell = verify_not_deer_saved_cell(content) if family == "notdeer" else None
 
     destination.mkdir(parents=True, exist_ok=False)
     profile = destination / "game-user"
@@ -68,7 +94,10 @@ def seed_antfarm_replay(source: Path, destination: Path) -> dict:
         created = campaign.status()
         if created["campaign_id"] == saved["campaign_id"] or created["characters"] or created["guest_count"]:
             raise RuntimeError("The staged Antfarm replay did not create fresh campaign identities")
-    return {"frame": copied, "spawn": expected_host, "campaign_id": created["campaign_id"]}
+    evidence = {"frame": copied, "spawn": expected_host, "campaign_id": created["campaign_id"]}
+    if source_cell:
+        evidence["source_cell"] = source_cell
+    return evidence
 
 
 def verify_antfarm_restore(run: Path, server: dict, seed: dict) -> dict:
@@ -332,7 +361,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
     campaign_root = work / "campaigns" / name
-    prepared = seed_antfarm_replay(antfarm_replay, campaign_root) if antfarm_replay else None
+    prepared = seed_antfarm_replay(antfarm_replay, campaign_root, family) if antfarm_replay else None
     host = campaign_root / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
@@ -731,7 +760,7 @@ if __name__ == "__main__":
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
     parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
-    parser.add_argument("--notdeer-replay", type=Path, help="replay the original stock NotDeer Antfarm frame from d474f2cf")
+    parser.add_argument("--notdeer-replay", type=Path, help="replay the original stock CrossRoads Antfarm frame from validation-ec15ee08")
     parser.add_argument("--combat", action="store_true", help="observe a stock melee attack against the exact detached guest")
     parser.add_argument("--projectile-tap", action="store_true",
                         help="verify an ordinary guest Light Pistol tap against the exact restored stock Flayer cohort")
