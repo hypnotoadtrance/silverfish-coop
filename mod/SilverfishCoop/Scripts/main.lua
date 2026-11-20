@@ -442,7 +442,7 @@ local function run_command(fields, state, current_phase)
         error("stock_live_dig_checkpoint_pending", 0)
     end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
-        native_mindcore_carry.clear()
+        if command ~= "native-guest-clear" then native_mindcore_carry.clear() end
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
         native_guest_mre.reset()
@@ -1359,7 +1359,10 @@ native_mindcore_replication.start(function() return role == "client" and not lea
 native_mindcore_view.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
-guest_save.start(bridge, native_death.clear_scope)
+guest_save.start(bridge, function(name)
+    native_mindcore_carry.clear(name)
+    return native_death.clear_scope()
+end)
 native_zone.start(bridge)
 native_guest_smg_hold.start_fast(bridge, status_row, function(state)
     return phase(state) == "hosting" and same_object(state.world, current_world())

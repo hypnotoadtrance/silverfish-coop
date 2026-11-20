@@ -393,6 +393,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         dormant_checkpoint, dormant_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
         if guest_carry:
+            original_guest, original_host = await inventory(guest_run, character), await inventory(run, "host")
             await action(run, carry.APPROACH_FIXTURE, target=character)
             readied = await wait(guest_run, lambda state: (
                 state.get("game", {}).get(carry.VIEW, {}).get("state") == "ready"
@@ -425,7 +426,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             assert turned["game"][carry.AUTHORITY]["lease"] == held["lease"]
             turned_scene = await shared_core_at(0, label="guest_turned_core")
             before_walk = runtime.read_json(guest_run / "status.json")["game"]["pawns"]["local"]["location"]
-            await action(guest_run, "walk", x=0, y=1, milliseconds=2500)
+            for _ in range(3):
+                await action(guest_run, "walk", x=0, y=1, milliseconds=1000)
+                await asyncio.sleep(.9)
             walked = await wait(guest_run, lambda state: (
                 (pawn := state.get("game", {}).get("pawns", {}).get("local", {})).get("name") == guest_pawn
                 and math.dist(pawn["location"], before_walk) >= 20
@@ -441,6 +444,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 and row.get("lease") == held["lease"] and row.get("pawn") == held["pawn"]
             ), timeout=14)
             actual_release = await shared_core_at(0, label="guest_released")
+            assert await inventory(guest_run, character) == original_guest
+            assert await inventory(run, "host") == original_host
             await action(run, "checkpoint")
             saved, released_flags = await flags()
             assert saved["revision"] > dormant_checkpoint["revision"]
@@ -450,7 +455,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 name: value for name, value in row.items() if name != "lease"
             } for key, row in (("held", held), ("turn", turned["game"][carry.AUTHORITY]),
                                ("release", released["game"][carry.AUTHORITY]))},
-                carry_checkpoint=saved["revision"], carry_stock_flags=[0, 0],
+                carry_checkpoint=saved["revision"], carry_stock_flags=[0, 0], inventories_verified=True,
                 guest_core_displacement_uu=round(math.dist(host_before["guest"]["position"],
                                                            actual_release["guest"]["position"]), 3))
             return proof

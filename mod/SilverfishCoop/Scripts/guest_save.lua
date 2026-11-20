@@ -170,7 +170,7 @@ end
 local function clear_binding(binding)
     if not binding then return false end
     binding.revoked = true
-    if not clear_death_scope() then
+    if not clear_death_scope(binding.name) then
         error("Could not revoke native death scope before guest teardown", 0)
     end
 
