@@ -181,7 +181,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             row["hold"]["sequence"] > before["hold"]["sequence"] and abs(row["hold"]["pitch"] - pitch) < .35
             and abs((row["hold"]["yaw"] - yaw + 180) % 360 - 180) < .35))
 
-    async def walk_to(label, point, tolerance, *, seat="carrier", reached=None):
+    async def walk_to(label, point, tolerance, *, seat="carrier", reached=None, pulse_limit=2200):
         directory = guest_run if seat == "carrier" else run
         last = await observe(label, lambda *_: True)
         stalled = 0
@@ -194,7 +194,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                 break
             dx, dy = ((target - origin) / distance for target, origin in zip(point, position, strict=True))
             strength = min(1, max(.16, distance / 180))
-            duration = max(50, min(2200, round(.7 * 1000 * distance / (500 * strength))))
+            duration = max(50, min(pulse_limit, round(.7 * 1000 * distance / (500 * strength))))
             request = {"x": strength * dx, "y": strength * dy, "milliseconds": duration, "continuous": True}
             step = {"phase": label, "seat": seat, "target": point, "before": position, "input": request}
             proof["walks"].append(step)
@@ -372,11 +372,12 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             if not (1280 < x < 1680 and 1900 < y < 2250 and 4475 < floor < 4560):
                 raise RuntimeError("The stock path did not reach the upper stair approach")
 
-        async def follow(seat, index, point):
+        async def follow(seat, index, point, *, pulse_limit=2200):
             x, y, floor = point
             return await walk_to(f"follow the east stair path point {index} with the {seat}",
                                  (x, y), 25, seat=seat,
-                                 reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
+                                 reached=lambda row: 48 < row[seat]["location"][2] - floor < 136,
+                                 pulse_limit=pulse_limit)
 
         async def cross_long_level_section(index, start, finish):
             distance = math.dist(start[:2], finish[:2])
@@ -405,18 +406,26 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     proof["south_doorway"] = frame
                     facing = -90
                 else:
-                    outward = math.degrees(math.atan2(y, x))
-                    if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
-                        await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
-                        facing = outward
                     previous = points[index - 1]
-                    current = proof["last_observation"]
-                    if (upper_approach and math.dist(previous[:2], (x, y)) > 650 and abs(previous[2] - floor) < 45
-                            and math.dist(current["lead"]["location"][:2], previous[:2]) < 230):
-                        frame = await cross_long_level_section(index, previous, (x, y, floor))
-                        lead_point = index
+                    rising_from_north_landing = 3280 < previous[2] < 3350 and 3570 < floor < 3650
+                    if rising_from_north_landing:
+                        dx, dy = x - previous[0], y - previous[1]
+                        heading = math.degrees(math.atan2(dy, dx))
+                        await turn("aim the Core up the next east staircase", heading, pitch=52)
+                        facing = heading
+                        frame = await follow("carrier", index, (x, y, floor), pulse_limit=600)
                     else:
-                        frame = await follow("carrier", index, (x, y, floor))
+                        outward = math.degrees(math.atan2(y, x))
+                        if abs((outward - facing + 180) % 360 - 180) > 28 or south_doorway_was_crossed:
+                            await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
+                            facing = outward
+                        current = proof["last_observation"]
+                        if (upper_approach and math.dist(previous[:2], (x, y)) > 650 and abs(previous[2] - floor) < 45
+                                and math.dist(current["lead"]["location"][:2], previous[:2]) < 230):
+                            frame = await cross_long_level_section(index, previous, (x, y, floor))
+                            lead_point = index
+                        else:
+                            frame = await follow("carrier", index, (x, y, floor))
             except StockCoreReleased as released:
                 if not upper_approach or len(proof.get("stock_regrips", ())) >= 3:
                     raise
