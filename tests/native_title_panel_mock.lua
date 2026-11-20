@@ -38,8 +38,12 @@ guid.NewGuid = function() return {A = 1, B = -1, C = 2, D = 3} end
 classes["/Script/UMG.Default__WidgetBlueprintLibrary"] = statics
 classes["/Script/UMG.Default__WidgetLayoutLibrary"] = layout
 classes["/Script/Engine.Default__KismetGuidLibrary"] = guid
-local env = setmetatable({
+local env
+env = setmetatable({
     require = function(name)
+        if name == "native_title_display" then
+            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_display.lua", "t", env))()
+        end
         assert(name == "native_title_entry")
         return {probe = function(state, phase) if state.qualified and phase == "ready" then return context end end}
     end,

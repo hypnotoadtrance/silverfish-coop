@@ -1,0 +1,24 @@
+# Stock title bootstrap
+
+This opt-in UE4SS Lua mod presents **Open Co-op** on the stock Project Silverfish title. It needs the exact standalone title with its normal menu mounted and in front. On a packaged coordinator offer, a fresh F7 press submits a one-use request. The title shows **Coordinator unavailable** until a compatible coordinator supplies a valid offer.
+
+The bootstrap only reads the title and adds its own passive text widget. The coordinator will own isolated game startup and the handoff.
+
+## Package
+
+From a checkout, run `python bootstrap/package.py <new-archive.zip>` to assemble the standalone mod. The archive includes the bootstrap entry and the same stock title qualification and display code used by the staged game. Its three Lua files load through UE4SS's absolute per-mod script search path.
+
+The archive ships disabled. An isolated lab can unpack `SilverfishCoopBootstrap` into the held replica's `SilverFish/Binaries/Win64/ue4ss/Mods` and add `SilverfishCoopBootstrap : 1` to that replica's `mods.txt`.
+
+## Coordinator calls
+
+- `SilverfishReadCoopBootstrapOffer()` returns integer protocol version `1` and the current generation. A generation is a nonzero string of 32 lowercase hexadecimal characters. The coordinator issues a new ID for each new offer.
+- `SilverfishRequestCoopBootstrapOpen(generation, request_id)` accepts the exact generation plus a fresh 32-character request ID in the same format. It returns `true` once the request has been queued. The coordinator consumes that generation at most once, revalidates the live title and user action, then reports gameplay startup through its own interface.
+
+Both callbacks run on the game thread. The selection callback should queue bounded work and return promptly. **Opening Co-op** stays visible on the same stock title while the consumed offer is withdrawn. A refused or unverified reply leaves the title available. A new attempt requires a fresh coordinator offer.
+
+## Isolated stock-layout check
+
+1. Use an independently staged stock copy with the matching UE4SS runtime and Project Silverfish signature. Enable only the bootstrap Lua mod in that copy. Give the replica a fresh standalone `-userdir` outside the Steam install and original save directory. Start with no inherited Silverfish co-op environment or special Steam launch options. Run one case with the executable's directory as the working directory and another from a different directory.
+2. Verify the mounted stock title shows **Open Co-op** and **Coordinator unavailable**. The loader log should show `[SilverfishCoopBootstrap] state=unavailable` after mount and text verification. A title or display failure reports `state=error`. Press F7 and check that the title stays usable and the process tree stays the same. Open a stock title dialog and verify the prompt disappears until the title is back on top. Check the archive remains inactive with its `mods.txt` entry absent.
+3. Record the original save hashes before and after the isolated run. Record the replica's effective profile and distinguish stock title configuration writes from the bootstrap. Exercise the future coordinator separately by providing one bounded offer and verifying one real F7 edge delivers the typed request. The Lua mock covers that callback contract today.

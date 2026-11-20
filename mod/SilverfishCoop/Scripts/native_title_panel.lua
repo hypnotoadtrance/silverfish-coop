@@ -1,7 +1,7 @@
 local panel = {}
 local title = require("native_title_entry")
+local display = require("native_title_display")
 
-local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local keys = {host = "F7", join = "F8", hide = "F9"}
 local actions = {
     ["host"] = {host = true}, ["join"] = {join = true}, ["host,join"] = {host = true, join = true},
@@ -16,10 +16,6 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
-end
-
-local function exact(object, class)
-    return valid(object) and same(object:GetClass(), StaticFindObject(class))
 end
 
 local function same_title(first, second)
@@ -45,44 +41,20 @@ end
 local function remove_display()
     local old = session
     session = nil
-    if old and valid(old.widget) then old.widget:RemoveFromParent() end
+    if old then display.remove(old.widget) end
 end
 
 local function message(text)
-    session.widget.TextBlock_Notes:SetText(FText(text))
-    if session.widget.TextBlock_Notes:GetText():ToString() ~= text then error("title_panel_text_unavailable", 0) end
+    display.text(session.widget, text)
 end
 
 local function mount(context, offer)
-    local class = StaticFindObject(widget_path)
-    if not valid(class) then
-        LoadAsset(widget_path)
-        class = StaticFindObject(widget_path)
-    end
-    local widgets = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
-    local layout = StaticFindObject("/Script/UMG.Default__WidgetLayoutLibrary")
-    if not valid(class) or not valid(widgets) or not valid(layout) then error("title_panel_widget_unavailable", 0) end
-    local widget = widgets:Create(context.controller, class, context.controller)
-    if not exact(widget, widget_path) or not same(widget:GetOwningPlayer(), context.controller)
-        or not exact(widget.TextBlock_Notes, "/Script/UMG.TextBlock") then
-        error("title_panel_widget_unqualified", 0)
-    end
-    session = {context = context, offer = offer, widget = widget, held = {}}
-    widget:SetVisibility(3) -- Self and children stay out of stock pointer hit testing.
-    widget.TextBlock_Notes:SetColorAndOpacity({SpecifiedColor = {R = 0.60, G = 0.90, B = 1.0, A = 1.0}, ColorUseRule = 0})
-    if widget:AddToPlayerScreen(110) ~= true or not widget:IsInViewport() then error("title_panel_mount_unverified", 0) end
-    local size, scale = layout:GetViewportSize(context.controller), layout:GetViewportScale(context.controller)
-    local width = size and tonumber(size.X)
-    if not width or width < 1 or width > 16384 or type(scale) ~= "number" or not (scale >= 0.25 and scale <= 8) then
-        error("title_panel_viewport_size_unavailable", 0)
-    end
-    widget:SetDesiredSizeInViewport({X = 344, Y = 148})
-    widget:SetPositionInViewport({X = math.max(20, width / scale - 364), Y = 62}, false)
     local lines = {"Direct IP co-op"}
     if actions[offer.choices].host then lines[#lines + 1] = "F7   Host a campaign" end
     if actions[offer.choices].join then lines[#lines + 1] = "F8   Join with an invite" end
     lines[#lines + 1] = "F9   Hide"
-    message(table.concat(lines, "\n"))
+    local widget = display.mount(context, table.concat(lines, "\n"))
+    session = {context = context, offer = offer, widget = widget, held = {}}
 end
 
 local function request_id()
