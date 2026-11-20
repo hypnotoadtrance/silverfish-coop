@@ -70,6 +70,51 @@ class BoroughBarterTests(unittest.IsolatedAsyncioTestCase):
         self.host.checkpoint_native.assert_awaited_once_with(self.bridge)
 
 
+class CraftingBenchTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.pawn = "Player_FP_C " + dialogue.LEVEL + "Player_FP_C_7"
+        self.frame = [barter.CRAFT_ACTION, dialogue.OBSERVATORY, self.pawn, barter.BENCH, "exchanged",
+                      PAYMENT, barter.BOARD, "1", REWARD, barter.SCRAP, "1", "60", "60", "0", "C" * 32]
+        self.proof = barter.parse_crafting(self.frame)
+        self.host = SimpleNamespace(
+            dialogue_sessions=SimpleNamespace(maps={dialogue.OBSERVATORY}, member_scope=Mock(
+                return_value=("boot", "visit", dialogue.OBSERVATORY, self.pawn))),
+            party={"receipts": {}, "players": {"guest": {"native_inventory": {PAYMENT: {}}}}},
+            checkpoint_native=AsyncMock(return_value=9), native_checkpoint_unsafe=False, stopping=False,
+            native_pickup=SimpleNamespace(forget_committed_row=Mock()), control=SimpleNamespace(event=Mock()),
+        )
+        self.bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": dialogue.OBSERVATORY, "native_crafting_bench": self.proof}))
+
+    def test_parser_rejects_wrong_bench_or_recipe_and_aliased_armor(self):
+        self.assertEqual(self.proof["receive"], {"guid": REWARD, "class_path": barter.SCRAP, "quantity": 1})
+        for index, value in [(3, barter.BENCH.removesuffix("51") + "63"), (10, "2"), (12, "59"), (14, PAYMENT)]:
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                malformed = self.frame.copy()
+                malformed[index] = value
+                barter.parse_crafting(malformed)
+
+    async def test_unworn_or_missing_board_reports_safe_refusal(self):
+        for reason in ("detached_worn_crafting", "exact_owned_computer_board"):
+            with self.subTest(reason=reason):
+                self.bridge.command.side_effect = RuntimeError("borough_barter_refused_" + reason)
+                with self.assertRaisesRegex(party.RuleError, reason):
+                    await barter.trade(self.host, self.bridge, "guest", PAYMENT, OPERATION, action=barter.CRAFT_ACTION)
+                self.assertEqual(self.host.party["players"]["guest"]["native_inventory"], {PAYMENT: {}})
+                self.assertFalse(self.host.native_checkpoint_unsafe or self.host.stopping)
+
+    async def test_exact_board_commit_and_request_replay(self):
+        with patch.object(party, "load_party", return_value={
+                "receipts": {}, "players": {"guest": {"native_inventory": {PAYMENT: {}}}}}):
+            result = await barter.trade(self.host, self.bridge, "guest", PAYMENT, OPERATION, action=barter.CRAFT_ACTION)
+        self.assertEqual(result, {"native_crafting_bench": self.proof})
+        self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({"guest"}))
+        self.assertEqual(self.host.party["players"]["guest"]["native_inventory"], {})
+        self.assertEqual(await barter.trade(self.host, self.bridge, "guest", PAYMENT, OPERATION,
+                                            action=barter.CRAFT_ACTION), result)
+        self.bridge.command.assert_awaited_once_with(barter.CRAFT_ACTION, self.pawn, PAYMENT, timeout=6)
+
+
 class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_meet_safe_routes_and_exact_trade_response(self):
         profile = dialogue.PROFILES[dialogue.BOROUGH]

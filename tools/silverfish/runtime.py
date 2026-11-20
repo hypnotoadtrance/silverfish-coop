@@ -1175,11 +1175,14 @@ class Bridge:
                     if dialogue_progress is not None:
                         raise ValueError("Duplicate stock dialogue progress")
                     dialogue_progress = fields
-                elif fields[0] == "native-borough-barter":
-                    proof = native_borough_barter.parse(fields)
-                    if ("native_borough_barter" in data or data.get("state") != "hosting" or data.get("map") != proof["map"]):
-                        raise ValueError("Invalid stock Borough barter frame scope")
-                    data["native_borough_barter"] = proof
+                elif fields[0] in ("native-borough-barter", native_borough_barter.CRAFT_ACTION):
+                    if fields[0] == native_borough_barter.CRAFT_ACTION:
+                        key, proof = "native_crafting_bench", native_borough_barter.parse_crafting(fields)
+                    else:
+                        key, proof = "native_borough_barter", native_borough_barter.parse(fields)
+                    if key in data or (data.get("state"), data.get("map")) != ("hosting", proof["map"]):
+                        raise ValueError("Invalid stock trade frame scope")
+                    data[key] = proof
                 elif profile := native_mosby_tape.BY_PREFIX.get(fields[0]):
                     if profile.key in data:
                         raise ValueError("Duplicate stock tape station proof")

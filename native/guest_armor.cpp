@@ -894,6 +894,26 @@ namespace
     }
 }
 
+bool silverfish::native_guest_armor::worn_crafting_passive(std::uintptr_t pawn, std::uintptr_t save, Guid& suit)
+{
+    if (!enabled() || !U::IsInGameThreadRaw()) return false;
+    Scope scope;
+    Inventory inventory;
+    if (!scope.bind(pawn, save) || !inventory.bind(scope.guest)) return false;
+    const auto* row = inventory.armor->ContainerPtrToValuePtr<void>(scope.guest);
+    const auto* profile = profile_for(inventory.item_class(row));
+    if (!profile || profile->passive != STR("Crafting")) return false;
+    auto* defaults = armor_defaults(*profile);
+    const auto id = inventory.item_guid(row);
+    int index{};
+    bool worn{};
+    if (!defaults || id == Guid{} || !stock_gear_row(inventory, row, defaults, *profile) ||
+        !inventory.locate(scope.guest, id, index, worn) || !worn || index >= 0 ||
+        !isolated_rows(scope, inventory, id)) return false;
+    suit = id;
+    return true;
+}
+
 void silverfish::native_guest_armor::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;

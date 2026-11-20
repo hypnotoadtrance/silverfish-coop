@@ -1,4 +1,5 @@
 #include "borough_barter.hpp"
+#include "guest_armor.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -29,9 +30,6 @@ namespace
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
     constexpr int capacity = 4096;
-    constexpr int receive_count = 25;
-    constexpr int ammo_value = 8;
-    constexpr double ammo_weight = 0.012;
     constexpr auto world_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough");
     constexpr auto npc_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.NPC_Mama_C_1");
     constexpr auto post_path = STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.TradePost_BP_C_1080");
@@ -39,6 +37,23 @@ namespace
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Intr_AP_BP.Ammo_Intr_AP_BP_C");
     constexpr auto base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto inventory_struct_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
+    constexpr auto observatory_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
+    constexpr auto bench_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.StaticMeshActor_51");
+    constexpr auto bench_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Furnature/CraftingBench_BP.CraftingBench_BP_C");
+    constexpr auto board_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
+    constexpr auto scrap_path = STR("/Game/Classes/Items/Item_ElectronicScrap.Item_ElectronicScrap_C");
+
+    struct Recipe
+    {
+        const U::TCHAR* row;
+        const U::TCHAR* payment;
+        const U::TCHAR* reward;
+        int index, offers, quantity, reward_value;
+        double reward_weight;
+        bool hide_unaffordable;
+    };
+    constexpr Recipe mama{STR("Trade_Mamma"), copper_path, ammo_path, 0, 5, 25, 8, 0.012, false};
+    constexpr Recipe bench{STR("Crafting"), board_path, scrap_path, 14, 40, 1, 80, 0.2, true};
 
     bool enabled()
     {
@@ -120,7 +135,35 @@ namespace
         return false;
     }
 
-    bool qualified_recipe(U::UObject* post, U::UClass* copper, U::UClass* ammo)
+    U::UObject* crafting_post(U::UObject* pawn, U::UWorld* world)
+    {
+        auto* actor = find<U::UObject>(bench_path);
+        if (!exact(actor, bench_class) || !authority(actor, world) || !near(pawn, actor) ||
+            object(actor, STR("As Game Instance FP")) != object(world, STR("OwningGameInstance"))) return nullptr;
+        auto location = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+        if (!(std::abs(location.GetX() + 5796.37) < 1.0 && std::abs(location.GetY() - 669.75) < 1.0 &&
+              std::abs(location.GetZ() - 150.0) < 1.0)) return nullptr;
+        auto* component = object(actor, STR("TradePost_BP"));
+        auto* box = object(actor, STR("Box"));
+        if (!exact(component, STR("/Script/Engine.ChildActorComponent")) || component->GetOuterPrivate() != actor ||
+            !exact(box, STR("/Script/Engine.BoxComponent")) || box->GetOuterPrivate() != actor) return nullptr;
+        return object(component, STR("ChildActor"));
+    }
+
+    bool crafting_value()
+    {
+        auto* object = find<U::UObject>(STR("/Game/Classes/Libraries/DataTables/PassiveEffects_MetaData_DT.PassiveEffects_MetaData_DT"));
+        if (!exact(object, STR("/Script/Engine.DataTable"))) return false;
+        auto* table = static_cast<U::UDataTable*>(object);
+        auto* schema = table->GetRowStruct().Get();
+        auto* value = field<U::FDoubleProperty>(schema, STR("Value_16_86F011AF491996019F586C922A602871"));
+        const U::FName name{STR("Crafting"), U::FNAME_Find};
+        const auto* row = !name.IsNone() && name.ToString() == STR("Crafting") ? table->FindRowUnchecked(name) : nullptr;
+        return value && row && value->GetPropertyValueInContainer(row) == 1.0 &&
+            bool_value(schema, STR("Stacks_13_4531363945A1C92F2EBF0592D2CFF62F"), row, false);
+    }
+
+    bool qualified_recipe(U::UObject* post, U::UClass* payment, U::UClass* reward, const Recipe& profile)
     {
         auto* row_schema = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/Trade_Inventory_Struct.Trade_Inventory_Struct"));
         auto* offer_schema = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/Trade_Struct.Trade_Struct"));
@@ -130,10 +173,10 @@ namespace
         auto* handle_type = find<U::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
         auto* table_field = field<U::FObjectProperty>(handle_type, STR("DataTable"));
         auto* name = field<U::FNameProperty>(handle_type, STR("RowName"));
-        const U::FName row_name{STR("Trade_Mamma"), U::FNAME_Find};
+        const U::FName row_name{profile.row, U::FNAME_Find};
         if (!row_schema || !offer_schema || !exact(table_object, STR("/Script/Engine.DataTable")) ||
             !handle || !handle_type || handle->GetStruct().Get() != handle_type || !table_field || !name ||
-            !inventory || inventory->GetStruct().Get() != row_schema || row_name.IsNone() || row_name.ToString() != STR("Trade_Mamma") ||
+            !inventory || inventory->GetStruct().Get() != row_schema || row_name.IsNone() || row_name.ToString() != profile.row ||
             !bool_value(post, STR("Generate_RandomTrades"), post, false)) return false;
         const auto* handle_value = handle->ContainerPtrToValuePtr<void>(post);
         auto* table = static_cast<U::UDataTable*>(table_object);
@@ -157,14 +200,14 @@ namespace
             rep->ContainerPtrToValuePtr<U::FScriptMap>(active)->Num() != 0) return false;
         U::FScriptArrayHelper authored(offers, offers->ContainerPtrToValuePtr<void>(cooked));
         U::FScriptArrayHelper live(offers, offers->ContainerPtrToValuePtr<void>(active));
-        if (authored.Num() != 5 || live.Num() != 5) return false;
-        const auto* recipe = authored.GetRawPtr(0);
+        if (authored.Num() != profile.offers || live.Num() != profile.offers) return false;
+        const auto* recipe = authored.GetRawPtr(profile.index);
         if (chance->GetPropertyValueInContainer(recipe) != 1.0 || give->GetPropertyValueInContainer(recipe) != 0 ||
             receive->GetPropertyValueInContainer(recipe) != 0 ||
             !bool_value(offer_schema, STR("RemoveAfterTrade_1_B26933FA4BBC62F03E1EE481B5414BA2"), recipe, false) ||
-            !bool_value(offer_schema, STR("Hide_IfCantTrade_24_4698C1544884DAA7621280A142208174"), recipe, false) ||
-            !one_entry(offer_schema, recipe, STR("Items_Give_20_B4929C76420B737D08B6E7A56384E8EC"), copper, 1) ||
-            !one_entry(offer_schema, recipe, STR("Items_Recive_22_BF8DA3D74F10EFDF07693DB9957DFFCD"), ammo, receive_count))
+            !bool_value(offer_schema, STR("Hide_IfCantTrade_24_4698C1544884DAA7621280A142208174"), recipe, profile.hide_unaffordable) ||
+            !one_entry(offer_schema, recipe, STR("Items_Give_20_B4929C76420B737D08B6E7A56384E8EC"), payment, 1) ||
+            !one_entry(offer_schema, recipe, STR("Items_Recive_22_BF8DA3D74F10EFDF07693DB9957DFFCD"), reward, profile.quantity))
             return false;
         int matches = 0;
         for (int index = 0; index < live.Num(); ++index)
@@ -278,7 +321,7 @@ namespace
             prop->HasAnyPropertyFlags(U::CPF_OutParm) == output ? prop : nullptr;
     }
 
-    Value make_ammo(const Inventory& layout, U::UObject* pawn, U::UClass* ammo)
+    Value make_stack(const Inventory& layout, U::UObject* pawn, U::UClass* item, const Recipe& profile)
     {
         auto* function = find<U::UFunction>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeItemStack"));
         auto* library = find<U::UObject>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
@@ -287,7 +330,7 @@ namespace
         auto* context = parameter<U::FObjectProperty>(function, STR("__WorldContext"), 16, false);
         auto* out = parameter<U::FStructProperty>(function, STR("Item"), 24, true);
         constexpr std::size_t max_size = 256;
-        auto* defaults = ammo->GetClassDefaultObject().Get();
+        auto* defaults = item->GetClassDefaultObject().Get();
         auto* unit_weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
         auto* unit_value = field<U::FIntProperty>(defaults, STR("Value"));
         if (!library || !library->HasAnyFlags(U::RF_ClassDefaultObject) || !function ||
@@ -297,22 +340,22 @@ namespace
             !layout.row_is(out) || out->GetOffset_Internal() + out->GetSize() > function->GetParmsSize() ||
             function->GetParmsSize() > max_size || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
             !bool_value(defaults, STR("Stacks"), defaults, true) ||
-            !unit_weight || unit_weight->GetPropertyValueInContainer(defaults) != ammo_weight ||
-            !unit_value || unit_value->GetPropertyValueInContainer(defaults) != ammo_value) return {};
+            !unit_weight || unit_weight->GetPropertyValueInContainer(defaults) != profile.reward_weight ||
+            !unit_value || unit_value->GetPropertyValueInContainer(defaults) != profile.reward_value) return {};
 
         alignas(std::max_align_t) std::array<std::byte, max_size> bytes{};
         out->InitializeValue_InContainer(bytes.data());
         const auto cleanup = [out](std::byte* container) { out->DestroyValue_InContainer(container); };
         std::unique_ptr<std::byte, decltype(cleanup)> guard(bytes.data(), cleanup);
-        klass->SetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(bytes.data()), ammo);
-        count->SetPropertyValueInContainer(bytes.data(), receive_count);
+        klass->SetObjectPropertyValue(klass->ContainerPtrToValuePtr<void>(bytes.data()), item);
+        count->SetPropertyValueInContainer(bytes.data(), profile.quantity);
         context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(bytes.data()), pawn);
         library->ProcessEvent(function, bytes.data());
         const auto* result = out->ContainerPtrToValuePtr<void>(bytes.data());
-        if (layout.identity(result) == Guid{} || layout.klass(result) != ammo || !layout.matches_defaults(result, defaults) ||
-            layout.units->GetPropertyValueInContainer(result) != receive_count ||
-            !(std::abs(layout.weight->GetPropertyValueInContainer(result) - ammo_weight * receive_count) < 1e-9) ||
-            layout.value->GetPropertyValueInContainer(result) != receive_count * ammo_value) return {};
+        if (layout.identity(result) == Guid{} || layout.klass(result) != item || !layout.matches_defaults(result, defaults) ||
+            layout.units->GetPropertyValueInContainer(result) != profile.quantity ||
+            !(std::abs(layout.weight->GetPropertyValueInContainer(result) - profile.reward_weight * profile.quantity) < 1e-9) ||
+            layout.value->GetPropertyValueInContainer(result) != profile.quantity * profile.reward_value) return {};
         return copy(out, result);
     }
 
@@ -330,14 +373,21 @@ namespace
         return result;
     }
 
+    template <bool crafting>
     int trade(const Lua& lua)
     {
+        const auto& profile = crafting ? bench : mama;
+        Guid armor{};
         const auto result = [&](bool ok, std::string_view reason, const Guid& id = {}) {
             lua.set_bool(ok);
             lua.set_string(reason);
             if (!ok) return 2;
-            lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", id[0], id[1], id[2], id[3]));
-            return 3;
+            const auto push_guid = [&](const Guid& value) {
+                lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", value[0], value[1], value[2], value[3]));
+            };
+            push_guid(id);
+            if constexpr (crafting) push_guid(armor);
+            return crafting ? 4 : 3;
         };
         if (!enabled() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_integer(3) || !lua.is_string(4)) return result(false, "borough_barter_refused_arguments");
@@ -346,43 +396,62 @@ namespace
         if (pawn <= 0 || save <= 0 || stock <= 0 || stock == save || payment == Guid{})
             return result(false, "borough_barter_refused_identity");
 
-        auto* world = find<U::UWorld>(world_path);
+        auto* world = find<U::UWorld>(crafting ? observatory_path : world_path);
         silverfish::shared_loot::EscrowOwner owner;
-        auto* post = find<U::UObject>(post_path);
-        auto* npc = find<U::UObject>(npc_path);
+        if (!world || !silverfish::shared_loot::qualify_escrow_owner_in_world(world,
+                static_cast<Address>(pawn), static_cast<Address>(save), static_cast<Address>(stock), owner))
+            return result(false, "borough_barter_refused_exact_scope");
+
+        U::UObject* post{};
+        if constexpr (crafting)
+        {
+            post = crafting_post(owner.pawn, world);
+            if (!post) return result(false, "borough_barter_refused_exact_workbench");
+            if (!silverfish::native_guest_armor::worn_crafting_passive(pawn, save, armor) || !crafting_value())
+                return result(false, "borough_barter_refused_detached_worn_crafting");
+        }
+        else
+        {
+            post = find<U::UObject>(post_path);
+            auto* npc = find<U::UObject>(npc_path);
+            auto* sphere = object(npc, STR("Sphere_Interact"));
+            if (!exact(npc, STR("/Game/Classes/NPCs/NPC_Characters/NPC_Mama.NPC_Mama_C")) || !authority(npc, world) ||
+                !bool_value(npc, STR("Alive"), npc, true) || !near(owner.pawn, npc) ||
+                !exact(sphere, STR("/Script/Engine.SphereComponent")) || sphere->GetOuterPrivate() != npc)
+                return result(false, "borough_barter_refused_exact_scope");
+        }
         auto* box = object(post, STR("Box"));
-        auto* sphere = object(npc, STR("Sphere_Interact"));
-        if (!world || !silverfish::shared_loot::qualify_escrow_owner_in_world(world, static_cast<Address>(pawn),
-                static_cast<Address>(save), static_cast<Address>(stock), owner) ||
-            !exact(npc, STR("/Game/Classes/NPCs/NPC_Characters/NPC_Mama.NPC_Mama_C")) || !authority(npc, world) ||
-            !bool_value(npc, STR("Alive"), npc, true) || !near(owner.pawn, npc) ||
-            !exact(sphere, STR("/Script/Engine.SphereComponent")) || sphere->GetOuterPrivate() != npc ||
-            !exact(post, STR("/Game/Classes/Actors/TradePost_BP.TradePost_BP_C")) || !authority(post, world) ||
+        if (!exact(post, STR("/Game/Classes/Actors/TradePost_BP.TradePost_BP_C")) || !authority(post, world) ||
             !exact(box, STR("/Script/Engine.BoxComponent")) || box->GetOuterPrivate() != post)
             return result(false, "borough_barter_refused_exact_scope");
 
-        auto* copper = find<U::UClass>(copper_path);
-        auto* ammo = find<U::UClass>(ammo_path);
+        auto* ingredient = find<U::UClass>(profile.payment);
+        auto* award = find<U::UClass>(profile.reward);
         auto* base = find<U::UClass>(base_path);
-        if (!copper || !ammo || !base || !copper->IsChildOf(base) || !ammo->IsChildOf(base) || !qualified_recipe(post, copper, ammo))
+        if (!ingredient || !award || !base || !ingredient->IsChildOf(base) || !award->IsChildOf(base) ||
+            !qualified_recipe(post, ingredient, award, profile))
             return result(false, "borough_barter_refused_authored_recipe");
-        auto* copper_defaults = copper->GetClassDefaultObject().Get();
+        auto* defaults = ingredient->GetClassDefaultObject().Get();
+        auto* input_units = field<U::FIntProperty>(defaults, STR("Ammo"));
         Inventory layout;
-        if (!layout.bind(owner.save) || !copper_defaults || !copper_defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            !bool_value(copper_defaults, STR("Stacks"), copper_defaults, false))
+        if (!layout.bind(owner.save) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            !input_units || !bool_value(defaults, STR("Stacks"), defaults, false))
             return result(false, "borough_barter_refused_inventory_schema");
 
         int source_index = -1, source_count = 0;
-        bool other_ammo{};
+        bool existing_reward{};
+        const auto expected_units = crafting ? input_units->GetPropertyValueInContainer(defaults) : 0;
         if (!layout.rows(owner.save, [&](const void* row, int index) {
-                if (layout.klass(row) == ammo) other_ammo = true;
+                if (layout.klass(row) == award) existing_reward = true;
                 if (layout.identity(row) != payment) return;
                 ++source_count;
-                if (layout.klass(row) == copper && layout.units->GetPropertyValueInContainer(row) == 0 &&
-                    layout.matches_defaults(row, copper_defaults)) source_index = index;
+                if (layout.klass(row) == ingredient && layout.units->GetPropertyValueInContainer(row) == expected_units &&
+                    layout.matches_defaults(row, defaults)) source_index = index;
             }) || source_count != 1 || source_index < 0)
-            return result(false, "borough_barter_refused_exact_owned_copper_wire");
-        if (other_ammo) return result(false, "borough_barter_refused_existing_ap_ammo_stack");
+            return result(false, crafting ? "borough_barter_refused_exact_owned_computer_board" :
+                "borough_barter_refused_exact_owned_copper_wire");
+        if (existing_reward) return result(false, crafting ? "borough_barter_refused_existing_electron_scrap_stack" :
+            "borough_barter_refused_existing_ap_ammo_stack");
 
         auto* flags = field<U::FMapProperty>(owner.stock, STR("Flags"));
         auto* flags_value = flags ? flags->ContainerPtrToValuePtr<void>(owner.stock) : nullptr;
@@ -392,16 +461,25 @@ namespace
         const auto stock_flags = flags_value ? copy(flags, flags_value) : Value{};
         if (!before || !prepared || !stock_flags) return result(false, "borough_barter_refused_inventory_snapshot");
 
-        const auto reward = make_ammo(layout, owner.pawn, ammo);
+        const auto reward = make_stack(layout, owner.pawn, award, profile);
         if (!flags->Identical(flags_value, stock_flags.get()) || !layout.backpack->Identical(backpack, before.get()))
             return result(false, "mutation_unverified_borough_barter_stock_make_item");
-        if (!reward) return result(false, "borough_barter_refused_stock_ammo_shape");
+        if (!reward) return result(false, crafting ? "borough_barter_refused_stock_scrap_shape" :
+            "borough_barter_refused_stock_ammo_shape");
         const auto reward_id = layout.identity(reward.get());
         bool duplicate{};
         for (auto* frame : {owner.save, owner.stock})
             if (!layout.rows(frame, [&](const void* row, int) { duplicate |= layout.identity(row) == reward_id; }))
                 return result(false, "borough_barter_refused_inventory_bounds");
         if (duplicate) return result(false, "borough_barter_refused_reward_guid_conflict");
+        if constexpr (crafting)
+        {
+            silverfish::shared_loot::EscrowOwner current;
+            Guid worn{};
+            if (!silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, current) ||
+                current.save != owner.save || !silverfish::native_guest_armor::worn_crafting_passive(pawn, save, worn) ||
+                worn != armor) return result(false, "borough_barter_refused_crafting_scope_changed");
+        }
 
         U::FScriptArrayHelper replacement(layout.backpack, prepared.get());
         if (source_index >= replacement.Num()) return result(false, "borough_barter_refused_inventory_changed");
@@ -425,6 +503,7 @@ namespace silverfish::borough_barter
 {
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
-        lua.register_function("SilverfishTradeNativeBoroughMama", trade);
+        lua.register_function("SilverfishTradeNativeBoroughMama", trade<false>);
+        lua.register_function("SilverfishTradeNativeCraftingBench", trade<true>);
     }
 }

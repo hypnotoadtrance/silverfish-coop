@@ -198,6 +198,7 @@ def parser() -> argparse.ArgumentParser:
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach", "native-enemy-shell-input-fixture",
         "native-quest-interact", "native-broker-input-fixture", "native-wipe-view-key-fixture",
         "native-dialogue-open", "native-dialogue-choose", "native-dialogue-approach", "native-dialogue-stock-fixture", "native-borough-mama-trade",
+        "native-crafting-bench",
         "native-mosby-tape-preflight", "native-mosby-tape-convert", "native-mosby-tape-approach", "native-mosby-readings-preflight",
         "native-pump-tape-preflight", "native-pump-tape-convert", "native-pump-tape-approach",
         "native-drill-test-results-preflight", "native-drill-test-results-convert", "native-drill-test-results-approach",

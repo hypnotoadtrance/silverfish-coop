@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 from struct import unpack_from
 import subprocess
@@ -14,8 +15,11 @@ from live_ai_smoke import wait
 from live_multi_smoke import CROSSROADS, OBSERVATORY, saved_hashes
 from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS, SCIENTIST
 
-
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from tools.silverfish import native_borough_barter as barter
+
+
 QUEST = "Clt_ComputerBoard"
 PICKUP = "observatory-comp-board"
 ITEM = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
@@ -75,7 +79,7 @@ def stock_flags(save_root, frame, area):
     return flags
 
 
-async def exercise(work, vanilla_saved, *, stock_board_input=False):
+async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_bench=False):
     name = "computer-board-" + uuid.uuid4().hex[:8]
     campaign, profile = ("--campaign", name), ("--profile", name)
     campaign_dir = work / "campaigns" / name
@@ -87,7 +91,7 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False):
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     processes = []
-    proof = {"stock_routes": [], "stock_board_input": stock_board_input}
+    proof = {"stock_routes": [], "stock_board_input": stock_board_input, "crafting_bench": crafting_bench}
     character = None
 
     async def command(*arguments, expected=True):
@@ -236,6 +240,41 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False):
             await action(owner, "stop")
         assert await asyncio.wait_for(process.wait(), 18) == 0, process.returncode
 
+    async def craft_board(guid):
+        target = (-5796.37, 669.75)
+        for _ in range(10):
+            state = json.loads((guest_run / "status.json").read_text(encoding="utf-8"))
+            location = state["game"]["pawns"]["local"]["location"]
+            proof["crafting_approach"] = location
+            distance = math.dist(target, location[:2])
+            if distance <= 140:
+                break
+            dx, dy = ((goal - actual) / distance for goal, actual in zip(target, location[:2], strict=True))
+            duration = max(130, min(1800, round((distance - 60) * 1.5)))
+            await action(profile, "walk", "--x", str(dx), "--y", str(dy), "--milliseconds", str(duration), "--continuous")
+            await asyncio.sleep(duration / 1000 + .55)
+        else:
+            raise AssertionError(f"The guest did not walk into stock workbench range: {location}")
+
+        refused = await action(profile, barter.CRAFT_ACTION, "--target", guid, expected=False)
+        assert refused["error"] == "borough_barter_refused_detached_worn_crafting", refused
+        assert guid in await inventory(profile, character)
+        armor = uuid.uuid4().hex.upper()
+        await action(campaign, "native-guest-armor-fixture", "--target", "guest", "--item-guid", armor, "--kind", "hazard-suit")
+        await action(profile, "native-guest-armor-equip", "--target", armor)
+        host_before = await inventory(campaign, "host")
+        operation = uuid.uuid4().hex
+        request = (barter.CRAFT_ACTION, "--target", guid, "--operation-id", operation)
+        exchanged = (await action(profile, *request))["native_crafting_bench"]
+        assert (exchanged["armor_guid"], exchanged["give"]["guid"]) == (armor, guid), exchanged
+        assert exchanged["wallet_before"] == exchanged["wallet_after"], exchanged
+        received = exchanged["receive"]["guid"]
+        items = await inventory(profile, character)
+        assert guid not in items and (items[received]["class_path"], items[received]["quantity"]) == (barter.SCRAP, 1), items
+        assert await inventory(campaign, "host") == host_before
+        assert (await action(profile, *request))["native_crafting_bench"] == exchanged
+        proof.update(exchange=exchanged, repeat_verified=True, verified=True)
+
     try:
         authority = await launch(campaign, "host", "host", *campaign, "--port", "0", "--start-zone", OBSERVATORY, *host_flags)
         await wait(host_run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == OBSERVATORY)
@@ -254,6 +293,10 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False):
         row = (await inventory(profile, character))[guid]
         assert (row["class_path"], row["source"], row["quantity"], row["stackable"]) == (ITEM, "backpack", 1, False), row
         proof["stock_pickup"] = {"interaction": entry, "claim": claimed, "inventory": row}
+
+        if crafting_bench:
+            await craft_board(guid)
+            return
 
         for destination, entrance in TO_BOROUGH:
             host = await cross(host, destination, entrance)
@@ -369,6 +412,9 @@ if __name__ == "__main__":
     options = argparse.ArgumentParser(description=__doc__)
     options.add_argument("--work", type=Path, required=True, help="prepared isolated stage workspace")
     options.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash before and after")
-    options.add_argument("--stock-board-input", action="store_true", help="use the stock Interact path at both bounty boards")
+    scenario = options.add_mutually_exclusive_group()
+    scenario.add_argument("--stock-board-input", action="store_true", help="use the stock Interact path at both bounty boards")
+    scenario.add_argument("--crafting-bench", action="store_true", help="exchange the stock pickup at the Observatory workbench")
     arguments = options.parse_args()
-    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, stock_board_input=arguments.stock_board_input))
+    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, stock_board_input=arguments.stock_board_input,
+                         crafting_bench=arguments.crafting_bench))
