@@ -8,6 +8,7 @@ from .travel import SCIENTIST_SHOP, UTILITY_TUNNELS
 BLANK_CLASS = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
 DRILL_QUEST = "Clt_DrillHead"
+DATA_SILO = "/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P"
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,11 @@ DRILL = TapeProfile(
     "native-drill-test-results", "native_drill_test_results_exchanges", "drill_test_results_tape",
     "silverfish-drill-test-results", allows_host=True,
 )
-BY_MAP = {profile.map: profile for profile in (STONE, PUMP, DRILL)}
+INSTRUCTIONS = TapeProfile(
+    DATA_SILO, "/Game/Classes/Items/DataTapes/DataTape_DrillInstructions.DataTape_DrillInstructions_C",
+    "native-drill-instructions", "native_drill_instructions_exchanges", "drill_instructions_tape", "silverfish-drill-instructions",
+)
+BY_MAP = {profile.map: profile for profile in (STONE, PUMP, DRILL, INSTRUCTIONS)}
 BY_STATION = {profile.station: profile for profile in BY_MAP.values()}
 BY_PREFIX = {profile.prefix: profile for profile in BY_MAP.values()}
 PREFLIGHTS = {profile.verb("preflight"): profile for profile in BY_MAP.values()}
@@ -61,3 +66,9 @@ def drill_download_unlocked(party: dict) -> bool:
     return (isinstance(quest, dict) and (quest.get("quest_id"), quest.get("step")) == (DRILL_QUEST, -10)
             and type(quest.get("mosby_drill_test")) is int and quest["mosby_drill_test"] == 1
             and quest.get("test_results") == {"station": DRILL.station, "class_path": DRILL.product})
+
+
+def instructions_download_unlocked(party: dict) -> bool:
+    from . import native_mindcore
+
+    return native_mindcore.LEDGER in party and native_mindcore.valid_receipt(party, party.get("players", {}))

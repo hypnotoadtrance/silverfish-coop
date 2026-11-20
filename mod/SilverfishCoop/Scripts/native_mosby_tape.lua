@@ -5,6 +5,7 @@ local players = require("players")
 local wire = require("native_wire_quest")
 local zones = require("zone_maps")
 local stations = require("native_tape_profiles")
+local mindcore = require("native_mindcore")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -105,6 +106,13 @@ local function scope(state, phase, required_map, station_profile)
         return {step = step, cash = wire.stock_flag(instance, "Player_Cash"), xp = wire.stock_flag(instance, "Player_Xp")},
             {instance = instance, save = save, host = pawn, key = key}
     end
+    if station_profile == stations.instructions then
+        local scene = mindcore.scene(state, phase)
+        if scene.status ~= 2 or not scene.installed then refuse("stock_instructions_not_compiled") end
+        return {step = "-", cash = wire.stock_flag(scene.instance, "Player_Cash"),
+            xp = wire.stock_flag(scene.instance, "Player_Xp"), console_status = scene.status},
+            {instance = scene.instance, save = scene.canonical, host = scene.host}
+    end
     local progress, host = mosby.progress(state)
     if not same(host.instance["As Player FP"], host.host) then refuse("canonical_host_changed") end
     if station_profile == stations.drill then
@@ -149,7 +157,15 @@ local function target_station(state, profile)
         or not same(box:GetOwner(), station) then refuse("exact_station_unavailable") end
     local anchor = station:K2_GetActorLocation()
     if not within(anchor, profile.anchor, 3) then refuse("station_placement_changed") end
-    return station, box
+    if profile ~= stations.instructions then return station, box, station end
+    local access = StaticFindObject(profile.access_path)
+    local button = valid(access) and access[profile.access_box]
+    if not exact(access, profile.access_class) or access:GetFullName() ~= profile.access_name or not same(access:GetWorld(), state.world)
+        or not access:HasAuthority() or access:IsActorBeingDestroyed() or not same(access.Tape_Downloader, station)
+        or not exact(button, "/Script/Engine.BoxComponent") or not same(button:GetOwner(), access) then
+        refuse("stock_instructions_cradle_link_unavailable")
+    end
+    return station, button, access
 end
 
 local function require_one(map, class)
@@ -197,7 +213,7 @@ local function approach(state, phase, name, variant, profile)
     end
     local _, host = scope(state, phase, profile.map, profile)
     local pawn = receiver(state, phase, name, host, profile.allows_host)
-    local station, box = target_station(state, profile)
+    local _, box, access = target_station(state, profile)
     local library, origin = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"), box:K2_GetComponentLocation()
     local capsule = pawn.CapsuleComponent
     local height = valid(capsule) and capsule:GetScaledCapsuleHalfHeight()
@@ -213,13 +229,13 @@ local function approach(state, phase, name, variant, profile)
         local x, y = origin.X + delta[1], origin.Y + delta[2]
         local hit = {}
         local found = library:LineTraceSingle(pawn, {X = x, Y = y, Z = origin.Z + 90}, {X = x, Y = y, Z = origin.Z - 300},
-            0, false, {pawn, host.host, station}, 0, hit, true, color, color, 0)
+            0, false, {pawn, host.host, access}, 0, hit, true, color, color, 0)
         hit = hit.OutHit or hit
         local point, normal = hit.ImpactPoint, hit.ImpactNormal
         if found == true and point and normal and normal.Z >= 0.7 then
             local place = {X = x, Y = y, Z = point.Z + height + 4}
             if within(place, origin, pawn.InteractionRange) and pawn:K2_TeleportTo(place, pawn:K2_GetActorRotation())
-                and reaches(pawn, station, box) then pawn:ForceNetUpdate(); return "exact stock station approach verified" end
+                and reaches(pawn, access, box) then pawn:ForceNetUpdate(); return "exact stock station approach verified" end
         end
     end
     refuse("approach_no_safe_floor")
@@ -229,8 +245,8 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
     local before, host = scope(state, phase, profile.map, profile)
     if profile == stations.stone and before.step ~= 1 and before.step ~= 2 then refuse("stock_quest_not_active") end
     local pawn, save = receiver(state, phase, name, host, profile.allows_host)
-    local station, box = target_station(state, profile)
-    if not reaches(pawn, station, box) then refuse("station_out_of_reach") end
+    local station, box, access = target_station(state, profile)
+    if not reaches(pawn, access, box) then refuse("station_out_of_reach") end
     local blank, product = StaticFindObject(blank_path), StaticFindObject(profile.product)
     qualify_offer(station, blank, product, profile)
     local rows, first_backpack = owned(save, blank, blank_guid ~= "-" and blank_guid or nil)
@@ -242,6 +258,7 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
         local convert = SilverfishExchangeStoneMazeTape
         if profile == stations.pump then convert = SilverfishExchangeEatherPumpTape end
         if profile == stations.drill then convert = SilverfishExchangeDrillTestResultsTape end
+        if profile == stations.instructions then convert = SilverfishExchangeDrillInstructionsTape end
         if not guid(replacement_guid) or replacement_guid == blank_guid or type(convert) ~= "function" then
             refuse("typed_conversion_unavailable") end
         local ok, reason, output = convert(pawn:GetAddress(), save:GetAddress(), host.save:GetAddress(),
@@ -249,14 +266,17 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
         if ok ~= true then error(reason or "native_mosby_tape_conversion_refused", 0) end
         checked, after = pcall(function()
             local verified, current = scope(state, phase, profile.map, profile)
-            if not same(current.save, host.save) or not same(pawn.Save, save) or not same(target_station(state, profile), station)
+            local old_station, old_box, old_access = target_station(state, profile)
+            if not same(current.save, host.save) or not same(pawn.Save, save) or not same(old_station, station)
+                or not same(old_box, box) or not same(old_access, access)
                 or (reason ~= "exchanged" and reason ~= "already_exchanged") or output ~= replacement_guid
                 or owned(save, blank, blank_guid)[blank_guid] ~= nil or owned(save, product, output)[output] ~= true then return end
             for key, value in pairs(before) do if verified[key] ~= value then return end end
             return verified
         end)
         if not checked or not after then
-            local name = profile == stations.drill and "drill_test_results" or "stone_maze"
+            local name = profile == stations.instructions and "drill_instructions"
+                or profile == stations.drill and "drill_test_results" or "stone_maze"
             error("mutation_unverified_" .. name .. "_tape_readback", 0)
         end
         status, filled, held = reason, output, blank_guid
@@ -264,7 +284,7 @@ local function exchange(state, phase, name, operation, blank_guid, replacement_g
     last = {type = "exchange", operation = operation, map = profile.map, pawn = name, station = profile.station,
         prefix = profile.prefix, status = status,
         blank = held or "-", filled = filled, step = after.step, cash = after.cash, xp = after.xp, world = state.world,
-        drill_flag = profile == stations.drill and after.Mosby_DrillTest or nil}
+        stage_flag = profile == stations.drill and after.Mosby_DrillTest or after.console_status}
     return "exact stock tape exchange verified"
 end
 
@@ -429,7 +449,7 @@ function tape.rows(state, phase, row)
     if not last or phase ~= "hosting" or last.map ~= state.map or not same(last.world, state.world) then return {} end
     if last.type == "exchange" then
         return {row(last.prefix, last.operation, last.map, last.pawn, last.station, last.status, last.blank, last.filled,
-            last.step, last.cash, last.xp, 1, 1, 0, 0, last.drill_flag)}
+            last.step, last.cash, last.xp, 1, 1, 0, 0, last.stage_flag)}
     end
     if last.type == "redemption" then
         local before, after = last.before, last.after

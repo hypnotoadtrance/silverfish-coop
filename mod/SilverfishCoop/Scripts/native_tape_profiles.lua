@@ -16,5 +16,13 @@ local drill = station("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01", "Cl
     "native-drill-test-results", "/Game/Classes/Items/DataTapes/DataTape_DrillTestResults.DataTape_DrillTestResults_C",
     7250, 2150, -300, "Scientist Download Station", "Drill Test Results")
 drill.allows_host = true
+local instructions = station("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P", "Reverse_Drill",
+    "native-drill-instructions", "/Game/Classes/Items/DataTapes/DataTape_DrillInstructions.DataTape_DrillInstructions_C",
+    100, 7050, 6750, "MindCore Console", "Drill Instruction Set")
+instructions.access_path = instructions.world .. ":PersistentLevel.MindCore_Cradle_BP_C_1"
+instructions.access_class = "/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C"
+instructions.access_name = "MindCore_Cradle_BP_C " .. instructions.access_path
+instructions.access_box = "Button_Tape"
 
-return {stone = stone, pump = pump, drill = drill, maps = {[stone.map] = stone, [pump.map] = pump, [drill.map] = drill}}
+return {stone = stone, pump = pump, drill = drill, instructions = instructions,
+    maps = {[stone.map] = stone, [pump.map] = pump, [drill.map] = drill, [instructions.map] = instructions}}

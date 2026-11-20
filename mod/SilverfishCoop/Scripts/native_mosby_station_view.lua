@@ -1,5 +1,6 @@
 local view = {}
-local profiles = require("native_tape_profiles").maps
+local tape_profiles = require("native_tape_profiles")
+local profiles, instructions = tape_profiles.maps, tape_profiles.instructions
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_EXPANDED_ZONES") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -8,7 +9,7 @@ local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local box_class = "/Script/Engine.BoxComponent"
 local camera_class = "/Script/Engine.CameraComponent"
 local widget_class = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
-local events, heartbeat, is_downed
+local events, heartbeat, download_heartbeat, is_downed
 local binding, session, widget, shown
 local last_sequence = 0
 
@@ -36,17 +37,25 @@ local function context(state, phase)
         or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
         or state.local_pawn.name ~= pawn:GetFullName() or not exact(station, station_class)
         or station:GetFullName() ~= profile.station or not same(station:GetWorld(), state.world) or station:IsActorBeingDestroyed() then return end
+    local access = station
     local box = station.Box
-    if not exact(box, box_class) or not same(box:GetOwner(), station) then return end
+    if profile == instructions then
+        access = StaticFindObject(profile.access_path)
+        if not exact(access, profile.access_class) or access:GetFullName() ~= profile.access_name
+            or not same(access:GetWorld(), state.world) or access:IsActorBeingDestroyed()
+            or not same(access.Tape_Downloader, station) then return end
+        box = access[profile.access_box]
+    end
+    if not exact(box, box_class) or not same(box:GetOwner(), access) then return end
     local collision = box:GetCollisionEnabled()
     if collision ~= 1 and collision ~= 3 then return end
-    return {pawn = pawn, controller = controller, world = state.world, station = station, box = box,
+    return {pawn = pawn, controller = controller, world = state.world, station = station, access = access, box = box,
         name = state.local_pawn.name, profile = profile}
 end
 
 local function matches(a, b)
     return a and b and same(a.world, b.world) and same(a.pawn, b.pawn) and same(a.controller, b.controller)
-        and same(a.station, b.station) and same(a.box, b.box)
+        and same(a.station, b.station) and same(a.access, b.access) and same(a.box, b.box)
 end
 
 local function within(a, b, range)
@@ -59,14 +68,21 @@ local function standing(current)
     if type(reach) ~= "number" or not (reach > 0 and reach <= 1000) or controller.Loading ~= false
         or not controller.MenuStack or controller.MenuStack:GetArrayNum() ~= 0 or pawn.Dead ~= false or is_downed(pawn) ~= false then return false end
     local point = pawn:K2_GetActorLocation()
-    return within(point, current.station:K2_GetActorLocation(), reach) and within(point, current.box:K2_GetComponentLocation(), reach)
+    return within(point, current.access:K2_GetActorLocation(), reach) and within(point, current.box:K2_GetComponentLocation(), reach)
 end
 
-local function fresh(now)
-    local file = io.open(heartbeat, "rb")
+local function fresh(current, now)
+    local data_silo = current.profile == instructions
+    local file = io.open(data_silo and download_heartbeat or heartbeat, "rb")
     if not file then return false end
-    local stamp = tonumber(file:read(32))
+    local contents = file:read(data_silo and 600 or 32)
     file:close()
+    local stamp = tonumber(contents)
+    if data_silo then
+        local seconds, pawn = (contents or ""):match("^(%d+)\t([^\r\n]+)[\r\n]*$")
+        if pawn ~= current.name then return false end
+        stamp = math.tointeger(tonumber(seconds))
+    end
     return stamp and stamp <= now and now <= stamp + 2
 end
 
@@ -149,10 +165,16 @@ function view.sync(state, phase)
     if not matches(current, binding) then view.clear(); binding = current end
     local usable = standing(current)
     local facing = focused(current)
-    local live = usable and fresh(now)
+    local leased = fresh(current, now)
+    local live = usable and leased
     if session and (not usable or session.expires <= now or not (session.fixture or facing)
         or not live and not session.pending and not (session.grace and now <= session.grace)) then session = nil end
     binding.state = "waiting"
+    if current.profile == instructions and not leased then
+        if type(SilverfishClearNativeMosbyStationScope) == "function" then SilverfishClearNativeMosbyStationScope() end
+        hide()
+        return
+    end
     if not arm(current, live and not (session and session.pending)) then session = nil; hide(); return end
     binding.state = live and (facing and "focused" or "armed") or "waiting"
     if live and facing and not (session and session.pending) then drain(current, now, false) end
@@ -211,7 +233,7 @@ function view.command(fields, state, phase)
     local current, now = context(state, phase), os.time()
     if not matches(current, binding) or not standing(current) then reject("exact_local_scope_unavailable") end
     if action == "native-mosby-station-fixture" then
-        if #fields ~= 2 or not headless or not fresh(now) or session and session.pending
+        if #fields ~= 2 or not headless or not fresh(current, now) or session and session.pending
             or type(SilverfishProbeNativeInteractInput) ~= "function" or not arm(current, true) then reject("fixture_unavailable") end
         return fixture(current, now)
     end
@@ -237,6 +259,7 @@ end
 
 function view.start(bridge, is_downed_apply)
     events, heartbeat = bridge .. "/native-mosby-station-events", bridge .. "/native-mosby-station-heartbeat"
+    download_heartbeat = bridge .. "/native-mindcore-download-heartbeat"
     is_downed = is_downed_apply
 end
 

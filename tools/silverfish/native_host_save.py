@@ -13,7 +13,9 @@ from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
 from .native_host_dig_live import escrow_frames as dig_escrow_frames
-from .native_tape_profiles import BY_MAP as TAPE_PROFILES, DRILL, STONE, drill_download_unlocked
+from .native_tape_profiles import (
+    BY_MAP as TAPE_PROFILES, DRILL, INSTRUCTIONS, STONE, drill_download_unlocked, instructions_download_unlocked,
+)
 from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 
 
@@ -219,6 +221,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
             raise CampaignFormatError("The campaign's stock station exchanges are invalid")
         if profile == DRILL and exchanges and not drill_download_unlocked(party):
             raise CampaignFormatError("A Drill Test Results exchange has no durable Prototype Drill completion")
+        if profile == INSTRUCTIONS and exchanges and not instructions_download_unlocked(party):
+            raise CampaignFormatError("A Drill Instructions exchange has no durable MindCore compilation")
         for blank, trade in exchanges.items():
             owner = trade.get("owner") if type(trade) is dict else None
             if (not valid_guid(blank) or blank in blanks or type(trade) is not dict or trade.get("blank_guid") != blank
@@ -229,6 +233,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                 raise CampaignFormatError("A stock station exchange has an invalid owner or tape identity")
             if profile == DRILL and (type(trade.get("mosby_drill_test")) is not int or not 1 <= trade["mosby_drill_test"] <= 3):
                 raise CampaignFormatError("A Drill Test Results exchange has no verified stock stage")
+            if profile == INSTRUCTIONS and (type(trade.get("console_status")) is not int or trade["console_status"] != 2):
+                raise CampaignFormatError("A Drill Instructions exchange has no verified compiled console stage")
             if profile != STONE:
                 expected = uuid.uuid5(uuid.NAMESPACE_URL, f"{profile.namespace}:{owner}:{blank}").hex.upper()
                 if (trade.get("map"), trade.get("station"), trade.get("class_path"), trade["filled_guid"]) != (

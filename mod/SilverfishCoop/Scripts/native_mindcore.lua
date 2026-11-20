@@ -72,7 +72,7 @@ local function scope(state, phase)
     local installed = within(core:K2_GetActorLocation(), mount:K2_GetComponentLocation(), 12)
         and frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) == false
     return {world = state.world, cradle = cradle, uploader = uploader, controls = controls, core = core, installed = installed,
-        status = status, canonical = stock, host = local_pawn, mount = mount, frame = frame}
+        status = status, canonical = stock, instance = instance, host = local_pawn, mount = mount, frame = frame}
 end
 
 local function qualify(item, state, phase, name, guid, reach)

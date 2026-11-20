@@ -20,9 +20,10 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
 from tools.silverfish import native_mindcore_view as console
+from tools.silverfish import native_mosby_station_view as download_view
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
-from tools.silverfish.native_tape_profiles import DRILL, drill_download_unlocked
+from tools.silverfish.native_tape_profiles import BLANK_CLASS, DRILL, INSTRUCTIONS, drill_download_unlocked
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
 
 
@@ -103,7 +104,9 @@ def baseline_inputs(work, baseline, *, resume=False):
     return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
-async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False):
+async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False):
+    if instructions and resume:
+        raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -234,6 +237,63 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             and (opened is None or proof.get("opened") == opened)), timeout=30)
         return row["game"][console.KEY]
 
+    async def download_state(state, sequence=None, opened=None):
+        frame = await wait(guest_run, lambda reply: (
+            (row := reply.get("game", {}).get(download_view.KEY, {})).get("state") == state
+            and row.get("station") == INSTRUCTIONS.station
+            and (sequence is None or row.get("sequence") == sequence)
+            and (opened is None or row.get("open") == opened)), timeout=30)
+        return frame["game"][download_view.KEY]
+
+    async def buy_blank():
+        await action(run, "native-finite-shop-approach", target="guest")
+        listing = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
+        shelf, = [row for row in listing["offers"] if row["class_path"] == BLANK_CLASS]
+        assert (shelf["quantity"], shelf["value"]) == (1, 30) and 0 < shelf["price"] <= 75, shelf
+        result = await action(guest_run, "native-finite-shop-buy", target=f"{shelf['guid']}@{shelf['price']}")
+        purchase = result["native_finite_purchase"]
+        bought, = purchase["offers"]
+        assert purchase["stock_source"] == "stock_shelf" and purchase["offer_guid"] == shelf["guid"]
+        assert bought["guid"] != shelf["guid"] and dict(bought, guid=shelf["guid"]) == shelf
+        assert purchase["wallet_before"] - purchase["wallet_after"] == shelf["price"]
+        assert purchase["merchant_cash_after"] - purchase["merchant_cash_before"] == shelf["price"]
+        proof["scientist_blank_purchase"] = purchase
+        return bought["guid"]
+
+    async def download_tape(owned_blank, expected_inventory, expected_host, compiled_flags):
+        await wait(guest_run, lambda reply: (row := reply.get("game", {}).get(download_view.KEY, {})).get("station")
+                   == INSTRUCTIONS.station and row["state"] in ("armed", "focused"), timeout=15)
+        first = (await action(guest_run, download_view.FIXTURE))[download_view.KEY]
+        opened = first["sequence"]
+        assert (first["state"], first["open"], first["station"], first["blank_guid"]) == (
+            "checking", opened, INSTRUCTIONS.station, None), first
+        offer = await download_state("offer", opened, opened)
+        assert offer["blank_guid"] == owned_blank, offer
+        before, _ = await flags()
+        assert not before["world"]["party"].get(INSTRUCTIONS.ledger)
+        assert await inventory(guest_run, character) == expected_inventory
+        second = (await action(guest_run, download_view.FIXTURE))[download_view.KEY]
+        assert (second["state"], second["open"], second["blank_guid"]) == ("trading", opened, owned_blank), second
+        assert second["sequence"] > opened
+        exchanged = await download_state("exchanged", second["sequence"], opened)
+        product = uuid.uuid5(uuid.NAMESPACE_URL, f"{INSTRUCTIONS.namespace}:{character}:{owned_blank}").hex.upper()
+        assert exchanged["filled_guid"] == product
+        current, stock_flags_after = await flags()
+        assert stock_flags_after == compiled_flags
+        current_party = current["world"]["party"]
+        account = current_party[INSTRUCTIONS.ledger][owned_blank]
+        assert (account["owner"], account["blank_guid"], account["filled_guid"], account["class_path"], account["console_status"]) == (
+            character, owned_blank, product, INSTRUCTIONS.product, 2), account
+        assert current_party["native_quests"] == data["world"]["party"]["native_quests"], current_party["native_quests"]
+        items = await inventory(guest_run, character)
+        assert (items[product]["class_path"], items[product]["source"], items[product]["quantity"]) == (INSTRUCTIONS.product, "backpack", 1)
+        assert owned_blank not in items and product not in expected_host
+        assert {id_: row for id_, row in items.items() if id_ != product} == {
+            id_: row for id_, row in expected_inventory.items() if id_ != owned_blank}
+        assert await inventory(run, "host") == expected_host
+        proof["instructions"] = dict(first=first, offer=offer, second=second, exchanged=exchanged, receipt=account)
+        return items, account
+
     async def inspect_buttons():
         attempts = []
         for variant in (None, *range(1, 13)):
@@ -263,6 +323,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         port = opening["endpoint"]["port"]
         guest_job = await start_guest()
         authority = await paired(start_area)
+        owned_blank = await buy_blank() if instructions else None
         if not resume:
             for leg in ROUTE:
                 authority = await travel(authority, leg)
@@ -286,6 +347,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         proof["installation"] = {"scene": installed, "headless_relocation": True, "stock_flags": [1, 0]}
 
         near, first = await inspect_buttons() if stock_input else (await action(run, fixture.APPROACH), None)
+        if instructions:
+            early = await action(guest_run, INSTRUCTIONS.verb("preflight"), target=owned_blank, success=False)
+            assert early["error"] == "native_drill_instructions_compiled_console_required", early
+            await download_state("waiting", 0, 0)
+            proof["instructions_before_compilation"] = early["error"]
         wrong = await action(guest_run, core.UPLOAD, target=blank, success=False)
         assert wrong["error"] == "native_mindcore_refused_durable_results_owner", wrong
         ready = (await action(guest_run, core.PREFLIGHT, target=guid))[core.PROOF]
@@ -324,6 +390,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         assert await inventory(guest_run, character) == original_guest and await inventory(run, "host") == original_host
         proof["upload"] = {"locked": locked["error"], "wrong_guid": wrong["error"], "preflight": ready,
                            "receipt": receipt, "tape": original_guest[guid], "stock_flags": [2, 0]}
+        final_guest, instructions_receipt = (await download_tape(owned_blank, original_guest, original_host, compiled_flags)
+                                             if instructions else (original_guest, None))
 
         await stop(guest_run, guest_job)
         await stop(run, host_job)
@@ -340,12 +408,22 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             proof["stage_two_upload_input"] = "pass-through"
         replay = await action(guest_run, core.UPLOAD, target=guid, operation_id=operation_id)
         assert replay["effect"] == "native_mindcore_already_compiled", replay
-        assert await inventory(guest_run, character) == original_guest and await inventory(run, "host") == original_host
+        assert await inventory(guest_run, character) == final_guest and await inventory(run, "host") == original_host
         after, restored_flags = await flags()
         assert after["world"]["party"][core.LEDGER] == receipt
         assert tuple(row.get(core.FLAG, 0) for row in restored_flags) == (2, 0), restored_flags
         commits = [row for row in events() if row["event"] == "native_mindcore_results_committed"]
         assert len(commits) == 1 and commits[0]["operation_id"] == operation_id, commits
+        if instructions:
+            await action(run, fixture.APPROACH)
+            instructions_replay = await action(guest_run, INSTRUCTIONS.verb("convert"), target=owned_blank,
+                                               operation_id=instructions_receipt["operation_id"])
+            assert instructions_replay["effect"] == INSTRUCTIONS.effect + "_already_exchanged"
+            assert after["world"]["party"][INSTRUCTIONS.ledger] == {owned_blank: instructions_receipt}
+            assert await inventory(guest_run, character) == final_guest
+            exchanges = [row for row in events() if row["event"] == INSTRUCTIONS.key + "_committed"]
+            assert len(exchanges) == 1 and exchanges[0]["filled_guid"] == instructions_receipt["filled_guid"]
+            proof["instructions"]["restart_replay"] = instructions_replay["effect"]
         proof.update(restart={"port": port, "scene": restored["game"][core.SCENE], "stock_flags": [2, 0],
                               "replay": replay["effect"], "upload_commits": len(commits)}, verified=True)
     except BaseException as error:
@@ -375,6 +453,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", required=True, type=Path)
     parser.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
     parser.add_argument("--stock-input", action="store_true", help="confirm the upload with two genuine stock Interact presses")
+    parser.add_argument("--instructions", action="store_true", help="buy a second blank and use the compiled console's stock exchange")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
-    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input))
+    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions, instructions=options.instructions))

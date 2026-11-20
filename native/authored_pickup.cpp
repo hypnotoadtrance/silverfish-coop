@@ -2,6 +2,7 @@
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
+#include "mindcore.hpp"
 #include "stock_cash.hpp"
 #include "quest_rewards.hpp"
 #include "stock_wallet.hpp"
@@ -273,6 +274,7 @@ namespace
         const U::TCHAR* world;
         const U::TCHAR* station;
         const U::TCHAR* product;
+        std::string_view reason_prefix{"stone_maze"};
     };
     constexpr TapeExchangeProfile stone_maze_tape{
         STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"),
@@ -283,11 +285,19 @@ namespace
         STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P"),
         STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
         STR("/Game/Classes/Items/DataTapes/DataTape_EatherPumps.DataTape_EatherPumps_C"),
+        "eather_pump",
     };
     constexpr TapeExchangeProfile drill_test_results_tape{
         STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
         STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
         STR("/Game/Classes/Items/DataTapes/DataTape_DrillTestResults.DataTape_DrillTestResults_C"),
+        "drill_test_results",
+    };
+    constexpr TapeExchangeProfile drill_instructions_tape{
+        STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1"),
+        STR("/Game/Classes/Items/DataTapes/DataTape_DrillInstructions.DataTape_DrillInstructions_C"),
+        "drill_instructions",
     };
     constexpr std::array guid_members{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr std::size_t parameter_capacity = 256;
@@ -1449,10 +1459,12 @@ namespace
     {
         auto* station = find<U::UObject>(profile.station);
         auto* box = object(station, STR("Box"));
+        auto* access = &profile == &drill_instructions_tape
+            ? silverfish::native_mindcore::qualified_instructions_cradle(world, canonical, station) : station;
         return exact(station, tape_station_class) && role(station) == 3 &&
             boolean(station, STR("bActorIsBeingDestroyed"), false) && exact(box, STR("/Script/Engine.BoxComponent")) &&
             box->GetOuterPrivate() == station && static_cast<U::AActor*>(station)->GetWorld() == world &&
-            static_cast<U::AActor*>(station)->GetLevel() == object(world, STR("PersistentLevel")) && in_range(pawn, station) &&
+            static_cast<U::AActor*>(station)->GetLevel() == object(world, STR("PersistentLevel")) && access && in_range(pawn, access) &&
             (&profile != &drill_test_results_tape || drill_station_unlocked(canonical, station));
     }
 
@@ -1488,12 +1500,13 @@ namespace
             {
                 if (const auto at = reason.find("stone_maze"); at != std::string_view::npos)
                     return result(lua, false, std::format("{}{}{}", reason.substr(0, at),
-                        &Profile == &eather_pump_tape ? "eather_pump" : "drill_test_results", reason.substr(at + 10)));
+                        Profile.reason_prefix, reason.substr(at + 10)));
             }
             return result(lua, false, reason);
         };
         if (!ready() || !env("SILVERFISH_COOP_NATIVE_ZONE") ||
-            (&Profile == &drill_test_results_tape && !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) || lua.get_stack_size() != 5 ||
+            ((&Profile == &drill_test_results_tape || &Profile == &drill_instructions_tape) &&
+                !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) || lua.get_stack_size() != 5 ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
             !lua.is_string(4) || !lua.is_string(5)) return fail("stone_maze_tape_arguments");
         const auto pawn_address = lua.get_integer();
@@ -1512,7 +1525,8 @@ namespace
         auto* target = live_address(static_cast<Address>(target_address), rows.save);
         auto* canonical = live_address(static_cast<Address>(canonical_address), rows.save);
         auto* world = tape_owner_world(pawn, target, canonical, Profile);
-        if (!world || !tape_station_reachable(world, pawn, canonical, Profile) ||
+        if (!world || (&Profile == &drill_instructions_tape && target == canonical) ||
+            !tape_station_reachable(world, pawn, canonical, Profile) ||
             !exclusive_tape_ids(stores, world, pawn, target, canonical, blank, filled))
             return fail("stone_maze_exact_tape_owner_unavailable");
 
@@ -2027,6 +2041,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishExchangeStoneMazeTape", exchange_tape<stone_maze_tape>);
         lua.register_function("SilverfishExchangeEatherPumpTape", exchange_tape<eather_pump_tape>);
         lua.register_function("SilverfishExchangeDrillTestResultsTape", exchange_tape<drill_test_results_tape>);
+        lua.register_function("SilverfishExchangeDrillInstructionsTape", exchange_tape<drill_instructions_tape>);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);
         if (headless()) lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
     }

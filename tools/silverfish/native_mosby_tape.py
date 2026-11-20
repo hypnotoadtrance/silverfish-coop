@@ -8,7 +8,8 @@ from . import native_host_save, native_rewards, party
 from .native_dialogue import MOSBY_QUEST
 from .native_gold import valid_guid
 from .native_tape_profiles import (
-    APPROACHES, BLANK_CLASS, BY_MAP, BY_PREFIX, CONVERSIONS, DRILL, PREFLIGHTS, STONE, STONE_MAZE, drill_download_unlocked,
+    APPROACHES, BLANK_CLASS, BY_MAP, BY_PREFIX, CONVERSIONS, DRILL, INSTRUCTIONS, PREFLIGHTS, STONE, STONE_MAZE,
+    drill_download_unlocked, instructions_download_unlocked,
 )
 from .travel import SCIENTIST_SHOP
 
@@ -45,13 +46,14 @@ def _step(value: str) -> int | None:
 
 def parse_exchange(fields: list[str]) -> dict:
     profile = BY_PREFIX.get(fields[0]) if fields else None
-    if not profile or len(fields) != (16 if profile == DRILL else 15):
+    if not profile or len(fields) != (16 if profile in (DRILL, INSTRUCTIONS) else 15):
         raise ValueError("Invalid stock station exchange proof")
     _, operation, area, pawn, station, status, before, after, step, cash, xp, give, receive, debit, credit, *extra = fields
     blank, filled = _optional_guid(before), _optional_guid(after)
     if ((area, station, give, receive, debit, credit) != (profile.map, profile.station, "1", "1", "0", "0")
             or (profile.requires_active_quest and step not in ("1", "2"))
             or (profile == DRILL and (step != "-10" or extra[0] not in ("1", "2", "3")))
+            or (profile == INSTRUCTIONS and (step != "-" or extra[0] != "2"))
             or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
             or not (operation == profile.verb("preflight") and status == "offer" and filled is None
                     or operation == profile.verb("convert") and status in ("exchanged", "already_exchanged")
@@ -60,8 +62,10 @@ def parse_exchange(fields: list[str]) -> dict:
     result = dict(operation=operation, map=area, pawn=pawn, station=station, state=status, blank_guid=blank, filled_guid=filled,
                   quest_step=_step(step), cash=int(cash), xp=int(xp), give={"class_path": BLANK_CLASS, "quantity": 1, "cash": 0},
                   receive={"class_path": profile.product, "quantity": 1, "cash": 0})
-    if extra:
+    if profile == DRILL:
         result["mosby_drill_test"] = int(extra[0])
+    elif profile == INSTRUCTIONS:
+        result["console_status"] = int(extra[0])
     return result
 
 
@@ -125,6 +129,16 @@ def _same_guest(host, actor, pawn):
         raise party.RuleError("native_mosby_tape_interactor_changed")
 
 
+def _unlocked(host, profile):
+    if profile == DRILL and not drill_download_unlocked(host.party):
+        raise party.RuleError("native_drill_test_results_durable_completion_required")
+    if profile == INSTRUCTIONS:
+        from . import native_mindcore
+
+        if not instructions_download_unlocked(host.party) or not native_mindcore._ready(host.last_game, 2):
+            raise party.RuleError("native_drill_instructions_compiled_console_required")
+
+
 async def _command(host, bridge, verb, pawn, *args):
     profile = PREFLIGHTS.get(verb) or CONVERSIONS.get(verb)
     key, area, actor_key, expected = ((profile.key, profile.map, "station", profile.station) if profile
@@ -143,8 +157,7 @@ async def preflight(host, bridge, actor, action, target):
         if target is not None and not valid_guid(target):
             raise party.RuleError("native_mosby_tape_exact_blank_guid_required")
         pawn = _scope(host, actor, profile.map, guest_only=not profile.allows_host)
-        if profile == DRILL and not drill_download_unlocked(host.party):
-            raise party.RuleError("native_drill_test_results_durable_completion_required")
+        _unlocked(host, profile)
         return {profile.key: await _command(host, bridge, action, pawn, target or "-")}
     if target is not None:
         raise party.RuleError("native_mosby_readings_has_fixed_board")
@@ -161,21 +174,24 @@ async def approach(host, bridge, actor, variant=None, *, profile=STONE):
     if variant is not None and (area != profile.map or type(variant) is not int or not 1 <= variant <= 8):
         raise party.RuleError("native_mosby_tape_approach_invalid_variant")
     pawn = _scope(host, actor, area, guest_only=area == profile.map and not profile.allows_host)
-    if profile == DRILL and not drill_download_unlocked(host.party):
-        raise party.RuleError("native_drill_test_results_durable_completion_required")
+    _unlocked(host, profile)
     snapshot = await bridge.command(profile.verb("approach"), pawn, *((str(variant),) if variant is not None else ()), timeout=6)
     if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
         raise RuntimeError("The station approach left the qualified stock zone")
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    return {profile.key + "_approach": {"map": area, "pawn": pawn, "target": profile.station if area == profile.map else BOARD}}
+    target = profile.station if area == profile.map else BOARD
+    if profile == INSTRUCTIONS:
+        from . import native_mindcore
+
+        target = native_mindcore.CRADLE
+    return {profile.key + "_approach": {"map": area, "pawn": pawn, "target": target}}
 
 
 async def convert(host, bridge, character, blank_guid, operation, *, profile=STONE):
     if not valid_guid(blank_guid) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("native_mosby_tape_exact_blank_guid_required")
     pawn = _scope(host, character, profile.map, guest_only=not profile.allows_host)
-    if profile == DRILL and not drill_download_unlocked(host.party):
-        raise party.RuleError("native_drill_test_results_durable_completion_required")
+    _unlocked(host, profile)
     preflight, exchange = profile.verb("preflight"), profile.verb("convert")
     ledger = host.party.get(profile.ledger, {})
     for other in BY_MAP.values():
@@ -196,7 +212,10 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
         before = await _command(host, bridge, preflight, pawn, blank_guid)
         if before["blank_guid"] != blank_guid:
             raise party.RuleError("native_mosby_tape_blank_not_owned")
-        await host.checkpoint_native(bridge)
+        if profile == INSTRUCTIONS:
+            await host.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+        else:
+            await host.checkpoint_native(bridge)
         if character == "host":
             if (host.last_game.get("state"), host.last_game.get("map"),
                     host.last_game.get("pawns", {}).get("local", {}).get("name")) != ("hosting", profile.map, pawn):
@@ -208,12 +227,15 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
         try:
             after = await _command(host, bridge, exchange, pawn, blank_guid, product)
         except RuntimeError as error:
-            if str(error).startswith(("native_mosby_tape_", "stone_maze_tape_", "eather_pump_", "drill_test_results_")):
+            if str(error).startswith(("native_mosby_tape_", "stone_maze_tape_", "eather_pump_", "drill_test_results_",
+                                      "native_mindcore_refused_", "drill_instructions_", "stock_drill_instructions_")):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
         if (after["blank_guid"], after["filled_guid"]) != (blank_guid, product) or any(
-                after.get(key) != before.get(key) for key in ("quest_step", "cash", "xp", "give", "receive", "mosby_drill_test")):
+                after.get(key) != before.get(key) for key in (
+                    "quest_step", "cash", "xp", "give", "receive", "mosby_drill_test", "console_status",
+                )):
             raise RuntimeError("The typed conversion did not reconcile with its stock offer")
         candidate = party.load_party(host.party)
         receipt = {"owner": character, "blank_guid": blank_guid, "filled_guid": product, "operation_id": operation}
@@ -221,6 +243,8 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
             receipt.update(map=profile.map, station=profile.station, class_path=profile.product)
         if profile == DRILL:
             receipt["mosby_drill_test"] = after["mosby_drill_test"]
+        if profile == INSTRUCTIONS:
+            receipt["console_status"] = after["console_status"]
         candidate.setdefault(profile.ledger, {})[blank_guid] = receipt
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
         host.party, host.native_checkpoint_unsafe = candidate, False

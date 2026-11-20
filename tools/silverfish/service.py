@@ -587,6 +587,8 @@ class Host:
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
+        if native_mindcore._ready(self.last_game, 2) and native_mosby_tape.instructions_download_unlocked(self.party):
+            view["host_world"][native_mosby_station_view.DOWNLOAD_READY] = True
         balance = self.last_game.get("native_wallet")
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
@@ -4099,7 +4101,7 @@ class Client:
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
             (self.wire_board is not None, native_wire_board.MAPS, native_wire_board.HEARTBEAT),
             (self.dialogue_view is not None, self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
-            (self.mosby_station is not None, native_mosby_tape.BY_MAP, native_mosby_station_view.HEARTBEAT),
+            (self.mosby_station is not None, native_mosby_station_view.ORDINARY_MAPS, native_mosby_station_view.HEARTBEAT),
         )
         sequence, seen = None, 0.0
         while not self.stopping and self.bridge.process.poll() is None:
@@ -4116,21 +4118,25 @@ class Client:
                         with contextlib.suppress(OSError):
                             write_text(self.bridge.directory / heartbeat_file, heartbeat)
             if self.mindcore_view:
-                path = self.bridge.directory / native_mindcore_view.HEARTBEAT
                 pawn = game.get("pawns", {}).get("local", {}).get("name") if game else None
-                with contextlib.suppress(OSError):
-                    if (native_mindcore_view.valid_pawn(pawn) and game.get("state") == "connected" and game.get("map") == native_mindcore.MAP
-                            and now - seen < 1.5 and self.mindcore_stage_ready()):
-                        write_text(path, f"{int(time.time())}\t{pawn}\n")
-                    else:
-                        path.unlink(missing_ok=True)
+                present = (native_mindcore_view.valid_pawn(pawn) and game.get("state") == "connected"
+                           and game.get("map") == native_mindcore.MAP and now - seen < 1.5)
+                leases = ((1, native_mindcore_view.HEARTBEAT), (2, native_mosby_station_view.DOWNLOAD_HEARTBEAT))
+                for stage, filename in leases:
+                    path = self.bridge.directory / filename
+                    with contextlib.suppress(OSError):
+                        if present and self.mindcore_stage_ready(stage) and (stage == 1 or self.mosby_station):
+                            write_text(path, f"{int(time.time())}\t{pawn}\n")
+                        else:
+                            path.unlink(missing_ok=True)
             await asyncio.sleep(.4)
 
-    def mindcore_stage_ready(self) -> bool:
+    def mindcore_stage_ready(self, stage=1) -> bool:
         return (not self.stopping and self.transport.connected and self.transport.game_access
                 and bool(self.host_session and self.zone_epoch) and self.expected_zone == native_mindcore.MAP
                 and not self.needs_travel and not self.server_transitioning and time.monotonic() - self.gameplay_seen < 2
-                and native_mindcore_view.qualified_stage(self.gameplay))
+                and native_mindcore_view.qualified_stage(self.gameplay, stage)
+                and (stage == 1 or self.gameplay.get("host_world", {}).get(native_mosby_station_view.DOWNLOAD_READY) is True))
 
     async def refresh_gameplay(self) -> None:
         now = time.monotonic()
@@ -4355,6 +4361,7 @@ class Client:
                 elif action == native_mosby_station_view.FIXTURE and self.mosby_station:
                     area = self.last_game.get("map")
                     if (self.last_game.get("state") != "connected" or area not in native_mosby_tape.BY_MAP
+                            or area == native_mindcore.MAP and not self.mindcore_stage_ready(2)
                             or request.get("target") is not None):
                         raise ValueError("Connect the enrolled guest at a qualified stock tape station")
                     self.last_game = await self.bridge.command(action, timeout=6)
@@ -4463,6 +4470,8 @@ class Client:
             if self.mosby_station:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
+                if self.last_game.get("map") == native_mindcore.MAP:
+                    current = current and self.mindcore_stage_ready(2)
                 self.last_game = await self.mosby_station.sync(self.last_game, epoch, current, self.gameplay_action)
             if self.mindcore_view:
                 epoch = f"{self.host_session}:{self.zone_epoch}"

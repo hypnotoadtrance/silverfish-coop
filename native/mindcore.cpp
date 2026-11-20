@@ -25,6 +25,10 @@ namespace
     constexpr auto uploader_type = STR("/Game/Classes/Actors/DataTape_Uploader_BP.DataTape_Uploader_BP_C");
     constexpr auto core_path = STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.MindCore_BP_C_1");
     constexpr auto core_type = STR("/Game/Classes/Actors/MindCore_BP.MindCore_BP_C");
+    constexpr auto downloader_path =
+        STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1");
+    constexpr auto downloader_type = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
+    constexpr auto instructions_type = STR("/Game/Classes/Items/DataTapes/DataTape_DrillInstructions.DataTape_DrillInstructions_C");
     constexpr auto tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_DrillTestResults.DataTape_DrillTestResults_C");
     constexpr auto tape_master = STR("/Game/Classes/Items/DataTapes/Item_DataTape_Master.Item_DataTape_Master_C");
     constexpr auto insert_path = STR("/Game/Classes/Actors/DataTape_Uploader_BP.DataTape_Uploader_BP_C:Insert_Tape");
@@ -163,6 +167,23 @@ namespace
 
 namespace silverfish::native_mindcore
 {
+    U::AActor* qualified_instructions_cradle(U::UWorld* world, U::UObject* canonical, U::UObject* station)
+    {
+        auto* cradle = find<U::AActor>(cradle_path);
+        auto* core = find<U::AActor>(core_path);
+        if (station != find<U::UObject>(downloader_path) || !actor(station, downloader_type, world) ||
+            !actor(cradle, cradle_type, world) || !actor(core, core_type, world) ||
+            object(cradle, STR("MindCore_Ref")) != core || object(cradle, STR("Tape_Downloader")) != station ||
+            !stock_stage(cradle, canonical, 2)) return nullptr;
+        auto* product = find<U::UClass>(instructions_type);
+        auto* database = field<U::FArrayProperty>(station, STR("Tapes_DataBase"));
+        auto* entry = database ? U::CastField<U::FClassProperty>(database->GetInner()) : nullptr;
+        auto* base = entry ? entry->GetMetaClass().Get() : nullptr;
+        if (!product || !base || !product->IsChildOf(base)) return nullptr;
+        U::FScriptArrayHelper rows(database, database->ContainerPtrToValuePtr<void>(station));
+        return rows.Num() == 1 && entry->GetObjectPropertyValue(rows.GetRawPtr(0)) == product ? cradle : nullptr;
+    }
+
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishReadNativeMindCoreResults", results<false>);

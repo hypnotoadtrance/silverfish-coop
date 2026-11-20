@@ -6,11 +6,14 @@ import uuid
 
 from . import party
 from .native_gold import valid_guid
-from .native_tape_profiles import BLANK_CLASS, BY_MAP, BY_STATION
+from .native_tape_profiles import BLANK_CLASS, BY_MAP, BY_STATION, INSTRUCTIONS
 
 
 KEY = "native_mosby_station_view"
 HEARTBEAT = "native-mosby-station-heartbeat"
+DOWNLOAD_HEARTBEAT = "native-mindcore-download-heartbeat"
+DOWNLOAD_READY = "native_mindcore_instructions_ready"
+ORDINARY_MAPS = frozenset(BY_MAP) - {INSTRUCTIONS.map}
 FIXTURE = "native-mosby-station-fixture"
 RENDER = "native-mosby-station-render"
 WAITING = {"view": "checking", "trade": "trading"}
@@ -95,6 +98,7 @@ class StationView:
                 proof = (await action(preflight, operation, None)).get(profile.key, {})
                 if (tuple(proof.get(field) for field in ("operation", "map", "station", "state", "filled_guid")) != (
                         preflight, profile.map, station, "offer", None)
+                        or profile == INSTRUCTIONS and proof.get("console_status") != 2
                         or proof.get("give") != {"class_path": BLANK_CLASS, "quantity": 1, "cash": 0}
                         or proof.get("receive") != {"class_path": profile.product, "quantity": 1, "cash": 0}):
                     raise RuntimeError("The host did not verify the exact stock tape offer")
@@ -109,6 +113,7 @@ class StationView:
                 product = converted.get("filled_guid")
                 if (converted.get("effect") not in (profile.effect + "_exchanged", profile.effect + "_already_exchanged")
                         or converted.get("blank_guid") != blank or not valid_guid(product) or product == blank
+                        or profile == INSTRUCTIONS and converted.get("console_status") != 2
                         or not profile.requires_active_quest and (converted.get("map"), converted.get("station"),
                             converted.get("class_path")) != (profile.map, station, profile.product)):
                     raise RuntimeError("The host did not verify the exchange of the exact selected blank tape")

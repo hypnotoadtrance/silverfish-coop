@@ -6,10 +6,10 @@ import time
 from . import party
 from .native_gold import valid_guid
 from .native_mosby_tape import _scope
-from .native_tape_profiles import DRILL, drill_download_unlocked
+from .native_tape_profiles import DATA_SILO, DRILL, drill_download_unlocked
 
 
-MAP = "/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P"
+MAP = DATA_SILO
 WORLD = MAP + ".DataSilo_01_P"
 LEVEL = WORLD + ":PersistentLevel."
 CRADLE = "MindCore_Cradle_BP_C " + LEVEL + "MindCore_Cradle_BP_C_1"

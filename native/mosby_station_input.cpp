@@ -1,5 +1,6 @@
 #include "mosby_station_input.hpp"
 #include "interaction_input.hpp"
+#include "mindcore_input.hpp"
 
 #include <array>
 #include <chrono>
@@ -25,6 +26,7 @@ namespace
     {
         const U::TCHAR* world;
         const U::TCHAR* station;
+        bool cradle{};
     };
     constexpr std::array profiles{
         Profile{STR("/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P.StoneMaze_P"),
@@ -33,9 +35,13 @@ namespace
             STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.DataTape_DownloadStation_BP_C_1")},
         Profile{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_DownloadStation_BP_C_1")},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P:PersistentLevel.MindCore_Cradle_BP_C_1"), true},
     };
     constexpr auto station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
     constexpr auto callback_path = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C:SendInteractionToActor");
+    constexpr auto cradle_class = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C");
+    constexpr auto cradle_callback = STR("/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C:SendInteractionToActor");
     constexpr auto pawn_class = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto box_class = STR("/Script/Engine.BoxComponent");
     constexpr auto component_class = STR("/Script/Engine.SceneComponent");
@@ -79,14 +85,15 @@ namespace
 
     U::UObject* stock_box(U::UObject* station, U::UObject* pawn, const Profile& profile)
     {
-        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(station_class) || station->GetPathName() != profile.station)
+        const auto* exact_type = profile.cradle ? cradle_class : station_class;
+        if (!live(station) || station->GetClassPrivate() != find<U::UClass>(exact_type) || station->GetPathName() != profile.station)
             return nullptr;
         auto* world = static_cast<U::AActor*>(station)->GetWorld();
         auto* destroying = field<U::FBoolProperty>(station, STR("bActorIsBeingDestroyed"));
         if (!live(world) || !pawn || static_cast<U::AActor*>(pawn)->GetWorld() != world || world->GetPathName() != profile.world ||
             !destroying || destroying->GetPropertyValueInContainer(station)) return nullptr;
         auto* type = find<U::UClass>(box_class);
-        auto* property = field<U::FObjectProperty>(station, STR("Box"));
+        auto* property = field<U::FObjectProperty>(station, profile.cradle ? STR("Button_Tape") : STR("Box"));
         if (!type || !property || property->GetPropertyClass().Get() != type) return nullptr;
         auto* box = read(property, station);
         return live(box) && box->GetClassPrivate() == type && box->GetOuterPrivate() == station ? box : nullptr;
@@ -120,6 +127,7 @@ namespace
         auto* station = selected ? find<U::AActor>(selected->station) : nullptr;
         auto* box = station ? stock_box(station, pawn, *selected) : nullptr;
         if (!box) return respond(false);
+        if (selected->cradle) silverfish::mindcore_input::clear_scope();
         const auto now = Clock::now();
         if (scope.pawn.Get() != pawn || scope.station.Get() != station || scope.box.Get() != box ||
             !accepting || now >= scope.expires) scope.pending = 0;
@@ -157,8 +165,9 @@ namespace silverfish::mosby_station_input
     void route(U::Hook::TCallbackIterationData<void>& call, U::UObject* actor, U::UFunction* function, const void* parameters)
     {
         const auto now = Clock::now();
-        if (!actor || actor != scope.station.Get() || !function || !parameters || now >= scope.expires ||
-            call.OriginalFunctionCallPrevented() || function != find<U::UFunction>(callback_path)) return;
+        if (!actor || actor != scope.station.Get() || !function || !parameters || now >= scope.expires || !scope.profile ||
+            call.OriginalFunctionCallPrevented() ||
+            function != find<U::UFunction>(scope.profile->cradle ? cradle_callback : callback_path)) return;
         auto* scoped = scope.pawn.Get();
         auto* pawn = scoped ? active_guest(reinterpret_cast<Address>(scoped)) : nullptr;
         auto* box = pawn && scope.profile ? stock_box(actor, pawn, *scope.profile) : nullptr;
@@ -168,6 +177,7 @@ namespace silverfish::mosby_station_input
         auto* player = parameter(function, STR("Player"), 0, pawn_class);
         auto* component = parameter(function, STR("HitComponent"), sizeof(void*), component_class);
         if (!player || !component || read(player, parameters) != pawn) return;
+        if (scope.profile->cradle && read(component, parameters) != box) return;
         // The host keeps the original stock trade. The guest's player-0 menu cannot authorize a campaign exchange.
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented() || !scope.accepting || read(component, parameters) != box ||

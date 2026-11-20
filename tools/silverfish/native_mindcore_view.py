@@ -43,10 +43,11 @@ def parse(fields):
                 guid=None if guid == "-" else guid)
 
 
-def qualified_stage(gameplay):
+def qualified_stage(gameplay, stage=1):
     scene = gameplay.get("host_world", {}).get(core.SCENE, {})
-    return tuple(scene.get(key) for key in ("map", "cradle", "uploader", "core", "flag", "status", "installed")) == (
-        core.MAP, core.CRADLE, core.UPLOADER, core.CORE, core.FLAG, 1, True)
+    return tuple(scene.get(key) for key in ("map", "cradle", "uploader", "core", "flag")) == (
+        core.MAP, core.CRADLE, core.UPLOADER, core.CORE, core.FLAG,
+    ) and type(scene.get("status")) is int and scene["status"] == stage and scene.get("installed") is True
 
 
 @dataclass(frozen=True)
