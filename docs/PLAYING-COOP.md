@@ -85,6 +85,10 @@ The invitation fingerprint covers the game, the staged Lua scripts, the co-op la
 
 Use the guest's `stop` action to close that guest instance. Use the host's `checkpoint` and `stop` actions for a saved shutdown.
 
+## Leave through the stock Pause menu
+
+In a connected co-op guest session, use **Quit to Menu** and confirm. The host saves that character before the guest returns to a fresh co-op title. The host keeps playing. To end the shared session, the host can use **Quit to Menu** or **Save and Quit** where the stock game offers it. The host completes the paired save before returning connected players to the co-op title.
+
 In sessions opened from the in-game co-op title, automation can use `action --profile NAME leave-session` for an acknowledged guest save and departure, or `action --campaign NAME leave-session` to save and end the host's session. A successful response reports the checkpoint revision. Watch the role's status for `state: stopped` and a `stop_reason` of `guest_left` or `host_session_ended`.
 
 ## Optional stock campaign mode
