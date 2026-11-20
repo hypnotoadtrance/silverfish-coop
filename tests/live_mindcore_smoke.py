@@ -581,8 +581,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             proof["upper_door"] = await verify_passage(
                 run, guest_run, action, restart_guest, character, authority["generation"], authority["zone_epoch"])
             await action(run, "checkpoint")
-            saved, stock_flags = await flags()
-            assert tuple(row.get(core.FLAG, 0) for row in stock_flags) == (0, 0)
+            saved, door_checkpoint_flags = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in door_checkpoint_flags) == (0, 0)
             proof["upper_door"]["checkpoint"] = saved["revision"]
             proof["verified"] = True
             return proof
