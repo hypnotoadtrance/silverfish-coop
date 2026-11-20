@@ -714,6 +714,18 @@ local function place_at_covered_door(state, pawn, door, library, ignore, color, 
     error(string.format("No verified %s door approach (%d stock floor hits, %d safe positions)", profile.tag, hits, reached), 0)
 end
 
+local indoor_door_fixtures = {
+    ["/Game/Classes/Maps/Maps_Dungeons/DryDock_P"] = {
+        map_name = "DryDock_P", spawn = {-6800, 4850, 442},
+        near = {tag = "Refine_DD", actor = "Dungeon_TransitionDoor_BP_C_0", range = 250, forward = {-1, 0}},
+        far = {tag = "Docks_DD", actor = "Dungeon_TransitionDoor_BP_C_1"},
+    },
+    ["/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"] = {
+        map_name = "Shop_Gunsmith_P", spawn = {0, 200, 142},
+        near = {tag = "South_Gunsmith", actor = "Dungeon_TransitionDoor_BP_C_1", range = 200, forward = {0, 1}},
+    },
+}
+
 local function place_at_named_door(state, pawn, door, direction, rotation, distance, tag)
     local marker = valid(door.LevelExit_Spawn_BP) and door.LevelExit_Spawn_BP.ChildActor
     local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
@@ -742,18 +754,18 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     table.insert(ignore, 1, door)
     local candidates = {}
     local indoor_top, indoor_bottom
-    if headless and state.map == "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
-        and (not far and tag == "Refine_DD" or far and tag == "Docks_DD") then
-        local level = state.map .. ".DryDock_P:PersistentLevel."
-        local door_name = level .. (far and "Dungeon_TransitionDoor_BP_C_1" or "Dungeon_TransitionDoor_BP_C_0")
+    local indoor = headless and indoor_door_fixtures[state.map]
+    local approach = indoor and indoor[far and "far" or "near"]
+    if approach and tag == approach.tag then
+        local level = state.map .. "." .. indoor.map_name .. ":PersistentLevel."
         local start = StaticFindObject(level .. "PlayerStart_1")
         local point = valid(start) and start:K2_GetActorLocation()
-        if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. door_name
+        if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. approach.actor
             or not valid(start) or not same(start:GetWorld(), state.world)
             or not same(start:GetClass(), StaticFindObject("/Script/Engine.PlayerStart"))
-            or not vector(point) or math.abs(point.X + 6800) > 2
-            or math.abs(point.Y - 4850) > 2 or math.abs(point.Z - 442) > 2 then
-            error("The exact Dry Dock door or stock spawn changed", 0)
+            or not vector(point) or math.abs(point.X - indoor.spawn[1]) > 2
+            or math.abs(point.Y - indoor.spawn[2]) > 2 or math.abs(point.Z - indoor.spawn[3]) > 2 then
+            error("The exact indoor door or stock spawn changed", 0)
         end
         -- Start the floor ray inside the room at the stock spawn height.
         indoor_top, indoor_bottom = point.Z + 40, point.Z - 200
@@ -762,14 +774,16 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
             local forward, across = dx * direction.X + dy * direction.Y, dx * lateral_x + dy * lateral_y
             candidates = {{forward, across}, {forward, across + 70}, {forward, across - 70}}
         else
-            if math.abs(point.X - origin.X + 250) > 2 or math.abs(point.Y - origin.Y) > 2
-                or math.abs(point.Z - origin.Z - 142) > 2 or math.abs(direction.X + 1) > .01
-                or math.abs(direction.Y) > .01 or math.abs(direction.Z) > .01 then
-                error("The stock spawn near the Dry Dock Refinery door moved", 0)
+            local span, face = approach.range, approach.forward
+            if math.abs(point.X - origin.X - span * face[1]) > 2
+                or math.abs(point.Y - origin.Y - span * face[2]) > 2
+                or math.abs(point.Z - origin.Z - 142) > 2 or math.abs(direction.X - face[1]) > .01
+                or math.abs(direction.Y - face[2]) > .01 or math.abs(direction.Z) > .01 then
+                error("The stock spawn near the indoor door moved", 0)
             end
             local local_pawn = state.local_pawn and state.local_pawn.pawn
             local side = same(local_pawn, pawn) and 1 or -1
-            candidates = {{250, side * 65}, {218, side * 75}, {250, 0}}
+            candidates = {{span, side * 65}, {span - 32, side * 75}, {span, 0}}
         end
     end
     for _, length in ipairs(far and { distance, -distance } or { 170, -170, 235, -235, 0 }) do
