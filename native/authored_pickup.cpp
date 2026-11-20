@@ -76,6 +76,7 @@ namespace
     };
 
     constexpr std::string_view drill_head_source = "scientist-tunnel-drill-head";
+    constexpr std::string_view lab_blank_tape_source = "lab-e206-blank-data-tape";
 
     constexpr std::array profiles{
         dead_drop_profile,
@@ -120,6 +121,14 @@ namespace
             STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3"),
             STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
             7580.6051850203, 5202.1434900782, -642.6426753447, 9,
+        },
+        Profile{
+            .source = lab_blank_tape_source,
+            .world = STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
+            .actor = STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.DataTape_Blank_C_1"),
+            .item_class = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
+            .x = 9789.311919064377, .y = 465.9586029091134, .z = 677.8869114598496,
+            .item_type = 9, .physics = true,
         },
         Profile{
             drill_head_source,
@@ -509,6 +518,32 @@ namespace
         return passive.Len() == 14 && std::wstring_view{*passive} == STR("EatherAffinity");
     }
 
+    bool lab_blank_tape_payload(U::UObject* actor)
+    {
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        auto* units = field<U::FIntProperty>(actor, STR("Ammo"));
+        auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
+        auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        auto* handle = field<U::FStructProperty>(actor, STR("TableRowName"));
+        auto* handle_type = find<U::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* table = field<U::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* row = field<U::FNameProperty>(handle_type, STR("RowName"));
+        auto* stock_table = find<U::UObject>(STR("/Game/Classes/Libraries/DataTables/DataTapes_DT.DataTapes_DT"));
+        const U::FName blank{STR("EmptyTape"), U::FNAME_Find};
+        auto* pickup = field<U::FMulticastInlineDelegateProperty>(actor, STR("Item_PickedUp"));
+        if (!actor->HasAnyFlags(U::RF_WasLoaded) || !mode || mode->GetPropertyValueInContainer(actor) != 2 ||
+            !boolean(actor, STR("DespawnIfPlayerOwns"), false) || !boolean(actor, STR("bReplicates"), false) ||
+            !units || units->GetPropertyValueInContainer(actor) != 0 || !weight ||
+            !(std::abs(weight->GetPropertyValueInContainer(actor) - 0.3) <= 1e-9) ||
+            !value || value->GetPropertyValueInContainer(actor) != 30 ||
+            !handle_type || !handle || handle->GetStruct().Get() != handle_type ||
+            !table || !row || !stock_table || blank.IsNone() || !pickup ||
+            pickup->GetSize() != sizeof(U::FMulticastScriptDelegate) ||
+            pickup->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound()) return false;
+        const auto* payload = handle->ContainerPtrToValuePtr<void>(actor);
+        return read(table, payload) == stock_table && row->GetPropertyValueInContainer(payload) == blank;
+    }
+
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
@@ -530,6 +565,8 @@ namespace
             return "authored_pickup_stock_category_unqualified";
         if (profile.source == drill_head_source && !drill_head_payload(actor))
             return "authored_pickup_stock_drill_head_payload_unqualified";
+        if (profile.source == lab_blank_tape_source && !lab_blank_tape_payload(actor))
+            return "authored_pickup_stock_lab_blank_tape_payload_unqualified";
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
         if (const auto* fault = profile.stock_bandage ? stock_bandage_fault(actor, profile) : nullptr) return fault;

@@ -16,6 +16,7 @@ local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
+local lab_e206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local northeast_rail = "/Game/Classes/Maps/Maps_OverWorld/NorthEast_Rail_P"
 local trench = "/Game/Classes/Maps/Maps_OverWorld/Trench_01_P"
@@ -79,6 +80,14 @@ local profiles = {
         class = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C",
         name = "DataTape_Blank_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = lab_e206,
+        source = "lab-e206-blank-data-tape",
+        path = lab_e206 .. ".Lab_E206_P:PersistentLevel.DataTape_Blank_C_1",
+        class = "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C",
+        name = "DataTape_Blank_C",
+        authority_sight = true,
     },
     {
         map = crossroads,

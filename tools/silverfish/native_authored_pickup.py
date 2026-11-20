@@ -8,7 +8,7 @@ from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
 from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
-from .travel import BOROUGH, CITY, CROSSROADS, FOREST, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
+from .travel import BOROUGH, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 SOURCE = "observatory-comp-board"
@@ -21,6 +21,7 @@ DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
 SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
+LAB_E206_BLANK_TAPE = "lab-e206-blank-data-tape"
 PROTOTYPE_DRILL = "scientist-tunnel-drill-head"
 POCKET_WATCH = "crossroads-pocket-watch"
 OLD_PIPE = "crossroads-old-pipe"
@@ -49,6 +50,8 @@ SOURCES = {
                       "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
     SCIENTIST_BLANK_TAPE: (SCIENTIST_SHOP, f"DataTape_Blank_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3",
                            "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
+    LAB_E206_BLANK_TAPE: (LAB_E206, f"DataTape_Blank_C {LAB_E206}.Lab_E206_P:PersistentLevel.DataTape_Blank_C_1",
+                         "/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C"),
     PROTOTYPE_DRILL: (SCI_TUNNEL, f"Art_DrillHead_C {SCI_TUNNEL}.Sci_Tunnel_01_P:PersistentLevel.Art_DrillHead_C_1",
                       "/Game/Classes/Items/Artifacts/Art_DrillHead.Art_DrillHead_C"),
     POCKET_WATCH: (CROSSROADS, f"Item_PocketWatch_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_PocketWatch_C_1",
@@ -135,7 +138,7 @@ async def project(service, bridge, pickups: dict) -> None:
 
 
 def _needs_epoch(source: str) -> bool:
-    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL)
+    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL, LAB_E206_BLANK_TAPE)
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:

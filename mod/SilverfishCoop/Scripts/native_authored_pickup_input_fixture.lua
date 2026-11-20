@@ -6,11 +6,13 @@ local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local docks = "/Game/Classes/Maps/Maps_OverWorld/Docks_01_P"
 local drill_head = "scientist-tunnel-drill-head"
+local lab_blank_tape = "lab-e206-blank-data-tape"
 local sources = {
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
     ["city-canned-peaches"] = city,
     ["scientist-blank-data-tape"] = scientist,
+    [lab_blank_tape] = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P",
     ["crossroads-pocket-watch"] = crossroads,
     ["crossroads-dead-drop-bag"] = crossroads,
     ["savlo-estate-evil-eye-ring"] = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P",
@@ -46,6 +48,7 @@ local precise_distances = {
     [dead_drop] = {85, 115, 145, 175, 210},
     [black_box] = {65, 85, 110, 140, 175, 205},
     [drill_head] = {85, 115, 145, 175, 210},
+    [lab_blank_tape] = {80, 110, 140, 175, 205},
 }
 local supplies, shelf_source = {}, nil
 for _, profile in ipairs(supply_profiles) do
@@ -171,7 +174,8 @@ end
 
 function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
-    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop or profile.source == black_box)
+    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
+        or profile.source == black_box or profile.source == lab_blank_tape)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
         or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
     if (not cash and not sight_profile and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
@@ -356,7 +360,7 @@ function input.precise_approach(state, phase, profile, pawn, actor)
     end
     local forest_locker_top = profile.source == stolen_bag
     local nested_floor = profile.source == molasses or profile.source == shelf_source or forest_locker_top
-        or profile.source == dead_drop or profile.source == black_box or drill_catwalk
+        or profile.source == dead_drop or profile.source == black_box or profile.source == lab_blank_tape or drill_catwalk
         or profile.source == "city-large-stack-1" or profile.source == "crossroads-small-stack-1"
     -- The bag sits above the stock locker bank, about 248 units above the room floor.
     -- The Drill Head sits about 264 units above its catwalk, beside the drill assembly.

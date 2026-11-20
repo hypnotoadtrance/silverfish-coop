@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_authored_pickup as pickup, native_computer_board, native_host_save, native_quest
 from tools.silverfish import authored_cash, generate_authored_cash, native_loot, native_wire_board, party, runtime
-from tools.silverfish.travel import BLACK_MARKET, CITY, CROSSROADS, OBSERVATORY
+from tools.silverfish.travel import BLACK_MARKET, CITY, CROSSROADS, LAB_E206, OBSERVATORY, SCIENTIST_SHOP
 
 
 WIRE, BRANDY = pickup.CITY_WIRE, pickup.CITY_BRANDY
@@ -35,6 +35,17 @@ class AuthoredPickupSelectorTests(unittest.TestCase):
         for wrong in (None, "City-Paladin-Brandy", pickup.SOURCE):
             with self.subTest(selector=wrong), self.assertRaisesRegex(party.RuleError, "exact_source_required"):
                 pickup.select_source(CITY, wrong)
+
+    def test_lab_blank_is_distinct_from_the_scientist_copy_and_epoch_bound(self):
+        lab, scientist = pickup.LAB_E206_BLANK_TAPE, pickup.SCIENTIST_BLANK_TAPE
+        self.assertEqual(pickup.select_source(LAB_E206, lab), lab)
+        self.assertEqual(pickup.select_source(SCIENTIST_SHOP, scientist), scientist)
+        with self.assertRaisesRegex(party.RuleError, "exact_source_required"):
+            pickup.select_source(LAB_E206, scientist)
+        self.assertEqual(pickup.SOURCES[lab][2], pickup.SOURCES[scientist][2])
+        self.assertNotEqual(pickup.SOURCES[lab][1], pickup.SOURCES[scientist][1])
+        self.assertEqual(pickup.request_target(lab, "a" * 32), f"{lab}@{'a' * 32}")
+        self.assertEqual(pickup.request_target(scientist, None), scientist)
 
     def test_status_keeps_each_exact_source_and_preserves_singleton_alias(self):
         path = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -145,6 +156,42 @@ class AuthoredPickupSelectorTests(unittest.TestCase):
 
 
 class AuthoredPickupTransactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lab_blank_commits_only_the_current_detached_owner_and_replays_once(self):
+        source = pickup.LAB_E206_BLANK_TAPE
+        guid, epoch, operation = "BB" * 16, "a" * 32, "b" * 32
+        profile = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        state = party.new_party()
+        party.add_player(state, GUEST)
+        frame = {"state": "hosting", "map": LAB_E206, pickup.SOURCES_KEY: {source: row(source)}}
+        host = SimpleNamespace(native_zones=True, native_profile=profile, stopping=False, transitioning=False,
+                               native_checkpoint_unsafe=False, last_game=frame, last_seen=time.monotonic(),
+                               party=state, native_recipients=lambda: {GUEST: {"pawn": PAWN, "connected": True}},
+                               checkpoint_native=AsyncMock(return_value=4), control=Mock(), zone_epoch=epoch)
+
+        async def command(action, pawn, slot, selected, *, timeout):
+            self.assertEqual((action, pawn, selected, timeout), (pickup.ACTION, PAWN, source, 7))
+            path = native_host_save.slot_path(profile, slot)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"GVAS Lab E206 blank tape")
+            return {**frame, "native_authored_pickup_claim": {"source": source, "map": LAB_E206, "pawn": pawn,
+                    "slot": slot, "ok": True, "applied": True, "status": "claimed", "guid": guid}}
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+        with self.assertRaisesRegex(party.RuleError, "stale_zone"):
+            await pickup.claim(host, bridge, GUEST, pickup.request_target(source, "d" * 32), operation)
+        bridge.command.assert_not_awaited()
+        target = pickup.request_target(source, epoch)
+        result = await pickup.claim(host, bridge, GUEST, target, operation)
+        self.assertEqual(result["native_authored_pickup_claim"], {
+            **{key: value for key, value in row(source).items() if key != "state"}, "guid": guid, "owner": GUEST,
+        })
+        self.assertEqual(set(host.party[pickup.STATE_KEY]), {source})
+        self.assertEqual(host.checkpoint_native.await_args.kwargs["require_guest_frames"], {GUEST})
+        self.assertEqual(await pickup.claim(host, bridge, GUEST, target, operation), result)
+        with self.assertRaisesRegex(party.RuleError, "already_claimed"):
+            await pickup.claim(host, bridge, GUEST, target, "c" * 32)
+        self.assertEqual(bridge.command.await_count, 1)
+
     def cash_host(self):
         profile = Path(self.enterContext(tempfile.TemporaryDirectory()))
         state = party.new_party()
