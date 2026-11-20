@@ -17,7 +17,7 @@ SOURCE_GUID, STACK_GUID = "AA" * 16, "BB" * 16
 
 
 def source_row(profile):
-    return dict(source=profile.source, map=profile.area, actor=profile.actor, class_path=profile.ammo.item_path, state="available")
+    return dict(source=profile.source, map=profile.area, actor=profile.actor, class_path=profile.class_path, state="available")
 
 
 class SupplyCatalogTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class SupplyCatalogTests(unittest.TestCase):
         self.assertEqual([target for _, target in bridge.interactions()], [CITY_AMMO.source])
 
         header = f"schema\t1\nsession\thost\thosting\t{CITY}\t1\t0\n"
-        for profile in authored_supply.PLACEMENTS:
+        for profile in authored_supply.BY_SOURCE.values():
             row = "\t".join(("native-authored-pickup", *source_row(profile).values()))
             (directory / "status.tsv").write_text(header + row + "\n", encoding="utf-8")
             status = bridge.snapshot()
@@ -51,6 +51,30 @@ class SupplyCatalogTests(unittest.TestCase):
                 self.assertEqual(status[pickup.SOURCES_KEY], {profile.source: source_row(profile)})
             else:
                 self.assertIsNone(status)
+
+    def test_field_bandage_profiles_preserve_exact_per_source_identity_and_units(self):
+        fixed = authored_supply.RAIL_YARD_BANDAGE
+        physical = authored_supply.SLUMS_BANDAGE
+        bandages = authored_supply.BANDAGE_PLACEMENTS
+        self.assertEqual(len(bandages), 5)
+        self.assertEqual(len({row.source for row in bandages}), 5)
+        self.assertEqual(len({row.area for row in bandages}), 4)
+        self.assertEqual(fixed.name, physical.name)
+        self.assertFalse(fixed.physics)
+        self.assertTrue(physical.physics)
+        for row in bandages:
+            self.assertEqual((row.class_path, row.units, row.weight, row.value),
+                             (authored_supply.BANDAGE_CLASS, 1, 0.05, 15))
+            self.assertEqual(pickup.SOURCES[row.source], (row.area, row.actor, row.class_path))
+            self.assertEqual(pickup.request_target(row.source, EPOCH), f"{row.source}@{EPOCH}")
+            self.assertEqual(pickup.select_source(row.area, row.source), row.source)
+        with self.assertRaises(party.RuleError):
+            pickup.select_source(physical.area, fixed.source)
+        header = {"source": fixed.source, "map": fixed.area, "pawn": PAWN, "slot": "SFCoop_" + "1" * 32}
+        report = {**header, "source_guid": SOURCE_GUID, "stack_guid": STACK_GUID, "before": 1, "after": 2}
+        claim = {**header, "ok": True, "applied": True, "status": "merged", "guid": SOURCE_GUID}
+        self.assertTrue(pickup._matches_merge(claim, report))
+        self.assertFalse(pickup._matches_merge(claim, {**report, "after": 3}))
 
     def test_merge_wire_requires_exact_claim_source_stack_and_quantity(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))

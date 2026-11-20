@@ -68,7 +68,7 @@ SOURCES = {
     STOLEN_BAG: (FOREST, f"Brokers_ArtifactsBag_C {FOREST}.Forest_01_P:PersistentLevel.Brokers_ArtifactsBag_C_1",
                  "/Game/Classes/Items/Key_Items/Brokers_ArtifactsBag.Brokers_ArtifactsBag_C"),
 }
-SOURCES.update({source: (row.area, row.actor, row.ammo.item_path) for source, row in STOCK_SUPPLIES.items()})
+SOURCES.update({source: (row.area, row.actor, row.class_path) for source, row in STOCK_SUPPLIES.items()})
 SOURCES.update({source: (row.area, row.actor, row.item.class_path) for source, row in STOCK_CASH.items()})
 MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():

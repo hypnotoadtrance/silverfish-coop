@@ -60,6 +60,9 @@ namespace
         int stack_value{};
         bool stock_cash{};
         bool dead_drop{};
+        bool stock_bandage{};
+
+        bool stacked_supply() const { return stock_ammo || stock_bandage; }
     };
 
     constexpr Profile dead_drop_profile{
@@ -429,6 +432,29 @@ namespace
         return read(table, row) == expected_table && name->GetPropertyValueInContainer(row) == expected;
     }
 
+    bool stock_bandage_matches(U::UObject* actor, const Profile& profile)
+    {
+        auto* type = find<U::UClass>(STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C"));
+        auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        auto* units = field<U::FIntProperty>(actor, STR("Ammo"));
+        auto* weight = field<U::FDoubleProperty>(actor, STR("Weight"));
+        auto* value = field<U::FIntProperty>(actor, STR("Value"));
+        auto* picked_up = field<U::FMulticastInlineDelegateProperty>(actor, STR("Item_PickedUp"));
+        return type && actor->GetClassPrivate() == type && actor->HasAnyFlags(U::RF_WasLoaded) &&
+            live(defaults) && defaults->HasAnyFlags(U::RF_ClassDefaultObject) && defaults->GetClassPrivate() == type &&
+            mode && mode->GetPropertyValueInContainer(actor) == 2 &&
+            mode->GetPropertyValueInContainer(defaults) == 2 &&
+            boolean(actor, STR("DespawnIfPlayerOwns"), false) && boolean(actor, STR("bReplicates"), false) &&
+            units && units->GetPropertyValueInContainer(defaults) == 1 &&
+            weight && std::abs(weight->GetPropertyValueInContainer(actor) - profile.stack_weight) <= 1e-9 &&
+            std::abs(weight->GetPropertyValueInContainer(defaults) - profile.stack_weight) <= 1e-9 &&
+            value && value->GetPropertyValueInContainer(actor) == profile.stack_value &&
+            value->GetPropertyValueInContainer(defaults) == profile.stack_value &&
+            picked_up && picked_up->GetSize() == sizeof(U::FMulticastScriptDelegate) &&
+            !picked_up->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound();
+    }
+
     int loose_cash_value(U::UObject* actor)
     {
         auto* value = field<U::FIntProperty>(actor, STR("Value"));
@@ -463,6 +489,8 @@ namespace
             return "authored_pickup_stock_category_unqualified";
         if (profile.stock_ammo && !stock_ammo_matches(actor, profile))
             return "authored_pickup_stock_ammo_profile_unqualified";
+        if (profile.stock_bandage && !stock_bandage_matches(actor, profile))
+            return "authored_pickup_stock_bandage_profile_unqualified";
         if (profile.stock_cash && !loose_cash_value(actor)) return "authored_pickup_stock_cash_profile_unqualified";
         // Physics-enabled items can settle below their authored placement under vanilla simulation.
         // A claimed item may fall when collision is disabled. Its exact scoped object stays hidden.
@@ -603,7 +631,7 @@ namespace
         if (!actor) return nullptr;
         const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
         if (match == scopes.end() || !local_scope(*match)) return nullptr;
-        if ((match->profile->stock_ammo || match->profile->stock_cash || match->profile->dead_drop) &&
+        if ((match->profile->stacked_supply() || match->profile->stock_cash || match->profile->dead_drop) &&
             (!exact_source(actor, match->world.Get(), *match->profile, !match->claimed) ||
              source_box(actor) != match->box.Get())) return nullptr;
         return &*match;
@@ -1134,7 +1162,7 @@ namespace
         TapeStores stores{rows};
         auto* pawn = live_address(pawn_address, find<U::UClass>(pawn_path));
         auto* target = object(pawn, STR("Save"));
-        if (!scope || !scope->profile || !scope->profile->stock_ammo || !scope->profile->stack_units ||
+        if (!scope || !scope->profile || !scope->profile->stacked_supply() || !scope->profile->stack_units ||
             address(target) != save_address || !authorized(*scope, pawn, target))
             return fail("authored_supply_merge_authority_unavailable");
         const auto& profile = *scope->profile;
@@ -1740,7 +1768,7 @@ namespace
         if (!scope || scope->profile->stock_cash || address(target) != supplied[1] || !authorized(*scope, pawn, target))
             return result(lua, false, "authored_pickup_exact_claimant_unavailable");
         if (!rows.bind()) return result(lua, false, "authored_pickup_inventory_schema_unavailable");
-        if (scope->profile->stack_units && !scope->profile->stock_ammo)
+        if (scope->profile->stack_units && !scope->profile->stacked_supply())
         {
             auto* equipment = field<U::FArrayProperty>(target, STR("PlayerEquipment"));
             auto* equipment_row = equipment ? U::CastField<U::FStructProperty>(equipment->GetInner()) : nullptr;
