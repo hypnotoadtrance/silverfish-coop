@@ -290,6 +290,13 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                 f"Loose Core did not reach the upper deck. Lower position {lower_position}, "
                 f"Core position at the upper lift stop {upper_position}"
             )
+        expected = [*lower_position[:2], lower_position[2] + UPPER_LANDING_Z]
+        proof["released_at_upper_stop"] = await observe(
+            "the Core settles at the upper stop and the guest can carry it again",
+            lambda row, *_: (row["lift"].get("stop") == "upper" and row["guest_hold"].get("state") == "ready"
+                              and math.dist(row["prop"]["position"], expected) < 25
+                              and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 12),
+        )
         return
     await action(run, carry.APPROACH_FIXTURE, target=character)
     proof["approach"] = await observe("checked stock Core approach", lambda row, *_: (

@@ -1,5 +1,6 @@
 local lift = {}
 local guest_save = require("guest_save")
+local mindcore = require("native_mindcore")
 local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -20,7 +21,7 @@ local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControle
 local deck_asset = "/Game/Assets/StaticMeshes/Mesh_Structures/Structure_AssemblyComponents/SM_Prop_Elevator_02.SM_Prop_Elevator_02"
 local item_class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local lower, upper = {X = -1780, Y = 0, Z = 0}, {X = -1780, Y = 0, Z = 2400}
-local actor_scope, is_client
+local actor_scope, is_client, cargo
 
 local function refuse(reason) error("native_datasilo_lift_" .. reason, 0) end
 local function valid(object) return not not (object and object:IsValid()) end
@@ -186,6 +187,89 @@ local function guard_guest(world)
     if current then guest_status(current) end
 end
 
+local function release_cargo()
+    if not cargo then return end
+    local core, frame, deck = cargo.core, cargo.frame, cargo.deck
+    if not valid(core) or core:IsActorBeingDestroyed() or not same(core.RootComponent, frame) then
+        cargo = nil
+        return
+    end
+    if same(frame:GetAttachParent(), deck) then
+        core:K2_DetachFromActor(1, 1, 1)
+        if same(frame:GetAttachParent(), deck) then return end
+    end
+    if not valid(frame:GetAttachParent()) then
+        frame:SetSimulatePhysics(true)
+        if frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= true then return end
+        core:ForceNetUpdate()
+    end
+    cargo = nil
+end
+
+local function loose_core(state, phase)
+    local stock = mindcore.scene(state, phase)
+    local core, frame = stock.core, stock.frame
+    if stock.status ~= 0 or stock.installed or core.bReplicates ~= true or core.bReplicateMovement ~= true
+        or core.BeingHeld ~= false or valid(core["Holding Actor"]) or core:GetActorEnableCollision() ~= true
+        or valid(frame:GetAttachParent()) or frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= true then return end
+    for _, detail in ipairs(state.pawns) do
+        local pawn = detail.pawn
+        if valid(pawn) and same(pawn:GetWorld(), stock.world) then
+            local handle = pawn.PhysicsHandle
+            if same(pawn.HeldObject, core)
+                or (owned(handle, pawn, "PhysicsHandleComponent") and same(handle:GetGrabbedComponent(), frame)) then
+                return
+            end
+        end
+    end
+    stock.position = point(core:K2_GetActorLocation())
+    if stock.position then return stock end
+end
+
+local function in_cabin(position, deck)
+    local x, y, z = position.X - deck.X, position.Y - deck.Y, position.Z - deck.Z
+    return x > 83 and x < 138 and math.abs(y) < 48 and z > 22 and z < 160
+end
+
+local function sync_cargo(current, scoped, state, phase)
+    if cargo then
+        if current.stop == "moving" and same(current.deck, cargo.deck) and same(cargo.frame:GetAttachParent(), cargo.deck) then
+            return
+        end
+        release_cargo()
+        if cargo then return end
+    end
+    local prior = scoped.parked_core
+    scoped.parked_core = nil
+    if current.stop == "moving" and not (prior and prior.settled) then return end
+    local stock = loose_core(state, phase)
+    if not stock or not in_cabin(stock.position, current.deck_position) then return end
+    if current.stop ~= "moving" then
+        stock.settled = prior and prior.stop == current.stop and same(stock.frame, prior.frame)
+            and near(stock.position, prior.position, 1.5)
+        stock.stop, stock.deck_position = current.stop, current.deck_position
+        scoped.parked_core = stock
+        return
+    end
+    local expected = {X = prior.position.X, Y = prior.position.Y,
+        Z = prior.position.Z + current.deck_position.Z - prior.deck_position.Z}
+    if not same(stock.frame, prior.frame) or not near(stock.position, expected, 18) then return end
+    -- Carry only the settled, authored Core with the deck until the next stop.
+    -- Keep the pose and collisions, and hand the body back to stock physics at the destination.
+    cargo = {core = stock.core, frame = stock.frame, deck = current.deck}
+    local ok, attached = pcall(function()
+        stock.frame:SetSimulatePhysics(false)
+        if stock.frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= false then return false end
+        return stock.core:K2_AttachToComponent(current.deck, FName("None", EFindName.FNAME_Find),
+            1, 1, 1, false) and same(stock.frame:GetAttachParent(), current.deck)
+    end)
+    if not ok or not attached then
+        release_cargo()
+        return
+    end
+    stock.core:ForceNetUpdate()
+end
+
 function lift.start(client_role)
     if not enabled or is_client or type(client_role) ~= "function" then return end
     is_client = client_role
@@ -207,12 +291,21 @@ end
 
 function lift.sync(state, phase)
     local peer = role(state, phase)
+    if cargo and peer ~= "host" then pcall(release_cargo) end
     if not peer then return end
     pcall(function()
         local current = scene(state.world, peer)
-        if current then
-            local scoped = binding(current)
-            scoped.status = (peer == "host" and host_status or guest_status)(current)
+        if not current then
+            release_cargo()
+            return
+        end
+        local scoped = binding(current)
+        scoped.status = (peer == "host" and host_status or guest_status)(current)
+        if scoped.status == "active" then
+            sync_cargo(current, scoped, state, phase)
+        elseif peer == "host" then
+            scoped.parked_core = nil
+            release_cargo()
         end
     end)
 end
@@ -393,6 +486,7 @@ end
 
 function lift.clear()
     -- The retiring co-op world keeps its client button blocked as it unloads.
+    pcall(release_cargo)
     actor_scope = nil
 end
 
