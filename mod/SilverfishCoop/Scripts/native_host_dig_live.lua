@@ -85,7 +85,7 @@ local function read(ctx)
 end
 
 function dig.start(path)
-    heartbeat = path .. "native-host-dig-heartbeat"
+    heartbeat = path .. "native-host-dig-live-heartbeat"
 end
 
 function dig.sync(state, phase)

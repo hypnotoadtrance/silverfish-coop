@@ -56,7 +56,7 @@ local heartbeat, serial, fail_ack = 100, 0, false
 local env = setmetatable({
     os = {getenv = function() return "1" end, time = function() return 100 end},
     io = {open = function(path, mode)
-        assert(path == "bridge/native-host-dig-heartbeat" and mode == "rb")
+        assert(path == "bridge/native-host-dig-live-heartbeat" and mode == "rb")
         return {read = function() return tostring(heartbeat) end, close = function() end}
     end},
     require = function(name)

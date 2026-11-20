@@ -474,11 +474,22 @@ namespace
     void begin_live_contact(Iteration& call, U::UObject* source, U::FFrame& frame)
     {
         const auto now = Clock::now();
-        if (!ordinary || watch.pressed || source != live_dig.source.Get()) return;
+        if (!ordinary || watch.pressed || !source || frame.Object() != source ||
+            !exact(source, source_class) || source->GetPathName() != source_path) return;
         auto* function = find<U::UFunction>(dig_function);
-        if (!function || frame.Node() != function || frame.Object() != source) return;
+        if (!function || frame.Node() != function || function->GetOuterPrivate() != source->GetClassPrivate()) return;
         const auto ctx = bound_live();
-        if (!ctx.world || !qualified_source(ctx, source)) return;
+        if (!ctx.world || source != live_dig.source.Get() || now >= live_dig.lease)
+        {
+            // An exact listen-host source can receive a stock hit before the
+            // coordinator leases it. Preserve the undug checkpoint until it can.
+            auto* world = static_cast<U::AActor*>(source)->GetWorld();
+            auto* instance = object(world, STR("OwningGameInstance"));
+            const auto host = qualify(address(world), address(object(instance, STR("As Player FP"))), false, false);
+            if (host.world && qualified_source(host, source)) call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (!qualified_source(ctx, source)) return;
         auto* caller = frame.PreviousFrame();
         const auto standing = bound_live(true, true);
         // This exact stock source enters an authenticated campaign only via
@@ -492,7 +503,7 @@ namespace
         }
         auto* input = field<U::FStructProperty>(function, STR("DigLocation"));
         auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
-        if (function->GetOuterPrivate() != source->GetClassPrivate() || function->GetNumParms() != 1 ||
+        if (function->GetNumParms() != 1 ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || function->GetParmsSize() != 24 ||
             function->GetReturnProperty() || !input || !vector || input->GetStruct().Get() != vector ||
             input->GetSize() != 24 || input->GetOffset_Internal() != 0 || !frame.Locals())
@@ -629,7 +640,8 @@ namespace
             if (caller && caller->Object() == receiver && caller->Node() && caller->Node() == find<U::UFunction>(melee_graph))
                 live_dig.spade_called = true;
         }
-        if (live_dig.source.Get() == receiver) begin_live_contact(call, receiver, frame);
+        static const U::FName dig_name{STR("DigForItem")};
+        if (frame.Node()->GetFName() == dig_name) begin_live_contact(call, receiver, frame);
         auto* package = live_dig.package.Get();
         if (!package || !frame.Locals()) return;
         static const U::FName add_name{STR("AddItemToInventory")};
