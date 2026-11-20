@@ -8,6 +8,9 @@ from tools.silverfish import native_datasilo_door as door, native_mindcore as co
 from tools.silverfish import native_mindcore_carry as carry, native_mindcore_fixture as fixture
 
 
+CRADLE_CAPSULE_XY = (0.0, 6662.06)
+
+
 async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
     """Bring the held Core through the keyed catwalk door and into the real cradle capsule."""
     host_name = authority["game"]["pawns"]["local"]["name"]
@@ -55,6 +58,31 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
                 "guest_aim": peer.get(carry.AIM), "guest_scope": peer.get(carry.VIEW_SCOPE),
                 "sequences": [game["sequence"], peer["sequence"]]}
 
+    async def turn_trailing_core_toward_cradle(before):
+        # A stock grip can leave the Core behind its carrier once the cradle blocks
+        # the catwalk. Turning in place swings the still-held Core around that grip.
+        x, y, _ = before["pawn"]
+        core_x, core_y, _ = before["prop"]["position"]
+        target_x, target_y = CRADLE_CAPSULE_XY
+        delta = math.degrees(math.atan2(target_y - y, target_x - x) - math.atan2(core_y - y, core_x - x))
+        yaw = (before["hold"]["yaw"] + delta + 180) % 360 - 180
+        turn = proof["cradle_turn"] = {"before": before, "yaw": yaw, "samples": []}
+        await action(guest_run, carry.FIXTURE, target=f"turn@8@{yaw:.3f}")
+        deadline = asyncio.get_running_loop().time() + 4
+        while asyncio.get_running_loop().time() < deadline:
+            sample = carrier_frame()
+            rows = turn["samples"]
+            if not rows or sample["sequences"] != rows[-1]["sequences"]:
+                rows.append(sample)
+            row = sample["hold"]
+            assert (row["lease"], row["core"]) == (lease, core.CORE), row
+            if row["state"] == "mount_released" or sample["scene"]["installed"]:
+                return
+            if row["state"] != "held":
+                raise RuntimeError(f"The Core hold ended during the final turn: {sample}")
+            await asyncio.sleep(.055)
+        raise RuntimeError(f"The final turn did not bring the Core into the stock cradle: {turn['samples'][-1]}")
+
     frames = proof["carrier_walk"] = []
     stalled = 0
     for _ in range(60):
@@ -91,6 +119,11 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
                 break
             await asyncio.sleep(.055)
         else:
+            body = sample["prop"].get("position")
+            if (6570 < y < 6650 and body and sample["pawn"][1] <= y + 4 and body[1] < sample["pawn"][1] - 25
+                    and abs(row["yaw"] - 90) < .5):
+                await turn_trailing_core_toward_cradle(sample)
+                break
             # A stock shock can stop movement for the entire input pulse.
             stalled += 1
             if stalled > 2 or row["sequence"] <= hold["sequence"] or sample["pawn"][1] > y + 4:
