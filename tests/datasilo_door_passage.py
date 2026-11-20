@@ -44,25 +44,52 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
                and row.get("lease") == lease and abs(row["yaw"] - 90) < .5 and abs(row["pitch"] - 8) < .5
                and row.get("grip_position"))
 
-    frames = proof["carrier_walk"] = []
-    for _ in range(30):
+    def carrier_frame():
         state = status(run)
         guest = member(state)
         game = state["game"]
-        hold, scene = game[carry.AUTHORITY], game[core.SCENE]
-        prop = game.get(core.REPLICATION, {})
-        x, y, z = guest["location"]
-        frames.append({"pawn": [x, y, z], "health": guest["health"], "hold": hold, "prop": prop,
-                       "scene": scene})
+        peer = status(guest_run)["game"]
+        return {"pawn": guest["location"], "health": guest["health"], "hold": game[carry.AUTHORITY],
+                "prop": game.get(core.REPLICATION, {}), "scene": game[core.SCENE],
+                "guest_pawn": peer.get("pawns", {}).get("local", {}).get("location"),
+                "guest_aim": peer.get(carry.AIM), "guest_scope": peer.get(carry.VIEW_SCOPE),
+                "sequences": [game["sequence"], peer["sequence"]]}
+
+    frames = proof["carrier_walk"] = []
+    for _ in range(60):
+        before = carrier_frame()
+        hold, scene = before["hold"], before["scene"]
+        x, y, z = before["pawn"]
         assert hold["lease"] == lease and hold["core"] == core.CORE, hold
         if hold["state"] == "mount_released" or scene["installed"]:
             break
-        if hold["state"] != "held" or guest["health"] <= 0 or y >= 6650 or not 6660 < z < 6740:
-            raise RuntimeError(f"The exact carrier did not reach the stock cradle while holding the Core: {frames[-1]}")
-        result = await action(guest_run, "walk", x=max(-.3, min(.3, -x / 140)), y=1,
-                              milliseconds=950 if y < 6300 else 400, continuous=True)
+        if hold["state"] != "held" or before["health"] <= 0 or y >= 6650 or not 6660 < z < 6740:
+            raise RuntimeError(f"The exact carrier did not reach the stock cradle while holding the Core: {before}")
+        duration = 200 if y < 5400 else 280 if y < 6200 else 150
+        direction = {"x": max(-.3, min(.3, -x / 140)), "y": .6, "milliseconds": duration, "continuous": True}
+        step = {"before": before, "input": direction, "samples": []}
+        frames.append(step)
+        result = await action(guest_run, "walk", **direction)
         assert result["movement_scheduled"], result
-        await asyncio.sleep(1.05 if y < 6300 else .5)
+        pulse_end = asyncio.get_running_loop().time() + duration / 1000
+        deadline = pulse_end + 2
+        while asyncio.get_running_loop().time() < deadline:
+            sample = carrier_frame()
+            if not step["samples"] or sample["sequences"] != step["samples"][-1]["sequences"]:
+                step["samples"].append(sample)
+            row = sample["hold"]
+            assert row["lease"] == lease and row["core"] == core.CORE, row
+            if row["state"] == "mount_released" or sample["scene"]["installed"]:
+                break
+            if row["state"] != "held":
+                raise RuntimeError(f"The Core hold ended during a catwalk step: {sample}")
+            grip = row.get("grip_position")
+            if (asyncio.get_running_loop().time() >= pulse_end and grip and row["sequence"] > hold["sequence"]
+                    and sample["pawn"][1] > y + 4 and grip[1] > hold["grip_position"][1] + 4):
+                break
+            await asyncio.sleep(.055)
+        else:
+            raise RuntimeError(f"The carrier's grip did not follow a catwalk step: {step['samples'][-1]}")
     else:
         raise RuntimeError(f"The held Core did not reach the cradle: {frames[-1]}")
 
@@ -72,7 +99,7 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
     release = mounted["game"][carry.AUTHORITY]
     assert (release["lease"], release["pawn"], release["state"], release["reason"]) == (
         lease, guest_name, "mount_released", "stock_core_capsule_release"), release
-    assert any(frame["pawn"][1] > 5140 and frame["hold"]["state"] == "held" for frame in frames), frames
+    assert any(frame["before"]["pawn"][1] > 5140 and frame["before"]["hold"]["state"] == "held" for frame in frames), frames
     proof["capsule_release"] = release
     return mounted["game"][core.SCENE]
 
