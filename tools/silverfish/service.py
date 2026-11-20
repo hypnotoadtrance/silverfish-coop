@@ -53,6 +53,9 @@ MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones"
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
 GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
+NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
+# The stock driver can retain a silent connection for 110 seconds.
+NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION,
@@ -289,6 +292,44 @@ class Host:
         self.expiry_capture_attempts: dict[str, int] = {}
         self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
         self.native_restart_attempted = 0
+        self.relay = None
+        self.guest_runtime_replacements: dict[str, dict] = {}
+
+    def runtime_admission(self, request: dict, character_id: str | None, previous_runtime: str | None,
+                          *, disconnected: bool) -> dict:
+        """Preflight a new process without renewing the disconnected process's native lease."""
+        guest_id = request["guest_id"]
+        runtime_id = request.get("runtime_id")
+        if character_id is None:
+            if self.relay is None or self.relay.guest_endpoint(guest_id) is None:
+                return {}
+            previous_runtime = self.relay.guest_runtime_id(guest_id)
+        if runtime_id == previous_runtime:
+            return {}
+        if not runtime_id:
+            return {"accepted": False, "reason": "guest_or_character_unavailable"}
+        if character_id is None:
+            return {"rotate_game_route": True}
+        if not disconnected or request["character_id"] != character_id:
+            return {"accepted": False, "reason": "guest_or_character_unavailable"}
+        try:
+            owned = self.store.list_characters(guest_id, request["credential"])
+        except CampaignError:
+            owned = []
+        if not any(saved["character_id"] == character_id for saved in owned):
+            return {"accepted": False, "reason": "guest_or_character_unavailable"}
+        if guest_id not in self.guest_runtime_replacements:
+            binding = self.enrollment.assignments.get(guest_id) if self.enrollment else None
+            proof = {"guest_id": guest_id, "character_id": character_id, "zone_epoch": self.zone_epoch}
+            if binding is not None:
+                proof["old_connection_id"] = binding.connection_id
+            self.guest_runtime_replacements[guest_id] = proof
+            self.control.event("guest_runtime_replacement_pending", **proof)
+        return {"accepted": False, "reason": NATIVE_RUNTIME_RETIRING}
+
+    def report_guest_runtime_retired(self, guest_id: str) -> None:
+        if proof := self.guest_runtime_replacements.pop(guest_id, None):
+            self.control.event("guest_runtime_retired", **proof)
 
     def admit(self, request: dict) -> dict:
         if self.stopping:
@@ -315,6 +356,12 @@ class Host:
             return {"accepted": False, "reason": "previous_pawn_still_present"}
         if self.party["wipe"] and request["character_id"] not in self.party["wipe"]["roster"]:
             return {"accepted": False, "reason": "wipe_in_progress"}
+        previous = self.guest if self.guest and self.guest["guest_id"] == request["guest_id"] else None
+        runtime = self.runtime_admission(request, previous["character_id"] if previous else None,
+                                         previous.get("runtime_id") if previous else None,
+                                         disconnected=previous is not None and previous["disconnected"] is not None)
+        if runtime.get("accepted") is False:
+            return runtime
         if (self.guest and self.guest["disconnected"] is not None
                 and time.monotonic() - self.guest["disconnected"] >= DEFAULT_RECONNECT_GRACE):
             return {"accepted": False, "reason": "native_roster_unavailable"}
@@ -335,16 +382,17 @@ class Host:
         self.guest = {
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
             "character_id": active["character"]["character_id"], "disconnected": None,
-            "restore": saved,
+            "restore": saved, "runtime_id": request.get("runtime_id"),
         }
         if not active["resumed"]:
             self.guest_pawn = None
+        self.guest_runtime_replacements.pop(request["guest_id"], None)
         with contextlib.suppress(OSError):
             self.control.event("guest_link_authenticated", guest_id=request["guest_id"],
                                character_id=self.guest["character_id"], resumed=active["resumed"])
         return {"accepted": True, "resumed": active["resumed"],
                 "character_id": self.guest["character_id"], "session_id": self.control.generation,
-                "zone_epoch": self.zone_epoch, "zone": self.last_game["map"]}
+                "zone_epoch": self.zone_epoch, "zone": self.last_game["map"], **runtime}
 
     def disconnected(self, guest_id: str) -> None:
         if not self.guest or self.guest["guest_id"] != guest_id or self.stopping:
@@ -2232,15 +2280,27 @@ class Host:
                 else:
                     self.expired_characters.add(character)
                     self.expiry_capture_attempts.pop(character, None)
-            if expired and not self.last_game.get("remote_clients", 0):
+            if (expired and self.guest["character_id"] in self.expired_characters
+                    and self.last_game.get("remote_clients") == 0):
                 expired_guest = self.guest
+                guest_id = expired_guest["guest_id"]
+                can_retire = True
                 if self.enrollment:
                     reservation = self.enrollment.pending
-                    if reservation and reservation.guest_id == expired_guest["guest_id"]:
+                    if reservation and reservation.guest_id == guest_id:
                         self.enrollment.cancel(reservation.id)
-                    self.enrollment.retire(expired_guest["guest_id"], self.last_game)
-                await transport.release_guest(expired_guest["guest_id"])
-                if self.guest is expired_guest:
+                    if guest_id in self.enrollment.assignments:
+                        can_retire = self.enrollment.retire(guest_id, self.last_game).state == "released"
+                    else:
+                        try:
+                            census = _census(self.last_game)
+                        except ValueError:
+                            can_retire = False
+                        else:
+                            can_retire = not census.connections
+                if can_retire:
+                    self.report_guest_runtime_retired(guest_id)
+                    await transport.release_guest(guest_id)
                     character = expired_guest["character_id"]
                     self.expired_characters.add(character)
                     self.expiry_capture_attempts.pop(character, None)
@@ -3208,6 +3268,7 @@ class Host:
             await asyncio.sleep(.4)
 
     async def run(self, bridge: Bridge, transport) -> None:
+        self.relay = transport
         if self.mindcore_carry:
             self.mindcore_carry.bridge = bridge
         invites = (native_host_invitation.HostInvitationMailbox(bridge.directory, self.control.run, self.invite)
@@ -3813,8 +3874,11 @@ async def open_admission(transport, invite: dict, request: dict, *, timeout: flo
     """Retry only bounded, authenticated waiting states reported by the host."""
     windows = {"guest_already_connected": 2.0, "native_roster_unavailable": 5.0}
     if queue:
-        windows.update(travel_in_progress=25.0, wipe_in_progress=35.0)
+        windows.update(guest_already_connected=14.0, travel_in_progress=25.0, wipe_in_progress=35.0,
+                       native_runtime_retiring=NATIVE_RUNTIME_RETIREMENT_WAIT)
     started = time.monotonic()
+    retirement_seen = False
+    after_retirement = None
     while True:
         result = await transport.connect(
             invite["host"], invite["port"], invite["certificate"], request, timeout=timeout,
@@ -3822,11 +3886,20 @@ async def open_admission(transport, invite: dict, request: dict, *, timeout: flo
         if result.get("accepted"):
             return result
         reason = result.get("reason")
-        if not isinstance(reason, str) or time.monotonic() - started >= windows.get(reason, 0):
+        if not isinstance(reason, str) or reason not in windows:
+            return result
+        now = time.monotonic()
+        if reason == NATIVE_RUNTIME_RETIRING:
+            retirement_seen = True
+        elif retirement_seen and after_retirement is None:
+            after_retirement = now
+        window_start = after_retirement if after_retirement is not None and reason != NATIVE_RUNTIME_RETIRING else started
+        if (now - window_start >= windows[reason]
+                or retirement_seen and now - started >= NATIVE_RUNTIME_RETIREMENT_WAIT):
             return result
         if on_wait:
             on_wait(reason)
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(1.0 if reason == NATIVE_RUNTIME_RETIRING else 0.25)
 
 
 async def character_catalog(work: Path, invitation: Path, name: str | None,
@@ -3912,6 +3985,8 @@ class Client:
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
         request["protocol_version"] = PROTOCOL
+        if isinstance(self.transport.runtime_id, str):
+            request["runtime_id"] = self.transport.runtime_id
         result = await open_admission(
             self.transport, self.invite, request, timeout=timeout, queue=queue,
             on_wait=self.admission_wait if queue else None,

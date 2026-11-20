@@ -137,6 +137,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_preserves_both_unreal_facing_endpoints(self):
         guest = self.request["guest_id"]
+        self.request["runtime_id"] = self.client.runtime_id
         self.assertTrue((await self.connect_guest())["accepted"])
         host_endpoint = self.host.guest_endpoint(guest)
         client_endpoint = self.client.address
@@ -152,9 +153,100 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertEqual(self.host.guest_endpoint(guest), host_endpoint)
+        self.assertEqual(self.host.guest_runtime_id(guest), self.client.runtime_id)
         self.assertEqual(self.client.address, client_endpoint)
         self.assertTrue(self.disconnected.empty())
         await self.exchange(1200)
+
+    async def test_fresh_runtime_cannot_use_old_relay_and_rotates_only_on_explicit_admission(self):
+        guest = self.request["guest_id"]
+        original_request = dict(self.request, runtime_id=self.client.runtime_id)
+        fresh = await start_client()
+        self.addAsyncCleanup(fresh.close)
+        fresh_request = dict(self.request, runtime_id=fresh.runtime_id)
+        self.assertNotEqual(fresh.runtime_id, self.client.runtime_id)
+        retired = False
+
+        def admit(request):
+            if request == original_request:
+                return {"accepted": True}
+            if request == fresh_request:
+                return {"accepted": True, "rotate_game_route": retired}
+            return {"accepted": False, "reason": "unexpected_guest"}
+
+        with patch.object(self.host, "_admit_callback", admit):
+            self.assertTrue((await self.connect_guest(original_request))["accepted"])
+            old_endpoint = self.host.guest_endpoint(guest)
+            await self.exchange(1200)
+            await self.client.disconnect()
+            self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), guest)
+
+            self.assertEqual(await self.connect_guest(fresh_request, client=fresh), {
+                "accepted": False, "reason": "native_runtime_retiring",
+            })
+            self.assertFalse(fresh.connected)
+            self.assertFalse(self.host.connected(guest))
+            self.assertEqual(self.host.guest_endpoint(guest), old_endpoint)
+            self.assertEqual(self.host.guest_runtime_id(guest), self.client.runtime_id)
+            self.game_client.sendto(b"parked guest packet", fresh.address)
+            self.game_host.sendto(b"parked host packet", old_endpoint)
+            for inbox in (self.host_inbox, self.client_inbox):
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(inbox.messages.get(), 0.15)
+
+            retired = True
+            self.assertEqual(await self.connect_guest(fresh_request, client=fresh), {"accepted": True})
+            new_endpoint = self.host.guest_endpoint(guest)
+            self.assertNotEqual(new_endpoint, old_endpoint)
+            self.assertEqual(self.host.guest_runtime_id(guest), fresh.runtime_id)
+            self.game_client.sendto(b"new runtime packet", fresh.address)
+            self.assertEqual(await self.host_inbox.next(), (b"new runtime packet", new_endpoint))
+            self.game_host.sendto(b"stale old route packet", old_endpoint)
+            self.game_host.sendto(b"new route reply", new_endpoint)
+            self.assertEqual(await self.client_inbox.next(), (b"new route reply", fresh.address))
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(self.client_inbox.messages.get(), 0.15)
+
+    async def test_failed_authorized_rotation_retires_old_route_and_allows_retry(self):
+        guest = self.request["guest_id"]
+        original_request = dict(self.request, runtime_id=self.client.runtime_id)
+        fresh = await start_client()
+        self.addAsyncCleanup(fresh.close)
+        fresh_request = dict(self.request, runtime_id=fresh.runtime_id)
+
+        def admit(request):
+            if request == original_request:
+                return {"accepted": True}
+            if request == fresh_request:
+                return {"accepted": True, "rotate_game_route": True}
+            return {"accepted": False, "reason": "unexpected_guest"}
+
+        with patch.object(self.host, "_admit_callback", admit):
+            self.assertTrue((await self.connect_guest(original_request))["accepted"])
+            prior = self.host._guest_routes[guest]
+            await self.client.disconnect()
+            self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), guest)
+            self.assertFalse(prior.transport.is_closing())
+
+            with (patch.object(self.host, "_create_game_route", side_effect=OSError("relay bind failed")) as opener,
+                  self.assertLogs(link.__name__, level="WARNING")):
+                self.assertEqual(await self.connect_guest(fresh_request, client=fresh), {
+                    "accepted": False, "reason": "admission_failed",
+                })
+            opener.assert_awaited_once_with(guest)
+            self.assertEqual(await asyncio.wait_for(self.disconnected.get(), 3), guest)
+            self.assertFalse(fresh.connected)
+            self.assertFalse(self.host.connected(guest))
+            self.assertTrue(prior.transport.is_closing())
+            self.assertIsNone(self.host.guest_endpoint(guest))
+            self.assertIsNone(self.host.guest_runtime_id(guest))
+
+            self.assertEqual(await self.connect_guest(fresh_request, client=fresh), {"accepted": True})
+            self.assertEqual(self.host.guest_runtime_id(guest), fresh.runtime_id)
+            self.game_client.sendto(b"retry after relay bind failure", fresh.address)
+            self.assertEqual(await self.host_inbox.next(), (
+                b"retry after relay bind failure", self.host.guest_endpoint(guest),
+            ))
 
     async def test_travel_hold_drops_game_packets_keeps_control_and_releases_same_route(self):
         self.assertTrue((await self.connect_guest())["accepted"])

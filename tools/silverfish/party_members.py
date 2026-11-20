@@ -37,6 +37,7 @@ class PartyMember:
     binding: Assignment | None = None
     entered: bool = False
     ready: bool = False
+    runtime_id: str | None = None
 
     def in_grace(self, now: float) -> bool:
         return self.grace_until is None or now < self.grace_until
@@ -206,11 +207,21 @@ class PartyMembers:
         """
         expired = tuple(member for member in self.expired() if member.lease_id not in awaiting_checkpoint)
         for member in expired:
+            if member.binding:
+                if self.forget_departed(member.guest_id, game).state != "released":
+                    continue
+            else:
+                # A retired reservation can leave stock handshake traffic without a pawn.
+                try:
+                    current = _census(game)
+                except ValueError:
+                    continue
+                known = {binding.connection_id for binding in self.enrollment.assignments.values()}
+                if current.connections.keys() - known:
+                    continue
             pending = self.enrollment.pending
             if pending and pending.guest_id == member.guest_id:
                 self.enrollment.cancel(pending.id)
-            if member.binding and self.forget_departed(member.guest_id, game).state != "released":
-                continue
             del self._members[member.guest_id]
         return expired
 
@@ -230,7 +241,7 @@ class PartyMembers:
         return result
 
     def observe(self, game: dict | None) -> EnrollmentResult:
-        result = self.enrollment.observe(game)
+        result = self.enrollment.observe(game, expired_guests=frozenset(member.guest_id for member in self.expired()))
         self._sync_bindings()
         if result.state in ("idle", "bound", "pending"):
             self._last_census = _census(game)

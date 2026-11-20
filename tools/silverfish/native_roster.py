@@ -223,11 +223,15 @@ class RosterEnrollment:
         self._pending = _Pending(reservation, current.sequence)
         return EnrollmentResult("reserved", "ready_for_relay", reservation)
 
-    def observe(self, game: dict | None) -> EnrollmentResult:
+    def observe(self, game: dict | None, *, expired_guests: frozenset[str] = frozenset()) -> EnrollmentResult:
         """Bind only the sole new ready connection with the original baseline intact."""
         current = self._current(game)
         if isinstance(current, EnrollmentResult):
             return current
+        for guest_id in expired_guests:
+            binding = self._assignments.get(guest_id)
+            if binding and binding.connection_id not in current.connections:
+                del self._assignments[guest_id]
         pending = self._pending
         known, problem = self._baseline(current)
         if problem:

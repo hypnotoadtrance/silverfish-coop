@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from test_title_handoff import ready
-from tools.silverfish import native_title_entry, runtime, service
+from tools.silverfish import native_title_entry, runtime, service, title_session
 from tools.silverfish.control import Control
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession, host_plan, join_plan
@@ -409,6 +409,67 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.wait(lambda: not self.bridge.alive)
         child.finish.set()
         await task
+
+    async def test_verified_runtime_retirement_wait_extends_deadlines_and_stays_cancellable(self):
+        control = self.enterContext(Control(self.directory / "control"))
+        replacement, stalled = Child("join"), Child("join")
+        attempts = iter((replacement, stalled))
+        plan = SessionPlan(
+            replacement.start,
+            lambda: replacement.state,
+            lambda _: True,
+            resolve_claim=lambda _: next(attempts).plan(),
+        )
+        elapsed = 0.0
+        clock = Mock(wraps=time)
+        clock.monotonic.side_effect = lambda: elapsed
+
+        async def advance(seconds):
+            nonlocal elapsed
+            frame = self.bridge.sequence
+            elapsed += seconds
+            await self.wait(lambda: self.bridge.sequence > frame)
+
+        with patch.object(title_session, "time", clock):
+            session = TitleSession(self.bridge, {"join": plan}, retire_title=self.bridge.retire,
+                                   poll_interval=.005, startup_timeout=1, stall_timeout=.3, control=control)
+            task = asyncio.create_task(session.run())
+            self.addAsyncCleanup(self.stop, task)
+            first = await self.control_offer(control)
+            selected = await self.control_reply(self.send_control(control, "title-select", first, role="join"))
+            self.assertTrue(selected["ok"])
+            await replacement.started.wait()
+            replacement.publish("waiting_for_host", wait_reason=service.NATIVE_RUNTIME_RETIRING)
+            await self.wait(lambda: self.read_control(control).get("progress") == "waiting_for_host")
+
+            # Fresh, verified waiting frames continue beyond both normal deadlines.
+            for _ in range(7):
+                replacement.publish("waiting_for_host", wait_reason=service.NATIVE_RUNTIME_RETIRING)
+                await advance(.2)
+            self.assertGreater(elapsed, 1)
+            self.assertTrue(self.bridge.alive)
+            self.assertFalse(replacement.cleanup.is_set())
+            self.assertEqual(self.read_control(control)["progress"], "waiting_for_host")
+
+            cancelled = await self.control_reply(self.send_control(control, "title-cancel", first))
+            self.assertEqual((cancelled["state"], cancelled["attempt"]), ("accepted", selected["attempt"]))
+            await replacement.cleanup.wait()
+            second = await self.control_offer(control)
+            self.assertNotEqual(first, second)
+            self.assertEqual(self.read_control(control)["last_failure"]["code"], "start_cancelled")
+
+            another = await self.control_reply(self.send_control(control, "title-select", second, role="join"))
+            self.assertTrue(another["ok"])
+            await stalled.started.wait()
+            stalled.publish("waiting_for_host", wait_reason="ordinary_wait")
+            await self.wait(lambda: self.read_control(control).get("progress") == "waiting_for_host")
+            await advance(.2)
+            stalled.publish("waiting_for_host", wait_reason="ordinary_wait")
+            await advance(.2)
+            await stalled.cleanup.wait()
+            self.assertNotEqual(second, await self.control_offer(control))
+            self.assertEqual(self.read_control(control)["last_failure"]["code"], "startup_stalled")
+            self.assertTrue(self.bridge.alive)
 
     async def test_embedded_attempt_waits_for_the_owned_game_pid_to_accept_this_claim(self):
         child = Child("host")

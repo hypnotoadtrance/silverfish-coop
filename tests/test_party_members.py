@@ -152,6 +152,39 @@ class PartyMembersTests(unittest.TestCase):
         self.assertNotEqual(later.member.lease_id, first.member.lease_id)
         self.assertEqual(later.member.restore, {"health": 19, "downed": True})
 
+    def test_expected_expired_departure_does_not_abort_other_guests_enrollment(self):
+        first = self.enroll_first()
+        self.party.disconnect(first.member.guest_id)
+        self.now += 90
+        second = self.admit(self.second, snapshot(2, self.one))
+        after_departure = snapshot(3, self.two)
+
+        enrolled = self.party.observe(after_departure)
+
+        self.assertEqual(enrolled.state, "bound")
+        self.assertEqual(enrolled.reservation, second.enrollment.reservation)
+        self.assertEqual(enrolled.assignment.connection_id, "c2")
+        self.assertIsNone(first.member.binding)
+        self.assertEqual(self.party.expire(after_departure), (first.member,))
+        self.assertIs(self.party.get(second.member.guest_id), second.member)
+
+    def test_unbound_expired_guest_waits_for_stock_handshake_to_leave(self):
+        first = self.admit(self.first, snapshot(1))
+        joining = dict(self.one, state="joining", pawn=None)
+        handshaking = snapshot(2, joining, aliases=[])
+        self.assertEqual(self.party.observe(handshaking).state, "pending")
+        self.party.disconnect(first.member.guest_id)
+        self.now += 90
+
+        self.assertEqual(self.party.expire(handshaking), (first.member,))
+        self.assertIs(self.party.get(first.member.guest_id), first.member)
+        self.assertEqual(self.party.enrollment.pending, first.enrollment.reservation)
+
+        drained = snapshot(3)
+        self.assertEqual(self.party.expire(drained), (first.member,))
+        self.assertIsNone(self.party.get(first.member.guest_id))
+        self.assertIsNone(self.party.enrollment.pending)
+
     def test_travel_retires_old_bindings_while_active_roles_wait_for_new_proof(self):
         first, second = self.enroll_two()
         roles = self.party.roles()

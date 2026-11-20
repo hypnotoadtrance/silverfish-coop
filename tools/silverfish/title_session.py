@@ -294,6 +294,8 @@ class TitleSession:
                 self._join_settings.poll(None)
 
     async def _launch(self, claim: Claim, original_title: tuple) -> bool:
+        from .service import NATIVE_RUNTIME_RETIREMENT_WAIT, NATIVE_RUNTIME_RETIRING
+
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
         try:
@@ -312,6 +314,7 @@ class TitleSession:
         started_wall, started = time.time(), time.monotonic()
         last_progress, deadline = started, started + self._startup_timeout
         progress, ready_at, child_generation = None, None, None
+        runtime_wait_started = False
         error = "child_exited_before_ready"
         self._starting = True
         self._cancel_requested = False
@@ -353,8 +356,16 @@ class TitleSession:
                         break
                     child_generation = status["generation"]
                 if verified and status.get("active") is True and status.get("state") in _PROGRESS:
+                    if (claim.action == "join" and status["state"] == "waiting_for_host"
+                            and status.get("wait_reason") == NATIVE_RUNTIME_RETIRING
+                            and 0 <= time.time() - status["updated_unix"] <= 5):
+                        if not runtime_wait_started:
+                            deadline = max(deadline, now + NATIVE_RUNTIME_RETIREMENT_WAIT + 20)
+                            runtime_wait_started = True
+                        last_progress = now
                     game = status.get("game")
-                    observed = status["generation"], status["state"], game.get("sequence") if isinstance(game, dict) else None
+                    sequence = game.get("sequence") if isinstance(game, dict) else None
+                    observed = status["generation"], status["state"], sequence, status.get("wait_reason")
                     if progress != observed:
                         progress, last_progress = observed, now
                         self._publish("starting", attempt=attempt, progress=status["state"])

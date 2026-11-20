@@ -20,7 +20,6 @@ class MultiHost(Host):
         if not self.enrollment or not self.native_profile or not self.persist_native_guest:
             raise ValueError("Multi-guest hosting requires staged exact native enrollment and detached saves")
         self.members = PartyMembers(self.store, max_guests=max_guests, enrollment=self.enrollment)
-        self.relay = None
         self.returning_guests: list[str] = []
         self.return_handshake: tuple[int, float] | None = None
         self.return_census_floor: int | None = None
@@ -67,6 +66,12 @@ class MultiHost(Host):
             return {"accepted": False, "reason": reason}
         if self.party["wipe"] and request["character_id"] not in self.party["wipe"]["roster"]:
             return {"accepted": False, "reason": "wipe_in_progress"}
+        previous = self.members.get(request["guest_id"])
+        runtime = self.runtime_admission(request, previous.character_id if previous else None,
+                                         previous.runtime_id if previous else None,
+                                         disconnected=previous is not None and previous.disconnected_at is not None)
+        if runtime.get("accepted") is False:
+            return runtime
         try:
             admitted = self.members.admit(request["guest_id"], request["credential"], request["character_id"], self.last_game)
         except PartyMemberError as error:
@@ -76,10 +81,13 @@ class MultiHost(Host):
             return {"accepted": False, "reason": reason}
         self._update_native_relay()
         member = admitted.member
+        member.runtime_id = request.get("runtime_id")
+        self.guest_runtime_replacements.pop(member.guest_id, None)
         self.control.event("guest_link_authenticated", guest_id=member.guest_id, character_id=member.character_id,
                            role=member.role, resumed=admitted.resumed)
         return {"accepted": True, "resumed": admitted.resumed, "character_id": member.character_id,
-                "session_id": self.control.generation, "zone_epoch": self.zone_epoch, "zone": self.last_game["map"]}
+                "session_id": self.control.generation, "zone_epoch": self.zone_epoch, "zone": self.last_game["map"],
+                **runtime}
 
     def disconnected(self, guest_id: str) -> None:
         if self.stopping:
@@ -358,12 +366,14 @@ class MultiHost(Host):
             request += (generation["slot"],)
         snapshot = await bridge.command("native-guest-bind-exact", *request, timeout=7)
         scope = snapshot.get("native_guest_save_members", {}).get(binding.pawn, {})
-        if scope.get("state") != "bound":
+        if scope.get("state") != "bound" or scope.get("pawn") != binding.pawn:
             raise RuntimeError("The game did not detach the exact authenticated guest save")
         if frame:
             proof = snapshot.get("native_guest_save_member_frames", {}).get(binding.pawn, {})
-            if proof.get("state") != "restored" or proof.get("slot") != frame["slot"]:
+            if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]
+                    or proof.get("pawn") != binding.pawn):
                 raise RuntimeError("The game did not restore the authenticated guest save generation")
+            self.control.event("native_guest_save_restored", character_id=member.character_id, role=member.role, **proof)
         self.last_game, self.last_seen = snapshot, time.monotonic()
         snapshot = await self._place_member(bridge, member, observation, near_host=member.spawn_near_host)
         self.last_game, self.last_seen = snapshot, time.monotonic()
@@ -394,7 +404,7 @@ class MultiHost(Host):
                         member.spawn_near_host = True
                         if member.guest_id not in self.returning_guests:
                             self.returning_guests.append(member.guest_id)
-        elif result.state == "aborted" and result.reservation:
+        if result.state == "aborted" and result.reservation:
             identifier = result.reservation.guest_id
             self.control.event("native_guest_enrollment_aborted", guest_id=identifier, reason=result.reason)
             await transport.abort_guest_route(identifier)
@@ -422,9 +432,9 @@ class MultiHost(Host):
         self.expiry_capture_attempts = awaiting
         self.retirement_processed = {member.lease_id for member in expired if member.lease_id not in awaiting}
         for member in self.members.expire(self.last_game, awaiting_checkpoint=frozenset(awaiting)):
-            if member.binding:
-                with contextlib.suppress(RuntimeError, TimeoutError):
-                    await bridge.command("native-guest-clear", member.binding.pawn, timeout=3)
+            if self.members.get(member.guest_id) is not None:
+                continue
+            self.report_guest_runtime_retired(member.guest_id)
             with contextlib.suppress(link.LinkError):
                 await transport.release_guest(member.guest_id)
 

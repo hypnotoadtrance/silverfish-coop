@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import math
+import secrets
 import ssl
 import struct
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
@@ -258,6 +259,11 @@ def _validate_request(request: Admission) -> None:
         raise LinkError("invalid protocol_version")
     if "catalog" in request and type(request["catalog"]) is not bool:
         raise LinkError("invalid catalog flag")
+    if "runtime_id" in request:
+        runtime_id = request["runtime_id"]
+        if (request.get("catalog") is True or not isinstance(runtime_id, str) or len(runtime_id) != 32
+                or runtime_id == "0" * 32 or any(character not in "0123456789abcdef" for character in runtime_id)):
+            raise LinkError("invalid runtime_id")
 
 
 def _validate_response(response: Admission) -> None:
@@ -540,6 +546,12 @@ class _HostProtocol(_LinkProtocol):
             self.send_admission(response)
 
 
+@dataclass(frozen=True)
+class _GameRoute:
+    transport: asyncio.DatagramTransport
+    runtime_id: str | None
+
+
 class HostLink:
     """Authenticated guest links with separate Unreal-facing UDP endpoints."""
 
@@ -559,7 +571,7 @@ class HostLink:
         self._admit_callback = admit
         self._disconnect_callback = on_disconnect
         self._request_callback = on_request
-        self._guest_sockets: dict[str, asyncio.DatagramTransport] = {}
+        self._guest_routes: dict[str, _GameRoute] = {}
         self._protocols: dict[str, _HostProtocol] = {}
         self._native_admission: frozenset[str] | None = None
         self._game_route_holds = 0
@@ -573,8 +585,13 @@ class HostLink:
         return _address(self._server._transport)
 
     def guest_endpoint(self, guest_id: str) -> Address | None:
-        transport = self._guest_sockets.get(guest_id)
-        return _address(transport) if transport is not None else None
+        route = self._guest_routes.get(guest_id)
+        return _address(route.transport) if route else None
+
+    def guest_runtime_id(self, guest_id: str) -> str | None:
+        """Identify the game process associated with a connected or cached relay."""
+        route = self._guest_routes.get(guest_id)
+        return route.runtime_id if route else None
 
     def connected(self, guest_id: str) -> bool:
         """Return whether the guest currently has an admitted game link."""
@@ -603,10 +620,10 @@ class HostLink:
             protocol = self._protocols.get(guest_id)
             if protocol and protocol.game_access:
                 return False
-            transport = self._guest_sockets.pop(guest_id, None)
-            if transport is None:
+            route = self._guest_routes.pop(guest_id, None)
+            if route is None:
                 return False
-            transport.close()
+            route.transport.close()
             return True
 
     async def abort_guest_route(self, guest_id: str) -> None:
@@ -616,15 +633,16 @@ class HostLink:
             if protocol and protocol.game_access:
                 protocol.close(error_code=_APP_ERROR, reason_phrase="native enrollment failed")
                 await self._release_locked(protocol)
-            route = self._guest_sockets.pop(guest_id, None)
+            route = self._guest_routes.pop(guest_id, None)
             if route is not None:
-                route.close()
+                route.transport.close()
 
     async def _create_game_route(self, guest_id: str) -> asyncio.DatagramTransport:
         transport = None
 
         def receive(data: bytes, _: Address) -> None:
-            if transport is not None and self._guest_sockets.get(guest_id) is transport:
+            current = self._guest_routes.get(guest_id)
+            if current is not None and current.transport is transport:
                 self._from_game(guest_id, data)
 
         transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
@@ -639,15 +657,15 @@ class HostLink:
         async with self._lock:
             if self._closed or not self.connected(guest_id) or not self._native_route_permitted(guest_id):
                 raise LinkError("the guest's Unreal relay route is unavailable")
-            prior = self._guest_sockets.get(guest_id)
+            prior = self._guest_routes.get(guest_id)
             if prior is None:
                 raise LinkError("the guest has no Unreal relay route")
-            route = await self._create_game_route(guest_id)
+            route = _GameRoute(await self._create_game_route(guest_id), prior.runtime_id)
             if self._closed or not self.connected(guest_id) or not self._native_route_permitted(guest_id):
-                route.close()
+                route.transport.close()
                 raise LinkError("the guest's Unreal relay route changed")
-            self._guest_sockets[guest_id] = route
-            prior.close()
+            self._guest_routes[guest_id] = route
+            prior.transport.close()
 
     async def refresh_game_routes(self) -> None:
         """Rebuild Unreal relay routes after hard travel without closing the QUIC link.
@@ -658,26 +676,27 @@ class HostLink:
         async with self._lock:
             if self._closed:
                 raise LinkError("host link is closed")
-            refreshed: dict[str, asyncio.DatagramTransport] = {}
+            refreshed: dict[str, _GameRoute] = {}
             try:
                 for guest_id in self._protocols:
                     if self.connected(guest_id):
-                        refreshed[guest_id] = await self._create_game_route(guest_id)
+                        prior = self._guest_routes[guest_id]
+                        refreshed[guest_id] = _GameRoute(await self._create_game_route(guest_id), prior.runtime_id)
                 if self._closed:
                     raise LinkError("host link is closed")
                 for guest_id in tuple(refreshed):
                     if not self.connected(guest_id):
-                        refreshed.pop(guest_id).close()
+                        refreshed.pop(guest_id).transport.close()
             except BaseException as error:
                 for route in refreshed.values():
-                    route.close()
+                    route.transport.close()
                 if isinstance(error, OSError) and not isinstance(error, LinkError):
                     raise LinkError("could not refresh the Unreal relay route") from None
                 raise
 
-            old_routes, self._guest_sockets = self._guest_sockets, refreshed
+            old_routes, self._guest_routes = self._guest_routes, refreshed
             for route in old_routes.values():
-                route.close()
+                route.transport.close()
 
     def _spawn(self, callback: Callable[..., Coroutine[Any, Any, None]], *args: Any) -> None:
         # aioquic can deliver termination events after the server has closed.
@@ -696,6 +715,7 @@ class HostLink:
     async def _admit(self, protocol: _HostProtocol, request: Admission) -> bytes:
         guest_id = request["guest_id"]
         catalog = request.get("catalog") is True
+        runtime_id = request.get("runtime_id")
         async with self._lock:
             if self._closed or protocol.terminated:
                 return _encode(_rejection("host_unavailable"))
@@ -709,7 +729,8 @@ class HostLink:
                 reason = "guest_already_connected" if self._max_game_guests == 1 else "party_full"
                 return _encode(_rejection(reason))
 
-            transport = None
+            route = prior = None
+            rotate = False
             try:
                 async with asyncio.timeout(_ADMISSION_TIMEOUT):
                     response = self._admit_callback(request)
@@ -722,6 +743,12 @@ class HostLink:
                     protocol.game_access = response.get("game_access") is not False
                     self._protocols[guest_id] = protocol
                 _validate_response(response)
+                # The admission callback authorizes replacement only after its native roster check.
+                rotate = response.get("rotate_game_route", False)
+                if type(rotate) is not bool or rotate and (not protocol.game_access or runtime_id is None):
+                    raise LinkError("invalid game relay rotation")
+                if "rotate_game_route" in response:
+                    response = {key: value for key, value in response.items() if key != "rotate_game_route"}
                 payload = _encode(response)
                 if not response["accepted"]:
                     return payload
@@ -732,14 +759,19 @@ class HostLink:
                 if protocol.terminated or self._closed:
                     return _encode(_rejection("host_unavailable"))
 
-                if protocol.game_access and guest_id not in self._guest_sockets:
-                    if len(self._guest_sockets) >= _MAX_CACHED_GUESTS:
+                prior = self._guest_routes.get(guest_id)
+                if protocol.game_access and prior and prior.runtime_id != runtime_id and not rotate:
+                    return _encode(_rejection("native_runtime_retiring"))
+                if protocol.game_access and (prior is None or rotate):
+                    if prior is None and len(self._guest_routes) >= _MAX_CACHED_GUESTS:
                         return _encode(_rejection("guest_endpoint_capacity"))
-                    transport = await self._create_game_route(guest_id)
+                    route = _GameRoute(await self._create_game_route(guest_id), runtime_id)
                 if protocol.terminated or self._closed:
                     return _encode(_rejection("host_unavailable"))
-                if transport is not None:
-                    self._guest_sockets[guest_id] = transport
+                if route is not None:
+                    self._guest_routes[guest_id] = route
+                    if prior is not None:
+                        prior.transport.close()
                 protocol.authorized = True
                 return payload
             except Exception:
@@ -747,8 +779,12 @@ class HostLink:
                 return _encode(_rejection("admission_failed"))
             finally:
                 if not protocol.authorized and self._protocols.get(guest_id) is protocol:
-                    if transport is not None:
-                        transport.close()
+                    if route is not None:
+                        route.transport.close()
+                    # The callback already verified that the old native seat can be replaced.
+                    if rotate is True and prior is not None and self._guest_routes.get(guest_id) is prior:
+                        del self._guest_routes[guest_id]
+                        prior.transport.close()
                     await self._release_locked(protocol)
 
     async def _run_action(self, protocol: _HostProtocol, body: bytes) -> bytes:
@@ -823,9 +859,9 @@ class HostLink:
         if guest_id is None or self._protocols.get(guest_id) is not protocol:
             return
         if protocol.authorized and protocol.game_access and self._native_route_permitted(guest_id):
-            transport = self._guest_sockets.get(guest_id)
-            if transport is not None:
-                transport.sendto(data)
+            route = self._guest_routes.get(guest_id)
+            if route is not None:
+                route.transport.sendto(data)
 
     def _from_game(self, guest_id: str, data: bytes) -> None:
         protocol = self._protocols.get(guest_id)
@@ -840,9 +876,9 @@ class HostLink:
             for protocol in tuple(self._protocols.values()):
                 await self._release_locked(protocol)
             self._server.close()
-            for transport in self._guest_sockets.values():
-                transport.close()
-            self._guest_sockets.clear()
+            for route in self._guest_routes.values():
+                route.transport.close()
+            self._guest_routes.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         # Give the QUIC close send a turn before finishing the UDP transport.
@@ -1028,6 +1064,7 @@ class ClientLink:
         self._lock = asyncio.Lock()
         self._closed = False
         self._catalog_only = catalog_only
+        self._runtime_id = None if catalog_only else secrets.token_hex(16)
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _ClientProtocol | None = None
         self._context = None
@@ -1036,6 +1073,11 @@ class ClientLink:
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
+
+    @property
+    def runtime_id(self) -> str | None:
+        """Identify this game process across reconnects of its QUIC link."""
+        return self._runtime_id
 
     @property
     def address(self) -> Address:

@@ -77,7 +77,9 @@ Check guest status from another terminal. A ready gameplay session reports `stat
 
 ## Rejoin and resume
 
-Leave the host and guest launchers running during a brief network interruption. The guest can retry automatically. The host reserves the character for 90 seconds. The reserved pawn still counts for party travel and other active-player checks. Rejoining within that window can restore control of the same pawn. After the reservation expires, the host attempts a final native checkpoint where supported, retires the old connection, and restores the character near the host on a fresh join.
+Leave both games running during a brief network interruption. The guest can retry automatically. The host reserves the character for 90 seconds. The reserved pawn still counts for party travel and other active-player checks. Reconnecting within that window restores control of the same pawn if Unreal still has the connection.
+
+If the guest game closes unexpectedly, reopen co-op and select the same character. Join can wait about two minutes while the host saves the old pawn and Unreal clears its connection. The replacement then joins close to the host with its saved inventory. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
 
 Reuse the invitation and character selection for a later session. Keep the host campaign's `save` and `game-user` directories together. The native campaign uses both for its checkpoint and stock save generations. Restart the host with the same campaign name and native flags. Its saved zone is selected on startup.
 

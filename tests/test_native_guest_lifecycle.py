@@ -32,24 +32,39 @@ class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):
                                 binding=SimpleNamespace(pawn="pawn1"))
         second = SimpleNamespace(role="guest2", lease_id="lease2", guest_id="peer2", character_id="char2", ready=True,
                                  binding=SimpleNamespace(pawn="pawn2"))
-        expired = (first, second)
+        old_stock_gone = {"peer2"}
+        members_by_id = {member.guest_id: member for member in (first, second)}
+
+        def expire(_game, awaiting_checkpoint):
+            eligible = tuple(member for member in members_by_id.values() if member.lease_id not in awaiting_checkpoint)
+            for member in eligible:
+                if member.guest_id in old_stock_gone:
+                    del members_by_id[member.guest_id]
+            return eligible
+
         members = SimpleNamespace(
-            expired=lambda: expired, match_pawns=lambda *_args, **_kwargs: {member.role: member for member in expired},
-            expire=Mock(side_effect=lambda _game, awaiting_checkpoint: tuple(
-                member for member in expired if member.lease_id not in awaiting_checkpoint)),
+            expired=lambda: tuple(members_by_id.values()), get=members_by_id.get,
+            match_pawns=lambda *_args, **_kwargs: {member.role: member for member in members_by_id.values()},
+            expire=expire,
         )
         host = SimpleNamespace(members=members, last_game={}, retirement_processed=set(), expiry_capture_attempts={},
-                               checkpoint_departing_guests=AsyncMock(side_effect=({"char2"}, {"char1"})))
+                               checkpoint_departing_guests=AsyncMock(side_effect=({"char2"}, {"char1"}, set())),
+                               report_guest_runtime_retired=Mock())
         bridge = SimpleNamespace(command=AsyncMock())
         transport = SimpleNamespace(release_guest=AsyncMock())
         await MultiHost._retire_expired_guests(host, bridge, transport)
         transport.release_guest.assert_awaited_once_with("peer2")
         self.assertEqual(host.expiry_capture_attempts, {"lease1": 1})
-        expired = (first,)
+        await MultiHost._retire_expired_guests(host, bridge, transport)
+        host.checkpoint_departing_guests.assert_awaited_with(bridge, {"char1": "pawn1"})
+        transport.release_guest.assert_awaited_once_with("peer2")
+        host.report_guest_runtime_retired.assert_called_once_with("peer2")
+        self.assertEqual(host.expiry_capture_attempts, {})
+
+        old_stock_gone.add("peer1")
         await MultiHost._retire_expired_guests(host, bridge, transport)
         transport.release_guest.assert_awaited_with("peer1")
-        host.checkpoint_departing_guests.assert_awaited_with(bridge, {"char1": "pawn1"})
-        self.assertEqual(host.expiry_capture_attempts, {})
+        host.report_guest_runtime_retired.assert_called_with("peer1")
 
 
 class GuestInputIdentityTests(unittest.IsolatedAsyncioTestCase):
