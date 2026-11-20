@@ -248,23 +248,46 @@ class Authority:
         holder.sequence, holder.renewed_at = request.sequence, time.monotonic()
         return {"ok": True}
 
-    async def _command(self, holder, request):
-        aim = tuple(f"{value:.3f}" for value in (request.aim or ()))
+    async def _grab(self, holder, request):
+        aim = tuple(f"{value:.3f}" for value in request.aim)
         try:
-            frame = await self.bridge.command(ACTION, holder.pawn, holder.token, request.edge, str(request.sequence), *aim,
+            frame = await self.bridge.command(ACTION, holder.pawn, holder.token, "grab", str(request.sequence), *aim,
                                               timeout=4)
         except RuntimeError as error:
             if str(error).startswith("mutation_unverified_"):
                 self.host.native_checkpoint_unsafe = self.host.stopping = True
             raise
-        row = frame.get(AUTHORITY, {})
         self.host.last_game, self.host.last_seen = frame, time.monotonic()
-        wanted = {"held"} if request.edge == "grab" else {"released", "mount_released"}
+        return self._receipt(frame, holder, request, {"held"})
+
+    def _receipt(self, frame, holder, request, wanted):
+        row = frame.get(AUTHORITY, {})
         if ((frame.get("state"), frame.get("map"), row.get("pawn"), row.get("lease"), row.get("sequence"))
                 != ("hosting", core.MAP, holder.pawn, holder.token, request.sequence)
                 or row.get("state") not in wanted):
             raise RuntimeError("Stock Core carry did not return the exact authoritative receipt")
         return row
+
+    async def _drop(self, holder, request):
+        from .runtime import write_text
+
+        write_text(self.bridge.directory / AUTHORITY_AIM,
+                   f"1\t{holder.token}\t{request.sequence}\tdrop\n", newline="\n")
+        frame = await self.bridge.wait_for(
+            lambda frame: ((row := frame.get(AUTHORITY, {})).get("lease"), row.get("pawn"))
+            == (holder.token, holder.pawn) and row.get("state") in {"released", "mount_released", "failure"},
+            timeout=2)
+        row = frame[AUTHORITY]
+        if row["state"] == "failure":
+            self.host.native_checkpoint_unsafe = self.host.stopping = True
+            raise RuntimeError(row["reason"])
+        return self._receipt(frame, holder, request, {"released", "mount_released"})
+
+    async def release_authenticated(self, character, request):
+        try:
+            return {"ok": True, **await self.operate(character, request)}
+        except (OSError, ValueError, RuntimeError) as error:
+            return {"ok": False, "error": str(error)}
 
     async def operate(self, character, request):
         if request.epoch != self.host.zone_epoch or self.closing:
@@ -277,7 +300,7 @@ class Authority:
             if len(self.spent) > 256:
                 self.spent.pop(next(iter(self.spent)))
             holder = Holder(character, pawn, request.epoch, request.lease, request.sequence, time.monotonic())
-            row = await self._command(holder, request)
+            row = await self._grab(holder, request)
             holder.renewed_at = time.monotonic()
             self.holder = holder
         else:
@@ -289,7 +312,7 @@ class Authority:
                 raise party.RuleError("native_mindcore_carry_stale_sequence")
             self.closing = True
             try:
-                row = await self._command(holder, request)
+                row = await self._drop(holder, request)
             finally:
                 self.closing = False
                 self._forget()

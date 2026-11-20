@@ -24,11 +24,10 @@ class AuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.native = {CHARACTER: {"pawn": PAWN, "connected": True}}
         self.host.native_recipients = lambda: self.native
         self.authority = carry.Authority(self.host)
-        self.authority.bridge = SimpleNamespace(directory=path, command=AsyncMock())
+        self.authority.bridge = SimpleNamespace(directory=path, command=AsyncMock(), wait_for=AsyncMock())
         self.authority.bridge.command.side_effect = lambda *_args, **_kw: {
             **base, carry.AUTHORITY: {"pawn": PAWN, "lease": _args[2], "sequence": int(_args[4]),
-                                     "state": "held" if _args[3] == "grab" else "released",
-                                     "reason": "stock_core_grabbed" if _args[3] == "grab" else "stock_core_released"},
+                                     "state": "held", "reason": "stock_core_grabbed"},
         }
         self.aim_path = path / carry.AUTHORITY_AIM
 
@@ -44,12 +43,24 @@ class AuthorityTests(unittest.IsolatedAsyncioTestCase):
         drop = carry.Request(EPOCH, LEASE, "drop", 3)
         with self.assertRaises(party.RuleError):
             await self.authority.operate(OTHER, drop)
+
+        def stock_released(condition, timeout):
+            self.assertEqual(self.aim_path.read_bytes(), f"1\t{LEASE}\t3\tdrop\n".encode())
+            frame = self.host.last_game
+            self.assertFalse(condition(frame))
+            receipt = dict(frame[carry.AUTHORITY], state="released", reason="stock_core_released", sequence=3)
+            self.assertFalse(condition({**frame, carry.AUTHORITY: dict(receipt, lease="f" * 32)}))
+            released = {**frame, carry.AUTHORITY: receipt}
+            self.assertTrue(condition(released))
+            return released
+
+        self.authority.bridge.wait_for.side_effect = stock_released
         await self.authority.operate(CHARACTER, drop)
         self.assertIsNone(self.authority.holder)
         self.assertFalse(self.aim_path.exists())
         with self.assertRaises(party.RuleError):
             await self.authority.operate(CHARACTER, grab)
-        self.assertEqual(self.authority.bridge.command.await_count, 2)
+        self.authority.bridge.command.assert_awaited_once()
 
     async def test_loss_of_identity_revokes_aim_before_the_native_watchdog_finishes(self):
         await self.authority.operate(CHARACTER, carry.Request(EPOCH, LEASE, "grab", 1, (3, 24)))

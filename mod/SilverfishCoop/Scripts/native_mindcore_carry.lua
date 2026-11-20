@@ -267,17 +267,21 @@ function carry.command(fields, state, phase)
     error(reason, 0)
 end
 
-local function read_aim(context)
+local function read_control(context)
     if not aim_path then return end
     local file = io.open(aim_path, "rb")
     if not file then return end
     local data = file:read(129)
     file:close()
     if not data or #data > 128 then return end
-    local lease, raw_sequence, raw_pitch, raw_yaw = data:match("^1\t([0-9a-f]+)\t(%d+)\t([^\t\r\n]+)\t([^\t\r\n]+)\n$")
+    local lease, raw_sequence, payload = data:match("^1\t([0-9a-f]+)\t(%d+)\t([^\r\n]+)\n$")
     if lease ~= context.lease then return end
-    local number, pitch, yaw = sequence(raw_sequence), angle(raw_pitch, 89.9), angle(raw_yaw, 180)
-    if number and number > context.sequence and pitch and yaw then return number, pitch, yaw end
+    local number = sequence(raw_sequence)
+    if not number or number <= context.sequence then return end
+    if payload == "drop" then return "drop", number end
+    local raw_pitch, raw_yaw = payload:match("^([^\t]+)\t([^\t]+)$")
+    local pitch, yaw = angle(raw_pitch, 89.9), angle(raw_yaw, 180)
+    if pitch and yaw then return "hold", number, pitch, yaw end
 end
 
 function carry.sync(state, phase)
@@ -295,8 +299,12 @@ function carry.sync(state, phase)
         release(context, context.sequence)
         return
     end
-    local number, pitch, yaw = read_aim(context)
-    if not number then return end
+    local action, number, pitch, yaw = read_control(context)
+    if not action then return end
+    if action == "drop" then
+        release(context, number)
+        return
+    end
     local ok, reason = mutate(context, "hold", pitch, yaw)
     if ok and reason == "stock_core_renewed" then
         context.sequence, context.pitch, context.yaw = number, pitch, yaw

@@ -1618,6 +1618,8 @@ class Host:
                 return {"ok": False, "error": str(error)}
             if carry.edge == "aim":
                 return self.mindcore_carry.aim(character, carry)
+            if carry.edge == "drop":
+                return self.mindcore_carry.release_authenticated(character, carry)
             return self.enqueue_native_request(guest_id, request)
         if action == native_smg_hold.ACTION and self.smg_holds and set(request) == {"action", "operation_id", "target"}:
             operation = request.get("operation_id")

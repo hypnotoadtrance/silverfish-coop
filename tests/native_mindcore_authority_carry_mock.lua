@@ -130,7 +130,17 @@ local function run()
     carry.sync(state, "hosting")
     assert(#actions == 2 and actions[2][1] == "hold" and actions[2][2] == 14.5 and actions[2][3] == -29.25)
     refuses(owner_name, lease, "drop", "2", "holder_or_sequence_changed")
-    assert(request(owner_name, lease, "drop", "3") and report()[6] == "released" and report()[7] == 3)
+    for _, ignored in ipairs({"1\t" .. next_lease .. "\t3\tdrop\n", "1\t" .. lease .. "\t2\tdrop\n",
+        "1\t" .. lease .. "\t3\tdrop\t0\n"}) do
+        aim = ignored
+        carry.sync(state, "hosting")
+        assert(#actions == 2 and report()[6] == "held")
+    end
+    aim = "1\t" .. lease .. "\t3\tdrop\n"
+    carry.sync(state, "hosting")
+    carry.sync(state, "hosting")
+    assert(#actions == 3 and actions[3][1] == "release" and not pawn.HeldObject
+        and report()[6] == "released" and report()[7] == 3 and report()[8] == "stock_core_released")
     refuses(owner_name, lease, "grab", "4", "holder_or_sequence_changed", "0", "0")
     assert(request(owner_name, next_lease, "grab", "7", "0", "0"))
     mock_native(pawn:GetAddress(), detached:GetAddress(), scene.canonical:GetAddress(),
