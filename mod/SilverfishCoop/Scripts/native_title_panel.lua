@@ -9,6 +9,8 @@ local actions = {
 local session_path, request_path, loop, current, session, report
 local dismissed, submitted
 local input_keys = {}
+local key_order = {"hide", "host", "join"}
+local queued_keys, bound_keys = {}, false
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
 local initial_port, edited_port = "7777", "28181"
@@ -41,22 +43,35 @@ local function read_offer()
     return {generation = generation, choices = choices, expires = expires}
 end
 
+local function close_host_form(owner)
+    local form = owner.form
+    owner.form = nil
+    if form then form.api.remove(form.draft) end
+end
+
 local function remove_display()
     local old = session
     session = nil
-    if old then display.remove(old.widget) end
+    if old then
+        close_host_form(old)
+        display.remove(old.widget)
+    end
 end
 
 local function message(text)
     display.text(session.widget, text)
 end
 
-local function mount(context, offer)
+local function menu_text(offer)
     local lines = {"Direct IP co-op"}
     if actions[offer.choices].host then lines[#lines + 1] = "F7   Host a campaign" end
     if actions[offer.choices].join then lines[#lines + 1] = "F8   Join with an invite" end
     lines[#lines + 1] = "F9   Hide"
-    local widget = display.mount(context, table.concat(lines, "\n"))
+    return table.concat(lines, "\n")
+end
+
+local function mount(context, offer)
+    local widget = display.mount(context, menu_text(offer))
     session = {context = context, offer = offer, widget = widget, held = {}}
 end
 
@@ -74,7 +89,7 @@ local function request_id()
     if id:find("[^0]") then return id end
 end
 
-local function write_request(generation, action)
+local function write_request(generation, action, host_values)
     local pending = io.open(request_path, "rb")
     if pending then
         pending:close()
@@ -85,7 +100,9 @@ local function write_request(generation, action)
     local temporary = request_path .. "." .. id .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    local written = file:write(table.concat({"1", generation, id, action}, "\t"), "\n")
+    local row = host_values and {"2", generation, id, "host", table.unpack(host_values)}
+        or {"1", generation, id, action}
+    local written = file:write(table.concat(row, "\t"), "\n")
     local closed = file:close()
     -- Windows rename refuses an existing destination. Never remove or replace a pending request.
     if written and closed and os.rename(temporary, request_path) then return true end
@@ -98,7 +115,20 @@ local function can_choose(context)
         and valid(session.widget) and session.widget:IsInViewport()
 end
 
-local function choose(action, context)
+local function active_offer(action, context)
+    if not can_choose(context) then return nil, "title_panel_not_ready" end
+    if not actions[session.offer.choices][action] then return nil, "title_action_not_offered" end
+    if submitted == session.offer.generation then return nil, "title_request_already_pending" end
+    local latest = read_offer()
+    if not latest or latest.generation ~= session.offer.generation or latest.choices ~= session.offer.choices then
+        remove_display()
+        report = nil
+        return nil, "title_offer_changed"
+    end
+    return latest
+end
+
+local function choose(action, context, host_values)
     if not can_choose(context) then return false, "title_panel_not_ready" end
     if action == "hide" then
         dismissed = session.offer.generation
@@ -106,27 +136,86 @@ local function choose(action, context)
         remove_display()
         return true
     end
-    if not actions[session.offer.choices][action] then return false, "title_action_not_offered" end
-    if submitted == session.offer.generation then return false, "title_request_already_pending" end
-    local latest = read_offer()
-    if not latest or latest.generation ~= session.offer.generation or latest.choices ~= session.offer.choices then
-        remove_display()
-        report = nil
-        return false, "title_offer_changed"
-    end
-    if write_request(latest.generation, action) then
+    local latest, reason = active_offer(action, context)
+    if not latest then return false, reason end
+    if write_request(latest.generation, action, host_values) then
         submitted = latest.generation
+        close_host_form(session)
         report = {state = "pending", choices = latest.choices}
         message("Direct IP co-op\nStarting " .. (action == "host" and "host" or "join") .. "...\nF9   Hide")
         return true
     end
+    close_host_form(session)
     report = {state = "unavailable", choices = latest.choices, reason = "title_request_write_failed"}
     message("Could not start co-op. Try again or press F9 to hide.")
     return false, report.reason
 end
 
+local function handle_host_form(action, state, phase, context)
+    local offer, reason = active_offer("host", context)
+    if not offer then return false, reason end
+    local form = session.form
+    if not form then
+        if action ~= "host" then return false, "title_host_form_unavailable" end
+        local api = require("native_title_host_form")
+        session.form = {api = api, draft = api.open(state, phase)}
+        message("")
+        report = {state = "ready", choices = offer.choices}
+        return true
+    end
+    if action == "hide" then
+        close_host_form(session)
+        message(menu_text(offer))
+        return true
+    end
+    if action == "join" then return form.api.next(form.draft, state, phase) end
+    local values, failure = form.api.selection(form.draft, state, phase)
+    if not values then return false, failure end
+    return choose("host", title.probe(state, phase), values)
+end
+
 local function fixture_enabled()
     return os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+end
+
+local function host_form_fixture_command(fields, state, phase)
+    if not fixture_enabled() then error("title_host_form_fixture_unavailable", 0) end
+    local operation, value = fields[3], fields[4]
+    local has_value = operation == "campaign" or operation == "port"
+    if #fields ~= (has_value and 4 or 3) then error("title_host_form_fixture_arguments", 0) end
+    local context = title.probe(state, phase)
+    local offer, reason = active_offer("host", context)
+    if not offer then error(reason, 0) end
+    if operation == "open" then
+        if session.form or settings_fixture or credits_fixture then error("title_host_form_already_open", 0) end
+        local accepted, failure = handle_host_form("host", state, phase, context)
+        if not accepted then error(failure, 0) end
+        return "title_host_form_open"
+    end
+    local form = session.form
+    if not form then error("title_host_form_unavailable", 0) end
+    if operation == "campaign" then
+        local suffix = value:match("^title%-host%-settings%-([0-9a-f]+)$")
+        if not suffix or #suffix ~= 8 or not form.api.fixture_write(form.draft, state, phase, "campaign", value) then
+            error("title_host_form_fixture_arguments", 0)
+        end
+        local accepted, failure = handle_host_form("join", state, phase, context)
+        if not accepted then error(failure, 0) end
+        return "title_host_form_campaign_entered"
+    end
+    if operation == "port" then
+        if #value > 5 or not value:match("^[0-9]+$") or tonumber(value) > 65535
+            or (value ~= "0" and value:sub(1, 1) == "0")
+            or not form.api.fixture_write(form.draft, state, phase, "port", value) then
+            error("title_host_form_fixture_arguments", 0)
+        end
+        return "title_host_form_port_entered"
+    end
+    local action = operation == "submit" and "host" or operation == "cancel" and "hide"
+    if not action then error("title_host_form_fixture_arguments", 0) end
+    local accepted, failure = handle_host_form(action, state, phase, context)
+    if not accepted then error(failure, 0) end
+    return operation == "submit" and "title_host_form_submitted" or "title_host_form_cancelled"
 end
 
 local function remove_settings_fixture()
@@ -228,6 +317,8 @@ local function settings_fixture_command(fields, state, phase)
 end
 
 local function poll()
+    local events = queued_keys
+    queued_keys = {}
     if not session then return end
     local context = current and title.probe(current.state, current.phase)
     if not can_choose(context) then
@@ -237,20 +328,29 @@ local function poll()
     end
     local pending = submitted == session.offer.generation
     local selected, rises = nil, 0
-    for _, action in ipairs({"hide", "host", "join"}) do
-        if action == "hide" or not pending and actions[session.offer.choices][action] then
-            if not input_keys[action] then
-                local key = FName(keys[action], EFindName.FNAME_Find)
-                if key:GetComparisonIndex() == 0 then error("title_panel_key_unavailable", 0) end
-                input_keys[action] = {KeyName = key}
+    for _, action in ipairs(key_order) do
+        if session.form or action == "hide" or not pending and actions[session.offer.choices][action] then
+            local pressed = events[action] == session
+            if not bound_keys then
+                if not input_keys[action] then
+                    local key = FName(keys[action], EFindName.FNAME_Find)
+                    if key:GetComparisonIndex() == 0 then error("title_panel_key_unavailable", 0) end
+                    input_keys[action] = {KeyName = key}
+                end
+                local down = context.controller:IsInputKeyDown(input_keys[action])
+                if type(down) ~= "boolean" then error("title_panel_key_unqualified", 0) end
+                pressed = down and session.held[action] == false
+                session.held[action] = down
             end
-            local down = context.controller:IsInputKeyDown(input_keys[action])
-            if type(down) ~= "boolean" then error("title_panel_key_unqualified", 0) end
-            if down and session.held[action] == false then selected, rises = action, rises + 1 end
-            session.held[action] = down
+            if pressed then selected, rises = action, rises + 1 end
         end
     end
-    if rises == 1 then choose(selected, context) end
+    if rises ~= 1 then return end
+    if session.form or selected == "host" then
+        handle_host_form(selected, current.state, current.phase, context)
+    else
+        choose(selected, context)
+    end
 end
 
 function panel.sync(state, phase)
@@ -282,6 +382,7 @@ end
 
 function panel.command(fields, state, phase)
     if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
+    if fields[2] == "native-title-host-form-fixture" then return host_form_fixture_command(fields, state, phase) end
     if fields[2] ~= "native-title-panel-press-fixture" then return end
     if not fixture_enabled() then error("title_panel_fixture_unavailable", 0) end
     local action = fields[3]
@@ -301,6 +402,16 @@ function panel.start(bridge)
     if loop or type(bridge) ~= "string" or bridge == "" then return end
     session_path = bridge .. "/title-handoff-session.tsv"
     request_path = bridge .. "/title-handoff-request.tsv"
+    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" and type(RegisterKeyBind) == "function"
+        and Key and Key.F7 and Key.F8 and Key.F9 then
+        bound_keys = true
+        for _, action in ipairs(key_order) do
+            RegisterKeyBind(Key[keys[action]], function()
+                -- UE4SS reports a down edge. Qualify Unreal objects on the game thread only.
+                if session and current then queued_keys[action] = session end
+            end)
+        end
+    end
     loop = LoopInGameThreadWithDelay(16, function()
         if not pcall(poll) then
             local choices = session and session.offer.choices

@@ -38,12 +38,36 @@ guid.NewGuid = function() return {A = 1, B = -1, C = 2, D = 3} end
 classes["/Script/UMG.Default__WidgetBlueprintLibrary"] = statics
 classes["/Script/UMG.Default__WidgetLayoutLibrary"] = layout
 classes["/Script/Engine.Default__KismetGuidLibrary"] = guid
+local editing
+local editor = {
+    mount = function(frame, phase, field, caption, initial)
+        assert(not editing and frame.qualified and phase == "ready" and caption:find(field == "bind" and "Listening IP"
+            or field == "campaign" and "Campaign" or "UDP port", 1, true))
+        editing = {field = field, text = initial}
+        return editing
+    end,
+    read = function(handle, frame, phase)
+        assert(handle == editing and frame.qualified and phase == "ready")
+        return handle.text
+    end,
+    write = function(handle, frame, phase, value)
+        assert(handle == editing and frame.qualified and phase == "ready")
+        handle.text = value
+        return value
+    end,
+    focus = function(handle) assert(handle == editing); return false end,
+    remove = function(handle) assert(handle == editing); editing = nil; return true end,
+}
 local env
 env = setmetatable({
     require = function(name)
         if name == "native_title_display" then
             return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_display.lua", "t", env))()
         end
+        if name == "native_title_host_form" then
+            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_host_form.lua", "t", env))()
+        end
+        if name == "native_title_settings_widget" then return editor end
         assert(name == "native_title_entry")
         return {probe = function(state, phase) if state.qualified and phase == "ready" then return context end end}
     end,
@@ -115,6 +139,12 @@ assert(not files[request]) -- Held before mount.
 press("F8")
 assert(not files[request]) -- Unadvertised.
 press("F7")
+assert(not files[request] and editing.field == "campaign" and editing.text == "")
+callback()
+assert(not files[request]) -- A held F7 cannot start the new form.
+press("F9")
+assert(not files[request] and not editing and display.TextBlock_Notes.text:find("Host a campaign", 1, true))
+assert(fixture("host"))
 assert(files[request] == "1\t" .. generation .. "\t00000001ffffffff0000000200000003\thost\n")
 assert(report()[3] == "pending" and writes == 1)
 allowed, reason = fixture("host")
@@ -146,3 +176,43 @@ state.qualified = true
 offer("join", 108, string.rep("e", 32))
 assert(fixture("join") and report()[3] == "pending" and writes == 2)
 assert(files[request]:match("\tjoin\n$"))
+
+local function form_fixture(operation, value)
+    return pcall(panel.command, {"test", "native-title-host-form-fixture", operation, value}, state, "ready")
+end
+
+files[request] = nil
+local edited_generation = string.rep("f", 32)
+offer("host", 108, edited_generation)
+flags.SILVERFISH_COOP_TITLE_FIXTURES = nil
+allowed, reason = form_fixture("open")
+assert(not allowed and reason == "title_host_form_fixture_unavailable")
+flags.SILVERFISH_COOP_TITLE_FIXTURES = "1"
+assert(form_fixture("open"))
+assert(form_fixture("campaign", "title-host-settings-1234abcd"))
+assert(form_fixture("port", "0"))
+allowed, reason = form_fixture("submit")
+assert(not allowed and reason == "title_host_form_invalid_port" and editing.text == "0" and not files[request])
+assert(form_fixture("cancel") and not editing and not files[request])
+assert(form_fixture("open"))
+assert(form_fixture("campaign", "title-host-settings-1234abcd"))
+assert(form_fixture("port", "28181"))
+assert(form_fixture("submit") and not editing and report()[3] == "pending")
+assert(files[request] == "2\t" .. edited_generation
+    .. "\t00000001ffffffff0000000200000003\thost\ttitle-host-settings-1234abcd\t\t28181\n")
+
+files[request] = nil
+local physical_generation = string.rep("9", 32)
+offer("host", 108, physical_generation)
+press("F7")
+press("F8")
+assert(editing.field == "port" and editing.text == "")
+press("F8")
+assert(editing.field == "bind" and editing.text == "")
+editing.text = "::ffff:500.0.0.1"
+press("F7")
+assert(not files[request] and editing.text == "::ffff:500.0.0.1")
+editing.text = "2001:db8::1"
+press("F7")
+assert(files[request] == "2\t" .. physical_generation
+    .. "\t00000001ffffffff0000000200000003\thost\t\t2001:db8::1\t\n")
