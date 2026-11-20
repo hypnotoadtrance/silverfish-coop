@@ -207,6 +207,8 @@ For a guest ammo split with an explicit count, use `native-inventory-split --tar
 
 At Borough's Copper Stop board, `native-wire-quest-preflight` reports the current step and checks for the interacting player's or host's exact Copper Wire. Use `native-quest-start --target Clt_Wire` and `native-quest-turnin --target Clt_Wire` within the board's stock interaction range. Eligible guests who are offline receive their queued personal rewards when they return to the campaign.
 
+For Missing Contact, accept the contract at the Black Market board and have the host dig up and collect the sealed package in CrossRoads. To let a guest redeem it, stand within three meters in CrossRoads or Black Market and use `native-missing-contact-handoff --target CHARACTER_ID` from the host's local controls. The guest can check custody with `native-missing-contact-preflight` at the Black Market board, then redeem the package through Interact or `native-quest-turnin --target Note_Farmhouse`.
+
 Within reach of the Borough or Scientist board, `native-bounty-board-list` shows the actual offers the host qualifies for. Pass `next_offset` as `--target` to read the next page. The `co_op` field identifies the supported contracts.
 
 Within reach of the Observatory Castaway, use `native-dialogue-open --target castaway`. The response returns the stock row, choices, and a confirmation token. Use `native-dialogue-choose --target TOKEN@ORDINAL` with an ordinal from that response. Read the next response for its current token and available choices.
