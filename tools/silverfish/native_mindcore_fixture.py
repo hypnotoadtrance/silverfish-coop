@@ -65,7 +65,7 @@ async def perform(host, bridge, action, target, variant=None):
     if not host.fixtures or action not in (INSTALL, APPROACH, CARRY, DECK_LOAD):
         raise party.RuleError("native_mindcore_fixture_refused_arguments")
     invalid_target = (not isinstance(target, str) or target not in _CARRY_RESULT) if action == CARRY else target is not None
-    if action == DECK_LOAD and target == "east-corridor":
+    if action == DECK_LOAD and target in ("east-corridor", "north-landing"):
         invalid_target = False
     if invalid_target:
         raise party.RuleError("native_mindcore_fixture_refused_arguments")

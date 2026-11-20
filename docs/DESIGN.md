@@ -58,6 +58,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Validate Steam invite integration on the supported Steam build. Test a reachable Direct IP path separately from relay availability and route switching.
 - Extend the first slice to campaign travel, shop and quest interactions, shared economy, world events, inventory persistence, and the complete downed and party wipe rules.
 - **Disguise handling for individual players (TODO).** Store disguise state per character in the host campaign. Apply each disguise change only to that character's appearance and resolve NPC recognition separately for each player.
+- The active carrier drives a held physics object's position. The host validates the carrier, object, and reach for each update, and returns the object to stock physics when the hold ends. Positions while held may move abruptly or appear to pass through geometry on another peer.
 
 ## AI operation
 

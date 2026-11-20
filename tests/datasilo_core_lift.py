@@ -82,7 +82,7 @@ async def verify_guest_hazard_authority(run, guest_run, action, authority, chara
 async def verify_core_lift(run, guest_run, action, authority, character, proof, *, lift_pose_matches, lift_riders_match,
                            raise_before_ascent=False, park_on_deck=False, fixture_loose_cargo=False,
                            fixture_passengers=False, west_walkway=False, east_stairs=False, upper_approach=False,
-                           stage_east=False):
+                           stage_site=None):
     session, epoch = authority["generation"], authority["zone_epoch"]
     host_pawn = authority["game"]["pawns"]["local"]["name"]
     guest_pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -399,7 +399,14 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         if distance < 180 or abs(end[2] - beyond[2]) > 12:
             raise RuntimeError("The east corridor did not provide room for both riders")
         last = len(points) - 1 if upper_approach else corridor
-        if upper_approach:
+        start = corridor if stage_site else 0
+        if stage_site == "north-landing":
+            north = next((index for index, point in enumerate(points[:-2])
+                          if 3280 < point[2] < 3350 and 3570 < points[index + 1][2] < 3650), None)
+            if north is None:
+                raise RuntimeError("The stock path did not include the north landing staircase")
+            start, last = north, north + 1
+        elif upper_approach:
             x, y, floor = points[last]
             if not (1280 < x < 1680 and 1900 < y < 2250 and 4475 < floor < 4560):
                 raise RuntimeError("The stock path did not reach the upper stair approach")
@@ -424,11 +431,11 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     raise result
             return moved[0]
 
-        base = proof["east_staged"] if stage_east else proof["west_walkway"]
+        base = proof["staged_carry"] if stage_site else proof["west_walkway"]
         facing = base["hold"]["yaw"]
         south_doorway_was_crossed = False
-        lead_point = corridor if stage_east else 1
-        index = corridor + 1 if stage_east else 1
+        lead_point = max(1, start)
+        index = start + 1
         while index <= last:
             x, y, floor = points[index]
             south_doorway = 500 < x < 760 and -2490 < y < -2400 and points[index - 1][1] > -2400
@@ -484,6 +491,23 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                 await follow("lead", lead_point, points[lead_point])
                 lead_point += 1
             index += 1
+        if stage_site == "north-landing":
+            end, onward = points[last:last + 2]
+            segment = math.dist(end[:2], onward[:2])
+            if segment < 170 or abs(end[2] - onward[2]) > 25:
+                raise RuntimeError("The upper landing did not provide room for both players")
+            ahead = [a + 170 * (b - a) / segment for a, b in zip(end[:2], onward[:2], strict=True)]
+            await follow("carrier", last + 1, [*ahead, end[2]])
+            for next_point in range(lead_point, last + 1):
+                await follow("lead", next_point, points[next_point])
+            reached = await observe("both players and the exact Core reach the floor above the north stairs", lambda row, *_: (
+                min(row[seat]["location"][2] for seat in ("lead", "carrier")) > 3640
+                and row["prop"]["position"][2] > 3590
+                and "grip_position" in row["hold"]
+                and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 55), timeout=6)
+            assert reached["hold"]["lease"] == lease
+            proof["north_stair"] = reached
+            return
         if upper_approach:
             finish = await observe("both players reach the upper stair approach with the same Core", lambda row, *_: (
                 all(4545 < row[seat]["location"][2] < 4665 for seat in ("lead", "carrier"))
@@ -534,17 +558,18 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
 
     proof["lower"] = await at_stop("lower stock lift", "lower")
     guest_local_pawn = proof["lower"]["guest_local"]["name"]
-    if stage_east:
-        proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD, target="east-corridor")
-        lead = await action(run, lift.STAGE_RIDER, target="host-east-corridor")
-        guest = await action(run, lift.STAGE_RIDER, target="guest-east-corridor")
+    if stage_site:
+        x, y, floor = (1741, 1936, 3300) if stage_site == "north-landing" else (2829, -1205, 2700)
+        proof["fixture_cargo"] = await action(run, fixture.DECK_LOAD, target=stage_site)
+        lead = await action(run, lift.STAGE_RIDER, target=f"host-{stage_site}")
+        guest = await action(run, lift.STAGE_RIDER, target=f"guest-{stage_site}")
         assert (lead["pawn"], guest["pawn"]) == (host_pawn, guest_pawn)
-        await observe("both players stand on the east corridor beside the loose Core", lambda row, *_: (
-            all(2770 < row[seat]["location"][2] < 2820 for seat in ("lead", "carrier"))
+        await observe("both players stand beside the loose Core at the staged stair approach", lambda row, *_: (
+            all(70 < row[seat]["location"][2] - floor < 120 for seat in ("lead", "carrier"))
             and row["guest_hold"].get("state") == "ready" and row["prop"].get("simulating") is True
-            and math.dist(row["prop"]["position"][:2], (2829, -1205)) < 24
-            and 2690 < row["prop"]["position"][2] < 2760), timeout=8)
-        proof["east_staged"] = await regrip("pick up the original Core on the east corridor", None)
+            and math.dist(row["prop"]["position"][:2], (x, y)) < 24
+            and -10 < row["prop"]["position"][2] - floor < 60), timeout=8)
+        proof["staged_carry"] = await regrip("pick up the original Core at the staged stair approach", None)
         await climb_east_stairs()
         return
     if fixture_passengers:

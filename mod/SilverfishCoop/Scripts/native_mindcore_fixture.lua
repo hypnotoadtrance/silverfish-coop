@@ -387,6 +387,11 @@ local function move_core(scene, pawn)
     return "headless exact stock Core moved into authored Capsule overlap"
 end
 
+local lift_test_sites = {
+    ["east-corridor"] = {x = 2829, y = -1205, floor = 2700, yaw = 90},
+    ["north-landing"] = {x = 1741, y = 1936, floor = 3300, yaw = -45},
+}
+
 local function place_loose_core_for_lift_test(scene, state, name, site)
     if name ~= scene.host:GetFullName() or scene.status ~= 0 or scene.installed
         or not within(scene.core:K2_GetActorLocation(), core_origin, 300)
@@ -399,25 +404,27 @@ local function place_loose_core_for_lift_test(scene, state, name, site)
         or not same(lift:GetWorld(), state.world) or not within(lift:K2_GetActorLocation(), {X=-1780, Y=0, Z=0}, 2)
         or not component(lift.SM_Prop_Elevator_01, lift, "StaticMeshComponent") then refuse("deck_load_lift_scope") end
     local target, yaw = {X = -1672, Y = -27, Z = 118}, -90
-    if site == "east-corridor" then
+    local layout = lift_test_sites[site]
+    if layout then
         local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
         local hit, color = {}, {R = 0, G = 0, B = 0, A = 0}
-        if not valid(library) or not library:LineTraceSingle(scene.host, {X = 2829, Y = -1205, Z = 2790},
-            {X = 2829, Y = -1205, Z = 2630}, 0, false, {scene.host, scene.core}, 0, hit, true, color, color, 0) then
-            refuse("east_corridor_floor_unavailable")
+        if not valid(library) or not library:LineTraceSingle(scene.host, {X = layout.x, Y = layout.y, Z = layout.floor + 90},
+            {X = layout.x, Y = layout.y, Z = layout.floor - 70}, 0, false, {scene.host, scene.core}, 0, hit, true, color, color, 0) then
+            refuse("lift_test_floor_unavailable")
         end
         hit = hit.OutHit or hit
         if not point(hit.ImpactPoint) or not point(hit.ImpactNormal) or hit.ImpactNormal.Z < .9
-            or hit.ImpactPoint.Z < 2685 or hit.ImpactPoint.Z > 2725 then refuse("east_corridor_floor_unavailable") end
-        target, yaw = {X = 2829, Y = -1205, Z = hit.ImpactPoint.Z + 70}, 90
+            or hit.ImpactPoint.Z < layout.floor - 15 or hit.ImpactPoint.Z > layout.floor + 25 then
+            refuse("lift_test_floor_unavailable")
+        end
+        target, yaw = {X = layout.x, Y = layout.y, Z = hit.ImpactPoint.Z + 70}, layout.yaw
     end
     if scene.core:K2_SetActorLocationAndRotation(target, {Pitch = 0, Yaw = yaw, Roll = 0}, false, {}, true) ~= true
         or not within(scene.core:K2_GetActorLocation(), target, 4) then
         error("mutation_unverified_native_mindcore_fixture_deck_load", 0)
     end
     scene.core:ForceNetUpdate()
-    return site == "east-corridor" and "headless loose stock Core placed above the east corridor"
-        or "headless loose stock Core placed above the lower deck"
+    return "headless loose stock Core placed above " .. (site or "the lower deck")
 end
 
 local function place_guest(scene, state, phase, name, variant)
@@ -487,7 +494,7 @@ function fixture.command(fields, state, phase)
     end
     local variant = fields[4] and math.tointeger(tonumber(fields[4]))
     local shape = #fields == 3 or (verb == approach and #fields == 4 and variant)
-        or (verb == deck_load and #fields == 4 and fields[4] == "east-corridor")
+        or (verb == deck_load and #fields == 4 and lift_test_sites[fields[4]] ~= nil)
     if not shape or type(name) ~= "string" or #name > 512 or not name:match("^Player_FP_C ") then
         refuse("exact_pawn_required")
     end

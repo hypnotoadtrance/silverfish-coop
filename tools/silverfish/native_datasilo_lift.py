@@ -94,6 +94,8 @@ async def stage_rider(host, bridge, target):
         "guest-clear-corner": ("guest", [-1698.0, 80.0, 250.0]),
         "host-east-corridor": ("host", [2816.0, -1335.0, 2810.0]),
         "guest-east-corridor": ("guest", [2829.0, -1065.0, 2810.0]),
+        "host-north-landing": ("host", [1768.0, 2334.0, 3410.0]),
+        "guest-north-landing": ("guest", [1655.0, 2022.0, 3410.0]),
     }
     if (not host.fixtures or host.stopping or host.transitioning or game.get("map") != core.MAP
             or lift.get("state") != "active" or lift.get("stop") != "lower"
@@ -108,7 +110,7 @@ async def stage_rider(host, bridge, target):
     restored = frame.get("pawns", {}).get(alias, {})
     if (frame.get("map"), restored.get("name")) != (core.MAP, pawn):
         raise RuntimeError("The isolated lift approach lost the exact active pawn")
-    if target.endswith("-east-corridor") and math.dist(restored["location"], location) > 55:
-        raise RuntimeError("The restored pawn did not land on the verified east corridor")
+    if target.endswith(("-east-corridor", "-north-landing")) and math.dist(restored["location"], location) > 55:
+        raise RuntimeError("The restored pawn did not land at the verified stair approach")
     host.last_game, host.last_seen = frame, time.monotonic()
     return {"pawn": pawn, "position": restored["location"]}
