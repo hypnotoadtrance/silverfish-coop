@@ -19,7 +19,20 @@ stage/SilverFish/Binaries/Win64/ue4ss/Mods/
       app/tools/silverfish/embedded_startup.py
 ```
 
-Use the exact staged runtime built with the matching co-op Python sources, Windows binaries, wheel data, and notices. Enable it in the isolated stage with `SilverfishCoopEmbeddedRuntime : 1`. The module verifies the manifest pin, its Windows x64 and CPython build fields, and every payload file against the manifest before importing Python. Extra files, missing files, reparse points, an unexpected `._pth`, or altered contents refuse startup.
+From the repository root, cache the locked Windows x64 packages, then build the runtime from the exact co-op revision used for the windowless coordinator. The build uses the local cache and prints the SHA-256 needed by the CMake target.
+
+```powershell
+python -m bootstrap.embedded_runtime_build fetch --cache $dependencyCache
+python -m bootstrap.embedded_runtime_build build --cache $dependencyCache --source $releaseCheckout --revision $commit --output $runtimePayload
+```
+
+Switch to that same co-op checkout before installing the matched package in an existing private C++ stage.
+
+```powershell
+python -m bootstrap.install_stage --work $workspace --embedded-addon $embeddedDll --embedded-runtime $runtimePayload
+```
+
+To create a new stage in the same command, add `--game $steamGame --ue4ss $ue4ssRelease --signatures $silverfishSignatures --cpp-addon $gameplayDll`. The stage copies stock game files from the local install and needs space for a full copy. The setup checks the runtime manifest against the native DLL's pin, verifies the payload and the matching Python and Lua sources, and publishes the enabled module. A repeat with the same package validates the existing installation. Keep an existing stage idle during setup. The module verifies the manifest pin, its Windows x64 and CPython build fields, and every payload file against the manifest before importing Python. Extra files, missing files, reparse points, an unexpected `._pth`, or altered contents refuse startup.
 
 ## Startup
 
