@@ -80,7 +80,7 @@ async def verify_disembark(run, guest_run, action, host_pawn, guest_pawn, charac
             effects = game.get("player_effects", {}).get(slot, {})
             pawns[seat] = {"position": _position(pawn),
                            "on_deck": (base.get("pawn"), base.get("base")) == (identity, lift.DECK),
-                           "state": effects.get("state"), "speed": effects.get("speed")}
+                           "state": effects.get("state")}
         if any(pawn["state"] != "standing" for pawn in pawns.values()):
             raise RuntimeError(f"Stock lift disembark requires standing riders: {_brief({'pawns': pawns})}")
         sequence = authority.get("sequence"), peer.get("sequence")

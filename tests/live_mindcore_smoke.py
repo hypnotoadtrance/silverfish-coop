@@ -435,6 +435,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             picked = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
                                 .get(pickup.STATE_KEY, {}).get(source, {}).get("owner") == "host", timeout=18)
             claim = picked["campaign"]["world"]["party"][pickup.STATE_KEY][source]
+            if source == pickup.CROSSROADS_LOCKPICK:
+                # Leave the hazardous console as soon as the stock pickup is durable.
+                await action(run, "native-door-position", target="host", entrance="CR_Cstrn", exit_position="near")
             item = (await inventory(run, "host"))[claim["guid"]]
             assert item["class_path"] == item_class
             return item
