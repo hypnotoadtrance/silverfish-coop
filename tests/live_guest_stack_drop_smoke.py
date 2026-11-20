@@ -9,7 +9,7 @@ import subprocess
 import sys
 import uuid
 
-from live_ai_smoke import status, wait
+from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -17,6 +17,9 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
 from tools.silverfish import native_host_save
+
+
+EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 
 
 async def verify(work: Path, originals_path: Path):
@@ -29,8 +32,8 @@ async def verify(work: Path, originals_path: Path):
     owner, other = ("--profile", name), ("--profile", name + "-other")
     clients = {target: work / "clients" / target[1] / "run" for target in (owner, other)}
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
-    flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--max-guests", "2",
-             "--start-zone", record.OBSERVATORY)
+    flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones",
+             "--max-guests", "2", "--start-zone", record.OBSERVATORY)
     originals = saved_hashes(originals_path)
     evidence, jobs = {}, []
 
@@ -43,7 +46,7 @@ async def verify(work: Path, originals_path: Path):
             process.kill()
             await process.wait()
             raise
-        if (process.returncode == 0) != success or not output:
+        if not output or (success is not None and (process.returncode == 0) != success):
             raise RuntimeError(f"{arguments[:4]} returned {output.decode(errors='replace')} {error.decode(errors='replace')}")
         return json.loads(output)
 
@@ -66,6 +69,7 @@ async def verify(work: Path, originals_path: Path):
         return await wait(run, lambda state: state.get("state") == "hosting"
                           and state.get("game", {}).get("remote_clients") == count
                           and state["game"].get(probe.CAPABILITY) == 1
+                          and state["game"].get("native_zone", {}).get("state") == "ready"
                           and len(state["game"].get("native_guest_save_members", {})) == count
                           and all(row.get("state") == "bound" for row in state["game"]["native_guest_save_members"].values()))
 
@@ -79,32 +83,66 @@ async def verify(work: Path, originals_path: Path):
         native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
         return checkpoint["world"]["party"][record.STATE]
 
-    def location():
-        now = status(run)
-        pawn = now.get("gameplay", {}).get("native_pawns", {}).get("guest")
-        return next((row["location"] for row in now.get("game", {}).get("pawns", {}).values()
+    def exact_position(frame, character):
+        game, gameplay = frame.get("game", {}), frame.get("gameplay", {})
+        pawn = gameplay.get("native_pawns", {}).get("guest")
+        if (frame.get("state") != "hosting" or game.get("map") != record.OBSERVATORY or not pawn
+                or gameplay.get("players", {}).get("guest", {}).get("character_id") != character
+                or game.get("native_guest_save_members", {}).get(pawn, {}).get("state") != "bound"):
+            return None
+        return next((row["location"] for row in game.get("pawns", {}).values()
                      if row.get("name") == pawn and record.valid_position(row.get("location"))), None)
 
-    async def move(anchor, *, away):
-        for direction in range(6):
-            current = location()
-            if not current:
-                await asyncio.sleep(0.35)
-                continue
-            distance = math.dist(current, anchor)
-            if (away and distance > 320) or (not away and distance < 170):
-                return current
-            dx, dy = anchor[0] - current[0], anchor[1] - current[1]
-            length = math.hypot(dx, dy)
-            if away:
-                dx, dy = ((-dx, -dy) if length > 5 and direction < 3 else ((1, 0), (0, 1), (-1, 0))[direction % 3])
-                length = math.hypot(dx, dy)
-            if length <= 5:
+    async def place(character, position, anchor=None):
+        start = await wait(run, lambda frame: exact_position(frame, character) is not None)
+        prior = exact_position(start, character)
+        pawn = start["gameplay"]["native_pawns"]["guest"]
+        sequence = start["game"]["sequence"]
+        attempts = []
+        samples = []
+        result = {"pawn": pawn, "attempts": attempts, "samples": samples}
+        evidence.setdefault("placements", []).append(result)
+        lanes = (("far", ()), ("near", ("--amount", "4"))) if position == "far" else (("near", ()),)
+        for where, lane in lanes:
+            placed = await action(host, "native-exit-position", "--target", "guest", "--exit-position", where,
+                                  "--entrance", EXIT_TAG, "--exit-actor", EXIT_ACTOR, *lane, success=None)
+            attempts.append({"requested": where, "lane": lane[-1] if lane else None, "response": placed})
+            if placed.get("ok") is True:
+                assert (placed["target"], placed["position"], placed["entrance"], placed["exit_actor"]) == (
+                    "guest", where, EXIT_TAG, EXIT_ACTOR), placed
                 break
-            duration = 700 if away else max(100, min(700, int((length - 65) * 2)))
-            await action(owner, "walk", "--x", str(dx / length), "--y", str(dy / length), "--milliseconds", str(duration))
-            await asyncio.sleep(duration / 1000 + 0.35)
-        raise RuntimeError(f"The stock guest did not move {'outside' if away else 'inside'} reclaim range: {location()}")
+            if placed.get("error") != "No verified stock floor at the requested expanded overlap position":
+                raise RuntimeError(f"The exact Observatory stock exit fixture declined placement: {attempts}")
+        else:
+            raise RuntimeError(f"No authorized stock floor in the specified Observatory positions: {attempts}")
+
+        def settled(frame):
+            point = exact_position(frame, character)
+            game, gameplay = frame.get("game", {}), frame.get("gameplay", {})
+            observed = game.get("sequence", 0)
+            if (point is None or gameplay.get("native_pawns", {}).get("guest") != pawn
+                    or (frame.get("generation"), frame.get("zone_epoch")) != (start["generation"], start["zone_epoch"])
+                    or observed <= (samples[-1]["sequence"] if samples else sequence)):
+                return False
+            travelled = math.dist(point, prior)
+            if anchor is None:
+                qualified = travelled > 75
+            else:
+                distance = math.dist(point, anchor)
+                qualified = distance > 340 if position == "far" else distance < 180
+            if not qualified:
+                samples.clear()
+                return False
+            if samples and math.dist(samples[-1]["location"], point) > 18:
+                samples.clear()
+            samples.append({"sequence": observed, "location": point})
+            return len(samples) >= 3
+
+        await wait(run, settled, timeout=15)
+        result["location"] = samples[-1]["location"]
+        if anchor:
+            result["distance_to_drop"] = math.dist(result["location"], anchor)
+        return result
 
     try:
         server = await start("host", "host", host, "--port", "0", *flags)
@@ -125,12 +163,14 @@ async def verify(work: Path, originals_path: Path):
         initial_items = await inventory(owner, owner_id)
         typed, = (item for item in initial_items if item["guid"] == source)
         assert (typed["source"], typed["class_path"], typed["quantity"]) == ("backpack", record.ITEM, 9), typed
+        drop_site = await place(owner_id, "near")
         request = (drop.DROP, "--target", f"{source}|9", "--operation-id", attempt)
         dropped = (await action(owner, *request))[drop.RESULT]
         evidence["drop"] = dropped
         assert (dropped["state"], dropped["drop_id"], dropped["owner"], dropped["guid"], dropped["quantity"]) == (
             "dropped", attempt, owner_id, source, 9), dropped
         assert record.valid_position(dropped["location"])
+        assert math.dist(dropped["location"], drop_site["location"]) < 180, (dropped, drop_site)
         assert (await action(owner, *request))[drop.RESULT] == dropped
         assert all(item["guid"] != source for item in await inventory(owner, owner_id))
         committed = evidence["durable_escrow"] = saved()[attempt]
@@ -155,10 +195,13 @@ async def verify(work: Path, originals_path: Path):
         assert (await action(owner, *request))[drop.RESULT] == dropped
 
         anchor = dropped["location"]
-        evidence["out_of_range_position"] = await move(anchor, away=True)
+        far = await place(owner_id, "far", anchor)
+        evidence["out_of_range_position"] = far["location"]
         refused = await action(owner, drop.RECLAIM, "--target", attempt, success=False)
         assert refused["error"] == "native_guest_stack_drop_out_of_range", refused
-        evidence["reclaim_position"] = await move(anchor, away=False)
+        near = await place(owner_id, "near", anchor)
+        assert near["pawn"] == far["pawn"], (far, near)
+        evidence["reclaim_position"] = near["location"]
         recover = (drop.RECLAIM, "--target", attempt, "--operation-id", claim_id)
         reclaimed = (await action(owner, *recover))[drop.RESULT]
         evidence["reclaim"] = reclaimed
