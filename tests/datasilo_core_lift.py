@@ -144,7 +144,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             required_seats, required_effects = (lead, guest, local), effects
         if (upper_approach and not host_can_be_downed and effects[1:] == ["standing", "standing"]
                 and (effects[0] == "downed" or type(lead.get("health")) in (int, float) and lead["health"] <= 0)
-                and all(type(body.get("health")) in (int, float) and body["health"] > 0 for body in (guest, local))):
+                and type(guest.get("health")) in (int, float) and guest["health"] > 0):
             raise StockHostDowned(f"The host went down during {label}")
         if "downed" in required_effects or any(type(body.get("health")) in (int, float) and body["health"] <= 0
                                                for body in required_seats):
@@ -416,6 +416,9 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
             behind = [b + 175 * (a - b) / distance for a, b in zip(start[:2], finish[:2], strict=True)]
             moved = await asyncio.gather(follow("carrier", index, finish), follow("lead", index, [*behind, finish[2]]),
                                          return_exceptions=True)
+            for result in moved:
+                if isinstance(result, StockHostDowned):
+                    raise result
             for result in moved:
                 if isinstance(result, BaseException):
                     raise result
