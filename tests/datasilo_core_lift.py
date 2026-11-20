@@ -233,10 +233,16 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         nonlocal lease
         released_lease, lease = lease, None
         await action(guest_run, carry.FIXTURE, target="release")
-        return await observe(label, lambda row, *_: (
-            tuple(row["hold"].get(key) for key in ("lease", "core", "state", "reason"))
-            == (released_lease, core.CORE, "released", "stock_core_released")
-            and (row["guest_hold"].get("state") == "ready" or carrier_can_be_downed and row["effects"][1] == "downed")), timeout=8)
+
+        def released(row, *_):
+            hold = row["hold"]
+            if (hold.get("lease"), hold.get("core"), hold.get("state")) != (released_lease, core.CORE, "released"):
+                return False
+            if carrier_can_be_downed and row["effects"][1:] == ["downed", "downed"]:
+                return hold.get("reason") in {"stock_core_released", "stock_core_holder_incapacitated"}
+            return hold.get("reason") == "stock_core_released" and row["guest_hold"].get("state") == "ready"
+
+        return await observe(label, released, timeout=8)
 
     async def regrip(label, released):
         nonlocal lease
