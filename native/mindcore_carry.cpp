@@ -811,8 +811,10 @@ namespace
         auto* other = object(parameter<U::FObjectProperty>(function, STR("Other"), 8), args);
         auto* part = object(parameter<U::FObjectProperty>(function, STR("OtherComp"), 0x10), args);
         auto* normal = parameter<U::FStructProperty>(function, STR("HitNormal"), 0x38);
+        const bool core_part = part == scene.mesh || (component(part, scene.core, STR("/Script/Engine.StaticMeshComponent")) &&
+            part->GetFName() == U::FName{STR("SM_MindCoffin_Body"), U::FNAME_Find});
         if (!component(own, pawn, STR("/Script/Engine.CapsuleComponent")) || own != object(pawn, STR("RootComponent")) ||
-            other != scene.core || part != scene.mesh || !normal || normal->GetSize() != sizeof(Point) ||
+            other != scene.core || !core_part || !normal || normal->GetSize() != sizeof(Point) ||
             normal->GetStruct().Get() != find<U::UScriptStruct>(vector_location)) return false;
         Point direction{};
         std::memcpy(direction.data(), normal->ContainerPtrToValuePtr<void>(args), sizeof(direction));
