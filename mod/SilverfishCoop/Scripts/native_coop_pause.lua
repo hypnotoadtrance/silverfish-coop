@@ -155,6 +155,11 @@ local function owned_pause(value, scene)
         and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport()
 end
 
+local function class_label(class)
+    local label = valid(class) and class:GetFullName():match("([^./: ]+)$") or "-"
+    return label:sub(1, 48):gsub("[^%w_%-]", "?")
+end
+
 local function confirmation(stack, scene)
     local count = stack and stack:GetArrayNum()
     local anchored = count == 2 and same(stack[1], fixture_menu)
@@ -167,18 +172,19 @@ local function confirmation(stack, scene)
     local abode = same(outer, instance) and "instance" or same(outer, scene.world) and "world" or valid(outer) and "other" or "unbound"
     local mounted, visible = valid(top) and top:IsInViewport() == true, valid(top) and top:IsVisible() == true
     local dialog = exact(top, confirmation_class)
+    local owner_qualified = owned == "local" or owned == "unbound" and (abode == "instance" or abode == "world")
     local same_world = false
-    if dialog and (abode == "instance" or abode == "world") then
+    if anchored and dialog and owner_qualified then
         local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
         same_world = valid(statics) and same(statics:GetGameInstance(top), instance)
             and same(statics:GetPlayerController(top, 0), scene.controller)
     end
-    local label = valid(class) and class:GetFullName():match("([^./: ]+)$") or "-"
-    label = label:sub(1, 70):gsub("[^%w_%-]", "?")
+    local outer_class = abode == "other" and class_label(outer:GetClass()) or "-"
     fixture_diagnostic = table.concat({"count=" .. tostring(count or "-"), "pause=" .. tostring(anchored and true or false),
-        "class=" .. label, "owner=" .. owned, "outer=" .. abode, "world=" .. tostring(same_world and true or false),
+        "class=" .. class_label(class), "owner=" .. owned, "outer=" .. abode, "outer_class=" .. outer_class,
+        "world=" .. tostring(same_world and true or false),
         "viewport=" .. tostring(mounted and true or false), "visible=" .. tostring(visible and true or false)}, ":")
-    if anchored and dialog and owned ~= "other" and same_world and mounted and visible then return top end
+    if same_world and mounted and visible then return top end
 end
 
 function pause.command(fields, state, phase)

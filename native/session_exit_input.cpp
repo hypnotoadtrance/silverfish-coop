@@ -371,13 +371,13 @@ namespace
 
     bool confirmation_context(U::UObject* dialog, const Seat& seat)
     {
-        if (dialog->GetWorld() != seat.world.Get() ||
-            (dialog->GetOuterPrivate() != seat.instance.Get() && dialog->GetOuterPrivate() != seat.world.Get()))
-            return false;
-        // Unlike the Pause menu, the stock graph creates Confirmation with OwningPlayer=None.
-        // The exact local stack and the sole Confirmed listener below prove its relationship to Pause.
+        if (dialog->GetWorld() != seat.world.Get()) return false;
         const auto player = widget_player(dialog);
-        return player && (!*player || *player == seat.controller.Get());
+        if (!player) return false;
+        if (*player) return *player == seat.controller.Get();
+        // The stock graph supplies no explicit owner. Without a resolved player, require a local outer.
+        auto* outer = dialog->GetOuterPrivate();
+        return outer == seat.instance.Get() || outer == seat.world.Get();
     }
 
     bool confirm_binds(U::UObject* dialog, U::UObject* pause)
