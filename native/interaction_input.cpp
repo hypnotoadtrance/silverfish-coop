@@ -1,5 +1,6 @@
 #include "interaction_input.hpp"
 #include "mosby_station_input.hpp"
+#include "mindcore_input.hpp"
 
 #include <array>
 #include <atomic>
@@ -586,6 +587,7 @@ namespace
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
         silverfish::mosby_station_input::route(iteration, actor, function, parameters);
+        silverfish::mindcore_input::route(iteration, actor, function, parameters);
     }
 
     bool exact_dispatch(Unreal::UObject* pawn, Unreal::UFunction* function)
@@ -1008,6 +1010,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
+        mindcore_input::register_lua(lua);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 
@@ -1020,6 +1023,7 @@ namespace silverfish::native_interaction_input
         dialogue_input = {};
         valve_input = {};
         mosby_station_input::clear_scope();
+        mindcore_input::clear_scope();
         first = count = event_depth = 0;
         event_source_matches = event_consumed = false;
     }

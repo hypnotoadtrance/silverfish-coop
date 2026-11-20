@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_mindcore as core, native_mindcore_fixture as fixture, runtime, service
+from tools.silverfish import native_mindcore_view as console
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_tape_profiles import DRILL, drill_download_unlocked
@@ -102,11 +103,13 @@ def baseline_inputs(work, baseline, *, resume=False):
     return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
-async def exercise(work, baseline, vanilla_saved, *, resume=False):
+async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False):
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
         raise ValueError("Use the matched isolated native stage with the stock overlap fixture")
+    if stock_input and not runtime.staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"):
+        raise ValueError("Use a matched stage with the ordinary MindCore Interact adapter")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -224,6 +227,32 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
                 return items
         raise RuntimeError("Data Silo inventory census exceeded its page bound")
 
+    async def view(state, sequence=None, opened=None):
+        row = await wait(guest_run, lambda status: (
+            (proof := status.get("game", {}).get(console.KEY, {})).get("state") == state
+            and (sequence is None or proof.get("sequence") == sequence)
+            and (opened is None or proof.get("opened") == opened)), timeout=30)
+        return row["game"][console.KEY]
+
+    async def inspect_buttons():
+        attempts = []
+        for variant in (None, *range(1, 13)):
+            try:
+                selector = {} if variant is None else {"amount": variant}
+                placement = await action(run, fixture.APPROACH, **selector)
+                await wait(guest_run, lambda state: state.get("game", {}).get(console.KEY, {}).get("state")
+                           in ("armed", "focused"), timeout=8)
+                first = (await action(guest_run, console.FIXTURE))[console.KEY]
+                return placement, first
+            except (TimeoutError, RuntimeError) as error:
+                reason = str(error)
+                if not isinstance(error, TimeoutError) and all(fragment not in reason for fragment in (
+                        "console_approach_no_safe_floor", "fixture_stock_focus")):
+                    raise
+                attempts.append(dict(variant=variant, reason=reason))
+                proof["stock_button_approach_attempts"] = attempts
+        raise AssertionError("The stock client did not reach or focus the exact MindCore tape button")
+
     try:
         copy_checkpoint(baseline, campaign, data)
         shutil.copyfile(inputs["identity"], campaign / "save/host-identity.json")
@@ -243,6 +272,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
         proof["dormant"] = inactive["game"][core.SCENE]
         locked = await action(guest_run, core.UPLOAD, target=guid, success=False)
         assert locked["error"] == core.LOCKED, locked
+        if stock_input:
+            await view("pass-through", 0, 0)
+            dormant_f = await action(guest_run, console.FIXTURE, success=False)
+            assert dormant_f["error"] == "The exact stock MindCore upload is unavailable", dormant_f
         await action(run, "checkpoint")
         _, dormant_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
@@ -252,7 +285,7 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
         assert tuple(row.get(core.FLAG, 0) for row in mounted_flags) == (1, 0), mounted_flags
         proof["installation"] = {"scene": installed, "headless_relocation": True, "stock_flags": [1, 0]}
 
-        near = await action(run, fixture.APPROACH)
+        near, first = await inspect_buttons() if stock_input else (await action(run, fixture.APPROACH), None)
         wrong = await action(guest_run, core.UPLOAD, target=blank, success=False)
         assert wrong["error"] == "native_mindcore_refused_durable_results_owner", wrong
         ready = (await action(guest_run, core.PREFLIGHT, target=guid))[core.PROOF]
@@ -261,9 +294,23 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
         assert (original_guest[guid]["class_path"], original_guest[guid]["quantity"], original_guest[guid]["source"]) == (
             DRILL.product, 1, "backpack"), original_guest[guid]
         assert guid not in original_host and blank not in original_guest
-        operation_id = uuid.uuid4().hex
-        result = await action(guest_run, core.UPLOAD, target=guid, operation_id=operation_id)
-        assert result["effect"] == "native_mindcore_results_compiled", result
+        if stock_input:
+            opened = first["sequence"]
+            assert (first["state"], first["opened"], first["guid"], first["cradle"]) == ("checking", opened, None, core.CRADLE)
+            offer = await view("offer", opened, opened)
+            assert offer["guid"] == guid
+            _, checked = await flags()
+            assert tuple(row.get(core.FLAG, 0) for row in checked) == (1, 0)
+            second = (await action(guest_run, console.FIXTURE))[console.KEY]
+            assert (second["state"], second["opened"], second["guid"], second["pawn"]) == ("submitting", opened, guid, first["pawn"])
+            assert second["sequence"] > opened
+            compiled = await view("compiled", second["sequence"], opened)
+            assert compiled["guid"] == guid
+            proof["stock_buttons"] = dict(first=first, offer=offer, second=second, compiled=compiled)
+        else:
+            operation_id = uuid.uuid4().hex
+            result = await action(guest_run, core.UPLOAD, target=guid, operation_id=operation_id)
+            assert result["effect"] == "native_mindcore_results_compiled", result
         final, compiled_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in compiled_flags) == (2, 0), compiled_flags
         assert {key: value for key, value in compiled_flags[0].items() if key != core.FLAG} == {
@@ -271,6 +318,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
         assert compiled_flags[1] == mounted_flags[1]
         receipt = final["world"]["party"][core.LEDGER]
         assert core.valid_receipt(final["world"]["party"], final["characters"])
+        if stock_input:
+            operation_id = receipt["operation_id"]
         assert (receipt["operation_id"], receipt["owner"], receipt["guid"]) == (operation_id, character, guid)
         assert await inventory(guest_run, character) == original_guest and await inventory(run, "host") == original_host
         proof["upload"] = {"locked": locked["error"], "wrong_guid": wrong["error"], "preflight": ready,
@@ -284,6 +333,11 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False):
         restarted = await paired(core.MAP, (authority["generation"], authority["zone_epoch"]))
         assert restarted["endpoint"]["port"] == port
         restored = await wait(run, lambda state: core._ready(state.get("game", {}), 2), timeout=25)
+        if stock_input:
+            await view("pass-through", 0, 0)
+            stage_two = await action(guest_run, console.FIXTURE, success=False)
+            assert stage_two["error"] == "The exact stock MindCore upload is unavailable", stage_two
+            proof["stage_two_upload_input"] = "pass-through"
         replay = await action(guest_run, core.UPLOAD, target=guid, operation_id=operation_id)
         assert replay["effect"] == "native_mindcore_already_compiled", replay
         assert await inventory(guest_run, character) == original_guest and await inventory(run, "host") == original_host
@@ -320,6 +374,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
     parser.add_argument("--resume", action="store_true", help="clone the paired dormant Data Silo stage-zero checkpoint")
+    parser.add_argument("--stock-input", action="store_true", help="confirm the upload with two genuine stock Interact presses")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
-    asyncio.run(exercise(*paths, resume=options.resume))
+    asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input))

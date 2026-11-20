@@ -35,7 +35,8 @@ from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
-from . import native_mindcore_fixture
+from . import native_mindcore_view
+from . import native_host_invitation, native_mindcore_fixture
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
@@ -181,7 +182,8 @@ class Host:
                  wire_board_enabled: bool = False, host_camera_input: bool = False, native_guest_controls: bool = False,
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
                  mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False, mama_dialogue_enabled: bool = False,
-                 native_dead_bridge_enemy_loot: bool = False, host_dig_live: bool = False, host_dig_live_fixture: bool = False):
+                 native_dead_bridge_enemy_loot: bool = False, host_dig_live: bool = False, host_dig_live_fixture: bool = False,
+                 mindcore_view_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -222,6 +224,7 @@ class Host:
             mosby=mosby_dialogue_enabled, shopkeep=shopkeep_dialogue_enabled, mama=mama_dialogue_enabled,
         ) if dialogue_enabled else None
         self.mosby_station_enabled = mosby_station_enabled
+        self.mindcore_view_enabled = mindcore_view_enabled
         self.camera_ready_at = {}
         self.host_camera_input = native_turret_photo.HostCameraInput() if host_camera_input else None
         self.native_host_dig_live = host_dig_live
@@ -558,7 +561,7 @@ class Host:
                                              "connected": self.guest["disconnected"] is None}}
 
     def native_world_state(self) -> dict:
-        return {key: self.last_game[key] for key in ("native_scene", "native_rules", "native_reputation", "native_seed")
+        return {key: self.last_game[key] for key in ("native_scene", "native_rules", "native_reputation", "native_seed", native_mindcore.SCENE)
                 if key in self.last_game}
 
     def sync_native_health_limits(self) -> None:
@@ -1893,6 +1896,7 @@ class Host:
             "native_dialogue_mama": bool(self.dialogue_sessions and BOROUGH in self.dialogue_sessions.maps),
             "native_guest_mre": self.guest_mre,
             "native_mosby_station": self.mosby_station_enabled,
+            "native_mindcore_view": self.mindcore_view_enabled,
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -2532,7 +2536,7 @@ class Host:
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
                                                            profile=native_mosby_tape.APPROACHES[action])
                 elif action in (native_mindcore_fixture.INSTALL, native_mindcore_fixture.APPROACH) and self.fixtures:
-                    result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"))
+                    result = await native_mindcore_fixture.perform(self, bridge, action, request.get("target"), request.get("amount"))
                 elif action in (native_mosby_tape.READINGS_PREFLIGHT, native_mosby_tape.DRILL.verb("preflight")):
                     result = await native_mosby_tape.preflight(self, bridge, "host", action, request.get("target"))
                 elif action == native_mosby_tape.DRILL.verb("convert"):
@@ -3052,18 +3056,22 @@ class Host:
             await asyncio.sleep(.4)
 
     async def run(self, bridge: Bridge, transport) -> None:
+        invites = (native_host_invitation.HostInvitationMailbox(bridge.directory, self.control.run, self.invite)
+                   if self.native_events and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
-            await self.run_session(bridge, transport)
+            await self.run_session(bridge, transport, invites)
         finally:
             if heartbeat:
                 heartbeat.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat
+            if invites is not None:
+                invites.close()
 
-    async def run_session(self, bridge: Bridge, transport) -> None:
+    async def run_session(self, bridge: Bridge, transport, invites) -> None:
         loot_view = native_loot.LootView(bridge, self.control) if self.native_loot_input else None
         wire_board = native_wire_board.WireBoardView(bridge, self.control) if self.wire_board_enabled else None
 
@@ -3180,6 +3188,11 @@ class Host:
                 except (ValueError, OSError, RuntimeError) as error:
                     self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             await self.service_requests(bridge, transport)
+            if invites is not None:
+                active = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.party.get("wipe"))
+                          and time.monotonic() - self.last_seen <= 1.5
+                          and self.last_game.get("native_host_invite_journal") is not None)
+                invites.poll(self.control.generation, self.zone_epoch, active)
             if not self.stopping:
                 await self.settle_wipe(bridge, transport)
                 if self.wipe_view:
@@ -3305,6 +3318,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     mama_dialogue_enabled = (dialogue_enabled and staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma")
                              and staged_script(work, "native_borough_barter.lua", "SilverfishTradeNativeBoroughMama"))
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
+    mindcore_view_enabled = bool(native_guest and native_zones and expanded_zones and native_backend == "cpp"
+                                 and staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"))
     host_camera_input = stage_options["host_camera_input"]
     native_guest_controls = native_guest and native_zones and staged_guest_controls(work)
     if guest_melee_canary and not (headless and fixtures and native_guest and native_zones and native_backend == "cpp"
@@ -3489,6 +3504,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
                               shopkeep_dialogue_enabled=shopkeep_dialogue_enabled, mama_dialogue_enabled=mama_dialogue_enabled,
                               mosby_station_enabled=mosby_station_enabled,
+                              mindcore_view_enabled=mindcore_view_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
                               native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, host_dig_live=host_dig_live,
                               host_dig_live_fixture=host_dig_live_fixture,
@@ -3593,7 +3609,7 @@ def load_invite(file: Path, build: str) -> dict:
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby",
-            "native_mosby_station", "native_dialogue_shopkeep", "native_dialogue_mama", "native_guest_mre")
+            "native_mosby_station", "native_mindcore_view", "native_dialogue_shopkeep", "native_dialogue_mama", "native_guest_mre")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
@@ -3698,6 +3714,8 @@ class Client:
         )
                               if invite.get("native_dialogue") else None)
         self.mosby_station = native_mosby_station_view.StationView(bridge, control) if invite.get("native_mosby_station") else None
+        self.mindcore_view = (native_mindcore_view.MindCoreView(bridge, control, invite["character_id"])
+                              if invite.get("native_mindcore_view") else None)
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
         self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
         self.primary_scope = None
@@ -4097,7 +4115,22 @@ class Client:
                     if enabled and game.get("map") in maps:
                         with contextlib.suppress(OSError):
                             write_text(self.bridge.directory / heartbeat_file, heartbeat)
+            if self.mindcore_view:
+                path = self.bridge.directory / native_mindcore_view.HEARTBEAT
+                pawn = game.get("pawns", {}).get("local", {}).get("name") if game else None
+                with contextlib.suppress(OSError):
+                    if (native_mindcore_view.valid_pawn(pawn) and game.get("state") == "connected" and game.get("map") == native_mindcore.MAP
+                            and now - seen < 1.5 and self.mindcore_stage_ready()):
+                        write_text(path, f"{int(time.time())}\t{pawn}\n")
+                    else:
+                        path.unlink(missing_ok=True)
             await asyncio.sleep(.4)
+
+    def mindcore_stage_ready(self) -> bool:
+        return (not self.stopping and self.transport.connected and self.transport.game_access
+                and bool(self.host_session and self.zone_epoch) and self.expected_zone == native_mindcore.MAP
+                and not self.needs_travel and not self.server_transitioning and time.monotonic() - self.gameplay_seen < 2
+                and native_mindcore_view.qualified_stage(self.gameplay))
 
     async def refresh_gameplay(self) -> None:
         now = time.monotonic()
@@ -4330,6 +4363,15 @@ class Client:
                             or (proof.get("map"), proof.get("station")) != (area, native_mosby_tape.BY_MAP[area].station)):
                         raise RuntimeError("The stock tape station press did not verify")
                     result = {native_mosby_station_view.KEY: proof}
+                elif action == native_mindcore_view.FIXTURE and self.mindcore_view:
+                    if not self.mindcore_stage_ready() or request.get("target") is not None:
+                        raise ValueError("The exact stock MindCore upload is unavailable")
+                    self.last_game = await self.bridge.command(action, timeout=6)
+                    proof = self.last_game.get(native_mindcore_view.KEY, {})
+                    if (proof.get("state") not in native_mindcore_view.WAITING or not proof.get("sequence")
+                            or proof.get("pawn") != self.last_game.get("pawns", {}).get("local", {}).get("name")):
+                        raise RuntimeError("The stock MindCore tape press did not verify")
+                    result = {native_mindcore_view.KEY: proof}
                 elif action == "native-wipe-view-key-fixture" and self.wipe_view:
                     self.last_game = await self.wipe_view.fixture(action, request.get("target"))
                     result = {"native_wipe_view": self.last_game.get("native_wipe_view", {})}
@@ -4422,6 +4464,11 @@ class Client:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
                 self.last_game = await self.mosby_station.sync(self.last_game, epoch, current, self.gameplay_action)
+            if self.mindcore_view:
+                epoch = f"{self.host_session}:{self.zone_epoch}"
+                self.last_game = await self.mindcore_view.sync(
+                    self.last_game, epoch, active and self.mindcore_stage_ready(), self.gameplay_action,
+                )
             if self.wipe_view:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
@@ -4492,6 +4539,7 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
     native_loot_input = invite.get("native_loot_input", False)
     broker_input = invite.get("native_broker_input", False)
     mosby_station_enabled = invite.get("native_mosby_station", False)
+    mindcore_view_enabled = invite.get("native_mindcore_view", False)
     wipe_view_enabled = invite.get("native_wipe_view", False)
     if wipe_view_enabled and not staged_script(work, "native_wipe_view.lua"):
         raise ValueError("Restage the native client for stock wipe item selection")
@@ -4501,6 +4549,9 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
         raise ValueError("Restage the native client for stock Copper Stop interaction")
     if mosby_station_enabled and not staged_script(work, "native_mosby_station_view.lua"):
         raise ValueError("Restage the native client for stock Stone Maze station interaction")
+    if mindcore_view_enabled and not (native_zones and expanded_zones
+                                      and staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput")):
+        raise ValueError("Restage the native client for the stock MindCore interaction")
     if invite.get("native_dialogue_shopkeep") and not staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop"):
         raise ValueError("Restage the native client for the stock ShopKeep counter dialogue")
     if invite.get("native_dialogue_mama") and not staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma"):
@@ -4522,7 +4573,8 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
                 native_shop_view=invite.get("native_shop_view", False), guest_primary_input=guest_primary_input,
                 native_loot_input=native_loot_input, broker_input=broker_input, native_wipe_view=wipe_view_enabled,
                 guest_clock=native_zones and staged_script(work, "native_guest_clock.lua"), guest_held_fire=guest_held_fire,
-                native_mosby_station=mosby_station_enabled, guest_mre=invite.get("native_guest_mre", False))
+                native_mosby_station=mosby_station_enabled, native_mindcore_view=mindcore_view_enabled,
+                guest_mre=invite.get("native_guest_mre", False))
 
 
 async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,

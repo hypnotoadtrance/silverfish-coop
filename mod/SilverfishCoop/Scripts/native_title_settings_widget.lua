@@ -9,6 +9,9 @@ local fields = {
     profile = {limit = 64, hint = "Local profile"},
     invite = {limit = 32768, hint = "Paste a one-line co-op invitation", secret = true},
     character = {limit = 256, hint = "Character name"},
+    participant = {limit = 256, hint = "Participant name"},
+    starter = {limit = 256, hint = "Starter character name"},
+    address = {limit = 253, hint = "Reachable host address or hostname"},
 }
 local tree_class = "/Script/UMG.WidgetTree"
 local canvas_class = "/Script/UMG.CanvasPanel"
@@ -32,7 +35,7 @@ local function exact(object, class)
     return valid(object) and same(object:GetClass(), StaticFindObject(class))
 end
 
-local function same_title(first, second)
+local function same_context(first, second)
     return first and second and same(first.world, second.world) and same(first.controller, second.controller)
         and same(first.menu, second.menu) and same(first.viewport, second.viewport)
 end
@@ -65,7 +68,7 @@ local function canvas_for(widget, tree)
 end
 
 local function held(session, context)
-    return same_title(session.context, context) and valid(session.widget) and session.widget:IsInViewport()
+    return same_context(session.context, context) and valid(session.widget) and session.widget:IsInViewport()
         and session.widget:IsVisible() and same(session.widget.WidgetTree, session.tree)
         and same(session.widget:GetOwningPlayer(), context.controller) and exact(session.input, input_class)
         and same(session.input:GetOuter(), session.tree) and same(session.input:GetParent(), session.canvas)
@@ -74,7 +77,7 @@ end
 
 local function current(handle, state, phase)
     if not active or handle ~= active.handle then reject("editor_unavailable") end
-    local context = title.probe(state, phase)
+    local context = active.probe(state, phase)
     if not held(active, context) then reject("editor_scope_changed") end
     return active, context
 end
@@ -106,16 +109,18 @@ local function remove(session)
     return ok and not mounted
 end
 
-function editor.mount(state, phase, field, caption, initial)
+function editor.mount(state, phase, field, caption, initial, scoped_probe)
     if active then reject("editor_already_mounted") end
     local profile = fields[field]
     if not profile then reject("unknown_field") end
     validate(caption, 256, true)
     initial = validate(initial == nil and "" or initial, profile.limit)
-    local context = title.probe(state, phase)
+    local probe = scoped_probe or title.probe
+    if type(probe) ~= "function" then reject("scope_unqualified") end
+    local context = probe(state, phase)
     if not context then reject("title_unavailable") end
     local widget = display.mount(context, caption)
-    local session = {handle = {}, context = context, widget = widget, field = profile}
+    local session = {handle = {}, context = context, widget = widget, field = profile, probe = probe}
     local ok, failure = pcall(function()
         session.tree = widget.WidgetTree
         session.canvas = canvas_for(widget, session.tree)
@@ -141,7 +146,7 @@ function editor.mount(state, phase, field, caption, initial)
         -- The overlay stays transparent to pointers except at its own editor.
         widget:SetVisibility(4)
         write(session, initial)
-        if not held(session, title.probe(state, phase)) then reject("mount_readback_unverified") end
+        if not held(session, probe(state, phase)) then reject("mount_readback_unverified") end
     end)
     if not ok then
         remove(session)

@@ -15,9 +15,9 @@ add_library(SilverfishCoopNative SHARED
     guest_armor.cpp guest_clock.cpp guest_consumable.cpp guest_item.cpp guest_melee.cpp guest_npc.cpp guest_primary_input.cpp guest_regen.cpp guest_reload_input.cpp guest_sickness.cpp
     interaction_input.cpp inventory_census.cpp inventory_wipe.cpp
     guest_stack_drop.cpp guest_drop_projection.cpp
-    inventory_view.cpp item_roundtrip.cpp kill_volume.cpp loot_crate_input.cpp loot_escrow.cpp mosby_station_input.cpp
+    inventory_view.cpp item_roundtrip.cpp kill_volume.cpp loot_crate_input.cpp loot_escrow.cpp mindcore_input.cpp mosby_station_input.cpp
     mindcore.cpp nothing_return.cpp pickup.cpp save_copy.cpp shared_loot.cpp shop_view.cpp
-    host_landmine.cpp host_dig.cpp
+    host_landmine.cpp host_dig.cpp host_invitation_clipboard.cpp
     stock_rest.cpp transport_items.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)
 target_link_libraries(SilverfishCoopNative PRIVATE UE4SS)

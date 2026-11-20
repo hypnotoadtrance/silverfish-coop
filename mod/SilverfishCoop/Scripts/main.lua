@@ -23,6 +23,7 @@ local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
 local native_mindcore_fixture = require("native_mindcore_fixture")
+local native_mindcore_view = require("native_mindcore_view")
 local native_prototype_drill = require("native_prototype_drill_turnin")
 local native_mosby_station = require("native_mosby_station_view")
 local native_computer_board = require("native_computer_board")
@@ -60,6 +61,7 @@ local native_wipe_view = require("native_wipe_view")
 local native_fresh_campaign = require("native_fresh_campaign")
 local native_title_entry = require("native_title_entry")
 local native_title_panel = require("native_title_panel")
+local native_host_invite = require("native_host_invite")
 local native_pickup = require("native_pickup")
 local native_red = require("native_cubes").new("red")
 local native_purple = require("native_cubes").new("purple")
@@ -452,6 +454,7 @@ local function run_command(fields, state, current_phase)
     if command == "travel" or command == "leave" or command == "join" then
         native_mosby_station.clear()
         native_mindcore.clear()
+        native_mindcore_view.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_savlo_locker.clear() end
@@ -878,6 +881,7 @@ local function run_command(fields, state, current_phase)
         or native_host_dig.command(fields, state, current_phase)
         or native_host_dig_live.command(fields, state, current_phase)
         or native_title_panel.command(fields, state, current_phase)
+        or native_host_invite.command(fields, state, current_phase)
         or native_guest_consumable.command(fields, state, current_phase)
         or native_guest_mre.command(fields, state, current_phase)
         or native_guest_sickness.command(fields, state, current_phase)
@@ -892,6 +896,7 @@ local function run_command(fields, state, current_phase)
         or native_mosby_tape.command(fields, state, current_phase)
         or native_mindcore.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
+        or native_mindcore_view.command(fields, state, current_phase)
         or native_prototype_drill.command(fields, state, current_phase)
         or native_mosby_station.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
@@ -1006,6 +1011,7 @@ local function write_status(state, current_phase, failure)
         local idle_sequence = role == "idle" and sequence or nil
         for _, row in ipairs(native_title_entry.rows(state, current_phase, status_row, idle_sequence)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_title_panel.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_invite.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(players.rows(status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local vitals_ok, vitals_row = pcall(vitals.row, state, current_phase, status_row)
@@ -1052,6 +1058,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1293,9 +1300,11 @@ local function tick()
         vitals.sync(state, current_phase)
         native_enemy_shell_view.sync(state, current_phase)
         players.sync(state, current_phase)
+        native_host_invite.sync(state, current_phase)
         native_wire_board.sync(state, current_phase)
         native_dialogue.sync(state, current_phase)
         native_mosby_station.sync(state, current_phase)
+        native_mindcore_view.sync(state, current_phase)
         native_wipe_view.sync(state, current_phase)
         return native_guest_regen.sync(state, current_phase, players.is_standing_guest)
     end)
@@ -1316,10 +1325,12 @@ native_guest_primary_input.start(bridge, players.is_downed)
 native_host_camera.start(bridge, players.is_downed)
 native_host_dig_live.start(bridge)
 native_title_panel.start(bridge)
+native_host_invite.start(bridge)
 native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)
 native_mosby_station.start(bridge, players.is_downed)
+native_mindcore_view.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)
 guest_save.start(bridge, native_death.clear_scope)

@@ -65,7 +65,7 @@ local function move_core(scene, pawn)
     return "headless exact stock Core moved into authored Capsule overlap"
 end
 
-local function place_guest(scene, state, phase, name)
+local function place_guest(scene, state, phase, name, variant)
     local pawn, detached = guest_save.exact_item_context(state, phase, name)
     if not valid(pawn) or not valid(detached) or same(detached, scene.canonical)
         or pawn.Dead ~= false or not players.is_standing_guest(pawn, name) then refuse("standing_guest_unavailable") end
@@ -77,9 +77,14 @@ local function place_guest(scene, state, phase, name)
     local old, rotation = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
     local anchor, color = scene.cradle:K2_GetActorLocation(), {R = 0, G = 0, B = 0, A = 0}
     local moved = false
-    for _, offset in ipairs({{0, -130}, {0, 130}, {-130, 0}, {130, 0},
+    local offsets = {{0, -130}, {0, 130}, {-130, 0}, {130, 0},
                               {-95, -95}, {95, -95}, {-95, 95}, {95, 95},
-                              {0, -170}, {0, 170}, {-170, 0}, {170, 0}}) do
+                              {0, -170}, {0, 170}, {-170, 0}, {170, 0}}
+    if variant then
+        if not offsets[variant] then refuse("invalid_console_approach") end
+        offsets = {offsets[variant]}
+    end
+    for _, offset in ipairs(offsets) do
         local x, y = origin.X + offset[1], origin.Y + offset[2]
         local hit = {}
         local traced = library:LineTraceSingle(pawn, {X = x, Y = y, Z = origin.Z + 90},
@@ -111,12 +116,14 @@ function fixture.command(fields, state, phase)
     local verb, name = fields[2], fields[3]
     if verb ~= install and verb ~= approach then return end
     if not enabled then refuse("not_enabled") end
-    if #fields ~= 3 or type(name) ~= "string" or #name > 512 or not name:match("^Player_FP_C ") then
+    local variant = fields[4] and math.tointeger(tonumber(fields[4]))
+    local shape = #fields == 3 or verb == approach and #fields == 4 and variant
+    if not shape or type(name) ~= "string" or #name > 512 or not name:match("^Player_FP_C ") then
         refuse("exact_pawn_required")
     end
     local scene = mindcore.scene(state, phase)
     if verb == install then return move_core(scene, name) end
-    return place_guest(scene, state, phase, name)
+    return place_guest(scene, state, phase, name, variant)
 end
 
 return fixture

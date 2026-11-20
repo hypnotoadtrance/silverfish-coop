@@ -18,7 +18,7 @@ def _same_participants(host, owner, guest_pawn, host_pawn):
             and host.last_game.get("pawns", {}).get("local", {}).get("name") == host_pawn)
 
 
-async def perform(host, bridge, action, target):
+async def perform(host, bridge, action, target, variant=None):
     if not host.fixtures or action not in (INSTALL, APPROACH) or target is not None:
         raise party.RuleError("native_mindcore_fixture_refused_arguments")
     seats = host.native_recipients()
@@ -29,8 +29,11 @@ async def perform(host, bridge, action, target):
     guest_pawn = _scope(host, owner, mindcore.MAP, guest_only=True)
     if not _same_participants(host, owner, guest_pawn, host_pawn):
         raise party.RuleError("native_mindcore_fixture_refused_exact_pair")
+    if variant is not None and (action != APPROACH or type(variant) is not int or not 1 <= variant <= 12):
+        raise party.RuleError("native_mindcore_fixture_refused_invalid_console_approach")
     if action == APPROACH:
-        snapshot = await bridge.command(APPROACH, guest_pawn, timeout=7)
+        selector = () if variant is None else (str(variant),)
+        snapshot = await bridge.command(APPROACH, guest_pawn, *selector, timeout=7)
         scene = snapshot.get(mindcore.SCENE)
         if not scene or snapshot.get("state") != "hosting" or snapshot.get("map") != mindcore.MAP:
             raise RuntimeError("The isolated console approach lost its exact stock world")

@@ -20,7 +20,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
-from . import native_mindcore
+from . import native_mindcore, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
@@ -311,7 +311,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            guest_regen: bool = False, guest_sickness: bool = False, host_camera_input: bool = False, guest_mre: bool = False,
            guest_clock: bool = False,
            broker_input: bool = False, native_wipe_view: bool = False, guest_held_fire: bool = False, native_mosby_station: bool = False,
-           native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False,
+           native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False, native_mindcore_view: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
            embedded_engine: bool = False, inspect_title_profile: bool = False,
            embedded_startup: str | None = None) -> dict[str, str]:
@@ -474,7 +474,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         env["SILVERFISH_COOP_NATIVE_BROKER_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
-    if native_mosby_station and headless and port is None:
+    if (native_mosby_station or native_mindcore_view) and headless and port is None:
         env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_wipe_view:
         env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"
@@ -1180,6 +1180,16 @@ class Bridge:
                     if native_mindcore.PROOF in data or native_mindcore.SCENE not in data:
                         raise ValueError("Invalid Data Silo Results proof scope")
                     data[native_mindcore.PROOF] = native_mindcore.parse_proof(fields)
+                elif fields[0] == "native-mindcore-view":
+                    if native_mindcore_view.KEY in data or (data.get("state"), data.get("map")) != ("connected", native_mindcore.MAP):
+                        raise ValueError("Invalid Data Silo local input scope")
+                    data[native_mindcore_view.KEY] = native_mindcore_view.parse(fields)
+                elif fields[0] == "native-host-invite-journal":
+                    if (len(fields) != 3 or data.get("mode") != "host" or data.get("state") != "hosting"
+                            or fields[1] != data.get("map") or "native_host_invite_journal" in data
+                            or fields[2] not in {"journal", "editing", "pending", "exported", "refused"}):
+                        raise ValueError("Invalid host invitation Journal scope")
+                    data["native_host_invite_journal"] = fields[2]
                 elif fields[0] == "native-mosby-station-view":
                     data[native_mosby_station_view.KEY] = native_mosby_station_view.parse(fields)
                 elif fields[0] == "native-mosby-readings":

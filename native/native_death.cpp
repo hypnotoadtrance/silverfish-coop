@@ -29,6 +29,7 @@
 #include "guest_melee.hpp"
 #include "host_landmine.hpp"
 #include "host_dig.hpp"
+#include "host_invitation_clipboard.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "guest_stack_drop.hpp"
@@ -1356,6 +1357,7 @@ namespace
             silverfish::native_guest_melee::register_lua(lua);
             silverfish::native_host_landmine::register_lua(lua);
             silverfish::native_host_dig::register_lua(lua);
+            silverfish::host_invitation_clipboard::register_lua(lua);
             silverfish::native_stock_rest::register_lua(lua);
             silverfish::shared_loot::register_lua(lua);
             silverfish::loot_escrow::register_lua(lua);
