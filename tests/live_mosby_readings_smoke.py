@@ -342,6 +342,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert pending["sequence"] > offer["sequence"]
         proof["stock_board"] = {"review": offer, "turn_in": await rendered("completed", pending), "stock_preflight": offered}
         durable = saved()
+        gained = flags(durable)
         record = durable["world"]["party"]["native_quests"][drill.QUEST_ID]
         assert (record["actor"], record["step"], record["cash"], record["xp"], record["consumed_drill_head"]) == (
             character, -10, 10000, 3, claimed["guid"]), record
@@ -357,7 +358,6 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         expected_guest[record["armor"][character]] = suit
         assert await inventory(authority, "host") == expected_host
         assert await inventory(client, character) == expected_guest
-        gained = flags(durable)
         for role in ("host", "guest"):
             assert gained[role].get("Player_Xp", 0) == before[role].get("Player_Xp", 0) + drill.XP
             assert gained[role].get("Player_Cash", 0) == before[role].get("Player_Cash", 0) + (drill.CASH if role == "host" else 0)
