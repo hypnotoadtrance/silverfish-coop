@@ -473,7 +473,7 @@ namespace
     bool inside_overlap{};
     std::atomic<bool> installed{};
     std::array<Hooks::GlobalCallbackId, 4> hooks{Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID};
-    U::FName grab_name{}, hold_name{}, stats_name{}, overlap_name{}, pickup_name{};
+    U::FName grab_name{}, hold_name{}, stats_name{}, overlap_name{}, pickup_name{}, hit_name{};
 
     bool trace_enabled()
     {
@@ -800,6 +800,25 @@ namespace
         }
     }
 
+    bool carried_core_self_contact(U::UObject* pawn, U::UFunction* function, const void* args)
+    {
+        if (!holder || !holder->collision || !args || pawn != holder->pawn.Get() ||
+            function != script(pawn_class, STR("ReceiveHit")) || function->GetNumParms() != 8 ||
+            function->GetReturnProperty()) return false;
+        Scene scene;
+        if (!scene.bind() || !scene.dormant() || !holder->held(scene)) return false;
+        auto* own = object(parameter<U::FObjectProperty>(function, STR("MyComp"), 0), args);
+        auto* other = object(parameter<U::FObjectProperty>(function, STR("Other"), 8), args);
+        auto* part = object(parameter<U::FObjectProperty>(function, STR("OtherComp"), 0x10), args);
+        auto* normal = parameter<U::FStructProperty>(function, STR("HitNormal"), 0x38);
+        if (!component(own, pawn, STR("/Script/Engine.CapsuleComponent")) || own != object(pawn, STR("RootComponent")) ||
+            other != scene.core || part != scene.mesh || !normal || normal->GetSize() != sizeof(Point) ||
+            normal->GetStruct().Get() != find<U::UScriptStruct>(vector_location)) return false;
+        Point direction{};
+        std::memcpy(direction.data(), normal->ContainerPtrToValuePtr<void>(args), sizeof(direction));
+        return std::isfinite(direction[2]) && direction[2] > 0.0;
+    }
+
     void intercept(Iteration& call, U::UObject* value, U::UFunction* function, const void* args, U::FFrame* frame)
     {
         if (!available() || !function || !value || call.OriginalFunctionCallPrevented()) return;
@@ -817,6 +836,17 @@ namespace
         if (name == overlap_name)
         {
             capsule_overlap(call, value, function, args);
+            return;
+        }
+        if (name == hit_name)
+        {
+            // Stock ReceiveHit drops a prop when the carrier lands on it. A guest-driven
+            // Core can trigger that branch when it brushes its own carrier's capsule.
+            if (carried_core_self_contact(value, function, args))
+            {
+                call.PreventOriginalFunctionCall();
+                trace_release(*holder, "core_self_contact", "ignored", frame);
+            }
             return;
         }
         if (name != grab_name && name != hold_name && name != stats_name) return;
@@ -1067,6 +1097,7 @@ namespace silverfish::native_mindcore_carry
         stats_name = U::FName{STR("ApplyDynamicStats"), U::FNAME_Add};
         overlap_name = U::FName{overlap_event, U::FNAME_Add};
         pickup_name = U::FName{pickup_event, U::FNAME_Add};
+        hit_name = U::FName{STR("ReceiveHit"), U::FNAME_Add};
         hooks[0] = Hooks::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* object, U::UFunction* function, void* args) {
                 intercept(call, object, function, args, nullptr);
