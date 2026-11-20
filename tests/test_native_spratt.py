@@ -14,16 +14,26 @@ OWNER = "guest"
 
 
 class NativeSprattTests(unittest.IsolatedAsyncioTestCase):
-    def proof(self, directory, *, target=TARGET, callback="1", map_name=spratt.AREA):
+    def proof(self, directory, *, target=TARGET, callback="1", map_name=spratt.AREA, state=spratt.VERIFIED):
         rows = (
             ("schema", "1"),
             ("session", "host", "hosting", map_name, "1", "0"),
-            ("native-spratt-objective", spratt.AREA, spratt.SPAWNER, target, spratt.VERIFIED, "1",
+            ("native-spratt-objective", spratt.AREA, spratt.SPAWNER, target, state, "1",
              "1", "2", "7", "7", "23", "23", "guest", PAWN, "exact stock pellet", "0", callback),
         )
         bridge = runtime.Bridge(directory, None)
         (directory / "status.tsv").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
         return bridge.snapshot()
+
+    async def test_schema_refusal_is_visible_without_adopting_an_objective(self):
+        state = "stock_spratt_schema_event_parameter_class"
+        with tempfile.TemporaryDirectory() as temp:
+            game = self.proof(Path(temp), state=state, target="-")
+            self.assertNotIn(spratt.KEY, self.proof(Path(temp), state=state))
+        self.assertEqual(game[spratt.KEY], {"map": spratt.AREA, "spawner": spratt.SPAWNER, "state": state})
+        host = self.host(game)
+        await spratt.observe(host, object())
+        host.checkpoint_native.assert_not_awaited()
 
     def host(self, game, *, enrolled=True):
         state = party.new_party()

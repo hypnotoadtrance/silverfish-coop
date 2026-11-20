@@ -310,38 +310,49 @@ namespace
             flag(candidate.cash, result.cash) && flag(candidate.xp, result.xp);
     }
 
-    bool schema(Scope& next, U::UObject* target)
+    std::string_view schema_fault(Scope& next, U::UObject* target)
     {
         auto* base = find<U::UClass>(npc_type);
         auto* projectile = find<U::UClass>(projectile_type);
+        if (!base || !target->IsA(base)) return "stock_spratt_schema_npc_base";
+        if (!projectile) return "stock_spratt_schema_projectile_base";
         next.deal = script(base, STR("DealDamage"), 7);
         next.resolve = script(base, STR("ResolveDeath"), 0);
         next.calc = script(projectile, STR("CalcDmg"), 1);
+        if (!next.deal || target->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) != next.deal)
+            return "stock_spratt_schema_deal_damage";
+        if (!next.resolve || target->GetFunctionByNameInChain(U::FName{STR("ResolveDeath")}) != next.resolve)
+            return "stock_spratt_schema_resolve_death";
+        if (!next.calc) return "stock_spratt_schema_projectile_calc";
         next.instigator = field<U::FObjectProperty>(next.deal, STR("Instigator"));
         next.health = field<U::FDoubleProperty>(target, STR("Health"));
+        if (!next.instigator || !next.instigator->HasAnyPropertyFlags(U::CPF_Parm) ||
+            next.instigator->HasAnyPropertyFlags(U::CPF_OutParm) || next.instigator->GetOffset_Internal() < 0 ||
+            next.instigator->GetOffset_Internal() + next.instigator->GetSize() > next.deal->GetParmsSize())
+            return "stock_spratt_schema_instigator";
+        if (!next.health) return "stock_spratt_schema_health";
         next.quest_struct = find<U::UScriptStruct>(quest_type);
         next.step = field<U::FIntProperty>(next.quest_struct, quest_step);
+        if (!next.step) return "stock_spratt_schema_quest_step";
         next.quest = U::FName{next.profile->quest, U::FNAME_Find};
         if (next.profile->death_flag) next.flag = U::FName{next.profile->death_flag, U::FNAME_Find};
         next.cash = U::FName{STR("Player_Cash"), U::FNAME_Find};
         next.xp = U::FName{STR("Player_Xp"), U::FNAME_Find};
+        if (next.quest.IsNone() || (next.profile->death_flag && next.flag.IsNone()) || next.cash.IsNone() || next.xp.IsNone())
+            return "stock_spratt_schema_save_keys";
         if (next.profile == &spratt)
         {
             next.target_killed = script(next.spawner.Get()->GetClassPrivate(), STR("Event_Target_Killed"), 1);
+            if (!next.target_killed || next.target_killed->GetParmsSize() != sizeof(void*))
+                return "stock_spratt_schema_death_event";
             next.event_target = field<U::FObjectProperty>(next.target_killed, STR("NPC_Ref"));
-            if (!next.target_killed || next.target_killed->GetParmsSize() != sizeof(void*) || !next.event_target ||
-                next.event_target->GetOffset_Internal() != 0 || next.event_target->GetPropertyClass().Get() != base ||
-                !next.event_target->HasAnyPropertyFlags(U::CPF_Parm) ||
-                next.event_target->HasAnyPropertyFlags(U::CPF_OutParm)) return false;
+            if (!next.event_target) return "stock_spratt_schema_event_parameter";
+            if (next.event_target->GetOffset_Internal() != 0 ||
+                !next.event_target->HasAnyPropertyFlags(U::CPF_Parm) || next.event_target->HasAnyPropertyFlags(U::CPF_OutParm))
+                return "stock_spratt_schema_event_parameter_layout";
+            if (next.event_target->GetPropertyClass().Get() != base) return "stock_spratt_schema_event_parameter_class";
         }
-        return base && target->IsA(base) && next.deal && next.resolve && next.calc && next.instigator && next.health &&
-            next.step && !next.quest.IsNone() && (!next.profile->death_flag || !next.flag.IsNone()) &&
-            !next.cash.IsNone() && !next.xp.IsNone() &&
-            target->GetFunctionByNameInChain(U::FName{STR("ResolveDeath")}) == next.resolve &&
-            target->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) == next.deal &&
-            next.instigator->HasAnyPropertyFlags(U::CPF_Parm) && !next.instigator->HasAnyPropertyFlags(U::CPF_OutParm) &&
-            next.instigator->GetOffset_Internal() >= 0 &&
-            next.instigator->GetOffset_Internal() + next.instigator->GetSize() <= next.deal->GetParmsSize();
+        return {};
     }
 
     bool publish(U::UObject* target)
@@ -545,7 +556,8 @@ namespace
             next.save = save;
             next.spawner = spawner;
             next.target = target;
-            if (!schema(next, target)) return refuse("stock_lenny_target_schema_unqualified", "stock_spratt_target_schema_unqualified");
+            if (const auto fault = schema_fault(next, target); !fault.empty())
+                return refuse("stock_lenny_target_schema_unqualified", fault);
             Progress initial;
             if (!progress(next, initial) || initial.step != 1 || initial.flag != 0)
                 return refuse("stock_lenny_stock_progress_unqualified", "stock_spratt_stock_progress_unqualified");

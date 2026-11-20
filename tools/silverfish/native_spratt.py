@@ -20,7 +20,12 @@ TARGET = re.compile(re.escape(f"NPC_Spratt_C {LEVEL}NPC_Spratt_C_") + r"[0-9]{1,
 COUNTERS = ("step_before", "step_after", "xp_before", "xp_after", "cash_before", "cash_after")
 REFUSALS = {"stock_spratt_scope_unqualified", "stock_spratt_spawner_unqualified", "stock_spratt_target_unavailable",
             "stock_spratt_target_unqualified", "stock_spratt_target_schema_unqualified",
-            "stock_spratt_stock_progress_unqualified"}
+            "stock_spratt_stock_progress_unqualified",
+            "stock_spratt_schema_npc_base", "stock_spratt_schema_projectile_base", "stock_spratt_schema_deal_damage",
+            "stock_spratt_schema_resolve_death", "stock_spratt_schema_projectile_calc", "stock_spratt_schema_instigator",
+            "stock_spratt_schema_health", "stock_spratt_schema_quest_step", "stock_spratt_schema_save_keys",
+            "stock_spratt_schema_death_event", "stock_spratt_schema_event_parameter",
+            "stock_spratt_schema_event_parameter_layout", "stock_spratt_schema_event_parameter_class"}
 
 
 def parse_objective(fields, *, area, phase):
