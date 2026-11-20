@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include <DynamicOutput/DynamicOutput.hpp>
@@ -1332,12 +1333,13 @@ namespace
         bool accepted = false;
         if (Unreal::IsInGameThreadRaw())
         {
-            if (lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_string(2) &&
-                current_host_argument(lua.get_integer(1)) && qualified_drop_host())
+            if (lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_string(2))
             {
-                const auto epoch = lua.get_string(2);
+                // LuaMadeSimple getters remove the value, so take arguments from the top down.
+                const std::string epoch{lua.get_string(2)};
+                const auto pawn = lua.get_integer(1);
                 auto* save = canonical_host_save();
-                if (save && drop_epoch_valid(epoch))
+                if (save && drop_epoch_valid(epoch) && current_host_argument(pawn) && qualified_drop_host())
                 {
                     if (!host_drop_scope_matches(save) || !std::ranges::equal(epoch, host_drop_scope.epoch))
                         clear_host_drop();
@@ -1364,8 +1366,11 @@ namespace
 
     int lua_take_host_drop(const Lua& lua)
     {
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2) ||
-            !host_drop_argument(lua.get_integer(1), lua.get_string(2)) || !host_drop_request ||
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
+            return 0;
+        const std::string epoch{lua.get_string(2)};
+        const auto pawn = lua.get_integer(1);
+        if (!host_drop_argument(pawn, epoch) || !host_drop_request ||
             host_drop_request->taken || Clock::now() >= host_drop_request->expires)
             return 0;
 
@@ -1383,9 +1388,13 @@ namespace
     int lua_finish_host_drop(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) ||
-            !lua.is_integer(3) || !host_drop_argument(lua.get_integer(1), lua.get_string(2)) ||
-            !host_drop_request || !host_drop_request->taken || host_drop_request->sequence != lua.get_integer(3) ||
-            Clock::now() >= host_drop_request->expires)
+            !lua.is_integer(3))
+            return probe_result(lua, false, "scope_changed");
+        const auto sequence = lua.get_integer(3);
+        const std::string epoch{lua.get_string(2)};
+        const auto pawn = lua.get_integer(1);
+        if (!host_drop_argument(pawn, epoch) || !host_drop_request || !host_drop_request->taken ||
+            host_drop_request->sequence != sequence || Clock::now() >= host_drop_request->expires)
             return probe_result(lua, false, "scope_changed");
 
         const auto completed = *host_drop_request;
