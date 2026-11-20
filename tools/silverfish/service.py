@@ -4719,15 +4719,16 @@ class Client:
                     result = {"native_dialogue_view": proof}
                 elif action == native_mosby_station_view.FIXTURE and self.mosby_station:
                     area = self.last_game.get("map")
-                    if (self.last_game.get("state") != "connected" or area not in native_mosby_tape.BY_MAP
+                    profile = native_mosby_station_view.PROFILES.get(area)
+                    if (self.last_game.get("state") != "connected" or profile is None
                             or area == native_mindcore.MAP and not self.mindcore_stage_ready(2)
                             or request.get("target") is not None):
-                        raise ValueError("Connect the enrolled guest at a qualified stock tape station")
+                        raise ValueError("Connect the enrolled guest at a qualified stock exchange station")
                     self.last_game = await self.bridge.command(action, timeout=6)
                     proof = self.last_game.get(native_mosby_station_view.KEY, {})
                     if (proof.get("state") not in ("checking", "trading") or not proof.get("sequence")
-                            or (proof.get("map"), proof.get("station")) != (area, native_mosby_tape.BY_MAP[area].station)):
-                        raise RuntimeError("The stock tape station press did not verify")
+                            or (proof.get("map"), proof.get("station")) != (area, profile.station)):
+                        raise RuntimeError("The stock exchange station press did not verify")
                     result = {native_mosby_station_view.KEY: proof}
                 elif action == native_mindcore_carry.FIXTURE and self.mindcore_carry:
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
