@@ -62,6 +62,8 @@ namespace
     constexpr auto pawn_type = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_type = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto npc_type = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
+    constexpr auto npc_armor_type =
+        STR("/Game/Classes/NPCs/NPC_Characters/NPC_CharacterBase_Inheritor.NPC_CharacterBase_Inheritor_C");
     constexpr auto projectile_type = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto instance_type = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_type = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -166,8 +168,8 @@ namespace
     {
         const Profile* profile{};
         U::FWeakObjectPtr world{}, instance{}, driver{}, host{}, save{}, spawner{}, target{};
-        U::UFunction *deal{}, *resolve{}, *calc{}, *target_killed{};
-        U::FObjectProperty *instigator{}, *event_target{};
+        U::UFunction *deal{}, *deal_with_armor{}, *resolve{}, *calc{}, *target_killed{};
+        U::FObjectProperty *instigator{}, *armor_instigator{}, *event_target{};
         U::FDoubleProperty* health{};
         U::UScriptStruct* quest_struct{};
         U::FIntProperty* step{};
@@ -319,8 +321,17 @@ namespace
         next.deal = script(base, STR("DealDamage"), 7);
         next.resolve = script(base, STR("ResolveDeath"), 0);
         next.calc = script(projectile, STR("CalcDmg"), 1);
-        if (!next.deal || target->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) != next.deal)
-            return "stock_spratt_schema_deal_damage";
+        if (!next.deal) return "stock_spratt_schema_deal_damage";
+        auto* entry = target->GetFunctionByNameInChain(U::FName{STR("DealDamage")});
+        if (next.profile == &spratt)
+        {
+            auto* armor = find<U::UClass>(npc_armor_type);
+            next.deal_with_armor = script(armor, STR("DealDamage"), 7);
+            if (!armor || target->GetClassPrivate()->GetSuperClass() != armor || armor->GetSuperClass() != base ||
+                !next.deal_with_armor || entry != next.deal_with_armor)
+                return "stock_spratt_schema_deal_with_armor";
+        }
+        else if (entry != next.deal) return "stock_spratt_schema_deal_damage";
         if (!next.resolve || target->GetFunctionByNameInChain(U::FName{STR("ResolveDeath")}) != next.resolve)
             return "stock_spratt_schema_resolve_death";
         if (!next.calc) return "stock_spratt_schema_projectile_calc";
@@ -330,6 +341,17 @@ namespace
             next.instigator->HasAnyPropertyFlags(U::CPF_OutParm) || next.instigator->GetOffset_Internal() < 0 ||
             next.instigator->GetOffset_Internal() + next.instigator->GetSize() > next.deal->GetParmsSize())
             return "stock_spratt_schema_instigator";
+        if (next.deal_with_armor)
+        {
+            next.armor_instigator = field<U::FObjectProperty>(next.deal_with_armor, STR("Instigator"));
+            if (!next.armor_instigator || !next.armor_instigator->HasAnyPropertyFlags(U::CPF_Parm) ||
+                next.armor_instigator->HasAnyPropertyFlags(U::CPF_OutParm) ||
+                next.armor_instigator->GetOffset_Internal() != next.instigator->GetOffset_Internal() ||
+                next.armor_instigator->GetSize() != next.instigator->GetSize() ||
+                next.armor_instigator->GetPropertyClass().Get() != next.instigator->GetPropertyClass().Get() ||
+                next.armor_instigator->GetOffset_Internal() + next.armor_instigator->GetSize() >
+                    next.deal_with_armor->GetParmsSize()) return "stock_spratt_schema_armor_instigator";
+        }
         if (!next.health) return "stock_spratt_schema_health";
         next.quest_struct = find<U::UScriptStruct>(quest_type);
         next.step = field<U::FIntProperty>(next.quest_struct, quest_step);
@@ -426,14 +448,25 @@ namespace
 
     Attribution shot(U::FFrame& damage)
     {
+        if (!damage.Locals()) return {};
+        auto* pawn = scope.instigator->GetObjectPropertyValue(scope.instigator->ContainerPtrToValuePtr<void>(damage.Locals()));
+        if (!pawn) return {};
         auto* prior = damage.PreviousFrame();
+        // Spratt's stock armor override computes resistances before calling the base damage graph.
+        if (scope.deal_with_armor)
+        {
+            if (!prior || prior->Node() != scope.deal_with_armor || prior->Object() != scope.target.Get() ||
+                !prior->Locals() || !scope.armor_instigator ||
+                scope.armor_instigator->GetObjectPropertyValue(
+                    scope.armor_instigator->ContainerPtrToValuePtr<void>(prior->Locals())) != pawn) return {};
+            prior = prior->PreviousFrame();
+        }
         auto* projectile = prior ? prior->Object() : nullptr;
         auto* world = static_cast<U::UWorld*>(scope.world.Get());
         auto* base = find<U::UClass>(projectile_type);
         if (!base || !projectile || prior->Node() != scope.calc || !projectile->IsA(base) ||
-            !authority(projectile, world) || !damage.Locals()) return {};
-        auto* pawn = scope.instigator->GetObjectPropertyValue(scope.instigator->ContainerPtrToValuePtr<void>(damage.Locals()));
-        if (!pawn || object(projectile, STR("Owner")) != pawn || object(projectile, STR("Instigator")) != pawn) return {};
+            !authority(projectile, world) || object(projectile, STR("Owner")) != pawn ||
+            object(projectile, STR("Instigator")) != pawn) return {};
         std::string_view role{"-"};
         if (pawn == scope.host.Get()) role = "host";
         else for (const auto& guest : scope.guests)
