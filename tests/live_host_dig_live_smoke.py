@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import suppress
 import json
 from pathlib import Path
 import subprocess
@@ -171,7 +172,8 @@ async def verify(work: Path, vanilla_saved: Path) -> None:
                 try:
                     await stop(directory, process)
                 except (OSError, RuntimeError, AssertionError, TimeoutError):
-                    process.terminate()
+                    with suppress(ProcessLookupError):
+                        process.terminate()
                     await process.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
         evidence["verified"] = evidence["verified"] and evidence["original_saves_verified"]

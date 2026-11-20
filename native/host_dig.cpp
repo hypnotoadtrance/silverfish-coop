@@ -558,16 +558,25 @@ namespace
         if (live_dig.state != LiveState::Contact) return;
         stock_wallet::Wallet flags;
         const auto spawned = scene(ctx, live_dig.impact);
-        const auto passed = flags.bind(ctx.instance) && flags.flag_value(ctx.instance, buried_flag) == std::pair{1, true};
-        if (passed && !live_dig.source.Get() && spawned.packages == 1 &&
-            spawned.holes == live_dig.before.holes + 1 && valid_package(ctx, spawned.package) &&
-            spawned.incidental >= live_dig.before.incidental && spawned.incidental <= live_dig.before.incidental + 1 &&
-            remember_package(spawned.package))
+        std::string_view problem;
+        if (!flags.bind(ctx.instance) || flags.flag_value(ctx.instance, buried_flag) != std::pair{1, true})
+            problem = "stock_live_dig_spawn_flag_unverified";
+        else if (authority(live_dig.source.Get()))
+            problem = "stock_live_dig_source_retirement_unverified";
+        else if (spawned.packages != 1 || !valid_package(ctx, spawned.package))
+            problem = "stock_live_dig_exact_package_unverified";
+        else if (spawned.holes != live_dig.before.holes + 1)
+            problem = "stock_live_dig_hole_unverified";
+        else if (spawned.incidental < live_dig.before.incidental || spawned.incidental > live_dig.before.incidental + 1)
+            problem = "stock_live_dig_incidental_unverified";
+        else if (!remember_package(spawned.package))
+            problem = "stock_live_dig_package_identity_unverified";
+        if (problem.empty())
         {
             live_dig.incidental = spawned.incidental - live_dig.before.incidental;
             live_dig.state = LiveState::Unclaimed;
         }
-        else if (Clock::now() >= live_dig.pickup_until) fail_live("stock_spawn_proof_unavailable");
+        else if (Clock::now() >= live_dig.pickup_until) fail_live(problem);
     }
 
     void observe_live_event(Iteration& call, U::UObject* receiver, U::UFunction* function, const void* args)
