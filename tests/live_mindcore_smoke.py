@@ -989,12 +989,16 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             passage = proof["held_cradle_passage"] = {"card": await assert_key_custody(cards[0])}
             passage["stock_carry_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
             installed = await verify_held_cradle_passage(run, guest_run, action, inactive, passage)
+            saved_mount = await action(run, "checkpoint")
         else:
             installed = (await action(run, fixture.INSTALL))[core.SCENE]
-        _, mounted_flags = await flags()
+        mounted_frame, mounted_flags = await flags()
         assert (installed["status"], installed["installed"]) == (1, True), installed
         assert tuple(row.get(core.FLAG, 0) for row in mounted_flags) == (1, 0), mounted_flags
         proof["installation"] = {"scene": installed, "headless_relocation": not cradle_carry, "stock_flags": [1, 0]}
+        if cradle_carry:
+            assert mounted_frame["revision"] >= saved_mount["revision"] > dormant_checkpoint["revision"]
+            proof["installation"]["checkpoint"] = mounted_frame["revision"]
         if shared_core:
             await shared_core_at(1, label="mounted")
 

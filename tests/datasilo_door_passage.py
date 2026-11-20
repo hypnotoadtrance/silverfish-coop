@@ -56,6 +56,7 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
                 "sequences": [game["sequence"], peer["sequence"]]}
 
     frames = proof["carrier_walk"] = []
+    stalled = 0
     for _ in range(60):
         before = carrier_frame()
         hold, scene = before["hold"], before["scene"]
@@ -86,10 +87,14 @@ async def verify_held_cradle_passage(run, guest_run, action, authority, proof):
             grip = row.get("grip_position")
             if (asyncio.get_running_loop().time() >= pulse_end and grip and row["sequence"] > hold["sequence"]
                     and sample["pawn"][1] > y + 4 and grip[1] > hold["grip_position"][1] + 4):
+                stalled = 0
                 break
             await asyncio.sleep(.055)
         else:
-            raise RuntimeError(f"The carrier's grip did not follow a catwalk step: {step['samples'][-1]}")
+            # A stock shock can stop movement for the entire input pulse.
+            stalled += 1
+            if stalled > 2 or row["sequence"] <= hold["sequence"] or sample["pawn"][1] > y + 4:
+                raise RuntimeError(f"The carrier's grip did not follow a catwalk step: {step['samples'][-1]}")
     else:
         raise RuntimeError(f"The held Core did not reach the cradle: {frames[-1]}")
 
