@@ -276,6 +276,8 @@ At the upper stop, moving the carrier to X −1,718 and turning west kept the Co
 
 The guest used stock carry and Interact to release the Core inside the lower cabin, where it settled near Z 120 before the guest went down. A shorter paired diagnostic started from the same keyed checkpoint and placed the loose Core directly over the lower deck with stock physics enabled. With both pawns on the starting floor, the host triggered the stock lift. The Core rose from Z 27 to Z 746 and fell off the deck. When the lift reached its upper stop at Z 2,400, the Core was outside the cabin at Z 121. Both save trees kept their hashes. [Loose cargo diagnostic](../tests/datasilo_core_lift.py)
 
+In co-op, the host now secures the exact unheld Core to the stock deck if it has settled inside the cabin. The stock replication message supplies the guest's attachment. If the guest receives that message before local physics is turned off, it retries applying the same attachment after physics is ready. The paired diagnostic observed the exact Core attached in both games during ascent, then detached with physics restored on both at the upper stop. The Core settled within one Unreal unit of the host's position on the guest. The source and original save hashes matched. [Replication and physics readback](../tests/datasilo_core_lift.py)
+
 For the next cargo change, run the focused checks and use the same isolated workspace and keyed checkpoint. From the repository root, with the staged Lua and native add-ons matching the change:
 
 ```powershell
