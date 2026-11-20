@@ -289,7 +289,14 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         pressed = await action(run, lift.FIXTURE, target="power")
         assert (pressed["input"], pressed["source_stop"]) == ("power", "lower"), pressed
         proof["stock_lift_power"] = pressed
-        proof["ascending"] = await at_stop("moving stock lift with loose cargo", "moving")
+        proof["ascending"] = await observe(
+            "both games carry the loose Core with the moving stock deck",
+            lambda row, host, peer: (
+                lift_pose_matches(host.get(lift.KEY, {}), peer.get(lift.KEY, {}), "moving")
+                and all(prop.get("simulating") is False and prop.get("parent") == "deck"
+                        for prop in (row["prop"], row["guest_prop"]))),
+            timeout=16,
+        )
         proof["upper"] = await at_stop("upper stock lift with loose cargo", "upper")
         lower_position = proof["lower_parked"]["prop"]["position"]
         upper_position = proof["upper"]["prop"]["position"]

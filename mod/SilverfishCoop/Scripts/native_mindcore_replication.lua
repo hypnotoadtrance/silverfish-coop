@@ -13,6 +13,7 @@ local core_name = "MindCore_BP_C " .. core_path
 local cradle_name = "MindCore_Cradle_BP_C " .. cradle_path
 local core_class = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local cradle_class = "/Game/Classes/Actors/MindCore_Cradle_BP.MindCore_Cradle_BP_C"
+local lift_class = "/Game/Classes/Actors/RailLift_BP.RailLift_BP_C"
 local capsule_class = "/Script/Engine.CapsuleComponent"
 local mesh_class = "/Script/Engine.StaticMeshComponent"
 local client_role, host_scope, client_scope
@@ -53,6 +54,21 @@ local function client_world(world)
     return valid(connection) and same(driver.World, world) and same(connection.Driver, driver)
 end
 
+local function reconcile_deck_attachment(current)
+    local core, frame = current.core, current.frame
+    if current.cradle.Status ~= 0 or core:GetLocalRole() ~= 1 or core.bReplicateMovement ~= true
+        or valid(frame:GetAttachParent()) or frame:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) ~= false then
+        return
+    end
+    local attachment = core.AttachmentReplication
+    local platform, deck = attachment.AttachParent, attachment.AttachComponent
+    if not actor(platform, lift_class, "RailLift_BP_C " .. lift_path, current.world) or platform:GetLocalRole() ~= 1
+        or not exact(deck, mesh_class) or deck:GetFullName() ~= deck_name
+        or not same(deck:GetOwner(), platform) or not same(deck, platform.SM_Prop_Elevator_01) then return end
+    -- Attachment can arrive before the update that turns off local physics. Retry the stock application once the body can attach.
+    core:OnRep_AttachmentReplication()
+end
+
 local function guard_client(world, origin, known_cradle)
     if not client_world(world) then return end
     local current = scene(world, StaticFindObject(core_path), known_cradle or StaticFindObject(cradle_path))
@@ -71,6 +87,7 @@ local function guard_client(world, origin, known_cradle)
     else
         client_scope.state = current.cradle.Status == 0 and "guarded" or "guest_late"
     end
+    reconcile_deck_attachment(current)
 end
 
 local function activate_host(state, phase)
