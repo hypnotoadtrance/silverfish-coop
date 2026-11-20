@@ -726,6 +726,11 @@ local indoor_door_fixtures = {
         far = {tag = "South_Gunsmith", actor = "Dungeon_TransitionDoor_BP_C_1",
             floor = "StaticMeshActor_124", position = {-1250, 2250, -300}},
     },
+    ["/Game/Classes/Maps/Maps_Dungeons/TheThroat_P"] = {
+        map_name = "TheThroat_P",
+        far = {tag = "Maw_Throat", actor = "Dungeon_TransitionDoor_BP_C_1",
+            floor = "StaticMeshActor_443", position = {-4850, -2700, 22800}, offset = 120},
+    },
 }
 
 local function place_at_named_door(state, pawn, door, direction, rotation, distance, tag)
@@ -760,17 +765,22 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
     local approach = indoor and indoor[far and "far" or "near"]
     if approach and tag == approach.tag then
         local level = state.map .. "." .. indoor.map_name .. ":PersistentLevel."
-        local start = StaticFindObject(level .. "PlayerStart_1")
-        local point = valid(start) and start:K2_GetActorLocation()
-        if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. approach.actor
-            or not valid(start) or not same(start:GetWorld(), state.world)
-            or not same(start:GetClass(), StaticFindObject("/Script/Engine.PlayerStart"))
-            or not vector(point) or math.abs(point.X - indoor.spawn[1]) > 2
-            or math.abs(point.Y - indoor.spawn[2]) > 2 or math.abs(point.Z - indoor.spawn[3]) > 2 then
-            error("The exact indoor door or stock spawn changed", 0)
+        if door:GetFullName() ~= "Dungeon_TransitionDoor_BP_C " .. level .. approach.actor then
+            error("The exact indoor door changed", 0)
         end
-        -- Start the floor ray inside the room at the stock spawn height.
-        indoor_top, indoor_bottom = point.Z + 40, point.Z - 200
+        local point
+        if indoor.spawn then
+            local start = StaticFindObject(level .. "PlayerStart_1")
+            point = valid(start) and start:K2_GetActorLocation()
+            if not valid(start) or not same(start:GetWorld(), state.world)
+                or not same(start:GetClass(), StaticFindObject("/Script/Engine.PlayerStart"))
+                or not vector(point) or math.abs(point.X - indoor.spawn[1]) > 2
+                or math.abs(point.Y - indoor.spawn[2]) > 2 or math.abs(point.Z - indoor.spawn[3]) > 2 then
+                error("The exact indoor stock spawn changed", 0)
+            end
+            -- Start the floor ray inside the room at the stock spawn height.
+            indoor_top, indoor_bottom = point.Z + 40, point.Z - 200
+        end
         if far then
             if approach.floor then
                 local floor = StaticFindObject(level .. approach.floor)
@@ -788,9 +798,10 @@ local function place_at_named_door(state, pawn, door, direction, rotation, dista
             end
             local dx, dy = point.X - origin.X, point.Y - origin.Y
             local forward, across = dx * direction.X + dy * direction.Y, dx * lateral_x + dy * lateral_y
-            candidates = {{forward, across}, {forward, across + 70}, {forward, across - 70},
-                {forward + 70, across + 70}, {forward - 70, across + 70},
-                {forward + 70, across - 70}, {forward - 70, across - 70}}
+            local offset = approach.offset or 70
+            candidates = {{forward, across}, {forward, across + offset}, {forward, across - offset},
+                {forward + offset, across + offset}, {forward - offset, across + offset},
+                {forward + offset, across - offset}, {forward - offset, across - offset}}
         else
             local span, face = approach.range, approach.forward
             if math.abs(point.X - origin.X - span * face[1]) > 2
