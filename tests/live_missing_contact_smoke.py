@@ -176,6 +176,8 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
             1, package, "host", True), active
         before = await balances(character)
         assert before[0][dig.FLAG] == 1 and before[1][dig.FLAG] == 0
+        effective_reputation = {key: active["reputation"][key]["before"] for key in ("8", "4")}
+        evidence["effective_reputation_before"] = effective_reputation
         await board_state(run, "armed", "focused")
         await press(run, "loading")
         await board_state(run, "ready")
@@ -184,9 +186,11 @@ async def exercise(work: Path, vanilla_saved: Path) -> None:
         assert (done["cash"], done["xp"], done[SPEC.consumed_field], done["objective_owner"]) == (450, 1, package, "host"), done
         assert set(done["recipients"]) == {"host", character}, done
         assert done["wallet"] == before[0]["Player_Cash"] + 450, done
+        expected_reputation = {"8": effective_reputation["8"] + 40, "4": effective_reputation["4"] - 5}
+        assert done["reputation"] == expected_reputation, done
         assert package not in await inventory(run) and package not in await inventory(guest_run), done
         expected_host = dict(before[0], Player_Cash=done["wallet"], Player_Xp=before[0]["Player_Xp"] + 1,
-                             Rep_Freelancer=before[0]["Rep_Freelancer"] + 40, Rep_State=before[0]["Rep_State"] - 5)
+                             Rep_Freelancer=expected_reputation["8"], Rep_State=expected_reputation["4"])
         expected_guest = dict(before[1], Player_Xp=before[1]["Player_Xp"] + 1)
         after = await balances(character)
         assert after == [expected_host, expected_guest], (before, after)
