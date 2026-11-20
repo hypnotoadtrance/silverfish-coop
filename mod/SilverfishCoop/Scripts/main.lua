@@ -23,6 +23,7 @@ local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
 local native_mindcore_fixture = require("native_mindcore_fixture")
+local native_mindcore_replication = require("native_mindcore_replication")
 local native_mindcore_view = require("native_mindcore_view")
 local native_prototype_drill = require("native_prototype_drill_turnin")
 local native_mosby_station = require("native_mosby_station_view")
@@ -457,6 +458,7 @@ local function run_command(fields, state, current_phase)
         native_mosby_station.clear()
         native_mindcore.clear()
         native_mindcore_fixture.clear()
+        native_mindcore_replication.clear()
         native_mindcore_view.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
@@ -1063,6 +1065,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1228,6 +1231,7 @@ end
 local function tick()
     local state, current_phase = observe_session()
     if not state then return end
+    native_mindcore_replication.sync(state, current_phase)
     native_title_panel.sync(state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
@@ -1339,6 +1343,7 @@ native_broker_input.start(bridge, players.is_downed)
 native_wire_board.start(bridge, players.is_downed)
 native_dialogue.start(bridge, players)
 native_mosby_station.start(bridge, players.is_downed)
+native_mindcore_replication.start(function() return role == "client" and not leaving end)
 native_mindcore_view.start(bridge, players.is_downed)
 native_wipe_view.start(bridge, players.is_downed)
 native_death.start(bridge)

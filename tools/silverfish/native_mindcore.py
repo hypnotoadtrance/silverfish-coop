@@ -18,6 +18,7 @@ UPLOADER = "DataTape_Uploader_BP_C " + LEVEL + "DataTape_Uploader_BP_C_1"
 FLAG = "MC_007_Console"
 SCENE = "native_mindcore_scene"
 PROOF = "native_mindcore_tape"
+REPLICATION = "native_mindcore_replication"
 LEDGER = "native_mindcore_results_upload"
 PREFLIGHT = "native-mindcore-preflight"
 UPLOAD = "native-mindcore-upload"
@@ -32,6 +33,25 @@ def parse_scene(fields: list[str]) -> dict:
         raise ValueError("Invalid exact Data Silo console report")
     return dict(map=MAP, cradle=CRADLE, uploader=UPLOADER, core=CORE, flag=FLAG,
                 status=int(fields[6]), installed=fields[7] == "1")
+
+
+def parse_replication(fields: list[str], role: str) -> dict:
+    if role not in ("host", "guest") or len(fields) != 13 or tuple(fields[:3]) != ("native-mindcore-replication", MAP, role):
+        raise ValueError("Invalid exact Data Silo replication scope")
+    state, core, replicates, movement, overlap, stage, x, y, z, source = fields[3:]
+    position = [float(value) for value in (x, y, z)]
+    states = {"host": {"active", "replication_unverified"},
+              "guest": {"guarded", "guard_unverified", "guest_late"}}
+    sources = {"host": {"authority"}, "guest": {"load_map", "begin_play", "tick"}}
+    if (core != CORE or state not in states[role] or source not in sources[role]
+            or not all(bit in ("0", "1", "-") for bit in (replicates, movement, overlap))
+            or stage not in ("0", "1", "2") or not all(-1e7 < value < 1e7 for value in position)
+            or state == "active" and (replicates, movement) != ("1", "1")
+            or state == "guarded" and (stage, overlap) != ("0", "0")):
+        raise ValueError("Invalid stock Data Silo replication report")
+    bits = {"0": False, "1": True, "-": None}
+    return dict(role=role, state=state, core=core, stage=int(stage), position=position, source=source,
+                replicates=bits[replicates], replicate_movement=bits[movement], capsule_overlap=bits[overlap])
 
 
 def parse_proof(fields: list[str]) -> dict:

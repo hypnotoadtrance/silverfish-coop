@@ -105,7 +105,8 @@ def baseline_inputs(work, baseline, *, resume=False):
     return data, source, receipt, guest_id, proof["routes"] if resume else []
 
 
-async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False, carry_only=False):
+async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
+                   carry_only=False, shared_core=False):
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
     if carry_only and instructions:
@@ -118,6 +119,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Use a matched stage with the ordinary MindCore Interact adapter")
     if carry_only and not runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.CARRY):
         raise ValueError("Use the matched stock Core handling fixture")
+    if shared_core and not runtime.staged_script(work, "native_mindcore_replication.lua", "SetReplicateMovement"):
+        raise ValueError("Use the matched Data Silo Core replication stage")
     originals = saved_hashes(vanilla_saved)
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
@@ -238,6 +241,27 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         host_pose, guest_pose = await asyncio.gather(observe(run, "host"), observe(guest_run, "guest"))
         return {"host": host_pose, "guest": guest_pose}
 
+    async def shared_core_at(stage, *, label):
+        def current(directory):
+            state = runtime.read_json(directory / "status.json")
+            return state.get("game", {}).get(core.REPLICATION, {})
+
+        host_view = guest_view = {}
+        deadline = asyncio.get_running_loop().time() + 16
+        while asyncio.get_running_loop().time() < deadline:
+            host_view, guest_view = current(run), current(guest_run)
+            if ((host_view.get("state"), host_view.get("stage"), host_view.get("capsule_overlap"))
+                    == ("active", stage, True)
+                    and (guest_view.get("state"), guest_view.get("stage"), guest_view.get("capsule_overlap"))
+                    == ("guarded", 0, False)):
+                distance = math.dist(host_view["position"], guest_view["position"])
+                if distance <= 24:
+                    row = {"host": host_view, "guest": guest_view, "distance_uu": round(distance, 3)}
+                    proof.setdefault("shared_core", {})[label] = row
+                    return row
+            await asyncio.sleep(.2)
+        raise RuntimeError(f"Core did not synchronize at {label}: host={host_view}, guest={guest_view}")
+
     async def inventory(directory, owner):
         items, offset = {}, 0
         for _ in range(17):
@@ -354,6 +378,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         inactive = await wait(run, lambda state: (scene := state.get("game", {}).get(core.SCENE, {}))
                               and (scene["status"], scene["installed"]) == (0, False), timeout=20)
         proof["dormant"] = inactive["game"][core.SCENE]
+        if shared_core:
+            await shared_core_at(0, label="dormant")
         locked = await action(guest_run, core.UPLOAD, target=guid, success=False)
         assert locked["error"] == core.LOCKED, locked
         if stock_input:
@@ -374,12 +400,16 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 assert (result[core.SCENE]["status"], result[core.SCENE]["installed"]) == (0, False)
                 proof["stock_carry"][step] = observed
                 poses[step] = previous = await core_poses(previous)
+                if shared_core:
+                    await shared_core_at(0, label=step)
             movement = proof["stock_carry"]["step"]
             assert movement["pawn_movement_uu"] >= 20 and movement["core_movement_uu"] >= 20, movement
             assert all(row["pawn"] == movement["pawn"] for row in proof["stock_carry"].values())
             proof["core_displacement"] = {role: round(math.dist(poses["before"][role]["position"],
                                                                poses["release"][role]["position"]), 2)
                                           for role in ("host", "guest")}
+            if shared_core:
+                assert proof["core_displacement"]["guest"] >= 20, proof["core_displacement"]
             await paired(core.MAP)
             await action(run, "checkpoint")
             saved, held_flags = await flags()
@@ -395,6 +425,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         assert (installed["status"], installed["installed"]) == (1, True), installed
         assert tuple(row.get(core.FLAG, 0) for row in mounted_flags) == (1, 0), mounted_flags
         proof["installation"] = {"scene": installed, "headless_relocation": True, "stock_flags": [1, 0]}
+        if shared_core:
+            await shared_core_at(1, label="mounted")
 
         near, first = await inspect_buttons() if stock_input else (await action(run, fixture.APPROACH), None)
         if instructions:
@@ -451,6 +483,8 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         restarted = await paired(core.MAP, (authority["generation"], authority["zone_epoch"]))
         assert restarted["endpoint"]["port"] == port
         restored = await wait(run, lambda state: core._ready(state.get("game", {}), 2), timeout=25)
+        if shared_core:
+            await shared_core_at(2, label="late_join_after_restart")
         if stock_input:
             await view("pass-through", 0, 0)
             stage_two = await action(guest_run, console.FIXTURE, success=False)
@@ -505,7 +539,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-input", action="store_true", help="confirm the upload with two genuine stock Interact presses")
     parser.add_argument("--instructions", action="store_true", help="buy a second blank and use the compiled console's stock exchange")
     parser.add_argument("--carry-only", action="store_true", help="grab, move, and release the Core with stock gameplay")
+    parser.add_argument("--shared-core", action="store_true", help="verify the guest sees the authoritative exact Core")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
-                         instructions=options.instructions, carry_only=options.carry_only))
+                         instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core))

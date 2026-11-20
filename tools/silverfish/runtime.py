@@ -1192,6 +1192,11 @@ class Bridge:
                     if native_mindcore.PROOF in data or native_mindcore.SCENE not in data:
                         raise ValueError("Invalid Data Silo Results proof scope")
                     data[native_mindcore.PROOF] = native_mindcore.parse_proof(fields)
+                elif fields[0] == "native-mindcore-replication":
+                    role = {"hosting": "host", "connected": "guest"}.get(data.get("state"))
+                    if role is None or data.get("map") != native_mindcore.MAP or native_mindcore.REPLICATION in data:
+                        raise ValueError("Invalid Data Silo replication scope")
+                    data[native_mindcore.REPLICATION] = native_mindcore.parse_replication(fields, role)
                 elif fields[0] in (native_mindcore_fixture.CARRY_TAG, native_mindcore_fixture.CARRY_DIAGNOSTIC):
                     key, parse = (
                         (native_mindcore_fixture.CARRY_KEY, native_mindcore_fixture.parse_carry)

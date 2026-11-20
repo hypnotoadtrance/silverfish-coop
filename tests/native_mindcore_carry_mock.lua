@@ -159,7 +159,7 @@ do_move = false
 assert(request("grab") and request("step"))
 advance(2.2)
 advance(2.5)
-advance(6)
+advance(9)
 assert(report():find("carry_motion_timeout", 1, true) and not report():find("\tcarried\t", 1, true))
 assert(request("release"))
 fixture.clear()
