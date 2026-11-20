@@ -34,7 +34,7 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         frozen = {"revision": 42, "characters": [{"character_id": OWNER, "state": {"native_guest_save": source}}]}
         host = SimpleNamespace(fixtures=True, native_guest=True, native_zones=True, native_profile=profile, party=state,
                                stopping=False, transitioning=False, native_checkpoint_unsafe=False, smg_holds=None,
-                               last_seen=time.monotonic(), last_game={"state": "hosting", "map": MAP, probe.CAPABILITY: 1},
+                               last_seen=time.monotonic(), last_game={"state": "hosting", "map": MAP, record.CAPABILITY: 1},
                                native_recipients=lambda: {character: {"connected": True, "pawn": PAWN} for character in (OWNER, OTHER)},
                                roles=lambda: {"guest": OWNER, "guest2": OTHER},
                                authoritative_pawns=Mock(return_value={OWNER: {"map": MAP, "location": POS}}),

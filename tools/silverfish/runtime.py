@@ -21,7 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
-from . import native_guest_drop_projection, native_guest_stack_drop
+from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_black_box
 from . import native_spratt
 from . import native_spratt_fixture
@@ -1541,10 +1541,14 @@ class Bridge:
                     if key in data:
                         raise ValueError("Duplicate stock drop projection")
                     data[key] = native_guest_drop_projection.parse(fields, data.get("state"), data.get("map"))
-                elif fields == [native_guest_stack_drop.ACTION + "-capability", "1"]:
+                elif len(fields) == 2 and fields[1] == "1" and fields[0] in (
+                    native_guest_stack_drop.BIRTH + "-capability", native_guest_stack_drop.ACTION + "-capability",
+                ):
                     if data.get("state") == "hosting" and data.get("map") == native_guest_stack_drop.OBSERVATORY:
-                        data[native_guest_stack_drop.CAPABILITY] = 1
-                elif fields[0] == native_guest_stack_drop.ACTION:
+                        key = (native_guest_drop_record.CAPABILITY if fields[0].startswith(native_guest_stack_drop.BIRTH)
+                               else native_guest_stack_drop.CAPABILITY)
+                        data[key] = 1
+                elif fields[0] in (native_guest_stack_drop.ACTION, native_guest_stack_drop.BIRTH):
                     if native_guest_stack_drop.KEY in data:
                         raise ValueError("Duplicate isolated stack drop report")
                     data[native_guest_stack_drop.KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
@@ -1575,6 +1579,11 @@ class Bridge:
                       and 1 < (count := int(fields[7])) < 2**31):
                     data["native_guest_inventory_split_view"] = dict(sequence=sequence, map=fields[2], pawn=fields[3],
                                                                    guid=fields[4], class_path=fields[5], state=fields[6], count=count)
+                elif fields[0] == native_guest_drop_record.VIEW_ROW:
+                    key = native_guest_drop_record.VIEW
+                    if key in data:
+                        raise ValueError("Duplicate stock inventory drop view")
+                    data[key] = native_guest_drop_record.parse_view(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-guest-inventory-equip-view" and len(fields) == 6:
                     data["native_guest_inventory_equip_view"] = {"sequence": int(fields[1]), "map": fields[2],
                                                                  "pawn": fields[3], "guid": fields[4], "state": fields[5]}

@@ -1,6 +1,7 @@
 """Validate the scoped durable owner-claim ledger for native stock 9mm stacks."""
 
 import math
+import re
 
 from .guest_weapon_profiles import NINE_MM_BALL
 from .native_gold import valid_guid
@@ -9,6 +10,10 @@ from .travel import OBSERVATORY
 
 
 STATE = "native_guest_stack_drops"
+CAPABILITY = "native_guest_stack_drop_capability"
+VIEW = "native_guest_inventory_drop_view"
+VIEW_ROW = "native-guest-inventory-drop-view"
+VIEW_RESULT = "native-inventory-view-drop-result"
 ITEM = NINE_MM_BALL.item_path
 MAX_DROPS = 128
 MAX_ACTIVE = 4
@@ -23,6 +28,22 @@ def valid_id(value) -> bool:
 def valid_position(value) -> bool:
     return (type(value) is list and len(value) == 3
             and all(type(axis) in (int, float) and abs(axis) <= 1e7 and math.isfinite(axis) for axis in value))
+
+
+_PAWN = re.compile(r"Player_FP_C " + re.escape(f"{OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_")
+                   + r"[0-9]{1,10}\Z")
+
+
+def parse_view(fields: list[str], state: str, area: str) -> dict:
+    if len(fields) != 8 or (state, area) != ("connected", OBSERVATORY):
+        raise ValueError("Unexpected stock inventory drop view")
+    _, number, reported_area, pawn, guid, item, phase, quantity = fields
+    if (reported_area != area or not _PAWN.fullmatch(pawn) or not valid_guid(guid) or item != ITEM
+            or phase not in {"confirming", "dropping", "dropped", "refused"}
+            or not re.fullmatch(r"[1-9][0-9]{0,15}", number) or int(number) >= 2**53
+            or not re.fullmatch(r"[1-9][0-9]{0,2}", quantity) or int(quantity) > MAX_QUANTITY):
+        raise ValueError("Invalid stock inventory drop view")
+    return dict(sequence=int(number), map=area, pawn=pawn, guid=guid, class_path=item, state=phase, count=int(quantity))
 
 
 def active_frames(data: dict, members) -> list[dict]:

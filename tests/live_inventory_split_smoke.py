@@ -1,4 +1,4 @@
-"""Verify stock guest inventory split, sort, or isolated ammo-drop spawning."""
+"""Verify routed guest inventory split, sort, or manual drop."""
 
 import argparse
 import asyncio
@@ -15,13 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL
 from tools.silverfish import native_guest_stack_drop as stack_drop
+from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 
 
-async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False):
-    mode = "stock-stack-drop" if stock_drop_probe else "inventory-sort" if sort_backpack else "inventory-split"
+async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False,
+                 manual_drop: bool = False):
+    mode = ("inventory-manual-drop" if manual_drop else "stock-stack-drop" if stock_drop_probe
+            else "inventory-sort" if sort_backpack else "inventory-split")
     name = mode + "-" + uuid.uuid4().hex[:8]
     host = ("--campaign", name)
     guest = ("--profile", name)
@@ -97,6 +100,63 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
         assert seeded["native_guest_weapon"]["guid"] == source, seeded
         rows = await page(guest, character)
         quantities(rows, {source: 9})
+        if manual_drop:
+            await stop(host, authority)
+            await stop(guest, client)
+            normal_flags = tuple(flag for flag in host_flags if flag != "--fixtures")
+            await launch(host, "host-manual-drop", "host", *host, "--port", str(first["endpoint"]["port"]), *normal_flags)
+            normal = await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != first["generation"]
+                                and state.get("game", {}).get(drop_record.CAPABILITY) == 1)
+            assert stack_drop.CAPABILITY not in normal["game"], normal["game"]
+            renewed = await ask("action", *host, "refresh-invite", "--target", invitation["guest_id"])
+            await launch(guest, "guest-manual-drop", "join", *guest, "--invite", renewed["invite_file"], *guest_flags)
+            await enrolled()
+            await wait(guest_run, lambda state: state.get("gameplay_fresh")
+                       and state.get("gameplay", {}).get(drop_record.CAPABILITY) == 1)
+            assert await page(guest, character) == rows
+            denied = await ask("action", *host, stack_drop.ACTION, "--target", "guest", "--item-guid", source,
+                               "--amount", "9", success=False)
+            assert denied["error"] == "native_guest_stack_drop_fixture_unavailable", denied
+            evidence["diagnostic_probe_refused_without_fixture_scope"] = True
+
+            await ask("action", *guest, "native-inventory-view-fixture")
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+            key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
+            for _ in range(next(index for index, row in enumerate(rows) if row["guid"] == source)):
+                await ask(*key, "down")
+            confirmation = (await ask(*key, "drop"))[drop_record.VIEW]
+            assert (confirmation["state"], confirmation["guid"], confirmation["count"]) == ("confirming", source, 9), confirmation
+            assert (await ask(*key, "back"))[drop_record.VIEW] == {}
+            assert await page(guest, character) == rows and await page(host, "host") == host_before
+            evidence["cancelled_confirmation"] = confirmation
+
+            assert (await ask(*key, "drop"))[drop_record.VIEW] == confirmation
+            pending = (await ask(*key, "confirm"))[drop_record.VIEW]
+            assert pending == {**confirmation, "state": "dropping"}, pending
+            final = await wait(guest_run, lambda state: state.get("game", {}).get(drop_record.VIEW) == {**pending, "state": "dropped"})
+            evidence["rendered_drop_result"] = final["game"][drop_record.VIEW]
+            events = (await ask("events", *guest, "--tail", "100"))["events"]
+            commits = [event for event in events if event["event"] == "native_guest_inventory_stack_dropped"
+                       and event["view_sequence"] == pending["sequence"]]
+            assert len(commits) == 1, commits
+            committed, = commits
+            assert (committed["state"], committed["owner"], committed["guid"], committed["quantity"]) == (
+                "dropped", character, source, 9), committed
+            operation = committed["operation_id"]
+            assert committed["drop_id"] == operation
+            evidence["inventory_drop"] = committed
+
+            campaign = run.parent
+            checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+            native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
+            escrow = checkpoint["world"]["party"][drop_record.STATE][operation]
+            assert escrow["guid"] == source and escrow["quantity"] == 9 and escrow["claim_id"] is None and "escrow" in escrow
+            assert await page(guest, character) == [row for row in rows if row["guid"] != source]
+            replay = (await ask("action", *guest, drop.DROP, "--target", f"{source}|9", "--operation-id", operation))[drop.RESULT]
+            assert replay == {key: committed[key] for key in replay}, replay
+            assert await page(host, "host") == host_before
+            evidence["verified"] = True
+            return
         if stock_drop_probe:
             arguments = (stack_drop.ACTION, "--target", "guest", "--item-guid", source, "--amount")
             denied = await ask("action", *guest, *arguments, "9", success=False)
@@ -208,7 +268,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                         process.terminate()
                         await process.wait()
         evidence["original_saves_verified"] = saved_hashes(vanilla_saved) == originals
-        report = "live-stock-stack-drop-verification.json" if stock_drop_probe else "live-inventory-split-verification.json"
+        report = ("live-inventory-manual-drop-verification.json" if manual_drop else
+                  "live-stock-stack-drop-verification.json" if stock_drop_probe else "live-inventory-split-verification.json")
         (run / report).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         assert evidence["original_saves_verified"], "Original single-player saves changed during the test"
 
@@ -220,5 +281,7 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--sort-backpack", action="store_true", help="verify stock sort on a mixed backpack before splitting")
     modes.add_argument("--stock-drop-probe", action="store_true", help="verify one stock 9mm actor born and retired in the same tick")
+    modes.add_argument("--manual-drop", action="store_true", help="qualify regular co-op inventory Drop after isolated seeding")
     settings = parser.parse_args()
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack, settings.stock_drop_probe))
+    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack,
+                       settings.stock_drop_probe, settings.manual_drop))

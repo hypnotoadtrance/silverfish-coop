@@ -1,9 +1,11 @@
 """Settle a scoped native guest stack drop or reclaim in one paired checkpoint."""
 
 import asyncio
+from contextlib import suppress
 import math
 import re
 import time
+import uuid
 
 from . import native_guest_drop_record as record
 from . import native_guest_stack_drop as probe, native_host_save, native_inventory, native_inventory_death, party
@@ -28,9 +30,9 @@ def _result(row: dict, drop_id: str, action: str) -> dict:
 
 def _owner(host, character: str) -> str:
     game = host.last_game
-    if (not host.fixtures or not host.native_guest or not host.native_zones or host.native_profile is None
+    if (not host.native_guest or not host.native_zones or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
-            or (game.get("state"), game.get("map"), game.get(probe.CAPABILITY)) != ("hosting", record.OBSERVATORY, 1)
+            or (game.get("state"), game.get("map"), game.get(record.CAPABILITY)) != ("hosting", record.OBSERVATORY, 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
     owner = host.native_recipients().get(character, {})
@@ -53,6 +55,61 @@ def _near(host, character: str, row: dict) -> bool:
 def _qualified_item(row: dict, guid: str, count: int) -> bool:
     return (row.get("guid"), row.get("quantity"), row.get("class_path"), row.get("source"),
             row.get("stackable"), row.get("important")) == (guid, count, record.ITEM, "backpack", True, False)
+
+
+def droppable(row: dict) -> bool:
+    guid, count = row.get("guid"), row.get("quantity")
+    return (valid_guid(guid) and type(count) is int and 1 <= count <= record.MAX_QUANTITY
+            and _qualified_item(row, guid, count))
+
+
+def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
+    return client.host_session, client.zone_epoch, client.stack_drop_projection.admission, sequence, area, pawn
+
+
+async def service_view(client, active: bool) -> None:
+    view = client.last_game.get(record.VIEW, {})
+    sequence = view.get("sequence")
+    if view.get("state") != "dropping" or type(sequence) is not int or not client.last_inventory_drop < sequence < 2**53:
+        return
+    client.last_inventory_drop = sequence
+    area, pawn, guid, item, count = (view.get(key) for key in ("map", "pawn", "guid", "class_path", "count"))
+    identity = view_identity(client, sequence, area, pawn)
+    operation = uuid.uuid5(client.bridge.input_namespace, ":".join(map(str, (*identity, DROP, guid, count)))).hex
+    result = "refused"
+    try:
+        if (not active or client.stopping or client.suspended or not client.transport.game_access
+                or client.needs_travel or client.server_transitioning or not client.host_session or not client.zone_epoch
+                or time.monotonic() - client.gameplay_seen >= 3 or client.gameplay.get(record.CAPABILITY) != 1
+                or area != record.OBSERVATORY or area != client.last_game.get("map")
+                or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
+                or client.inventory_drop_scope != identity or item != record.ITEM or not valid_guid(guid)
+                or type(count) is not int or not 1 <= count <= record.MAX_QUANTITY):
+            raise ValueError("The stock inventory drop confirmation expired")
+        owner = client.invite["character_id"]
+        page = (await client.gameplay_action("native-inventory-list", operation, "0"))["native_inventory"]
+        if (page["owner"] != owner or page["offset"] != 0
+                or not any(droppable(row) and (row["guid"], row["quantity"]) == (guid, count) for row in page["items"])):
+            raise ValueError("The selected full stack is no longer on your authenticated backpack page")
+        current = client.bridge.snapshot() or {}
+        if (view_identity(client, sequence, area, pawn) != identity or not client.transport.game_access
+                or client.suspended or client.needs_travel or client.server_transitioning
+                or client.inventory_drop_scope != identity or current.get("state") != "connected"
+                or current.get("map") != area or current.get(record.VIEW) != view
+                or current.get("pawns", {}).get("local", {}).get("name") != pawn):
+            raise ValueError("The stock inventory drop confirmation expired")
+        receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{count}"))[RESULT]
+        if (tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map")) != (
+                "dropped", operation, owner, guid, count, record.ITEM, area)
+                or not record.valid_position(receipt.get("location"))):
+            raise RuntimeError("The host did not verify the exact dropped 9mm stack")
+        result = "dropped"
+        client.control.event("native_guest_inventory_stack_dropped", operation_id=operation, view_sequence=sequence, **receipt)
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
+        client.control.event("native_guest_inventory_stack_drop_rejected", operation_id=operation, view_sequence=sequence,
+                             reason=str(error))
+    with suppress(OSError, RuntimeError, ValueError):
+        client.last_game = await client.bridge.command(record.VIEW_RESULT, str(sequence), area, guid, result, timeout=2)
 
 
 async def _escrow_item(host, bridge, frame: dict, guid: str, count: int) -> None:
@@ -159,7 +216,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if (len(drops) >= record.MAX_DROPS or len(active) >= record.MAX_ACTIVE
             or any(row["owner"] == character or row["guid"] == guid for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")
-    birth = (await probe.perform(host, bridge, character, guid, count))[probe.KEY]
+    birth = (await probe.perform(host, bridge, character, guid, count, fixture=False))[probe.KEY]
     location = birth.get("location")
     campaign = host.store.status()
     source = native_inventory.saved_frame(host, campaign, character)

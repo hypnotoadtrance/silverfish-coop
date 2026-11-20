@@ -42,6 +42,7 @@ end
 
 local stack_drop = require("native_guest_stack_drop")
 local action = "native-guest-stack-drop-probe"
+local birth = "native-guest-stack-drop-birth"
 local command = {"request", action, guest, slot, guid, "9"}
 local function status(...) return table.pack(...) end
 local function attempt(fields, phase)
@@ -49,7 +50,7 @@ local function attempt(fields, phase)
 end
 local function no_receipt()
     local rows = stack_drop.rows(game, "hosting", status)
-    return #rows == 1 and rows[1][1] == action .. "-capability" and rows[1][2] == 1
+    return #rows == 2 and rows[1][1] == birth .. "-capability" and rows[2][1] == action .. "-capability"
 end
 
 assert(not attempt(command, "connected") and calls == 0 and loaded == 0 and no_receipt())
@@ -58,7 +59,7 @@ standing = false
 assert(not attempt(command, "hosting") and calls == 0 and loaded == 0)
 standing = true
 assert(attempt(command, "hosting") and calls == 1 and loaded == 1)
-local row = stack_drop.rows(game, "hosting", status)[2]
+local row = stack_drop.rows(game, "hosting", status)[3]
 assert(row.n == 13 and row[1] == action and row[3] == guest and row[4] == slot and row[5] == guid and row[6] == 9)
 assert(row[7] == 1 and row[8] == "stock_spawn_verified_and_retired" and row[9] == actor and row[10] == changed)
 assert(row[11] == 10 and row[12] == -20 and row[13] == 30)
@@ -79,5 +80,16 @@ ok, reason = attempt(settle, "hosting")
 assert(not ok and reason == "native_guest_stack_drop_out_of_range" and recovered == 0)
 location.X = 0
 assert(attempt(settle, "hosting") and recovered == 1)
-row = stack_drop.rows(game, "hosting", status)[2]
+row = stack_drop.rows(game, "hosting", status)[3]
 assert(row[1] == settle[2] and row[3] == "reclaim" and row[8] == 1 and row[9] == "recovered" and row[10] == 1)
+
+env.SILVERFISH_COOP_NATIVE_FIXTURES, env.SILVERFISH_COOP_HEADLESS = nil, nil
+package.loaded.native_guest_stack_drop = nil
+stack_drop = require("native_guest_stack_drop")
+broken = false
+assert(not attempt(command, "hosting"))
+local rows = stack_drop.rows(game, "hosting", status)
+assert(#rows == 1 and rows[1][1] == birth .. "-capability")
+assert(attempt({"request", birth, guest, slot, guid, "9"}, "hosting"))
+row = stack_drop.rows(game, "hosting", status)[2]
+assert(row[1] == birth and row[9] == actor and row[10] == changed)

@@ -26,7 +26,7 @@ from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
-from . import native_guest_drop, native_guest_drop_projection
+from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_guest_melee
 from . import native_host_dig, native_host_landmine
 from . import native_kill_volume
@@ -1445,8 +1445,10 @@ class Host:
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
-        if self.fixtures and self.last_game.get(native_guest_stack_drop.CAPABILITY) == 1:
-            gameplay["native_guest_stack_drops"] = native_guest_drop.visible_drops(self.party, character, self.last_game.get("map"))
+        if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
+            gameplay[native_guest_drop_record.CAPABILITY] = 1
+            gameplay[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(
+                self.party, character, self.last_game.get("map"))
         if "native_pawns" in gameplay:
             positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
@@ -3551,6 +3553,8 @@ class Client:
         self.last_primary_intent = 0
         self.last_inventory_use = 0
         self.last_inventory_split = 0
+        self.last_inventory_drop = 0
+        self.inventory_drop_scope = None
         self.last_crate_intent = 0
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
@@ -3816,9 +3820,11 @@ class Client:
         if not requests or not active or self.stopping or not self.host_session:
             return
         sequence, opened, area, pawn = requests[-1]
+        self.inventory_drop_scope = None
         if (not opened or area != self.last_game.get("map")
                 or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
+        identity = native_guest_drop.view_identity(self, sequence, area, pawn)
         operation = uuid.uuid5(self.bridge.input_namespace,
                                f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}").hex
         try:
@@ -3831,10 +3837,17 @@ class Client:
                 raise ValueError("The host did not return this guest's exact stock inventory page")
             splits = (self.gameplay.get(native_inventory.SPLIT_CAPABILITY) == 1
                       and self.last_game.get("native_inventory_split_view_capability") is True)
-            entries = tuple(
-                f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
-                + ("|split" if splits and native_inventory.splittable(row) else "") for row in items
-            )
+            drops = (self.gameplay.get(native_guest_drop_record.CAPABILITY) == 1
+                     and area == native_guest_drop_record.OBSERVATORY)
+            entries = []
+            for row in items:
+                options = []
+                if splits and native_inventory.splittable(row):
+                    options.append("split")
+                if drops and native_guest_drop.droppable(row):
+                    options.append("drop")
+                entry = f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
+                entries.append(entry + ("|" + ",".join(options) if options else ""))
             snapshot = await self.bridge.command("native-inventory-view-render", str(sequence), area, "0",
                                                  str(total), *entries, timeout=5)
             proof = snapshot.get("native_inventory_view", {})
@@ -3842,6 +3855,8 @@ class Client:
                          "offset": 0, "total": total, "count": len(items)}:
                 raise RuntimeError("The stock inventory overlay did not verify the authenticated page")
             self.last_game = snapshot
+            if drops:
+                self.inventory_drop_scope = identity
             self.control.event("native_guest_inventory_rendered", operation_id=operation, **proof)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_inventory_view_rejected", operation_id=operation, reason=str(error))
@@ -4121,11 +4136,12 @@ class Client:
                 elif action == "native-inventory-view-key-fixture":
                     view = self.last_game.get("native_inventory_view", {})
                     key = request.get("target")
-                    if view.get("state") != "rendered" or key not in ("up", "down", "confirm", "back"):
+                    if view.get("state") != "rendered" or key not in ("up", "down", "confirm", "back", "drop"):
                         raise ValueError("Select an input for the current staged inventory page")
                     self.last_game = await self.bridge.command(action, str(view["sequence"]), view["map"], key, timeout=5)
                     result = {key: self.last_game.get(key, {}) for key in (
                         "native_guest_inventory_equip_view", "native_guest_inventory_use_view", native_inventory.SPLIT_VIEW,
+                        native_guest_drop_record.VIEW,
                     )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")
@@ -4281,6 +4297,7 @@ class Client:
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)
             await native_inventory.service_split_view(self, active)
+            await native_guest_drop.service_view(self, active)
             try:
                 await self.stack_drop_projection.sync(self, active)
             except (OSError, RuntimeError) as error:

@@ -3,12 +3,13 @@ local guest_save = require("guest_save")
 local players = require("players")
 
 local action = "native-guest-stack-drop-probe"
+local birth = "native-guest-stack-drop-birth"
 local settle = "native-guest-stack-drop-settle"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local stock_actor_prefix = "Ammo_Pistol_BP_C " .. map .. ".Observitory_P:PersistentLevel.Ammo_Pistol_BP_C_"
 local settings = "/Script/Engine.Default__GameplayStatics"
-local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
-    and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, settlement
 
@@ -75,8 +76,10 @@ local function transfer(fields, state, phase)
 end
 
 function stack_drop.command(fields, state, phase)
-    if fields[2] == settle then return transfer(fields, state, phase) end
-    if fields[2] ~= action then return end
+    local command = fields[2]
+    if command == settle then return transfer(fields, state, phase) end
+    if command ~= action and command ~= birth then return end
+    if command == action and not fixtures then error("native_guest_stack_drop_fixture_unavailable", 0) end
     observation = nil
     local name, slot, guid, raw_count = fields[3], fields[4], fields[5], fields[6]
     local count = math.tointeger(tonumber(raw_count))
@@ -102,17 +105,18 @@ function stack_drop.command(fields, state, phase)
                 or not coordinate(z)) then
         error("mutation_unverified_native_guest_stack_drop_readback", 0)
     end
-    observation = {map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,
+    observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,
         actor = ok and actor or "-", new_guid = ok and new_guid or "-", location = ok and {x, y, z}}
     return "isolated stock ammo drop probe reported"
 end
 
 function stack_drop.rows(state, phase, status_row)
     if not enabled or phase ~= "hosting" or state.map ~= map or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
-    local rows = {status_row(action .. "-capability", 1)}
+    local rows = {status_row(birth .. "-capability", 1)}
+    if fixtures then rows[#rows + 1] = status_row(action .. "-capability", 1) end
     local row = observation
     if row then
-        rows[#rows + 1] = status_row(action, row.map, row.pawn, row.slot, row.guid, row.count, row.ok and 1 or 0, row.status,
+        rows[#rows + 1] = status_row(row.command, row.map, row.pawn, row.slot, row.guid, row.count, row.ok and 1 or 0, row.status,
             row.actor, row.new_guid, table.unpack(row.location or {}))
     end
     if settlement then

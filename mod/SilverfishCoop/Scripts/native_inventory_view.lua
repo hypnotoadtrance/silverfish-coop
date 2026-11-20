@@ -19,13 +19,15 @@ local meals = {
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
+local drop_ammo = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local drop_map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local split_ammo = {
-    ["/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"] = true,
+    [drop_ammo] = true,
     ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
     ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
 }
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
-local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End"}
+local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
 local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
 local event_path, equip_path, is_downed, binding, observation, display
@@ -153,7 +155,10 @@ local function page(fields)
     end
     local records, seen, slots = {}, {}, {}
     for index = 7, #fields do
-        local marked = fields[index]:match("^(.+)|split$")
+        local marked, options = fields[index]:match("^(.+)|([a-z,]+)$")
+        if options and options ~= "split" and options ~= "drop" and options ~= "split,drop" then
+            error("The authenticated inventory row contains an unsupported action", 0)
+        end
         local guid, source, slot, amount, class = (marked or fields[index]):match(
             "^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_./%-]+)$")
         local quantity = integer(amount, 2147483647)
@@ -175,11 +180,19 @@ local function page(fields)
         local name = item:gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or mre_enabled and meals[class]
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
-        local splittable = marked ~= nil and source == "backpack" and split_ammo[class] == true and quantity > 1
-        if marked and not splittable then error("The authenticated inventory split row did not qualify", 0) end
+        local splittable = options == "split" or options == "split,drop"
+        if splittable and (source ~= "backpack" or not split_ammo[class] or quantity <= 1) then
+            error("The authenticated inventory split row did not qualify", 0)
+        end
+        local droppable = options == "drop" or options == "split,drop"
+        if droppable and (fields[4] ~= drop_map or source ~= "backpack" or class ~= drop_ammo or quantity > 200) then
+            error("The authenticated inventory drop row did not qualify", 0)
+        end
         if usable then name = consumable end
+        if droppable then name = "9mm Ball" end
         records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
-            name = name, quantity = quantity, splittable = splittable, label = string.format("%s   %d x %s", sources[source], quantity, name)}
+            droppable = droppable, name = name, quantity = quantity, splittable = splittable,
+            label = string.format("%s   %d x %s", sources[source], quantity, name)}
     end
     return offset, total, records
 end
@@ -193,7 +206,15 @@ local function show()
         lines[#lines + 1] = (index == row.selection and "> " or "  ") .. entry.label
     end
     local selected = records[row.selection]
-    if row.split_state == "confirming" then
+    if row.drop_state == "confirming" then
+        lines[#lines + 1] = string.format("Drop all %d rounds of 9mm Ball? Home confirms. End cancels.", selected.quantity)
+    elseif row.drop_state == "dropping" then
+        lines[#lines + 1] = "Ammo drop pending"
+    elseif row.drop_state == "dropped" then
+        lines[#lines + 1] = "Ammo dropped. Reopen inventory to refresh."
+    elseif row.drop_state == "refused" then
+        lines[#lines + 1] = "Ammo drop unavailable. Reopen inventory to refresh."
+    elseif row.split_state == "confirming" then
         lines[#lines + 1] = string.format("Split off %d rounds? Home confirms. End cancels.", selected.quantity // 2)
     elseif row.split_state == "splitting" then
         lines[#lines + 1] = "Ammo stack split pending"
@@ -201,6 +222,9 @@ local function show()
         lines[#lines + 1] = "Ammo stack split. Reopen inventory to refresh."
     elseif row.split_state == "refused" then
         lines[#lines + 1] = "Ammo stack split unavailable. Reopen inventory to refresh."
+    elseif selected and selected.droppable then
+        local split = selected.splittable and " Home splits half the stack." or ""
+        lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a full stack drop." .. split .. " End closes."
     elseif selected and selected.splittable then
         lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
     elseif row.use_state == "confirming" then
@@ -265,6 +289,7 @@ local function select_item()
     observation.equip_state = selected and selected.equippable and "selecting" or "read_only"
     observation.use_state = selected and selected.usable and "selecting" or nil
     observation.split_state = nil
+    observation.drop_state = nil
     observation.confirm_guid = nil
 end
 
@@ -273,11 +298,12 @@ local function choose(current, action)
     local row = observation
     local selected = row.records[row.selection]
     if action == "back" then
-        if row.equip_state == "confirming" or row.use_state == "confirming" or row.split_state == "confirming" then
+        if row.equip_state == "confirming" or row.use_state == "confirming" or row.split_state == "confirming"
+            or row.drop_state == "confirming" then
             select_item()
         elseif ready(current, true) then
             remove_display()
-            row.state, row.equip_state, row.use_state, row.split_state = "closed", nil, nil, nil
+            row.state, row.equip_state, row.use_state, row.split_state, row.drop_state = "closed", nil, nil, nil, nil
             emit(current, row.sequence, false)
             return true
         end
@@ -286,6 +312,12 @@ local function choose(current, action)
             local direction = action == "up" and -1 or 1
             row.selection = math.min(#row.records, math.max(1, row.selection + direction))
             select_item()
+        elseif action == "drop" and selected.droppable then
+            select_item()
+            row.drop_state, row.confirm_guid = "confirming", selected.guid
+        elseif action == "confirm" and selected.droppable and row.drop_state == "confirming"
+            and row.confirm_guid == selected.guid then
+            row.request_guid, row.drop_state = selected.guid, "dropping"
         elseif action == "confirm" and selected.usable then
             if row.use_state == "confirming" and row.confirm_guid == selected.guid then
                 row.request_guid, row.use_state = selected.guid, "using"
@@ -316,7 +348,7 @@ local function poll_keys()
     local current = observation and observation.context
     if not ready(current, false) then return end
     local changed
-    for _, action in ipairs({"back", "up", "down", "confirm"}) do
+    for _, action in ipairs({"back", "up", "down", "drop", "confirm"}) do
         if not input_keys[action] then
             local key = FName(keys[action], EFindName.FNAME_Find)
             if key:GetComparisonIndex() == 0 then error("The stock inventory key did not resolve", 0) end
@@ -353,7 +385,8 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
         and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-use-result"
-        and operation ~= "native-inventory-view-split-result" then return end
+        and operation ~= "native-inventory-view-split-result"
+        and operation ~= "native-inventory-view-drop-result" then return end
     local current = context(state, phase)
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
@@ -385,6 +418,14 @@ function inventory_view.command(fields, state, phase)
         observation.use_state = fields[6]
         show()
         return "verified inventory item result displayed"
+    elseif operation == "native-inventory-view-drop-result" then
+        if #fields ~= 6 or observation.drop_state ~= "dropping" or fields[5] ~= observation.request_guid
+            or (fields[6] ~= "dropped" and fields[6] ~= "refused") or not ready(current, false) then
+            error("The authenticated result does not match the pending inventory drop", 0)
+        end
+        observation.drop_state = fields[6]
+        show()
+        return "verified inventory drop result displayed"
     elseif operation == "native-inventory-view-split-result" then
         if #fields ~= 6 or observation.split_state ~= "splitting" or fields[5] ~= observation.request_guid
             or (fields[6] ~= "split" and fields[6] ~= "refused") or not ready(current, false) then
@@ -433,6 +474,11 @@ function inventory_view.rows(state, phase, status_row)
         local selected = observation.records[observation.selection]
         rows[#rows + 1] = status_row("native-guest-inventory-use-view", observation.sequence, current.map,
             current.name, selected.guid, observation.use_state)
+    end
+    if observation.drop_state and ready(current, false) then
+        local selected = observation.records[observation.selection]
+        rows[#rows + 1] = status_row("native-guest-inventory-drop-view", observation.sequence, current.map,
+            current.name, selected.guid, selected.class, observation.drop_state, selected.quantity)
     end
     if observation.split_state and ready(current, false) then
         local selected = observation.records[observation.selection]

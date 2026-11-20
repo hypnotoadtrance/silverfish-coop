@@ -10,6 +10,7 @@ from .travel import OBSERVATORY
 
 
 ACTION = "native-guest-stack-drop-probe"
+BIRTH = "native-guest-stack-drop-birth"
 KEY = "native_guest_stack_drop_probe"
 CAPABILITY = KEY + "_capability"
 SETTLE = "native-guest-stack-drop-settle"
@@ -26,7 +27,7 @@ _STATUS = re.compile(r"[a-z0-9_]{1,100}\Z")
 def parse(fields: list[str], state: str, area: str) -> dict:
     if fields[:1] == [SETTLE]:
         return parse_settlement(fields, state, area)
-    if (len(fields) not in (10, 13) or fields[0] != ACTION or state != "hosting" or area != OBSERVATORY
+    if (len(fields) not in (10, 13) or fields[0] not in (ACTION, BIRTH) or state != "hosting" or area != OBSERVATORY
             or fields[1] != area):
         raise ValueError("Invalid isolated stock stack drop report")
     map_name, pawn, slot, guid, raw_count, flag, status, actor, new_guid = fields[1:10]
@@ -63,13 +64,14 @@ def parse_settlement(fields: list[str], state: str, area: str) -> dict:
                 replacement=replacement if operation == "debit" else None, ok=flag == "1", status=status, count=int(count))
 
 
-async def perform(host, bridge, character: str, guid: str, count: int) -> dict:
+async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True) -> dict:
     if not valid_guid(guid) or type(count) is not int or not 1 <= count <= 200:
         raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
     game = host.last_game
-    if (not host.fixtures or not host.native_guest or not host.native_zones or host.native_profile is None
+    capability = CAPABILITY if fixture else native_guest_drop_record.CAPABILITY
+    if ((fixture and not host.fixtures) or not host.native_guest or not host.native_zones or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
-            or (game.get("state"), game.get("map"), game.get(CAPABILITY)) != ("hosting", OBSERVATORY, 1)
+            or (game.get("state"), game.get("map"), game.get(capability)) != ("hosting", OBSERVATORY, 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
     owner = host.native_recipients().get(character, {})
@@ -89,7 +91,7 @@ async def perform(host, bridge, character: str, guid: str, count: int) -> dict:
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(ACTION, pawn, slot, guid, str(count), timeout=6)
+            snapshot = await bridge.command(ACTION if fixture else BIRTH, pawn, slot, guid, str(count), timeout=6)
         except RuntimeError as error:
             if str(error).startswith(REFUSAL):
                 host.native_checkpoint_unsafe = False
