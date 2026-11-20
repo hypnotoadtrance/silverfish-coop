@@ -1,0 +1,157 @@
+local fixture = {}
+local host_save = require("native_host_save")
+local players = require("players")
+local maps = require("native_guest_drop_maps")
+
+local menu_command = "native-host-stack-drop-menu-fixture"
+local close_command = "native-host-stack-drop-menu-close-fixture"
+local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
+local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C"
+local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
+local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
+local context_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
+local ammo_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+
+local function valid(object)
+    return object and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function exact(object, path)
+    return valid(object) and same(object:GetClass(), StaticFindObject(path))
+end
+
+local function named_row(item, guid)
+    local parts = item and item[item_guid]
+    if not parts then return false end
+    local a, b, c, d = math.tointeger(parts.A), math.tointeger(parts.B), math.tointeger(parts.C), math.tointeger(parts.D)
+    return a and b and c and d and string.format("%08X%08X%08X%08X", a & 0xffffffff, b & 0xffffffff,
+        c & 0xffffffff, d & 0xffffffff) == guid
+end
+
+local function select_row(rows, guid, read_item)
+    local count = rows and rows:GetArrayNum()
+    if type(count) ~= "number" or count < 0 or count > 1024 then
+        error("host_stack_drop_menu_fixture_rows_unavailable", 0)
+    end
+    local match
+    for index = 1, count do
+        local row = rows[index]
+        if named_row(read_item(row), guid) then
+            if match then error("host_stack_drop_menu_fixture_ambiguous_guid", 0) end
+            match = row
+        end
+    end
+    return match, count
+end
+
+local function row_item(row) return row end
+
+local function card_item(card)
+    return exact(card, card_path) and card.Item or nil
+end
+
+local function qualified_stock_row(item, count)
+    return item and same(item[item_class], StaticFindObject(ammo_path)) and item[item_count] == count
+end
+
+local function screen(controller, pawn, instance)
+    local stack = controller.MenuStack
+    if stack:GetArrayNum() ~= 1 then error("host_stack_drop_menu_fixture_inventory_unavailable", 0) end
+    local menu = stack[1]
+    if not exact(menu, inventory_path) or not menu:IsInViewport()
+        or not same(menu:GetOwningPlayer(), controller) or not same(menu:GetOwningPlayerPawn(), pawn) then
+        error("host_stack_drop_menu_fixture_inventory_unavailable", 0)
+    end
+    local panel, manager = menu.BackpackPanel, menu.ItemManager
+    if not exact(panel, panel_path) or not exact(manager, manager_path)
+        or not same(panel.Target, instance) or panel.InventoryIndex ~= 0 or not same(panel.ItemManager, manager)
+        or not same(manager.ParentScreen, menu) or not same(manager.DropLocation, menu.FloorPanel)
+        or manager.CanDropItems ~= true then error("host_stack_drop_menu_fixture_backpack_unavailable", 0) end
+    return menu, panel, manager
+end
+
+local function open_stock_menu(controller, pawn, instance)
+    if controller.MenuStack:GetArrayNum() ~= 0 then error("host_stack_drop_menu_fixture_menu_already_open", 0) end
+    local class = StaticFindObject(inventory_path)
+    if not valid(class) then
+        LoadAsset(inventory_path)
+        class = StaticFindObject(inventory_path)
+    end
+    if not valid(class) then error("host_stack_drop_menu_fixture_inventory_unavailable", 0) end
+    local result = {}
+    controller:OpenMenu(class, result)
+    local menu, panel, manager = screen(controller, pawn, instance)
+    if not same(menu, result.CreatedMenu) then error("host_stack_drop_menu_fixture_inventory_unverified", 0) end
+    return panel, manager
+end
+
+local function stock_drop(instance, pawn, controller, guid, count, entry)
+    local save = instance.SaveSlot_Ref
+    local row, rows = select_row(save.PlayerBackpack, guid, row_item)
+    if not qualified_stock_row(row, count) then error("host_stack_drop_menu_fixture_stock_stack_unavailable", 0) end
+    local panel, manager = open_stock_menu(controller, pawn, instance)
+    local card = select_row(panel.Cards, guid, card_item)
+    if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
+        or not qualified_stock_row(card.Item, count) then error("host_stack_drop_menu_fixture_card_unavailable", 0) end
+
+    if entry == "ctrl_click" then
+        manager.HoveredCard = card
+        if not same(manager.HoveredCard, card) then error("host_stack_drop_menu_fixture_selection_unverified", 0) end
+    else
+        manager:OpenContextMenu(card)
+        local context = manager.ItemContextMenu
+        if not exact(context, context_path) or not same(context["Item Card"], card) then
+            error("host_stack_drop_menu_fixture_context_unverified", 0)
+        end
+    end
+
+    -- Both presses occur before the coordinator can settle, so the second must be suppressed too.
+    for _ = 1, 2 do
+        if entry == "ctrl_click" then manager:DropItem() else manager:ActionDrop() end
+        local after, remaining = select_row(save.PlayerBackpack, guid, row_item)
+        if not same(instance.SaveSlot_Ref, save) or not same(pawn.Save, save) or remaining ~= rows
+            or not qualified_stock_row(after, count) then error("mutation_unverified_host_stack_drop_menu_fixture_debit", 0) end
+    end
+    return "stock drop invoked without direct inventory mutation"
+end
+
+function fixture.command(fields, state, phase)
+    local command, guid = fields[2], fields[3]
+    if command ~= menu_command and command ~= close_command then return end
+    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
+        or not maps[state.map] or phase ~= "hosting" or state.server ~= false or not state.listening
+        or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$") or not guid:find("[^0]") then
+        error("host_stack_drop_menu_fixture_unavailable", 0)
+    end
+    local instance, pawn = host_save.canonical_host(state, phase)
+    local controller = state.controller
+    if not valid(instance) or not valid(pawn) or pawn.Dead ~= false or players.is_downed(pawn)
+        or controller.Loading ~= false then error("host_stack_drop_menu_fixture_unavailable", 0) end
+
+    if command == close_command and #fields == 3 then
+        local menu, panel, manager = screen(controller, pawn, instance)
+        if select_row(instance.SaveSlot_Ref.PlayerBackpack, guid, row_item) or select_row(panel.Cards, guid, card_item) then
+            error("host_stack_drop_menu_fixture_card_not_refreshed", 0)
+        end
+        if valid(manager.ItemContextMenu) then manager:CloseContextMenu() end
+        local result = {}
+        controller:CloseMenu(result)
+        if result.Success ~= true or controller.MenuStack:GetArrayNum() ~= 0 or (valid(menu) and menu:IsInViewport()) then
+            error("host_stack_drop_menu_fixture_close_unverified", 0)
+        end
+        return "canonical inventory and refreshed host menu agree"
+    end
+    local count, entry = math.tointeger(tonumber(fields[4])), fields[5]
+    if command ~= menu_command or #fields ~= 5 or not count or count < 1 or count > 200 or tostring(count) ~= fields[4]
+        or (entry ~= "ctrl_click" and entry ~= "context_menu") then error("host_stack_drop_menu_fixture_arguments", 0) end
+    return stock_drop(instance, pawn, controller, guid, count, entry)
+end
+
+return fixture

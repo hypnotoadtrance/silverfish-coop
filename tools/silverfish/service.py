@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
-               native_guest_weapon, native_host_save, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
+               native_guest_weapon, native_host_save, native_host_stack_drop, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
@@ -226,6 +226,7 @@ class Host:
         self.mindcore_carry = (native_mindcore_carry.Authority(self)
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
+        self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -2412,6 +2413,8 @@ class Host:
                 elif action == native_guest_drop_projection.FIXTURE and self.fixtures:
                     proof = await self.stack_drop_projection.fixture_host(self, bridge, request.get("target"))
                     result = {native_guest_drop_projection.KEY: proof}
+                elif action in (native_host_stack_drop.FIXTURE, native_host_stack_drop.CLOSE_FIXTURE) and self.fixtures:
+                    result = await native_host_stack_drop.fixture(self, bridge, action, request.get("target"))
                 elif action == native_kill_volume.FIXTURE and self.fixtures:
                     result = await native_kill_volume.fixture(self, bridge, request.get("target"))
                 elif (action == "native-finite-shop-approach" and self.fixtures
@@ -3437,6 +3440,7 @@ class Host:
                     self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
+            await self.stock_drop_input.poll(self, bridge)
             try:
                 await self.stack_drop_projection.sync_host(self, bridge)
             except (OSError, RuntimeError) as error:

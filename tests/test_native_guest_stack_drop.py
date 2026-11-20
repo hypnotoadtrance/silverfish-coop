@@ -3,9 +3,10 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_guest_stack_drop as drop, native_guest_drop_record as record, native_host_save, party
+from tools.silverfish import native_guest_drop, native_host_stack_drop as menu_drop
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
@@ -22,6 +23,30 @@ def stock_row():
 
 
 class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
+    async def test_host_menu_rejects_stale_epoch_and_dispatches_stock_intent_once(self):
+        host, _ = self.make_host()
+        scope = {"map": OBSERVATORY, "pawn": PAWN, "epoch": host.zone_epoch}
+        host.smg_holds = None
+        host.control.generation = "exact-test-host"
+        host.last_game.update(pawns={"local": {"name": PAWN}}, **{menu_drop.CAPABILITY: 1, menu_drop.SCOPE: scope})
+        fields = [menu_drop.INTENT_ROW, OBSERVATORY, PAWN, "e" * 32, "1", GUID, "9", "ctrl_click"]
+        host.last_game[menu_drop.INTENT] = menu_drop.parse(fields, "hosting", OBSERVATORY)
+        bridge = SimpleNamespace(command=AsyncMock())
+        controller = menu_drop.HostDropInput()
+        receipt = {native_guest_drop.RESULT: {"state": "dropped"}}
+        with patch.object(native_guest_drop, "perform", AsyncMock(return_value=receipt)) as perform:
+            await controller.poll(host, bridge)
+            perform.assert_not_awaited()
+            fields[3] = host.zone_epoch
+            host.last_game[menu_drop.INTENT] = menu_drop.parse(fields, "hosting", OBSERVATORY)
+            bridge.command.return_value = {**host.last_game, "ack": {"message": "refreshed"}}
+            await controller.poll(host, bridge)
+            await controller.poll(host, bridge)
+            perform.assert_awaited_once()
+            self.assertEqual(perform.await_args.args[:5], (host, bridge, "host", native_guest_drop.DROP, f"{GUID}|9"))
+        bridge.command.assert_awaited_once_with(menu_drop.FINISH, host.zone_epoch, "1", timeout=2)
+        self.assertEqual(host.control.event.call_args.kwargs["refresh"], "refreshed")
+
     def test_bridge_accepts_one_exact_host_only_report(self):
         path = Path(self.enterContext(TemporaryDirectory()))
         bridge = Bridge(path, Mock())

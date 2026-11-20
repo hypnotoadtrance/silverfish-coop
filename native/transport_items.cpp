@@ -1,4 +1,5 @@
 #include "transport_items.hpp"
+#include "guest_drop_maps.hpp"
 
 #include <algorithm>
 #include <array>
@@ -41,6 +42,8 @@ namespace
     constexpr auto card_path = STR("/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C");
     constexpr auto panel_path = STR("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C");
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
+    constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
+    constexpr auto pistol_ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -49,11 +52,15 @@ namespace
     constexpr auto item_class_name = STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81");
     constexpr auto item_guid_name = STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A");
     constexpr auto item_ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
+    constexpr auto item_never_drop_name = STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D");
     constexpr auto item_weight_name = STR("Weight_12_11AB9ED547504E78A849A692A36DC938");
     constexpr auto item_value_name = STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr auto scope_lease = std::chrono::seconds(2);
     constexpr auto request_lease = std::chrono::seconds(2);
+    constexpr auto host_drop_settlement_lease = std::chrono::seconds(45);
+    constexpr std::int32_t max_drop_ammo = 200;
+    constexpr std::int64_t max_drop_sequence = (std::int64_t{1} << 53) - 1;
     constexpr int inventory_limit = 4096;
     using Guid = std::array<std::uint32_t, guid_names.size()>;
 
@@ -125,6 +132,8 @@ namespace
 
     struct Entries
     {
+        Unreal::FName drop_item{STR("DropItem")};
+        Unreal::FName action_drop{STR("ActionDrop")};
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName use_held{STR("UseHeldItem")};
@@ -187,6 +196,25 @@ namespace
         Unreal::FWeakObjectPtr equipment;
     };
 
+    struct HostDropScope
+    {
+        std::array<char, 32> epoch{};
+        Unreal::FWeakObjectPtr pawn, world, save;
+        std::uint64_t generation{};
+        Clock::time_point expires{};
+    };
+
+    struct HostDropRequest
+    {
+        Guid guid;
+        std::int32_t count;
+        std::int64_t sequence;
+        bool taken;
+        Clock::time_point expires;
+        Unreal::FWeakObjectPtr manager, screen, panel;
+        std::string_view entry;
+    };
+
     std::optional<Entries> entries;
     std::array<Hook::GlobalCallbackId, 3> hooks{};
     std::atomic<bool> hooks_ready{};
@@ -195,6 +223,9 @@ namespace
     thread_local Receipt receipt;
     thread_local std::optional<TransportRequest> transport_request;
     thread_local std::array<MatrixInput, 2> matrix_inputs;
+    thread_local HostDropScope host_drop_scope;
+    thread_local std::optional<HostDropRequest> host_drop_request;
+    thread_local std::int64_t host_drop_sequence{};
 
     [[nodiscard]] bool enabled()
     {
@@ -210,6 +241,20 @@ namespace
         std::size_t size{};
         return getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_NATIVE_FIXTURES") == 0 &&
                size == flag.size() && flag[0] == '1';
+    }
+
+    [[nodiscard]] bool host_drop_enabled()
+    {
+        std::array<char, 2> flag{};
+        std::size_t size{};
+        return getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_NATIVE_GUEST_SAVE") == 0 &&
+               size == flag.size() && flag[0] == '1';
+    }
+
+    void clear_host_drop()
+    {
+        host_drop_scope = {};
+        host_drop_request.reset();
     }
 
     template <typename T>
@@ -740,6 +785,156 @@ namespace
                object_field(panel, STR("Target")) == scope.instance.Get() && object_field(panel, STR("ItemManager")) == manager;
     }
 
+    [[nodiscard]] bool array_has_widget(Unreal::UObject* owner, const Unreal::TCHAR* name, Unreal::UObject* widget,
+                                        bool top_only)
+    {
+        auto* array = field<Unreal::FArrayProperty>(owner, name);
+        auto* element = array ? Unreal::CastField<Unreal::FObjectProperty>(array->GetInner()) : nullptr;
+        if (!element || element->GetArrayDim() != 1 || !live(widget)) return false;
+        Unreal::FScriptArrayHelper rows(array, array->ContainerPtrToValuePtr<void>(owner));
+        if (rows.Num() < 1 || rows.Num() > inventory_limit) return false;
+        for (int index = top_only ? rows.Num() - 1 : 0; index < rows.Num(); ++index)
+        {
+            if (object_value(element, rows.GetRawPtr(index)) == widget) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool exact_drop_screen(Unreal::UObject* manager, Unreal::UObject* screen, Unreal::UObject* panel)
+    {
+        auto* floor = object_field(screen, STR("FloorPanel"));
+        return live(manager) && exact_class(manager, manager_path) && live(screen) &&
+               exact_class(screen, inventory_screen_path) && live(panel) && exact_backpack_panel(panel, manager) &&
+               live(floor) && exact_class(floor, panel_path) && floor != panel &&
+               object_field(manager, STR("ParentScreen")) == screen && object_field(screen, STR("ItemManager")) == manager &&
+               object_field(screen, STR("BackpackPanel")) == panel && object_field(manager, STR("DropLocation")) == floor &&
+               array_has_widget(scope.controller.Get(), STR("MenuStack"), screen, true) &&
+               same_widget_player(manager) && same_widget_player(screen) && same_widget_player(panel);
+    }
+
+    [[nodiscard]] bool qualified_drop_host()
+    {
+        return host_drop_enabled() && scope.host && scope.generation == generation.load(std::memory_order_acquire) &&
+               current_player(scope) &&
+               silverfish::native_guest_drop_maps::contains(static_cast<Unreal::UWorld*>(scope.world.Get()));
+    }
+
+    [[nodiscard]] bool host_drop_scope_matches(Unreal::UObject* save)
+    {
+        return live(save) && host_drop_scope.save.Get() == save && host_drop_scope.pawn.Get() == scope.pawn.Get() &&
+               host_drop_scope.world.Get() == scope.world.Get() && host_drop_scope.generation == scope.generation;
+    }
+
+    [[nodiscard]] bool drop_epoch_valid(std::string_view epoch)
+    {
+        return epoch.size() == host_drop_scope.epoch.size() &&
+               std::ranges::all_of(epoch, [](char digit) {
+                   return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f');
+               });
+    }
+
+    [[nodiscard]] bool host_drop_argument(std::int64_t pawn, std::string_view epoch)
+    {
+        return drop_epoch_valid(epoch) && std::ranges::equal(epoch, host_drop_scope.epoch) &&
+               current_host_argument(pawn) && host_drop_scope_matches(canonical_host_save()) &&
+               Clock::now() < host_drop_scope.expires;
+    }
+
+    [[nodiscard]] bool exact_canonical_drop_row(Unreal::UObject* save, const ItemView& card,
+                                                const Guid& guid, std::int32_t count, Unreal::UObject* ammo_class)
+    {
+        auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
+        auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
+        auto* armor = field<Unreal::FStructProperty>(save, STR("PlayerArmor"));
+        auto* helmet = field<Unreal::FStructProperty>(save, STR("PlayerHelmet"));
+        auto* count_field = field<Unreal::FIntProperty>(card.structure, item_ammo_name);
+        auto* class_field = field<Unreal::FClassProperty>(card.structure, item_class_name);
+        auto* never_drop = field<Unreal::FBoolProperty>(card.structure, item_never_drop_name);
+        const GuidFields fields(card.structure);
+        if (!backpack || !equipment || !item_struct(backpack->GetInner(), card.structure) ||
+            !item_struct(equipment->GetInner(), card.structure) || !item_struct(armor, card.structure) ||
+            !item_struct(helmet, card.structure) || !fields.valid() || !count_field || !class_field || !never_drop ||
+            never_drop->GetPropertyValueInContainer(card.value))
+            return false;
+
+        Unreal::FScriptArrayHelper pack(backpack, backpack->ContainerPtrToValuePtr<void>(save));
+        Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
+        if (pack.Num() < 1 || pack.Num() > inventory_limit || loadout.Num() < 0 || loadout.Num() > inventory_limit)
+            return false;
+
+        bool found = false;
+        for (int index = 0; index < pack.Num(); ++index)
+        {
+            const auto* row = pack.GetRawPtr(index);
+            if (fields.read(row) != guid) continue;
+            if (found || object_value(class_field, row) != ammo_class ||
+                count_field->GetPropertyValueInContainer(row) != count || never_drop->GetPropertyValueInContainer(row))
+                return false;
+            found = true;
+        }
+        for (int index = 0; index < loadout.Num(); ++index)
+        {
+            if (fields.read(loadout.GetRawPtr(index)) == guid) return false;
+        }
+        return found && fields.read(armor->ContainerPtrToValuePtr<void>(save)) != guid &&
+               fields.read(helmet->ContainerPtrToValuePtr<void>(save)) != guid;
+    }
+
+    void intercept_host_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
+                             bool from_menu)
+    {
+        if (function->GetNumParms() != 0 || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !live(manager) || !exact_class(manager, manager_path) ||
+            function->GetOuterPrivate() != manager->GetClassPrivate() || !qualified_drop_host()) return;
+
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        if (!exact_drop_screen(manager, screen, panel)) return;
+
+        auto* card = object_field(manager, STR("HoveredCard"));
+        Unreal::UObject* menu = nullptr;
+        if (from_menu)
+        {
+            menu = object_field(manager, STR("ItemContextMenu"));
+            if (!live(menu) || !exact_class(menu, context_menu_path)) return;
+            card = object_field(menu, STR("Item Card"));
+        }
+        if (!exact_class(card, card_path)) return;
+        const auto candidate = card_item(card);
+        auto* ammo_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
+        if (candidate.panel != panel || !ammo_class || ammo_class->GetPathName() != pistol_ammo_path) return;
+
+        // Suppress stock TakeCard even when the selected 9mm row is stale or a request is already pending.
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return;
+
+        const auto now = Clock::now();
+        auto* save = canonical_host_save();
+        auto* allow = field<Unreal::FBoolProperty>(manager, STR("CanDropItems"));
+        auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
+        if (!host_drop_scope_matches(save) || now >= host_drop_scope.expires ||
+            (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
+            !allow || !allow->GetPropertyValueInContainer(manager) || !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
+            (from_menu && (object_field(menu, STR("ItemManager")) != manager || !same_widget_player(menu))) ||
+            !held_class || object_value(held_class, held.value) ||
+            !live(card) || !same_widget_player(card) || object_field(card, STR("ItemManager")) != manager ||
+            !array_has_widget(panel, STR("Cards"), card, false))
+            return;
+
+        const GuidFields fields(candidate.structure);
+        auto* count_field = field<Unreal::FIntProperty>(candidate.structure, item_ammo_name);
+        if (!fields.valid() || !count_field) return;
+        const Guid guid = fields.read(candidate.value);
+        const auto count = count_field->GetPropertyValueInContainer(candidate.value);
+        if (guid == Guid{} || count < 1 || count > max_drop_ammo ||
+            !exact_canonical_drop_row(save, candidate, guid, count, ammo_class)) return;
+        host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
+                                            screen, panel, from_menu ? "context_menu" : "ctrl_click"};
+    }
+
     [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
     {
         return save && request.save.Get() == save && request.pawn.Get() == scope.pawn.Get() &&
@@ -876,6 +1071,11 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        if (name == entries->drop_item || name == entries->action_drop)
+        {
+            intercept_host_drop(iteration, context, function, name == entries->action_drop);
+            return;
+        }
         const bool manager = name == entries->action_use || name == entries->quick_move ||
                              name == entries->use_held || name == entries->confirm_use;
         const bool primary = name == entries->use_primary;
@@ -975,6 +1175,7 @@ namespace
                 scope = {};
                 transport_request.reset();
                 matrix_inputs = {};
+                clear_host_drop();
             }
         }
         lua.set_bool(accepted);
@@ -1124,6 +1325,89 @@ namespace
         return function && function->GetOuterPrivate() == object->GetClassPrivate() && function->GetNumParms() == 0 &&
                !function->GetReturnProperty() && !function->HasAnyFunctionFlags(Unreal::FUNC_Native) &&
                !function->HasAnyFunctionFlags(Unreal::FUNC_Net) ? function : nullptr;
+    }
+
+    int lua_set_host_drop(const Lua& lua)
+    {
+        bool accepted = false;
+        if (Unreal::IsInGameThreadRaw())
+        {
+            if (lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_string(2) &&
+                current_host_argument(lua.get_integer(1)) && qualified_drop_host())
+            {
+                const auto epoch = lua.get_string(2);
+                auto* save = canonical_host_save();
+                if (save && drop_epoch_valid(epoch))
+                {
+                    if (!host_drop_scope_matches(save) || !std::ranges::equal(epoch, host_drop_scope.epoch))
+                        clear_host_drop();
+                    std::ranges::copy(epoch, host_drop_scope.epoch.begin());
+                    host_drop_scope.pawn = scope.pawn.Get();
+                    host_drop_scope.world = scope.world.Get();
+                    host_drop_scope.save = save;
+                    host_drop_scope.generation = scope.generation;
+                    host_drop_scope.expires = Clock::now() + scope_lease;
+                    accepted = true;
+                }
+            }
+            if (!accepted) clear_host_drop();
+        }
+        lua.set_bool(accepted);
+        return 1;
+    }
+
+    int lua_clear_host_drop(const Lua&)
+    {
+        if (Unreal::IsInGameThreadRaw()) clear_host_drop();
+        return 0;
+    }
+
+    int lua_take_host_drop(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2) ||
+            !host_drop_argument(lua.get_integer(1), lua.get_string(2)) || !host_drop_request ||
+            host_drop_request->taken || Clock::now() >= host_drop_request->expires)
+            return 0;
+
+        auto& request = *host_drop_request;
+        request.taken = true;
+        request.expires = Clock::now() + host_drop_settlement_lease;
+        const auto guid = format_guid(request.guid);
+        lua.set_integer(request.sequence);
+        lua.set_string({guid.data(), guid.size()});
+        lua.set_integer(request.count);
+        lua.set_string(request.entry);
+        return 4;
+    }
+
+    int lua_finish_host_drop(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) ||
+            !lua.is_integer(3) || !host_drop_argument(lua.get_integer(1), lua.get_string(2)) ||
+            !host_drop_request || !host_drop_request->taken || host_drop_request->sequence != lua.get_integer(3) ||
+            Clock::now() >= host_drop_request->expires)
+            return probe_result(lua, false, "scope_changed");
+
+        const auto completed = *host_drop_request;
+        host_drop_request.reset();
+        auto* manager = completed.manager.Get();
+        auto* panel = completed.panel.Get();
+        if (!exact_drop_screen(manager, completed.screen.Get(), panel))
+            return probe_result(lua, true, "screen_closed");
+        if (completed.entry == "context_menu")
+        {
+            const Unreal::FName close_name{STR("CloseContextMenu")};
+            auto* close = stock_no_args(manager, close_name);
+            if (!close) return probe_result(lua, false, "refresh_unavailable");
+            manager->ProcessEvent(close, nullptr);
+            if (!exact_drop_screen(manager, completed.screen.Get(), panel))
+                return probe_result(lua, true, "screen_closed");
+        }
+        const Unreal::FName refresh_name{STR("FullRefresh")};
+        auto* refresh = stock_no_args(panel, refresh_name);
+        if (!refresh) return probe_result(lua, false, "refresh_unavailable");
+        panel->ProcessEvent(refresh, nullptr);
+        return probe_result(lua, true, "refreshed");
     }
 
     class RestoreItem
@@ -2046,6 +2330,7 @@ void silverfish::native_transport::clear_scope()
         scope = {};
         transport_request.reset();
         matrix_inputs = {};
+        clear_host_drop();
     }
 }
 
@@ -2069,6 +2354,10 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishSetNativeTransportScope", lua_enroll);
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
+        lua.register_function("SilverfishSetNativeHostDropScope", lua_set_host_drop);
+        lua.register_function("SilverfishClearNativeHostDropScope", lua_clear_host_drop);
+        lua.register_function("SilverfishTakeNativeHostDropRequest", lua_take_host_drop);
+        lua.register_function("SilverfishFinishNativeHostDropRequest", lua_finish_host_drop);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);
         lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_transport_request<TransportKind::Gold>);
         lua.register_function("SilverfishInspectNativeGoldTransport", lua_inspect_cube<TransportKind::Gold>);

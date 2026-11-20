@@ -24,6 +24,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
+from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
 from . import native_spratt_fixture
@@ -1738,6 +1739,13 @@ class Bridge:
                     if native_guest_stack_drop.SETTLE_KEY in data:
                         raise ValueError("Duplicate isolated stack drop settlement")
                     data[native_guest_stack_drop.SETTLE_KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
+                elif fields == ["native-host-stack-drop-menu-capability", "1"] and data.get("state") == "hosting":
+                    data[native_host_stack_drop.CAPABILITY] = 1
+                elif fields[0] in (native_host_stack_drop.SCOPE_ROW, native_host_stack_drop.INTENT_ROW):
+                    key = fields[0].replace("-", "_")
+                    if key in data:
+                        raise ValueError("Duplicate stock host inventory drop report")
+                    data[key] = native_host_stack_drop.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-inventory-sort" and len(fields) == 5:
                     data["native_inventory_sort"] = {"map": fields[1], "pawn": fields[2], "state": fields[3],
                                                      "count": int(fields[4])}

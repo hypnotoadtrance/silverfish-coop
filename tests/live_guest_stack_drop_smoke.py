@@ -17,14 +17,17 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
 from tools.silverfish import native_guest_drop_projection as projection, native_host_save
+from tools.silverfish import native_host_stack_drop as host_drop_input
 
 
 EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
 
 
-async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False):
-    mode = "host-origin" if host_origin else claimant
+async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
+                 host_origin_menu=None):
+    host_origin = host_origin or host_origin_menu is not None
+    mode = f"host-menu-{host_origin_menu}" if host_origin_menu else "host-origin" if host_origin else claimant
     name = f"manual-stack-drop-{mode}-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     run = campaign / "run"
@@ -263,9 +266,22 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             host_before = await inventory(host, "host")
             host_stack, = (item for item in host_before if item["guid"] == source)
 
-            host_drop_id = uuid.uuid4().hex
+            if host_origin_menu:
+                await wait(run, lambda state: state.get("game", {}).get(host_drop_input.SCOPE) is not None)
+                await action(host, host_drop_input.FIXTURE, "--target", f"{source}|9|{host_origin_menu}")
+                await wait(run, lambda state: any(row.get("owner") == "host" and row.get("guid") == source
+                           for row in state.get("gameplay", {}).get(record.STATE, {}).values()))
+                events = (await command("events", *host, "--tail", "50"))["events"]
+                committed_by_menu, = [event for event in events if event["event"] == "native_host_stock_drop"
+                                      and event.get(drop.RESULT, {}).get("guid") == source]
+                host_drop_id, host_drop = committed_by_menu["operation_id"], committed_by_menu[drop.RESULT]
+                assert (committed_by_menu["entry"], committed_by_menu["refresh"]) == (host_origin_menu, "refreshed"), committed_by_menu
+                evidence["host_menu_drop"] = committed_by_menu
+                await action(host, host_drop_input.CLOSE_FIXTURE, "--target", source)
+            else:
+                host_drop_id = uuid.uuid4().hex
+                host_drop = (await action(host, drop.HOST_DROP, "--target", f"{source}|9", "--operation-id", host_drop_id))[drop.RESULT]
             host_request = (drop.HOST_DROP, "--target", f"{source}|9", "--operation-id", host_drop_id)
-            host_drop = (await action(host, *host_request))[drop.RESULT]
             evidence["host_drop"] = host_drop
             assert (host_drop["state"], host_drop["drop_id"], host_drop["owner"], host_drop["guid"], host_drop["quantity"]) == (
                 "dropped", host_drop_id, "host", source, 9), host_drop
@@ -392,10 +408,13 @@ if __name__ == "__main__":
     parser.add_argument("--visible-projection", action="store_true", help="verify shared stock display and the owner's stock Interact")
     parser.add_argument("--claimant", choices=("owner", "host", "teammate"), default="owner",
                         help="verify the owner after restart, or run a short stock Interact pickup as host or teammate")
-    parser.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
+    origin = parser.add_mutually_exclusive_group()
+    origin.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
+    origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu"),
+                        help="drop through the selected stock host inventory route, then pick up the stack as the guest")
     settings = parser.parse_args()
-    if settings.host_origin and (settings.visible_projection or settings.claimant != "owner"):
-        parser.error("--host-origin is a separate stock Interact test mode")
+    if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
+        parser.error("host-origin tests run separately from claimant-only tests")
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
                        visible_projection=settings.visible_projection, claimant=settings.claimant,
-                       host_origin=settings.host_origin))
+                       host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu))
