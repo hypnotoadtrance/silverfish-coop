@@ -26,7 +26,7 @@ from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
-from . import native_guest_drop
+from . import native_guest_drop, native_guest_drop_projection
 from . import native_guest_melee
 from . import native_host_dig, native_host_landmine
 from . import native_kill_volume
@@ -3567,6 +3567,7 @@ class Client:
         self.primary_scope = None
         self.next_primary_renewal = 0.0
         self.bag_projection_key = None
+        self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.stopping = False
 
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
@@ -3606,6 +3607,7 @@ class Client:
         self.native_return_reservation = None
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
+        self.stack_drop_projection.rebind()
         self.control.event("client_link_authenticated", character_id=request["character_id"],
                            resumed=bool(result.get("resumed")))
         return result
@@ -4131,6 +4133,9 @@ class Client:
                         raise ValueError("Select a qualified merchant fixture input")
                     self.last_game = await self.bridge.command(action, choice, timeout=5)
                     result = {"native_shop_view": self.last_game.get("native_shop_view", {})}
+                elif action == native_guest_drop_projection.FIXTURE:
+                    proof = await self.stack_drop_projection.fixture(self, request.get("target"))
+                    result = {native_guest_drop_projection.KEY: proof}
                 elif action == "native-bag-projection-fixture":
                     self.last_game = await self.bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": self.last_game.get("native_bag_projection_interaction", {})}
@@ -4276,6 +4281,13 @@ class Client:
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)
             await native_inventory.service_split_view(self, active)
+            try:
+                await self.stack_drop_projection.sync(self, active)
+            except (OSError, RuntimeError) as error:
+                reason = str(error)
+                if self.stack_drop_projection.last_error != reason:
+                    self.stack_drop_projection.last_error = reason
+                    self.control.event("stock_drop_projection_unavailable", reason=reason)
             if self.shop_view:
                 await self.shop_view.sync(self, active)
             frame = (self.gameplay.get(native_enemy_shells.FRAME_KEY) if active and self.transport.game_access
@@ -4288,6 +4300,11 @@ class Client:
             if active and not self.stopping:
                 for operation_id, target in interactions:
                     try:
+                        stack_drop = native_guest_drop_projection.target_parts(target)
+                        if stack_drop:
+                            result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
                                   else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
                                   else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)

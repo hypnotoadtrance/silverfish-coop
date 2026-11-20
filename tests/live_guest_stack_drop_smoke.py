@@ -16,14 +16,14 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
-from tools.silverfish import native_host_save
+from tools.silverfish import native_guest_drop_projection as projection, native_host_save
 
 
 EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
 
 
-async def verify(work: Path, originals_path: Path):
+async def verify(work: Path, originals_path: Path, *, visible_projection=False):
     name = "manual-stack-drop-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     run = campaign / "run"
@@ -83,6 +83,21 @@ async def verify(work: Path, originals_path: Path):
         checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
         native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
         return checkpoint["world"]["party"][record.STATE]
+
+    async def projected(owner_id, drop_id):
+        def predicate(frame):
+            game = frame.get("game", {})
+            proof = game.get(projection.KEY, {})
+            row = frame.get("gameplay", {}).get(record.STATE, {}).get(drop_id, {})
+            return (frame.get("state"), frame.get("character_id"), frame.get("gameplay_fresh"),
+                    proof.get("map"), proof.get("drop_id"), proof.get("pawn"), row.get("owner")) == (
+                        "connected", owner_id, True, record.OBSERVATORY, drop_id,
+                        game.get("pawns", {}).get("local", {}).get("name"), owner_id)
+
+        frame = await wait(clients[owner], predicate)
+        proof = frame["game"][projection.KEY]
+        assert proof["pawn"] and proof["actor"].startswith("Ammo_Pistol_BP_C "), proof
+        return proof
 
     def exact_position(frame, character):
         game, gameplay = frame.get("game", {}), frame.get("gameplay", {})
@@ -193,6 +208,13 @@ async def verify(work: Path, originals_path: Path):
         assert (await action(other, drop.RECLAIM, "--target", attempt, success=False))["error"] == "native_guest_stack_drop_not_owned"
         assert await inventory(other, spare["character_id"]) == other_items
         assert await inventory(host, "host") == host_items
+        if visible_projection:
+            evidence["projection_before_restart"] = await projected(owner_id, attempt)
+            observed = await wait(clients[other], lambda state: state.get("state") == "connected" and state.get("gameplay_fresh"))
+            assert observed.get("gameplay", {}).get(record.STATE) == {} and projection.KEY not in observed["game"]
+            refused = await action(other, projection.FIXTURE, "--target", attempt, success=False)
+            assert refused["error"] == "stock_drop_projection_fixture_scope_unavailable", refused
+            evidence["wrong_owner_projection_rejected"] = True
 
         await stop(host, server)
         await stop(owner, player)
@@ -214,11 +236,41 @@ async def verify(work: Path, originals_path: Path):
         evidence["out_of_range_position"] = far["location"]
         refused = await action(owner, drop.RECLAIM, "--target", attempt, success=False)
         assert refused["error"] == "native_guest_stack_drop_out_of_range", refused
+        if visible_projection:
+            after_restart = await projected(owner_id, attempt)
+            assert after_restart["epoch"] != evidence["projection_before_restart"]["epoch"], after_restart
+            evidence["projection_after_restart"] = after_restart
+            assert (await action(owner, "drop-link"))["link_connected"] is False
+            await wait(clients[owner], lambda state: state.get("link_connected") is False
+                       and state.get("reconnect_suspended") is True and projection.KEY not in state.get("game", {}))
+            refused = await action(owner, projection.FIXTURE, "--target", attempt, success=False)
+            assert refused["error"] == "stock_drop_projection_fixture_scope_unavailable", refused
+            assert (await action(owner, "reconnect"))["resumed"] is True
+            await bound(1)
+            after_reconnect = await projected(owner_id, attempt)
+            assert after_reconnect["epoch"] != after_restart["epoch"], after_reconnect
+            evidence["projection_after_reconnect"] = after_reconnect
         near = await place(owner_id, "near", anchor, preferred_lane=drop_site["lane"])
         assert near["pawn"] == far["pawn"], (far, near)
         evidence["reclaim_position"] = near["location"]
+        if visible_projection:
+            unclaimed = await projected(owner_id, attempt)
+            assert (await inventory(owner, owner_id)) == [item for item in initial_items if item["guid"] != source]
+            press = (await action(owner, projection.FIXTURE, "--target", attempt))[projection.KEY]
+            assert press == {**unclaimed, "sequence": unclaimed["sequence"] + 1}, (unclaimed, press)
+            evidence["stock_projection_interact"] = press
+            await wait(clients[owner], lambda state: state.get("gameplay_fresh")
+                       and state.get("gameplay", {}).get(record.STATE) == {} and projection.KEY not in state.get("game", {}))
+            events = (await command("events", *owner, "--tail", "50"))["events"]
+            routed = [event for event in events if event["event"] == "local_interaction"
+                      and event.get(drop.RESULT, {}).get("drop_id") == attempt]
+            assert len(routed) == 1, routed
+            event, = routed
+            claim_id, reclaimed = event["operation_id"], event[drop.RESULT]
+            evidence["stock_projection_reclaim_operation"] = claim_id
+        else:
+            reclaimed = (await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id))[drop.RESULT]
         recover = (drop.RECLAIM, "--target", attempt, "--operation-id", claim_id)
-        reclaimed = (await action(owner, *recover))[drop.RESULT]
         evidence["reclaim"] = reclaimed
         assert reclaimed == {**dropped, "state": "reclaimed"}, reclaimed
         assert saved()[attempt] == {key: value if key != "claim_id" else claim_id for key, value in committed.items() if key != "escrow"}
@@ -247,5 +299,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--visible-projection", action="store_true", help="verify the owner-only stock display and F reclaim")
     settings = parser.parse_args()
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve()))
+    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
+                       visible_projection=settings.visible_projection))

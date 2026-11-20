@@ -1,5 +1,6 @@
 local players = {}
 local native_bag_projection = require("native_bag_projection")
+local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_authored_pickup = require("native_authored_pickup")
 local native_enemy_shell_view = require("native_enemy_shell_view")
 
@@ -93,6 +94,8 @@ local function sync_native_interact(phase)
         if not source then break end
         write_interaction(pawn, source)
     end
+    local stack_drop = native_guest_drop_projection.take_press(pawn)
+    if stack_drop then write_interaction(pawn, stack_drop) end
     local valve = SilverfishTakeNativeSubwayValvePress
     if type(valve) == "function" and valve(address) then write_interaction(pawn, "subway-valve") end
     local target

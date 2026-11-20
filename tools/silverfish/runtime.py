@@ -21,7 +21,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
-from . import native_guest_stack_drop
+from . import native_guest_drop_projection, native_guest_stack_drop
 from . import native_black_box
 from . import native_spratt
 from . import native_spratt_fixture
@@ -546,6 +546,7 @@ class Bridge:
             decoded = target.decode("ascii") if target is not None else None
             if (target is not None and decoded != native_subway_valve.INPUT
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
+                    and not native_guest_drop_projection.target_parts(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
@@ -1535,6 +1536,11 @@ class Bridge:
                                                     "total": int(fields[6]), "count": int(fields[7])}
                 elif fields == ["native-inventory-sort-capability", "1"]:
                     data["native_inventory_sort_capability"] = 1
+                elif fields[0] == native_guest_drop_projection.ROW:
+                    key = native_guest_drop_projection.KEY
+                    if key in data:
+                        raise ValueError("Duplicate stock drop projection")
+                    data[key] = native_guest_drop_projection.parse(fields, data.get("state"), data.get("map"))
                 elif fields == [native_guest_stack_drop.ACTION + "-capability", "1"]:
                     if data.get("state") == "hosting" and data.get("map") == native_guest_stack_drop.OBSERVATORY:
                         data[native_guest_stack_drop.CAPABILITY] = 1

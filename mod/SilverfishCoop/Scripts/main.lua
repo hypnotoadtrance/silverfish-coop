@@ -46,6 +46,7 @@ local native_inventory = require("native_inventory")
 local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_guest_stack_drop = require("native_guest_stack_drop")
+local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_loot_actions = require("native_loot_actions")
 local native_loot_crate_input = require("native_loot_crate_input")
 local native_loot_view = require("native_loot_view")
@@ -438,6 +439,7 @@ local function run_command(fields, state, current_phase)
     if command == "travel" or command == "leave" or command == "join" then native_mosby_station.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_savlo_locker.clear() end
+    if command == "join" or command == "leave" or command == "travel" then native_guest_drop_projection.clear() end
     if command == "join" or command == "leave" then
         native_world_view.clear()
         native_inventory_view.clear()
@@ -839,6 +841,7 @@ local function run_command(fields, state, current_phase)
         or native_finite_shop.command(fields, state, current_phase)
         or native_wipe_inventory.command(fields, state, current_phase)
         or native_guest_stack_drop.command(fields, state, current_phase)
+        or native_guest_drop_projection.command(fields, state, current_phase)
         or native_pickup.command(fields, state, current_phase)
         or native_shop.command(fields, state, current_phase)
         or native_shop_view.command(fields, state, current_phase)
@@ -987,6 +990,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_finite_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_stack_drop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_guest_drop_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_shop_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

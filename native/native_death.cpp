@@ -32,6 +32,7 @@
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "guest_stack_drop.hpp"
+#include "guest_drop_projection.hpp"
 #include "inventory_view.hpp"
 #include "bag_projection.hpp"
 #include "finite_shop.hpp"
@@ -1235,6 +1236,7 @@ namespace
             silverfish::native_guest_reload_input::uninstall_hooks();
             silverfish::native_inventory_view::uninstall_hooks();
             silverfish::native_guest_stack_drop::uninstall_hooks();
+            silverfish::native_guest_drop_projection::uninstall_hooks();
             silverfish::native_bag_projection::uninstall_hooks();
             silverfish::native_interaction_input::uninstall_hooks();
             silverfish::native_authored_pickup::uninstall_hooks();
@@ -1278,6 +1280,7 @@ namespace
             silverfish::native_inventory_view::install_hooks();
             silverfish::native_bag_projection::install_hooks();
             silverfish::native_interaction_input::install_hooks();
+            silverfish::native_guest_drop_projection::install_hooks();
             silverfish::native_authored_pickup::install_hooks();
             silverfish::native_broker_menu::install_hooks();
             silverfish::native_broker_input::install_hooks();
@@ -1358,6 +1361,7 @@ namespace
             silverfish::inventory_census::register_lua(lua);
             silverfish::inventory_wipe::register_lua(lua);
             silverfish::native_guest_stack_drop::register_lua(lua);
+            silverfish::native_guest_drop_projection::register_lua(lua);
             silverfish::finite_shop::register_lua(lua);
             silverfish::native_guest_npc::register_lua(lua);
             silverfish::native_guest_reload_input::register_lua(lua);
@@ -1419,6 +1423,7 @@ namespace
                 silverfish::native_guest_npc::clear_scope();
                 silverfish::native_inventory_view::clear_scope();
                 silverfish::native_bag_projection::clear_scope();
+                silverfish::native_guest_drop_projection::clear_scope();
                 silverfish::native_interaction_input::clear_scope();
                 silverfish::native_authored_pickup::clear_scope();
                 silverfish::native_broker_menu::clear_scope();
