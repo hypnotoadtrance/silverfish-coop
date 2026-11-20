@@ -40,17 +40,30 @@ local function host(state, phase)
     local details = state.local_pawn
     local pawn = details and details.pawn
     if phase ~= "hosting" or not state.listening or state.server ~= false or not valid(world)
-        or not valid(world.NetDriver) or valid(world.NetDriver.ServerConnection)
-        or not exact(controller, controller_class) or controller.Loading ~= false
-        or not controller:IsLocalController() or not controller:HasAuthority() or controller:IsActorBeingDestroyed()
-        or not exact(pawn, pawn_class) or pawn.Dead ~= false or not pawn:HasAuthority() or not pawn:IsLocallyControlled()
-        or pawn:IsActorBeingDestroyed() or players.is_downed(pawn) ~= false or not same(pawn.Controller, controller)
-        or not same(controller.Pawn, pawn) or not same(controller:GetWorld(), world) or not same(pawn:GetWorld(), world) then return end
+        or not valid(world.NetDriver) or valid(world.NetDriver.ServerConnection) then
+        return nil, "listen_scope_unavailable"
+    end
+    if not exact(controller, controller_class) or not controller:IsLocalController()
+        or not controller:HasAuthority() or controller:IsActorBeingDestroyed() then
+        return nil, "controller_unqualified"
+    end
+    if controller.Loading ~= false then return nil, "controller_loading" end
+    if not exact(pawn, pawn_class) or pawn.Dead ~= false or not pawn:HasAuthority()
+        or not pawn:IsLocallyControlled() or pawn:IsActorBeingDestroyed() then
+        return nil, "pawn_unqualified"
+    end
+    if players.is_downed(pawn) ~= false then return nil, "standing_pawn_unverified" end
+    if not same(pawn.Controller, controller) or not same(controller.Pawn, pawn)
+        or not same(controller:GetWorld(), world) or not same(pawn:GetWorld(), world) then
+        return nil, "pawn_scope_changed"
+    end
     local statics, viewport = StaticFindObject(stats_path), FindFirstOf("GameViewportClient")
-    if not valid(statics) or statics:IsGamePaused(controller) ~= false
-        or not exact(viewport, viewport_class) or not same(viewport.World, world) then return end
+    if not valid(statics) or statics:IsGamePaused(controller) ~= false then return nil, "world_pause_unverified" end
+    if not exact(viewport, viewport_class) or not same(viewport.World, world) then return nil, "viewport_unqualified" end
     local instance = statics:GetGameInstance(controller)
-    if not valid(instance) or not same(viewport:GetOuter(), instance:GetOuter()) then return end
+    if not valid(instance) or not same(viewport:GetOuter(), instance:GetOuter()) then
+        return nil, "game_instance_unqualified"
+    end
     return {world = world, controller = controller, pawn = pawn, viewport = viewport, instance = instance, map = state.map}
 end
 
@@ -313,9 +326,12 @@ local function fixture_enabled()
 end
 
 local function fixture_open(state, phase)
-    local context = host(state, phase)
-    local stack = context and context.controller.MenuStack
-    if not stack or stack:GetArrayNum() ~= 0 or fixture_menu then error("native_host_invite_journal_unavailable", 0) end
+    local context, failure = host(state, phase)
+    if not context then error("native_host_invite_" .. failure, 0) end
+    local stack = context.controller.MenuStack
+    if not stack or stack:GetArrayNum() ~= 0 or fixture_menu then
+        error("native_host_invite_journal_unavailable", 0)
+    end
     local class = StaticFindObject(journal_class)
     if not valid(class) then
         LoadAsset(journal_class)
