@@ -12,6 +12,10 @@ The current Python launcher starts a staged game process with `-userdir` and `-M
 
 A standalone Windows x64 test ran both existing QUIC roles inside one C++ process with an embedded CPython worker. The host rejected an invalid credential and a mismatched character ID. Both roles exchanged UDP payloads through simulated Unreal endpoints. Reconnect restored the same character, saved state, lease, and relay endpoints. The next transport milestone connects that worker to Unreal's game thread.
 
+The staged title probe found the same stock widget at the top of its local controller's menu stack across several frames. It verified that the widget was visible and attached to the actual viewport. The title created only the stock `Config.sav` in its isolated profile. The original single-player save hashes matched.
+
+A staged loopback trial mounted the co-op panel over that title. The panel exposed the bound Host or Join action and refused the unoffered action. The headless input seam submitted each selection through the same one-use request as the physical keys. Host opened the chosen UDP port and started Observatory, and Join connected the invited guest and bound their detached stock save. Each title process stayed open until the new session became ready. The paired checkpoint succeeded and the original save hashes matched.
+
 ## Delivery milestones
 
 1. **Title menu to isolated co-op stage.** Add the title entry in the matched staged build. Host and Join call the current supervisor through a private, structured handoff. The supervisor reserves the campaign or profile, passes an isolated prelaunch user directory, and reports when the requested host or guest is ready. Start with two staged processes. Verify one click produces one launch, a rejected or cancelled request leaves the title usable, and stock single-player buttons still load their own data. Hash the original save directory before and after.
