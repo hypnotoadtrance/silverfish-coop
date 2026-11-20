@@ -25,8 +25,13 @@ MOSBY_NPC = "NPC_DrMosby_C " + MOSBY_LEVEL + "NPC_DrMosby_C_1"
 MOSBY_CONTROLLER = "Dialogue_Controler_BP_C " + MOSBY_LEVEL + "Dialogue_Controler_BP_C_1"
 GREET, QUESTIONS, ANOMALIES, DRILL, OFFER = ("Mosby_Greet", "Mosby_Questions", "Mosby_Anomalies", "Mosby_EatherDrill", "Mosby_DrillQuest_01")
 MOSBY_QUEST = "Clt_Tape_StoneMaze_01"
-MOSBY_ROWS = {GREET: (1, {1: None, 4: QUESTIONS}), QUESTIONS: (1, {1: GREET, 3: ANOMALIES, 5: DRILL, 6: OFFER}),
-              ANOMALIES: (4, {1: QUESTIONS}), DRILL: (3, {1: QUESTIONS}), OFFER: (4, {1: None, 2: None})}
+READINGS, EQUIPMENT = "Mosby_EatherReadings_01", "Mosby_DrillQuest_02"
+READINGS_OPEN = "native-dialogue-mosby-readings-open"
+PROTOTYPE_QUEST = "Clt_DrillHead"
+MOSBY_ROWS = {GREET: (1, {1: None, 4: QUESTIONS}),
+              QUESTIONS: (1, {1: GREET, 3: ANOMALIES, 5: DRILL, 6: OFFER, 7: EQUIPMENT}),
+              ANOMALIES: (4, {1: QUESTIONS}), DRILL: (3, {1: QUESTIONS}), OFFER: (4, {1: None, 2: None}),
+              READINGS: (6, {1: EQUIPMENT, 2: GREET}), EQUIPMENT: (5, {1: QUESTIONS, 2: None})}
 SHOPKEEP_PROFILE = "shopkeep"
 SHOPKEEP_LEVEL = SHOPKEEP + ".Shop_ShopKeep_P:PersistentLevel."
 SHOPKEEP_NPC = "NPC_ShopKeep_C " + SHOPKEEP_LEVEL + "NPC_ShopKeep_C_1"
@@ -49,7 +54,11 @@ MAMA_OPEN, MAMA_TRADE = "native-dialogue-mama-open", "native-dialogue-mama-trade
 MEET_PROFILES = {SHOPKEEP_PROFILE: (SHOPKEEP_OPEN, SHOPKEEP_FIRST), MAMA: (MAMA_OPEN, MAMA_FIRST)}
 MAMA_PROGRESS = (*SHOPKEEP_PROGRESS, "rev_orders")
 PROGRESS_KEYS = ("topic_eather_drill", "topic_drill_data", "stone_maze_readings", "quest_step", "cash", "xp")
-EFFECTS = {(QUESTIONS, 3): "topic_eather_drill", (QUESTIONS, 5): "topic_drill_data", (OFFER, 2): "stone_maze_issued"}
+PROTOTYPE_KEYS = ("topic_micro_drill", "mosby_drill_test", "topic_drill_lab", "prototype_step")
+EFFECTS = {(QUESTIONS, 3): "topic_eather_drill", (QUESTIONS, 5): "topic_drill_data", (OFFER, 2): "stone_maze_issued",
+           (EQUIPMENT, 1): "topic_drill_lab", (EQUIPMENT, 2): "prototype_drill_issued"}
+ISSUES = {"stone_maze_issued": (MOSBY_QUEST, "quest_step", "stone_maze_already_present"),
+          "prototype_drill_issued": (PROTOTYPE_QUEST, "prototype_step", "prototype_drill_already_present")}
 ORDINALS = tuple(str(index) for index in sorted({
     index for _, choices in (*ROWS.values(), *MOSBY_ROWS.values(), *SHOPKEEP_ROWS.values(), *MAMA_ROWS.values()) for index in choices
 }))
@@ -89,14 +98,25 @@ def available_ordinals(profile, row: str, progress: dict) -> tuple[int, ...]:
     if profile.id != MOSBY or row != QUESTIONS:
         return ordinals
     return tuple(ordinal for ordinal in ordinals if (ordinal != 5 or progress["topic_eather_drill"] >= 1)
-                 and (ordinal != 6 or progress["topic_drill_data"] >= 1 and progress["stone_maze_readings"] < 1))
+                 and (ordinal != 6 or progress["topic_drill_data"] >= 1 and progress["stone_maze_readings"] < 1)
+                 and (ordinal != 7 or progress.get("topic_micro_drill", 0) >= 1 and progress.get("mosby_drill_test", 0) < 1))
+
+
+def stock_rows(profile: Profile, progress: dict | None) -> dict:
+    if profile.id == MOSBY and "prototype_step" not in progress:
+        return {name: row for name, row in profile.rows.items() if name not in (READINGS, EQUIPMENT)}
+    return profile.rows
 
 
 def parse_progress(fields, pawn: str) -> dict:
-    if not fields or len(fields) != 10 or tuple(fields[1:3]) != (SCIENTIST_SHOP, pawn) or fields[-1] not in ("read", *EFFECTS.values()):
+    if (not fields or len(fields) not in (10, 14) or tuple(fields[1:3]) != (SCIENTIST_SHOP, pawn)
+            or fields[-1] not in ("read", *EFFECTS.values(), "readings_opened")
+            or len(fields) == 10 and fields[-1] in ("readings_opened", "topic_drill_lab", "prototype_drill_issued")):
         raise ValueError("Invalid stock Mosby progress frame")
-    result = {name: None if name == "quest_step" and value == "-" else int(value) for name, value in zip(PROGRESS_KEYS, fields[3:9])}
-    if (result["quest_step"] not in (None, 1, 2, -10)
+    steps = ("quest_step", "prototype_step")
+    result = {name: None if name in steps and value == "-" else int(value)
+              for name, value in zip((*PROGRESS_KEYS, *PROTOTYPE_KEYS), fields[3:-1])}
+    if (any(result.get(step) not in (None, 1, 2, -10) for step in steps)
             or any(value is not None and not -(2**31) <= value < 2**31 for value in result.values())):
         raise ValueError("Invalid stock Mosby save state")
     return {**result, "effect": fields[-1]}
@@ -126,10 +146,11 @@ def parse_stock(frame, lines, choices, progress_fields=None) -> dict:
                 else parse_meet_progress(progress_fields, frame[4], profile) if profile.id in MEET_PROFILES else None)
     if progress is None and progress_fields:
         raise ValueError("Unexpected stock dialogue progress")
-    result = {name: {"lines": {}, "choices": {}} for name in profile.rows}
+    rows = stock_rows(profile, progress)
+    result = {name: {"lines": {}, "choices": {}} for name in rows}
     for entries, field in ((lines, "lines"), (choices, "choices")):
         for fields in entries:
-            if (len(fields) != 4 or fields[1] not in profile.rows or fields[2] not in ("1", "2", "3", "4", "5", "6")
+            if (len(fields) != 4 or fields[1] not in rows or fields[2] not in ("1", "2", "3", "4", "5", "6", "7")
                     or not 0 < len(fields[3]) <= 1024):
                 raise ValueError("Invalid stock dialogue text row")
             index = int(fields[2])
@@ -137,7 +158,7 @@ def parse_stock(frame, lines, choices, progress_fields=None) -> dict:
             if index in target:
                 raise ValueError("Duplicate stock dialogue text row")
             target[index] = fields[3]
-    for name, (count, _) in profile.rows.items():
+    for name, (count, _) in rows.items():
         row = result[name]
         ordinals = available_ordinals(profile, name, progress)
         if row["lines"].keys() != set(range(1, count + 1)) or row["choices"].keys() != set(ordinals):
@@ -161,6 +182,9 @@ def render_text(reply, profile: Profile, row: str | None) -> tuple[str, ...]:
     if profile.id == MOSBY and (not isinstance(progress, dict)
             or any(type(progress.get(key)) is not int for key in PROGRESS_KEYS[:3])):
         raise ValueError("The host did not provide the authoritative stock topic state")
+    if profile.id == MOSBY and (row not in stock_rows(profile, progress)
+            or "prototype_step" in progress and any(type(progress.get(key)) is not int for key in PROTOTYPE_KEYS[:3])):
+        raise ValueError("The host did not provide the authoritative stock Prototype Drill state")
     allowed = available_ordinals(profile, row, progress)
     if (len(lines) != line_count or not all(isinstance(choice, dict) for choice in choices)
             or [choice.get("ordinal") for choice in choices] != list(allowed)):
@@ -247,16 +271,25 @@ class DialogueSessions:
     async def _commit(self, host, bridge, character, scope, stock, row, ordinal):
         effect = EFFECTS[(row, ordinal)]
         before = stock["progress"]
-        issue = effect == "stone_maze_issued"
-        if issue:
+        issue = ISSUES.get(effect)
+        if effect == "stone_maze_issued":
             if (before["topic_eather_drill"] < 1 or before["topic_drill_data"] < 1 or before["stone_maze_readings"] >= 1):
                 raise party.RuleError("native_dialogue_choice_unavailable")
-            if before["quest_step"] is not None:
-                return stock, "stone_maze_already_present", None
-            if MOSBY_QUEST in host.party.get("native_quests", {}):
-                raise RuntimeError("The checkpointed Stone Maze contract has no matching stock host quest")
+        elif row == EQUIPMENT and (before.get("topic_micro_drill", 0) < 1 or before.get("mosby_drill_test", 0) >= 1):
+            raise party.RuleError("native_dialogue_choice_unavailable")
+        if issue:
+            quest, step, replay = issue
+            if before[step] is not None:
+                return stock, replay, None
+            if quest in host.party.get("native_quests", {}):
+                raise RuntimeError("The checkpointed Mosby contract has no matching stock host quest")
         elif before[effect] >= 1:
             return stock, "topic_already_known", None
+        expected = {**before, "effect": effect, (step if issue else effect): 1}
+        return await self._mutate_mosby(host, bridge, character, scope, before, COMMIT,
+                                        (row, str(ordinal)), expected, issue[0] if issue else None)
+
+    async def _mutate_mosby(self, host, bridge, character, scope, before, command, arguments, expected, quest=None):
         host.transitioning = True
         try:
             await host.checkpoint_native(bridge)
@@ -265,27 +298,27 @@ class DialogueSessions:
                     or (host.control.generation, host.zone_epoch, host.last_game.get("map")) != scope[:3]):
                 raise party.RuleError("native_dialogue_scope_changed")
             host.native_checkpoint_unsafe = True
-            expected = ("-" if before[key] is None else str(before[key]) for key in PROGRESS_KEYS)
+            fields = ("-" if before[key] is None else str(before[key])
+                      for key in (*PROGRESS_KEYS, *PROTOTYPE_KEYS) if key in before)
             try:
-                observed = await self._read(host, bridge, PROFILES[SCIENTIST_SHOP], scope[3], command=COMMIT,
-                                            arguments=(row, str(ordinal), scope[4], *expected))
+                observed = await self._read(host, bridge, PROFILES[SCIENTIST_SHOP], scope[3], command=command,
+                                            arguments=(*arguments, scope[4], *fields))
             except RuntimeError as error:
                 if str(error).startswith(("native_dialogue_", "stock_wire_quest_")):
                     host.native_checkpoint_unsafe = False
                     raise party.RuleError(str(error)) from error
                 raise
-            after = observed["progress"]
-            expected = {**before, "effect": effect, "quest_step" if issue else effect: 1}
-            if observed["connection"] != scope[4] or after != expected:
+            if observed["connection"] != scope[4] or observed["progress"] != expected:
                 raise RuntimeError("The canonical host save did not verify the exact stock dialogue change")
             candidate = None
-            if issue:
+            if quest:
                 candidate = party.load_party(host.party)
-                candidate.setdefault("native_quests", {})[MOSBY_QUEST] = {"quest_id": MOSBY_QUEST, "step": 1, "actor": character}
+                candidate.setdefault("native_quests", {})[quest] = {"quest_id": quest, "step": 1, "actor": character}
             revision = await host.checkpoint_native(bridge, candidate)
             if candidate is not None:
                 host.party = candidate
             host.native_checkpoint_unsafe = False
+            effect = expected["effect"]
             host.control.event("native_dialogue_committed", revision=revision, effect=effect, character=character)
             return observed, effect, revision
         except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
@@ -357,6 +390,14 @@ class DialogueSessions:
             if profile.id in MEET_PROFILES:
                 stock, destination, effect, revision = await self._open_meet(host, bridge, character, scope, stock, profile)
                 now = time.monotonic()
+            elif profile.id == MOSBY:
+                before = stock["progress"]
+                if ("prototype_step" in before and before["quest_step"] == -10
+                        and before["stone_maze_readings"] == 1 and before["mosby_drill_test"] < 1):
+                    expected = dict(before, stone_maze_readings=2, topic_micro_drill=1, effect="readings_opened")
+                    stock, effect, revision = await self._mutate_mosby(
+                        host, bridge, character, scope, before, READINGS_OPEN, (), expected)
+                    destination, now = READINGS, time.monotonic()
         else:
             token, separator, choice = target.partition("@")
             session = self.sessions.get(character)
@@ -391,7 +432,7 @@ class DialogueSessions:
         report = {"profile": profile.id, "map": profile.map, "npc": profile.npc, "row": destination, "token": None,
                   "state": "closed" if destination is None else "open", "lines": [], "choices": []}
         if profile.id == MOSBY:
-            report["progress"] = {key: stock["progress"][key] for key in PROGRESS_KEYS}
+            report["progress"] = {key: value for key, value in stock["progress"].items() if key != "effect"}
         elif profile.id in MEET_PROFILES:
             keys = MAMA_PROGRESS if profile.id == MAMA else SHOPKEEP_PROGRESS
             report["progress"] = {key: stock["progress"][key] for key in keys}

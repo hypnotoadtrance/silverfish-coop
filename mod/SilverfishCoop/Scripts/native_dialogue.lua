@@ -39,6 +39,8 @@ local exit_field = "Terminate_Convo_5_BAA128604982D7FC877B498C6500026C"
 local next_pointer = "NextConvo_8_59FA977C44DA6739371CD9992F385F4F"
 local activate = "Activate_Quests_22_323EA585468EFFDA9A12A188EBDF5022"
 local ping_field = "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD"
+local choice_gates = {require_flag = "Flags_PreReq_26_50B864DB4BE3226CB3721BB63C4D74DE",
+    hide_flag = "Flags_HideIfMet_28_6501CD9247D8EA6D695B5C9F5FD8C639"}
 local effect_arrays = {"Add_JournalEntries_17_E77934214DFD7B85991F729C59678191",
     "Check_TurnIn_Quests_20_4B851D164A4A4164B7B74D80DE4EED23", ping_field}
 local effect_maps = {add = "Add_SaveFlags_13_0FEB9B204B1F6F013B6309BF12311EF7",
@@ -152,8 +154,21 @@ local function catalog(state, profile, progress)
             end
             local quests = choice[activate]
             if count(quests) ~= (effect.quest and 1 or 0) then reject("stock_choice_quest_unqualified:" .. name) end
-            if effect.quest and not pointer_matches(quests[1], profile.table_and_key(), effect.quest) then
+            if effect.quest and not pointer_matches(quests[1], profile.table_and_key(effect.quest), effect.quest) then
                 reject("stock_choice_quest_unqualified:" .. name)
+            end
+            if profile == mosby then
+                for key, field in pairs(choice_gates) do
+                    local values, expected = choice[field], effect[key]
+                    if not values or #values ~= (expected and 1 or 0) then reject("stock_choice_gate_unqualified:" .. name) end
+                    if expected then
+                        local flag = FName(expected, EFindName.FNAME_Find)
+                        if flag:GetComparisonIndex() == 0 or flag:ToString() ~= expected
+                            or not values:Contains(flag) or values:Find(flag):get() ~= 1 then
+                            reject("stock_choice_gate_unqualified:" .. name)
+                        end
+                    end
+                end
             end
             if not profile.available or profile.available(effect, progress) then found.choices[ordinal] = text(choice[choice_text]) end
         end
@@ -323,16 +338,20 @@ local function host_command(fields, state, phase)
     host_report = nil
     local action, name = fields[2], fields[3]
     local commit = action == "native-dialogue-commit"
+    local readings_open = action == "native-dialogue-mosby-readings-open"
     local mama_open = action == "native-dialogue-mama-open"
     local shop_open = action == "native-dialogue-shopkeep-open" or mama_open
     local shop_cash = action == "native-dialogue-shopkeep-cash"
     local mama_trade = action == "native-dialogue-mama-trade"
-    if #fields ~= (commit and 12 or mama_open and 8 or shop_open and 7 or (shop_cash or mama_trade) and 6 or 3) then
+    if (commit and #fields ~= 12 and #fields ~= 16)
+        or (not commit and #fields ~= (readings_open and 14 or mama_open and 8 or shop_open and 7
+            or (shop_cash or mama_trade) and 6 or 3)) then
         reject("arguments_unqualified")
     end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
     if (action == "native-dialogue-shopkeep-open" or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
     if (action == "native-dialogue-mama-open" or mama_trade) and profile ~= mama then reject("mama_scope_unavailable") end
+    if readings_open and profile ~= mosby then reject("readings_scope_unavailable") end
     if action == "native-dialogue-approach" then
         if not (headless and fixtures) then reject("approach_unavailable") end
         local location, floor = target:K2_GetActorLocation(), npc:K2_GetActorLocation().Z
@@ -356,11 +375,20 @@ local function host_command(fields, state, phase)
         local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
         local effect = profile.effects and profile.effects[row] and profile.effects[row][ordinal]
         if not effect or not effect.effect or not rows[row].choices[ordinal] or identity ~= fields[6]
+            or effect.prototype and #fields ~= 16
             or not profile.accepts_progress_fields(progress, fields, 7) then reject("commit_scope_changed") end
         progress = profile.commit(context, effect, progress)
         local checked, updated = pcall(catalog, state, profile, progress)
         if not checked then error("mutation_unverified_native_dialogue_catalog:" .. tostring(updated), 0) end
         rows, effect_name = updated, effect.effect
+    elseif readings_open then
+        if identity ~= fields[4] or not profile.accepts_progress_fields(progress, fields, 5) then
+            reject("readings_open_scope_changed")
+        end
+        progress = profile.open_readings(state, context, progress)
+        local checked, updated = pcall(catalog, state, profile, progress)
+        if not checked then error("mutation_unverified_native_dialogue_catalog:" .. tostring(updated), 0) end
+        rows, effect_name = updated, "readings_opened"
     elseif shop_open then
         if identity ~= fields[4] or tostring(progress.meet) ~= fields[5] or tostring(progress.cash) ~= fields[6]
             or tostring(progress.xp) ~= fields[7] or mama_open and tostring(progress.rev_orders) ~= fields[8] then
@@ -432,6 +460,7 @@ end
 function dialogue.command(fields, state, phase)
     local action = fields[2]
     if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit"
+        or action == "native-dialogue-mosby-readings-open"
         or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash"
         or action == "native-dialogue-mama-open" or action == "native-dialogue-mama-trade" then
         return host_command(fields, state, phase)
@@ -484,6 +513,7 @@ function dialogue.command(fields, state, phase)
     local profile, following = current.profile, current.profile.root
     if session.content then following = profile.rows[session.row].next[session.content.ordinals[selected]] end
     if not session.content and profile.first and row == profile.first then following = profile.first end
+    if not session.content and profile == mosby and row == profile.readings then following = profile.readings end
     local content
     if row == "-" then
         if following ~= false or token ~= "-" or #fields ~= 5 then reject("render_unqualified") end

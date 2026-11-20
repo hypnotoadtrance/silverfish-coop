@@ -27,7 +27,8 @@ TO_MAZE = ((RUIN_FIELDS, "Market_Flood"), (CROSSROADS, "CR_RF"), (DEAD_BRIDGE, "
 TO_SCIENTIST = ((DEAD_BRIDGE, "DB_SM"), (CROSSROADS, "DB_CR"), (RUIN_FIELDS, "CR_RF"), (SCIENTIST_SHOP, "Market_Flood"))
 
 
-async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False, equip_reward=False):
+async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
+                   equip_reward=False, prototype_dialogue=False):
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
     authority, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -37,6 +38,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
     originals = saved_hashes(vanilla_saved) if vanilla_saved else None
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
+    if prototype_dialogue:
+        host_flags += ("--max-guests", "2")
     guest_flags = ("--headless", "--native-zones")
     if equip_reward:
         guest_flags += ("--native-guest-inventory-view",)
@@ -130,6 +133,64 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert (report["board"], report["pawn"]) == (tape.BOARD, placed["pawn"]), report
         return report
 
+    async def accept_prototype():
+        sibling_name = name + "-sibling"
+        sibling, sibling_run = ("--profile", sibling_name), work / "clients" / sibling_name / "run"
+        second = await command("invite", *authority, "--name", "Research reader", "--character", "Drill Scout")
+        assert second["character_id"] != character
+        sibling_process = await launch("join", sibling, "guest-sibling", "--invite", second["invite_file"], *guest_flags)
+        await wait(sibling_run, lambda state: (state.get("character_id"), state.get("host_session"), state.get("zone_epoch"))
+                   == (second["character_id"], current["generation"], current["zone_epoch"])
+                   and state.get("state") == "connected", timeout=75)
+        await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("guest2", {}).get("character_id")
+                   == second["character_id"] and (
+                       state.get("game", {}).get("native_guest_save_members", {}).get(
+                           state["gameplay"].get("native_pawns", {}).get("guest2"), {}).get("state")) == "bound", timeout=75)
+
+        def view(state):
+            return state.get("game", {}).get("native_dialogue_view", {})
+
+        async def press(target, row):
+            pending = (await action(client, dialogue.FIXTURE, "--target", target))["native_dialogue_view"]
+            outcome = ("open", row) if row else ("closed", "-")
+            observed = view(await wait(client_run, lambda status: (
+                view(status).get("state"), view(status).get("row"), view(status).get("sequence"), view(status).get("pawn"))
+                == (*outcome, pending["sequence"], pending["pawn"]), timeout=25))
+            evidence["prototype_dialogue"]["stock_presses"].append(
+                {key: observed[key] for key in ("sequence", "row", "state")})
+            return observed
+
+        evidence["prototype_dialogue"] = {"stock_presses": []}
+        await action(authority, dialogue.APPROACH, "--target", "guest2")
+        await action(authority, dialogue.APPROACH, "--target", "guest")
+        await wait(client_run, lambda state: view(state).get("state") == "armed", timeout=25)
+        await press("open", dialogue.READINGS)
+        observed = flags(saved())["host"]
+        assert observed == {**gained["host"], "Mosby_SM_Readings": 2, "Topic_MicroDrill": 1}
+        first_offer = await press("1", dialogue.EQUIPMENT)
+        second_offer = (await action(sibling, dialogue.OPEN, "--target", dialogue.MOSBY))["native_dialogue"]
+        assert second_offer["row"] == dialogue.GREET and second_offer["progress"]["prototype_step"] is None
+        for ordinal, row in ((4, dialogue.QUESTIONS), (7, dialogue.EQUIPMENT)):
+            second_offer = (await action(sibling, dialogue.CHOOSE, "--target", f"{second_offer['token']}@{ordinal}"))["native_dialogue"]
+            assert second_offer["row"] == row, second_offer
+        borrowed = await action(sibling, dialogue.CHOOSE, "--target", f"{first_offer['token']}@2", expected=False)
+        assert borrowed["error"] == "native_dialogue_choice_expired"
+
+        await press("2", None)
+        record = {"quest_id": dialogue.PROTOTYPE_QUEST, "step": 1, "actor": character}
+        await wait(run, lambda state: state.get("gameplay", {}).get("native_quests", {}).get(dialogue.PROTOTYPE_QUEST) == record)
+        replay = (await action(sibling, dialogue.CHOOSE, "--target", f"{second_offer['token']}@2"))["native_dialogue"]
+        assert (replay["state"], replay["effect"], replay["progress"]["prototype_step"]) == (
+            "closed", "prototype_drill_already_present", 1)
+        assert flags(saved())["host"] == observed and flags(saved())["guest"] == gained["guest"]
+        events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        effects = [(event["effect"], event["character"]) for event in events
+                   if event.get("event") == "native_dialogue_committed"
+                   and event.get("effect") in ("readings_opened", "prototype_drill_issued")]
+        assert effects == [("readings_opened", character), ("prototype_drill_issued", character)]
+        evidence["prototype_dialogue"].update(issued=record, sibling=replay["effect"], committed=effects)
+        await stop(sibling_process, sibling)
+
     async def exercise_reward_armor(reward_guid, original_inventory):
         backpack = (armor.HAZOP_CLASS_PATH, "backpack", 1)
         worn = (armor.HAZOP_CLASS_PATH, "armor", 1)
@@ -184,6 +245,11 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         port = current["endpoint"]["port"]
         await action(authority, dialogue.APPROACH, "--target", "guest")
         scene = (await action(client, dialogue.OPEN, "--target", dialogue.MOSBY))["native_dialogue"]
+        if prototype_dialogue:
+            questions = (await action(client, dialogue.CHOOSE, "--target", f"{scene['token']}@4"))["native_dialogue"]
+            refused = await action(client, dialogue.CHOOSE, "--target", f"{questions['token']}@7", expected=False)
+            assert refused["error"] == "native_dialogue_choice_unavailable"
+            scene = (await action(client, dialogue.OPEN, "--target", dialogue.MOSBY))["native_dialogue"]
         for ordinal in (4, 3, 1, 5, 1, 6, 2):
             scene = (await action(client, dialogue.CHOOSE, "--target", f"{scene['token']}@{ordinal}"))["native_dialogue"]
         assert (scene["effect"], scene["progress"]["quest_step"]) == ("stone_maze_issued", 1)
@@ -320,6 +386,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         if equip_reward:
             guest_items = await exercise_reward_armor(guest_armor, guest_items)
             assert await inventory(authority, "host") == host_items and flags(saved()) == gained
+        if prototype_dialogue:
+            await accept_prototype()
 
         await stop(host_process, authority)
         await stop(guest_process, client)
@@ -340,8 +408,17 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
 
             evidence["armor_equip"]["restored_projection"] = native_hazop(await wait(run, native_hazop))
         restored = await identify_board()
-        assert (restored["step_after"], restored["flag_after"], restored["objective_guid"]) == (-10, 1, None), restored
+        assert (restored["step_after"], restored["flag_after"], restored["objective_guid"]) == (
+            -10, 2 if prototype_dialogue else 1, None), restored
         assert tuple(restored[key] for key in ("cash_after", "xp_after")) == (gained["host"]["Player_Cash"], gained["host"]["Player_Xp"])
+        if prototype_dialogue:
+            await action(authority, dialogue.APPROACH, "--target", "guest")
+            recovered = (await action(client, dialogue.OPEN, "--target", dialogue.MOSBY))["native_dialogue"]
+            progress = recovered["progress"]
+            assert (recovered["row"], progress["quest_step"], progress["stone_maze_readings"],
+                    progress["topic_micro_drill"], progress["prototype_step"]) == (dialogue.GREET, -10, 2, 1, 1), recovered
+            assert saved()["world"]["party"]["native_quests"][dialogue.PROTOTYPE_QUEST] == evidence["prototype_dialogue"]["issued"]
+            evidence["prototype_dialogue"]["restarted"] = progress
         evidence.update(restart={"port": port, "generation": restarted["generation"], "quest": restored}, verified=True)
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
@@ -371,6 +448,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
     parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
     parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
+    parser.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
     args = parser.parse_args()
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
-                         stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward))
+                         stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
+                         prototype_dialogue=args.prototype_dialogue))

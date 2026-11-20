@@ -111,7 +111,7 @@ class CastawayDialogueTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(bridge.snapshot())
 
             events = directory / "native-dialogue-events"
-            events.write_text(f"dialogue-input\t1\t{pawn}\t-\t-\ndialogue-input\t2\t{pawn}\t{'a' * 32}\t7\n"
+            events.write_text(f"dialogue-input\t1\t{pawn}\t-\t-\ndialogue-input\t2\t{pawn}\t{'a' * 32}\t8\n"
                               f"dialogue-input\t3\t{pawn}\t{'a' * 32}\t3", encoding="utf-8")
             self.assertEqual(bridge.native_dialogue_requests(), [(1, pawn, "-", "-")])
             with events.open("ab") as stream:
@@ -160,9 +160,10 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         frame = ["native-dialogue-stock", self.profile.map, self.profile.npc, self.profile.controller, pawn, connection]
         progress = ["native-dialogue-progress", self.profile.map, pawn,
                     *("-" if self.progress[key] is None else str(self.progress[key]) for key in dialogue.PROGRESS_KEYS), effect]
+        rows = dialogue.stock_rows(self.profile, self.progress)
         lines = [["native-dialogue-line", row, str(index), f"line {index}"]
-                 for row, (count, _) in self.profile.rows.items() for index in range(1, count + 1)]
-        choices = [["native-dialogue-choice", row, str(index), f"choice {index}"] for row in self.profile.rows
+                 for row, (count, _) in rows.items() for index in range(1, count + 1)]
+        choices = [["native-dialogue-choice", row, str(index), f"choice {index}"] for row in rows
                    for index in dialogue.available_ordinals(self.profile, row, self.progress)]
         return {**self.game, "native_dialogue_stock": dialogue.parse_stock(frame, lines, choices, progress)}
 

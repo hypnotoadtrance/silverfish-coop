@@ -173,7 +173,8 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         await wait(run, lambda state: state.get("gameplay", {}).get("native_quests", {}).get(dialogue.MOSBY_QUEST) == record)
         lines = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         writes = [row for row in lines if row.get("event") == "native_dialogue_committed"]
-        assert [(row["effect"], row["character"]) for row in writes] == [(effect, primary_actor) for effect in dialogue.EFFECTS.values()], writes
+        effects = ("topic_eather_drill", "topic_drill_data", "stone_maze_issued")
+        assert [(row["effect"], row["character"]) for row in writes] == [(effect, primary_actor) for effect in effects], writes
         serials = [row["sequence"] for row in evidence["stock_input"]]
         assert serials == sorted(set(serials)), serials
         evidence.update(quest=record, canonical_progress=progress, writes=writes, sibling_replay=settlement["effect"])
