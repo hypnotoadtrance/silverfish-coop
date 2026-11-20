@@ -45,6 +45,7 @@ from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, p
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
 from .travel import CROSSROADS
+from . import udp_ownership
 
 REPO = Path(__file__).resolve().parents[2]
 AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
@@ -296,18 +297,7 @@ def spare_udp_port() -> int:
 
 
 def verify_loopback_socket(pid: int, port: int) -> None:
-    result = subprocess.run(["netstat.exe", "-ano", "-p", "udp"], capture_output=True,
-                            text=True, check=True, timeout=10,
-                            creationflags=subprocess.CREATE_NO_WINDOW)
-    endpoints = set()
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) == 4 and fields[0] == "UDP" and fields[-1] == str(pid):
-            endpoints.add(fields[1])
-    expected = f"127.0.0.1:{port}"
-    matching = {endpoint for endpoint in endpoints if endpoint.endswith(f":{port}")}
-    if matching != {expected}:
-        raise RuntimeError("The staged game did not bind its expected loopback-only UDP socket")
+    udp_ownership.verify_loopback_socket(pid, port)
 
 
 def launch(work: Path, profile: Path, bridge: Path, headless: bool,
