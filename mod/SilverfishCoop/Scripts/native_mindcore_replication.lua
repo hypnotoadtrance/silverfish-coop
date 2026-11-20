@@ -84,19 +84,20 @@ local function activate_host(state, phase)
     local core = current.core
     if active.state == "replication_unverified" then return end
     if active.state ~= "active" then
-        if core.bNetLoadOnClient ~= true or core.bReplicates ~= false or core.bReplicateMovement ~= false then
+        local prior_replication, prior_movement = core.bReplicates, core.bReplicateMovement
+        if core.bNetLoadOnClient ~= true or type(prior_replication) ~= "boolean" or type(prior_movement) ~= "boolean" then
             active.state = "replication_unverified"
             return
         end
         local applied = pcall(function()
-            core:SetReplicates(true)
+            if not prior_replication then core:SetReplicates(true) end
             if core.bReplicates ~= true then return end
-            core:SetReplicateMovement(true)
+            if not prior_movement then core:SetReplicateMovement(true) end
         end)
         if not applied or core.bReplicates ~= true or core.bReplicateMovement ~= true then
             pcall(function()
-                if core.bReplicateMovement == true then core:SetReplicateMovement(false) end
-                if core.bReplicates == true then core:SetReplicates(false) end
+                if core.bReplicateMovement ~= prior_movement then core:SetReplicateMovement(prior_movement) end
+                if core.bReplicates ~= prior_replication then core:SetReplicates(prior_replication) end
             end)
             active.state = "replication_unverified"
             return

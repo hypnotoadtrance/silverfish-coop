@@ -402,6 +402,18 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
                 poses[step] = previous = await core_poses(previous)
                 if shared_core:
                     await shared_core_at(0, label=step)
+                    if step == "step":
+                        dropped = await action(guest_run, "drop-link")
+                        assert dropped["link_connected"] is False
+                        await wait(run, lambda state: any(
+                            row["character_id"] == character and row["state"] == "reserved"
+                            for row in state.get("campaign", {}).get("leases", ())
+                        ), timeout=16)
+                        recovered = await action(guest_run, "reconnect")
+                        assert recovered.get("resumed") is True and recovered.get("link_connected") is True
+                        await paired(core.MAP)
+                        proof["core_carry_guest_reconnected"] = True
+                        await shared_core_at(0, label="reconnected_while_held")
             movement = proof["stock_carry"]["step"]
             assert movement["pawn_movement_uu"] >= 20 and movement["core_movement_uu"] >= 20, movement
             assert all(row["pawn"] == movement["pawn"] for row in proof["stock_carry"].values())

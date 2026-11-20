@@ -141,6 +141,18 @@ class MindCoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             mindcore.parse_proof(["native-mindcore-tape", mindcore.MAP, mindcore.UPLOAD, PAWN, GUID, "dispatched", "2"])
 
+    def test_replication_report_keeps_mount_authority_separate_from_peer_movement(self):
+        row = ["native-mindcore-replication", mindcore.MAP, "guest", "guarded", mindcore.CORE,
+               "0", "1", "0", "0", "0.0", "6682.0", "6719.0", "load_map"]
+        view = mindcore.parse_replication(row, "guest")
+        self.assertTrue(view["replicate_movement"])
+        self.assertFalse(view["capsule_overlap"])
+        for index, value in ((3, "active"), (4, mindcore.CORE.removesuffix("_1") + "_2"), (7, "1"), (8, "1")):
+            changed = row.copy()
+            changed[index] = value
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                mindcore.parse_replication(changed, "guest")
+
 
 class MindCoreFixtureTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
