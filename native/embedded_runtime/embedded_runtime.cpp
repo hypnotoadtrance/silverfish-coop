@@ -95,6 +95,11 @@ namespace
                 static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
     }
 
+    bool windows_path_equal(fs::path left, fs::path right)
+    {
+        return windows_equal(left.make_preferred().native(), right.make_preferred().native());
+    }
+
     fs::path module_image(HMODULE module)
     {
         std::wstring image(max_path, L'\0');
@@ -110,7 +115,7 @@ namespace
         const auto attributes = GetFileAttributesW(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_REPARSE_POINT ||
             bool(attributes & FILE_ATTRIBUTE_DIRECTORY) != directory) return false;
-        return windows_equal(path.native(), fs::canonical(path).native());
+        return windows_path_equal(path, fs::canonical(path));
     }
 
     bool profile_name(std::wstring_view name)
@@ -134,7 +139,7 @@ namespace
     {
         const CommandArguments arguments;
         if (!arguments.values || arguments.count < 3 ||
-            !windows_equal(arguments.values[0], image.native())) return false;
+            !windows_path_equal(arguments.values[0], image)) return false;
         bool userdir = false, loopback = false;
         for (int index = 1; index < arguments.count; ++index)
         {
@@ -145,7 +150,7 @@ namespace
             if (windows_equal(name, L"-userdir"))
             {
                 const fs::path supplied(value);
-                if (userdir || !windows_equal(supplied.native(), profile.native()) || !exact_path(supplied, true)) return false;
+                if (userdir || !windows_path_equal(supplied, profile) || !exact_path(supplied, true)) return false;
                 userdir = true;
             }
             if (windows_equal(name, L"-multihome"))
@@ -157,19 +162,22 @@ namespace
         return userdir && loopback;
     }
 
-    fs::path qualify_startup(HMODULE module, std::wstring_view nonce)
+    fs::path qualify_startup(HMODULE module, std::wstring_view nonce, const wchar_t*& state)
     {
+        state = L"startup_scope_environment_refused";
         if (startup_nonce() != nonce || environment(embedded_env) != L"1") return {};
         const auto image = module_image(nullptr);
         const auto addon = module_image(module);
+        state = L"startup_scope_image_refused";
         if (!exact_path(image, false) || !exact_path(addon, false)) return {};
         const auto binaries = image.parent_path();
         const auto stage = binaries.parent_path().parent_path().parent_path();
         const auto work = stage.parent_path();
         const auto mod = binaries / L"ue4ss" / L"Mods" / mod_name;
+        state = L"startup_scope_stage_refused";
         if (stage.filename() != L"stage" ||
-            image != stage / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe" ||
-            !windows_equal(addon.native(), (mod / L"dlls/main.dll").native()) ||
+            !windows_path_equal(image, stage / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
+            !windows_path_equal(addon, mod / L"dlls/main.dll") ||
             !exact_path(stage / L"silverfish-coop-stage.json", false)) return {};
 
         const fs::path bridge(environment(bridge_env));
@@ -178,12 +186,16 @@ namespace
         const auto run_profile = run.parent_path();
         const auto role_root = run_profile.parent_path();
         const auto profile = run_profile / L"game-user";
+        state = L"startup_scope_bridge_refused";
         if (bridge.filename() != nonce || bridge_folder.filename() != L"game-bridge" || run.filename() != L"run" ||
             !profile_name(run_profile.filename().native()) ||
-            (role_root != work / L"campaigns" && role_root != work / L"clients") ||
-            !matches_command_line(image, profile)) return {};
+            (!windows_path_equal(role_root, work / L"campaigns") &&
+             !windows_path_equal(role_root, work / L"clients"))) return {};
         for (const auto& path : {role_root, run_profile, run, bridge_folder, bridge})
             if (!exact_path(path, true)) return {};
+
+        state = L"startup_scope_arguments_refused";
+        if (!matches_command_line(image, profile)) return {};
         return mod / L"runtime";
     }
 
@@ -343,7 +355,7 @@ namespace
         // Loaded extensions and the interpreter stay mapped for the lifetime of this engine.
         const auto module = LoadLibraryExW(library.c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!module || !windows_equal(module_image(module).native(), library.native()))
+        if (!module || !windows_path_equal(module_image(module), library))
             return L"python_library_unavailable";
 #define SF_PYTHON_API(symbol) const auto symbol = resolve<decltype(&::symbol)>(module, #symbol); \
     if (!symbol) return L"python_api_unavailable";
@@ -404,15 +416,17 @@ namespace
         const wchar_t* state = L"preflight_error";
         try
         {
-            const auto root = qualify_startup(module, nonce);
-            auto runtime = !root.empty() ? verify_package(root) : std::nullopt;
-            if (root.empty()) state = L"startup_scope_refused";
-            else if (!runtime) state = L"runtime_package_refused";
-            else
+            const auto root = qualify_startup(module, nonce, state);
+            if (!root.empty())
             {
-                RC::Output::send(STR("[SilverfishCoopEmbeddedRuntime] state=starting pid={} game_thread={} worker_thread={}\n"),
-                    GetCurrentProcessId(), game_thread, GetCurrentThreadId());
-                state = run_python(runtime->root);
+                state = L"runtime_package_refused";
+                if (auto runtime = verify_package(root))
+                {
+                    RC::Output::send(STR("[SilverfishCoopEmbeddedRuntime] state=starting pid={} game_thread={} worker_thread={}\n"),
+                        GetCurrentProcessId(), game_thread, GetCurrentThreadId());
+                    state = L"embedded_startup_failed";
+                    state = run_python(runtime->root);
+                }
             }
         }
         catch (...) {}
