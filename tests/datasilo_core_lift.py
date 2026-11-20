@@ -234,10 +234,18 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     await walk_to("cross above the second pile face", (-795, 465), 16)
     await walk_to("clear the far side of the second pile", (-900, 450), 20)
     await walk_to("reach the west side of the lower lift", (-1900, 170), 17)
-    await turn("trail the Core on the west approach", 90)
+    await walk_to("reach the west wall beside the lift", (-1941, 183), 12)
+    await turn("swing the Core north in the clear west approach", 90)
+    proof["north_turn"] = await observe("allow the Core to clear the north side of the carrier", lambda row, *_: (
+        row["prop"]["position"][1] > row["carrier"]["location"][1] + 65), timeout=5)
+    await turn("turn the Core away from the lift before lining up", 180)
+    proof["west_turn"] = await observe("allow the stock Core to swing behind the carrier outside the lift", lambda row, *_: (
+        row["prop"]["position"][0] < row["carrier"]["location"][0] - 75), timeout=5)
     await walk_to("west approach to the lower lift", (-1900, EXIT_Y), 9)
     await walk_to("align with the lower lift opening", (-1900, EXIT_Y), 3.5)
-    await turn("align the trailing Core with the west opening", 180)
+    proof["preboard_hold"] = await observe("verify the trailing prop before entering the west opening", lambda row, *_: (
+        row["prop"]["position"][0] < row["carrier"]["location"][0] - 75
+        and abs(row["prop"]["position"][1] - EXIT_Y) < 35), timeout=5)
     boarded = await walk_to("walk the held Core onto the lower deck", (-1672, EXIT_Y), 13, reached=on_deck)
     proof["carrier_boarded"] = boarded
 
