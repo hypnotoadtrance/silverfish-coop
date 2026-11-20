@@ -64,6 +64,27 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         client.bridge.command.assert_awaited_with(projection.CLEAR, timeout=2)
         self.assertNotIn(projection.KEY, client.last_game)
 
+    async def test_stale_authenticated_snapshot_pauses_projection_without_retiring_its_identity(self):
+        client, view = self.client(), projection.Projection()
+        await view.sync(client, True)
+        proof = client.last_game.pop(projection.KEY)
+        client.gameplay_seen = time.monotonic() - 2.5
+        view.next_sync = 0.
+        await view.sync(client, True)
+        client.bridge.command.assert_awaited_once()
+        self.assertEqual(view.current, (proof["epoch"], ID, PAWN))
+        with self.assertRaisesRegex(party.RuleError, "intent_stale"):
+            await view.reclaim(client, OPERATION, (proof["epoch"], ID))
+        with self.assertRaisesRegex(party.RuleError, "fixture_scope_unavailable"):
+            await view.fixture(client, ID)
+        client.gameplay_action.assert_not_awaited()
+
+        client.gameplay_seen = time.monotonic()
+        await view.sync(client, True)
+        self.assertEqual(client.last_game[projection.KEY], proof)
+        self.assertEqual([call.args[0] for call in client.bridge.command.await_args_list],
+                         [projection.SYNC, projection.SYNC])
+
     async def test_old_epoch_cannot_reclaim_but_same_durable_drop_gets_new_projection(self):
         client, view = self.client(), projection.Projection()
         await view.sync(client, True)

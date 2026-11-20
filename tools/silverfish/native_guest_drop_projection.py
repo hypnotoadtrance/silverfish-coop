@@ -40,7 +40,7 @@ def _desired(client, active: bool, admission: str):
     character = client.invite["character_id"]
     if (not active or client.stopping or client.suspended or client.needs_travel or client.server_transitioning
             or not client.transport.game_access or not client.host_session
-            or not record.valid_id(client.zone_epoch) or time.monotonic() - client.gameplay_seen >= 2
+            or not record.valid_id(client.zone_epoch)
             or (game.get("state"), game.get("map"), client.expected_zone) !=
                 ("connected", record.OBSERVATORY, record.OBSERVATORY)):
         return None
@@ -58,6 +58,10 @@ def _desired(client, active: bool, admission: str):
         return None
     epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{client.host_session}:{client.zone_epoch}:{character}:{admission}").hex
     return epoch, drop_id, pawn, row["location"]
+
+
+def _fresh(client) -> bool:
+    return time.monotonic() - client.gameplay_seen < 2
 
 
 class Projection:
@@ -97,8 +101,10 @@ class Projection:
         if self.claimed == (epoch, drop_id):
             await self.clear(client)
             return
+        # A stalled read can age the snapshot without changing its owner or scene. Let native hide
+        # the actor and renew its same weak identity when the next authenticated frame arrives.
         now = time.monotonic()
-        if now < self.next_sync:
+        if not _fresh(client) or now < self.next_sync:
             return
         self.next_sync = now + .6
         snapshot = await client.bridge.command(SYNC, epoch, drop_id, *(str(axis) for axis in xyz), timeout=2)
@@ -111,7 +117,8 @@ class Projection:
         from .native_guest_drop import RECLAIM, RESULT
 
         desired = _desired(client, True, self.admission)
-        if (desired is None or self.current != desired[:3] or desired[:2] != target or self.claimed == target
+        if (not _fresh(client) or desired is None or self.current != desired[:3] or desired[:2] != target
+                or self.claimed == target
                 or not self._matches(client.last_game, desired)):
             raise party.RuleError("native_guest_drop_projection_intent_stale")
         result = await client.gameplay_action(RECLAIM, operation, target[1])
@@ -124,7 +131,8 @@ class Projection:
 
     async def fixture(self, client, drop_id: str | None):
         desired = _desired(client, True, self.admission)
-        if (not record.valid_id(drop_id) or desired is None or self.current != desired[:3] or desired[1] != drop_id
+        if (not _fresh(client) or not record.valid_id(drop_id) or desired is None
+                or self.current != desired[:3] or desired[1] != drop_id
                 or not self._matches(client.last_game, desired)):
             raise party.RuleError("stock_drop_projection_fixture_scope_unavailable")
         before = client.last_game[KEY]["sequence"]

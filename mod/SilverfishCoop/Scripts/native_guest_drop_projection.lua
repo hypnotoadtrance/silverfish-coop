@@ -84,10 +84,7 @@ function projection.rows(state, phase, row)
         return {}
     end
     local actor, sequence = proof()
-    if not actor then
-        projection.clear()
-        return {}
-    end
+    if not actor then return {} end
     return { row("native-guest-drop-projection", area, current.epoch, current.id, current.pawn:GetFullName(), actor, sequence) }
 end
 

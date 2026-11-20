@@ -48,6 +48,7 @@ namespace
     constexpr auto pawn_script_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:ExecuteUbergraph_Player_FP");
     constexpr auto maximum_sequence = (std::int64_t{1} << 53) - 1;
     constexpr auto heartbeat = std::chrono::seconds(2);
+    constexpr auto hidden_retention = std::chrono::seconds(8);
     constexpr double range = 250.0;
 
     struct Actor
@@ -158,17 +159,24 @@ namespace
         return input::current_guest_pawn(address);
     }
 
-    bool scope_current()
+    bool same_scene()
     {
         auto* pawn = lease.pawn.Get();
         auto* world = lease.world.Get();
         auto* driver = lease.driver.Get();
         auto* connection = lease.connection.Get();
-        return pawn && local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn &&
-            live(world) && live(driver) && live(connection) && Clock::now() < lease.expiry &&
-            static_cast<U::AActor*>(pawn)->GetWorld() == world && object(world, STR("NetDriver")) == driver &&
-            object(driver, STR("World")) == world && object(driver, STR("ServerConnection")) == connection &&
-            object(connection, STR("Driver")) == driver;
+        auto* controller = object(pawn, STR("Controller"));
+        return mutable_actor(pawn) && live(world) && live(driver) && live(connection) && live(controller) &&
+            object(controller, STR("Pawn")) == pawn && static_cast<U::AActor*>(pawn)->GetWorld() == world &&
+            object(world, STR("NetDriver")) == driver && object(driver, STR("World")) == world &&
+            object(driver, STR("ServerConnection")) == connection && object(connection, STR("Driver")) == driver;
+    }
+
+    bool scope_current()
+    {
+        auto* pawn = lease.pawn.Get();
+        return Clock::now() < lease.expiry && same_scene() &&
+            local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn;
     }
 
     void clear()
@@ -184,6 +192,32 @@ namespace
         if (!mutable_actor(projection.object.Get())) projection = {};
     }
 
+    bool show(U::AActor* actor)
+    {
+        if (!mutable_actor(actor) || !scope_current()) return false;
+        auto actual = actor->K2_GetActorLocation();
+        const auto offset = std::hypot(actual.GetX() - lease.source[0], actual.GetY() - lease.source[1],
+                                       actual.GetZ() - lease.visual_z);
+        if (!std::isfinite(offset) || offset > 5) return false;
+        actor->SetActorEnableCollision(true);
+        actor->SetActorHiddenInGame(false);
+        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) return false;
+        lease.visible = true;
+        return true;
+    }
+
+    void conceal()
+    {
+        if (!lease.visible) return;
+        lease.visible = false;
+        lease.intent = 0;
+        auto* actor = static_cast<U::AActor*>(projection.object.Get());
+        if (!mutable_actor(actor)) return;
+        actor->SetActorEnableCollision(false);
+        actor->SetActorHiddenInGame(true);
+        if (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true)) clear();
+    }
+
     void tick()
     {
         if (!ready()) return;
@@ -196,7 +230,8 @@ namespace
         const auto now = Clock::now();
         if (now < next_check) return;
         next_check = now + std::chrono::milliseconds(100);
-        if (!scope_current()) clear();
+        if (!same_scene() || now >= lease.expiry + hidden_retention) clear();
+        else if (!scope_current()) conceal();
     }
 
     bool near_source(U::UObject* pawn)
@@ -517,14 +552,8 @@ namespace
         if (!inert(actor) || actor->IsActorTickEnabled() || !byte(actor, STR("RemoteRole"), 0) ||
             !collision.configure(actor, box, mesh)) return "stock_drop_projection_inert_state_unverified";
 
-        actor->SetActorHiddenInGame(false);
-        auto actual = actor->K2_GetActorLocation();
-        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false) ||
-            !scope_current() || std::hypot(actual.GetX() - lease.source[0], actual.GetY() - lease.source[1],
-                                           actual.GetZ() - lease.visual_z) > 5)
-            return "stock_drop_projection_visible_actor_unverified";
+        if (!show(actor)) return "stock_drop_projection_visible_actor_unverified";
         projection.box = box;
-        lease.visible = true;
         return nullptr;
     }
 
@@ -558,12 +587,16 @@ namespace
             return report(lua, false, "stock_drop_projection_scope_unqualified");
         }
 
-        if (lease.visible && scope_current() && lease.epoch == epoch && lease.id == id && lease.pawn.Get() == pawn &&
-            lease.world.Get() == world && lease.driver.Get() == driver && lease.connection.Get() == connection &&
-            lease.source == source && mutable_actor(projection.object.Get()))
+        auto* existing = static_cast<U::AActor*>(projection.object.Get());
+        if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
+            lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
+            lease.connection.Get() == connection && lease.source == source && mutable_actor(existing) &&
+            live(projection.box.Get()) && object(existing, STR("Box")) == projection.box.Get())
         {
             lease.expiry = Clock::now() + heartbeat;
-            return report(lua, true, "projected");
+            if (lease.visible || (inert(existing) && show(existing))) return report(lua, true, "projected");
+            clear();
+            return report(lua, false, "stock_drop_projection_reappear_unverified");
         }
         clear();
         if (mutable_actor(projection.object.Get())) return report(lua, false, "stock_drop_projection_retirement_pending");
@@ -589,7 +622,7 @@ namespace
         if (!ready() || lua.get_stack_size() != 0) return report(lua, false, "stock_drop_projection_read_arguments");
         if (!lease.visible || !scope_current() || !mutable_actor(projection.object.Get()))
         {
-            if (lease.visible) clear();
+            if (lease.visible) conceal();
             return report(lua, false, "stock_drop_projection_inactive");
         }
         lua.set_bool(true);
