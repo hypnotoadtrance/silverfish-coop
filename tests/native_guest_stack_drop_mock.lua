@@ -160,3 +160,26 @@ assert(not attempt(settle, "connected") and recovered == 2)
 assert(attempt(settle, "hosting") and recovered == 3)
 row = stack_drop.rows(game, "hosting", status)[3]
 assert(row[1] == settle[2] and row[3] == "reclaim" and row[4] == host_name and row[9] == "recovered")
+
+function SilverfishProbeNativeGuestStackDrop(owner, live_save, frozen, source, count)
+    assert(owner == 6 and live_save == 7 and frozen == 3 and source == guid and count == 9)
+    return true, "stock_spawn_verified_and_retired", actor, changed, 9, 10, -20, 30
+end
+assert(attempt({"request", birth, host_name, slot, guid, "9", game.map}, "hosting"))
+row = stack_drop.rows(game, "hosting", status)[2]
+assert(row[1] == birth and row[3] == host_name and row[7] == 1)
+
+local prepared, replacement = object(14), "SFCoop_" .. ("f"):rep(32)
+local load = statics.LoadGameFromSlot
+function statics:LoadGameFromSlot(name, user)
+    if name == replacement and user == 0 then return prepared end
+    return load(self, name, user)
+end
+function SilverfishApplyPreparedNativeInventory(source, replacement_address, target, recipient)
+    assert(source == 3 and replacement_address == 14 and target == 7 and recipient == 6)
+    return true, "applied"
+end
+settle[3], settle[7] = "debit", replacement
+assert(attempt(settle, "hosting"))
+row = stack_drop.rows(game, "hosting", status)[3]
+assert(row[1] == settle[2] and row[3] == "debit" and row[4] == host_name and row[9] == "applied")

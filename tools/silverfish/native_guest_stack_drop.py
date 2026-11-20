@@ -21,6 +21,33 @@ UNSAFE = "mutation_unverified_native_guest_stack_drop_"
 _STATUS = re.compile(r"[a-z0-9_]{1,100}\Z")
 
 
+def standing_pawn(host, character: str) -> str:
+    game = host.last_game
+    if character == "host":
+        local = game.get("pawns", {}).get("local", {})
+        health, pawn = local.get("health"), local.get("name")
+        eligible = type(health) in (int, float) and 0 < health < float("inf")
+        refusal = "native_guest_stack_drop_exact_standing_host_required"
+    else:
+        guest = host.native_recipients().get(character, {})
+        pawn, eligible = guest.get("pawn"), guest.get("connected")
+        refusal = "native_guest_stack_drop_exact_standing_guest_required"
+    player = host.party["players"].get(character)
+    if (not eligible or not native_guest_drop_record.pawn_matches(game.get("map"), pawn)
+            or not player or player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]):
+        raise party.RuleError(refusal)
+    return pawn
+
+
+async def verify_owner_frame(profile, saved: dict, character: str) -> dict:
+    if character == "host":
+        if saved.get("character_id") is not None:
+            raise RuntimeError("The drop requires the canonical host inventory frame")
+        await asyncio.to_thread(native_host_save.verify_record, profile, saved)
+        return saved
+    return await asyncio.to_thread(native_host_save.guest_record, profile, saved, character)
+
+
 def parse(fields: list[str], state: str, area: str) -> dict:
     if fields[:1] == [SETTLE]:
         return parse_settlement(fields, state, area)
@@ -68,28 +95,23 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     game = host.last_game
     area, epoch = game.get("map"), host.zone_epoch
     capability = CAPABILITY if fixture else native_guest_drop_record.CAPABILITY
-    if ((fixture and (not host.fixtures or area != OBSERVATORY)) or not host.native_guest or not host.native_zones
+    if ((fixture and (not host.fixtures or area != OBSERVATORY or character == "host"))
+            or not host.native_guest or not host.native_zones
             or host.native_profile is None or host.stopping or host.transitioning or host.native_checkpoint_unsafe
             or not native_guest_drop_record.supported_map(area) or (game.get("state"), game.get(capability)) != ("hosting", 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
-    owner = host.native_recipients().get(character, {})
-    pawn = owner.get("pawn")
-    player = host.party["players"].get(character)
-    if (not owner.get("connected") or not native_guest_drop_record.pawn_matches(area, pawn) or not player
-            or player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]):
-        raise party.RuleError("native_guest_stack_drop_exact_standing_guest_required")
+    pawn = standing_pawn(host, character)
 
-    revision = await host.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+    revision = await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
     campaign = host.store.status()
     saved = native_inventory.saved_frame(host, campaign, character)
     if not isinstance(saved, dict) or saved.get("map") != area or campaign.get("revision") != revision:
-        raise RuntimeError("The isolated stack drop requires the guest's fresh source-map frame")
-    frame = await asyncio.to_thread(native_host_save.guest_record, host.native_profile, saved, character)
+        raise RuntimeError("The isolated stack drop requires the dropper's fresh source-map frame")
+    frame = await verify_owner_frame(host.native_profile, saved, character)
     slot = frame["slot"]
-    owner = host.native_recipients().get(character, {})
     if (host.transitioning or host.last_game.get("map") != area or host.zone_epoch != epoch
-            or not owner.get("connected") or owner.get("pawn") != pawn):
+            or standing_pawn(host, character) != pawn):
         raise party.RuleError("native_guest_stack_drop_scope_changed")
     arguments = (pawn, slot, guid, str(count)) if fixture else (pawn, slot, guid, str(count), area)
     host.native_checkpoint_unsafe = True

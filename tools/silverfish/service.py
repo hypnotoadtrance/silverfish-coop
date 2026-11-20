@@ -2609,9 +2609,10 @@ class Host:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_stack_drop.perform(self, bridge, character, request.get("item_guid"),
                                                                    request.get("amount"))
-                elif action == native_guest_drop.HOST_RECLAIM:
+                elif action in (native_guest_drop.HOST_DROP, native_guest_drop.HOST_RECLAIM):
+                    operation = native_guest_drop.DROP if action == native_guest_drop.HOST_DROP else native_guest_drop.RECLAIM
                     async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
-                        result = await native_guest_drop.perform(self, bridge, "host", native_guest_drop.RECLAIM,
+                        result = await native_guest_drop.perform(self, bridge, "host", operation,
                                                                 request.get("target"), request.get("operation_id") or path.stem)
                 elif action in native_guest_drop.ACTIONS and self.fixtures:
                     character = self.roles().get("guest")

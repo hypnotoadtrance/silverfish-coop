@@ -42,7 +42,7 @@ local function qualified_owner(state, phase, name)
     if checked and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name) then return pawn, save end
 end
 
-local function reclaim_target(state, phase, name)
+local function qualified_participant(state, phase, name)
     if state.local_pawn and name == state.local_pawn.name then
         local instance, pawn = host_save.canonical_host(state, phase)
         if valid(pawn) and pawn.Dead == false and players.is_downed(pawn) == false then
@@ -66,8 +66,7 @@ local function transfer(fields, state, phase)
         or not coordinate(x) or not coordinate(y) or not coordinate(z) or type(apply) ~= "function" then
         error("native_guest_stack_drop_settlement_unavailable", 0)
     end
-    local qualify = debit and qualified_owner or reclaim_target
-    local pawn, save = qualify(state, phase, name)
+    local pawn, save = qualified_participant(state, phase, name)
     if not pawn then error("native_guest_stack_drop_exact_recipient_unavailable", 0) end
     local origin = pawn:K2_GetActorLocation()
     if not origin or not coordinate(origin.X) or not coordinate(origin.Y) or not coordinate(origin.Z)
@@ -111,8 +110,9 @@ function stack_drop.command(fields, state, phase)
         or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then
         error("native_guest_stack_drop_fixture_unavailable", 0)
     end
-    local pawn, save = qualified_owner(state, phase, name)
-    if not pawn then error("native_guest_stack_drop_exact_guest_unavailable", 0) end
+    local qualify = command == action and qualified_owner or qualified_participant
+    local pawn, save = qualify(state, phase, name)
+    if not pawn then error("native_guest_stack_drop_exact_dropper_unavailable", 0) end
     local statics = StaticFindObject(settings)
     local frozen = valid(statics) and statics:LoadGameFromSlot(slot, 0)
     if not valid(frozen) then error("native_guest_stack_drop_frozen_frame_unavailable", 0) end

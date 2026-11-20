@@ -79,7 +79,8 @@ def active_frames(data: dict, members) -> list[dict]:
     slots, operations, active_guids, active_owners = set(), set(), set(), set()
     frames = []
     for drop_id, row in drops.items():
-        if not valid_id(drop_id) or type(row) is not dict or not isinstance(row.get("owner"), str) or row["owner"] not in members:
+        if (not valid_id(drop_id) or type(row) is not dict or not isinstance(row.get("owner"), str)
+                or (row["owner"] != "host" and row["owner"] not in members)):
             raise ValueError("Invalid stock stack drop identity or owner")
         owner, claim_id = row["owner"], row.get("claim_id")
         fields = _RECORD_FIELDS | ({"escrow"} if claim_id is None else set())

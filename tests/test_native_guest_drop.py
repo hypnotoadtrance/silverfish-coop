@@ -132,8 +132,6 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "exact_standing_host_required"):
             await drop.perform(host, bridge, "host", drop.RECLAIM, DROP, CLAIM)
         host.last_game["pawns"]["local"]["health"] = 100
-        with self.assertRaisesRegex(party.RuleError, "exact_standing_guest_required"):
-            await drop.perform(host, bridge, "host", drop.DROP, GUID + "|9", "d" * 32)
         bridge.command.assert_not_awaited()
         with patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})):
             result = await drop.perform(host, bridge, "host", drop.RECLAIM, DROP, CLAIM)
@@ -141,6 +139,25 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args.args[2], host.last_game["pawns"]["local"]["name"])
         self.assertTrue(all(not call.kwargs["require_guest_frames"] for call in host.checkpoint_native.await_args_list))
         self.assertEqual(record.active_frames(host.party, {OWNER}), [])
+
+    async def test_host_debit_publishes_canonical_escrow_and_replays(self):
+        host, source, escrow, replacement, item, expected = self.make_world()
+        source = {key: value for key, value in source.items() if key != "character_id"}
+        host.store.status.return_value["world"] = {"native_host_save": source}
+        pawn = host.last_game["pawns"]["local"]["name"]
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.reply(host, "debit", source, replacement, recipient="host")))
+        birth = {probe.KEY: {"map": MAP, "pawn": pawn, "slot": source["slot"], "revision": 42, "location": POS}}
+        with (patch.object(probe, "perform", AsyncMock(return_value=birth)),
+              patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})),
+              patch.object(drop.native_inventory_death, "prepare", AsyncMock(return_value={"bag": escrow, "replacement": replacement}))):
+            result = await drop.perform(host, bridge, "host", drop.DROP, GUID + "|9", DROP)
+        self.assertEqual(host.party[record.STATE][DROP], dict(expected, owner="host"))
+        host.checkpoint_native.assert_awaited_once()
+        self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset()})
+        self.assertEqual(record.active_frames(host.party, {OWNER}), [escrow])
+        host.party["receipts"].clear()
+        self.assertEqual(await drop.perform(host, bridge, "host", drop.DROP, GUID + "|9", DROP), result)
+        bridge.command.assert_awaited_once()
 
     async def test_legacy_durable_and_recent_claim_replays_fill_original_claimant(self):
         host, _, _, _, _, row = self.make_world()

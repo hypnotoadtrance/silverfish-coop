@@ -1,4 +1,4 @@
-"""Settle a native guest drop or teammate pickup in one paired checkpoint."""
+"""Settle a native inventory drop or pickup in one paired checkpoint."""
 
 import asyncio
 from contextlib import suppress
@@ -14,6 +14,7 @@ from .native_gold import valid_guid
 
 DROP = "native-guest-stack-drop"
 RECLAIM = "native-guest-stack-reclaim"
+HOST_DROP = "native-host-stack-drop"
 HOST_RECLAIM = "native-host-stack-reclaim"
 ACTIONS = (DROP, RECLAIM)
 RESULT = "native_guest_stack_drop"
@@ -34,7 +35,7 @@ def _result(row: dict, drop_id: str, action: str) -> dict:
     return {RESULT: result}
 
 
-def _participant(host, character: str, action: str) -> str:
+def _participant(host, character: str) -> str:
     game = host.last_game
     area = game.get("map")
     if (not host.native_guest or not host.native_zones or host.native_profile is None
@@ -42,24 +43,9 @@ def _participant(host, character: str, action: str) -> str:
             or (game.get("state"), game.get(record.CAPABILITY)) != ("hosting", 1)
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
-    if character == "host" and action == RECLAIM:
-        local = game.get("pawns", {}).get("local", {})
-        health, pawn = local.get("health"), local.get("name")
-        eligible = type(health) in (int, float) and math.isfinite(health) and health > 0
-        refusal = "native_guest_stack_drop_exact_standing_host_required"
-    else:
-        guest = host.native_recipients().get(character, {})
-        pawn = guest.get("pawn")
-        eligible = character != "host" and guest.get("connected")
-        refusal = "native_guest_stack_drop_exact_standing_guest_required"
-    player = host.party["players"].get(character)
-    if (not eligible or not record.pawn_matches(area, pawn)
-            or not player or player["downed"] or host.party["wipe"]
-            or character in host.party["pending_spawns"]):
-        raise party.RuleError(refusal)
     if host.smg_holds is not None and host.smg_holds.strokes:
         raise party.RuleError("native_guest_stack_drop_combat_busy")
-    return pawn
+    return probe.standing_pawn(host, character)
 
 
 def _near(host, character: str, row: dict) -> bool:
@@ -142,11 +128,11 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     if row["map"] != area or source.get("map") != area or (prepared is not None and prepared.get("map") != area):
         raise RuntimeError("The stack drop transaction frames do not belong to the exact source map")
     if action == DROP:
-        await asyncio.to_thread(native_host_save.guest_record, host.native_profile, source, character)
+        await probe.verify_owner_frame(host.native_profile, source, character)
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, prepared)
     else:
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, source)
-    if host.last_game.get("map") != area or host.zone_epoch != epoch or _participant(host, character, action) != pawn:
+    if host.last_game.get("map") != area or host.zone_epoch != epoch or _participant(host, character) != pawn:
         raise party.RuleError("native_guest_stack_drop_scope_changed")
     if not _near(host, character, row):
         raise party.RuleError("native_guest_stack_drop_out_of_range")
@@ -192,7 +178,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     if action not in ACTIONS or not record.valid_id(operation):
         raise party.RuleError("invalid_operation_id")
-    pawn = _participant(host, character, action)
+    pawn = _participant(host, character)
     area, epoch = host.last_game["map"], host.zone_epoch
     scope = area, epoch, pawn
     drops = host.party.get(record.STATE, {})
