@@ -60,6 +60,14 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - **Disguise handling for individual players (TODO).** Store disguise state per character in the host campaign. Apply each disguise change only to that character's appearance and resolve NPC recognition separately for each player.
 - The active carrier drives a held physics object's position. The host validates the carrier, object, and reach for each update, and returns the object to stock physics when the hold ends. Positions while held may move abruptly or appear to pass through geometry on another peer.
 
+## Steam title and save routing
+
+The target is one Steam installation and one running game process per player. The stock title offers Singleplayer and Multiplayer. Singleplayer uses its existing stock save path. Multiplayer selects the private co-op save directory before opening Host or Join and keeps that selection through play, checkpointing, and travel. Returning to Singleplayer requires closing the co-op network session, draining its saves, and restoring the stock title's save selection.
+
+The stock `Find_MostRecentSaveFile` first enumerates `GetProjectSavedDirectory()/SaveGames/` for `.sav` files, then checks and loads each candidate by slot. Stock save and delete paths also address slots directly. The co-op route needs to cover physical enumeration as well as slot reads and writes, including the stock `Config` slot. Both profiles can use the same slot names and stock save format in separate directories.
+
+Qualify the routing in an isolated stock replica first. In one process, create the same slot in both modes, verify the stock Continue list and each slot's contents, and delete each mode's test save independently. Then qualify in-process Host and Join on a chosen UDP port with the existing authenticated Direct IP transport. Repeat the save check after co-op travel, disconnect, and return to the stock title.
+
 ## AI operation
 
 Expose documented, stable commands for supported actions and structured output for their results. Status should identify the role, current map, session and connection state, active and reserved roster, and save outcome as those capabilities become available. Give events timestamps and identifiers that link an action to its result. Use explicit outcomes for rejected or incomplete operations so a model can tell when a join, save, or reconnect has actually finished.
