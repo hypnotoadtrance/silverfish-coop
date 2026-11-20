@@ -798,9 +798,12 @@ namespace
 
     bool stock_npc_for_combat(U::UObject* actor, U::UWorld* world, NpcFamily family)
     {
+        if (family == NpcFamily::Unknown) return false;
         auto* infection = field<U::FIntProperty>(actor, STR("Melee_Infection"));
         const bool flayer = family == NpcFamily::Flayer;
-        return stock_npc_authority(actor, flayer ? flayer_class : npc_class, world) && stock_npc_controller(actor, world) &&
+        const auto* profile = family == NpcFamily::NotDeer ? &not_deer_profile : flayer ? &flayer_profile : nullptr;
+        return stock_npc_authority(actor, profile ? profile->npc : npc_class, world, profile ? profile->faction : 6) &&
+            stock_npc_controller(actor, world) &&
             bool_field(actor, STR("Alive"), true) && infection &&
             infection->GetPropertyValueInContainer(actor) == (flayer ? flayer_infection : 0);
     }
@@ -1585,9 +1588,12 @@ namespace
         const auto guest_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         const auto source_address = lua.get_integer();
-        const bool flayer = arguments == 5 && lua.get_string() == "flayer";
-        if (arguments == 5 && (!flayer || !publish_flayers || !veto_flayer_spawns)) return reply(false);
-        const auto family = flayer ? NpcFamily::Flayer : NpcFamily::Husk;
+        const auto selected = arguments == 5 ? lua.get_string() : std::string_view{};
+        const bool flayer = selected == "flayer" && publish_flayers && veto_flayer_spawns;
+        const bool not_deer = selected == "notdeer" && operate_not_deer;
+        if (arguments == 5 && !flayer && !not_deer) return reply(false);
+        const auto* profile = not_deer ? &not_deer_profile : flayer ? &flayer_profile : nullptr;
+        const auto family = profile ? profile->family : NpcFamily::Husk;
         const auto active = network(find<U::UWorld>(world_path));
         auto* director = find<U::UObject>(director_path);
         if (active.seat != Seat::Host || !exact_director(director, active)) return reply(false);
@@ -1601,10 +1607,12 @@ namespace
         };
         double host_health{}, guest_health{};
         SicknessSnapshot initial_sickness;
-        auto& registered = flayer ? scope.flayers.latest : scope.latest;
+        const auto* antfarm = profile ? antfarm_cohort(family) : nullptr;
+        if (profile && !antfarm) return reply(false);
+        const auto& registered = antfarm ? antfarm->latest : scope.latest;
         auto* data = registered.data.Get();
-        const auto qualified_stock = flayer
-            ? registered.stage == "stock_antfarm" && exact(data, data_class) && data->GetPathName() == flayer_squad
+        const auto qualified_stock = profile
+            ? registered.stage == "stock_antfarm" && exact(data, data_class) && data->GetPathName() == profile->data
             : data_index(data) >= 0;
         if (!matches(host, host_address) || !matches(guest, guest_address) || !matches(detached, save_address) ||
             !exact(detached, save_class) || detached == canonical || !read_health(canonical, host_health) || host_health <= 0 ||

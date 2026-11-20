@@ -4,22 +4,24 @@ local players = require("players")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") == "1"
-local fixture = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
+local not_deer_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER") == "1"
+local combat_enabled = os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT") == "1"
+local fixture = enabled and (os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
+    or (not_deer_enabled and combat_enabled))
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local combat_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT") == "1"
+local combat_fixture = fixture and combat_enabled
 local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == "1"
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
-local not_deer_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
     husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
         stages = { stock_initial = true, stock_refresh = true }, combat_radii = { 550, 680, 820 } },
     flayer = { name = "NPC_Flayer_C", path = "/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C", limit = 2,
-        stages = { stock_antfarm = true }, combat_radii = { 235, 275, 295 } },
+        stages = { stock_antfarm = true }, combat_radii = { 235, 275, 295 }, trace_sweep = 350 },
     notdeer = { name = "NPC_NotDeer_C", path = "/Game/Classes/NPCs/NPC_NotDeer.NPC_NotDeer_C", limit = 1,
-        stages = { stock_antfarm = true } },
+        stages = { stock_antfarm = true }, combat_radii = { 205, 230, 250 }, trace_sweep = 300 },
 }
 local requested_view = os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW")
 local view = "husk"
@@ -34,8 +36,8 @@ local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local trace_color = { R = 0, G = 0, B = 0, A = 0 }
 local approach_radius, readback_tolerance = 4000, 60
-local flayer_sweep, flayer_sweep_margin = 350, 25
-local flayer_angles = { 0, 30, -30, 50, -50 }
+local sweep_margin = 25
+local frontal_angles = { 0, 30, -30, 50, -50 }
 local active, approach, refresh, shot_aim, shot_ticket
 
 local function valid(value)
@@ -181,7 +183,7 @@ local function at(pawn, target, tolerance)
     return current and distance(current, target) <= tolerance and current
 end
 
-local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, flayer)
+local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, sweep)
     local covered = floor_at(trace, host, anchor, anchor.X - math.cos(angle) * 3500,
         anchor.Y - math.sin(angle) * 3500, ignored)
     local exposed = floor_at(trace, guest, anchor, x, y, ignored)
@@ -190,8 +192,8 @@ local function safe_melee_placement(trace, host, guest, target, cohort, anchor, 
         local location = point(actor:K2_GetActorLocation())
         if not location or distance(covered, location) < 2500 then return end
     end
-    if flayer then
-        if distance(exposed, anchor) <= flayer_sweep - flayer_sweep_margin then return covered, exposed end
+    if sweep then
+        if distance(exposed, anchor) <= sweep - sweep_margin then return covered, exposed end
         return
     end
     local hit = {}
@@ -204,11 +206,11 @@ local function safe_melee_placement(trace, host, guest, target, cohort, anchor, 
     end
 end
 
-local function forward_melee_trace(trace, target, guest, location)
+local function forward_melee_trace(trace, target, guest, location, sweep)
     local start, facing = point(target:K2_GetActorLocation()), point(target:GetActorForwardVector())
     if not start or not facing then return "sweep_range" end
     local reach = distance(start, location)
-    if reach > flayer_sweep - flayer_sweep_margin then return "sweep_range" end
+    if reach > sweep - sweep_margin then return "sweep_range" end
     local dx, dy = location.X - start.X, location.Y - start.Y
     local length = math.sqrt(dx ^ 2 + dy ^ 2)
     local facing_length = math.sqrt(facing.X ^ 2 + facing.Y ^ 2)
@@ -227,7 +229,7 @@ local function forward_melee_trace(trace, target, guest, location)
     local impact = { time = hit.Time, distance = hit.Distance, depth = hit.PenetrationDepth }
     if not finite(impact.time) or not finite(impact.distance) or not finite(impact.depth)
         or impact.time < 0 or impact.time > 1 or impact.distance < 0
-        or impact.distance > flayer_sweep - flayer_sweep_margin or impact.depth < 0
+        or impact.distance > sweep - sweep_margin or impact.depth < 0
         or math.abs(impact.distance - impact.time * reach) > 1 then
         return "invalid_impact", component_name, impact
     end
@@ -246,15 +248,15 @@ local function place_pair(world, host, guest, target, cohort)
     if not valid(trace) or not anchor then error("stock_husk_approach_geometry_unavailable", 0) end
     local ignored = { host.pawn, guest.pawn }
     for _, actor in ipairs(cohort) do ignored[#ignored + 1] = actor end
-    local flayer = combat_fixture and view == "flayer"
+    local sweep = combat_fixture and types[view].trace_sweep
     local angles, diagnostics = {}, nil
-    if flayer then
+    if sweep then
         local facing = point(target:GetActorForwardVector())
-        if target.Melee_SweepRange ~= flayer_sweep or not facing or facing.X ^ 2 + facing.Y ^ 2 < 0.25 then
-            error("stock_flayer_approach_sweep_unqualified", 0)
+        if target.Melee_SweepRange ~= sweep or not facing or facing.X ^ 2 + facing.Y ^ 2 < 0.25 then
+            error("stock_" .. view .. "_approach_sweep_unqualified", 0)
         end
         local heading = math.atan(facing.Y, facing.X)
-        for _, offset in ipairs(flayer_angles) do angles[#angles + 1] = heading + math.rad(offset) end
+        for _, offset in ipairs(frontal_angles) do angles[#angles + 1] = heading + math.rad(offset) end
         diagnostics = { floors = 0, placements = 0, penetrations = 0, obstructions = 0, trace = "not_tried" }
     else
         for step = 0, 11 do angles[#angles + 1] = step * math.pi / 6 end
@@ -265,7 +267,7 @@ local function place_pair(world, host, guest, target, cohort)
             local x, y = anchor.X + math.cos(angle) * radius, anchor.Y + math.sin(angle) * radius
             local first, second
             if combat_fixture then
-                first, second = safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, flayer)
+                first, second = safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, sweep)
             else
                 local dx, dy = -math.sin(angle) * 150, math.cos(angle) * 150
                 first = floor_at(trace, host, anchor, x + dx, y + dy, ignored)
@@ -282,10 +284,10 @@ local function place_pair(world, host, guest, target, cohort)
                         at(guest.pawn, second, readback_tolerance)
                     if host_at and guest_at and distance(host_at, anchor) <= approach_radius
                         and distance(guest_at, anchor) <= approach_radius then
-                        if flayer then
+                        if sweep then
                             diagnostics.placements = diagnostics.placements + 1
                             diagnostics.trace, diagnostics.component, diagnostics.impact =
-                                forward_melee_trace(trace, target, guest, guest_at)
+                                forward_melee_trace(trace, target, guest, guest_at, sweep)
                             if diagnostics.trace == "start_penetrating" then
                                 diagnostics.penetrations = diagnostics.penetrations + 1
                             elseif diagnostics.trace == "other_hit" then
@@ -317,8 +319,8 @@ local function place_pair(world, host, guest, target, cohort)
     end
     if diagnostics then
         local impact = diagnostics.impact or {}
-        error(string.format("stock_flayer_approach_no_verified_position floors=%d placements=%d penetrations=%d obstructions=%d trace=%s component=%s origin=(%.1f,%.1f,%.1f) impact=(%s,%s,%s)",
-            diagnostics.floors, diagnostics.placements, diagnostics.penetrations, diagnostics.obstructions,
+        error(string.format("stock_%s_approach_no_verified_position floors=%d placements=%d penetrations=%d obstructions=%d trace=%s component=%s origin=(%.1f,%.1f,%.1f) impact=(%s,%s,%s)",
+            view, diagnostics.floors, diagnostics.placements, diagnostics.penetrations, diagnostics.obstructions,
             diagnostics.trace, diagnostics.component or "-", anchor.X, anchor.Y, anchor.Z,
             tostring(impact.time or "-"), tostring(impact.distance or "-"), tostring(impact.depth or "-")), 0)
     end
@@ -476,7 +478,7 @@ function campaign_npc.command(fields, state, phase)
     end
     if fields[2] ~= "native-campaign-npc-approach" then return end
     local projectile = #fields == 5 and fields[4] == "projectile"
-    if not fixture or view == "notdeer" or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
+    if not fixture or (view == "notdeer" and not combat_fixture) or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
         or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end
     approach = nil
     if projectile then shot_ticket, shot_aim = nil, nil end
@@ -502,7 +504,7 @@ function campaign_npc.command(fields, state, phase)
     if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
     if combat_fixture then
         local flayer = view == "flayer"
-        local family = flayer and { view } or {}
+        local family = view == "husk" and {} or { view }
         if (flayer and not detached_sickness) or type(SilverfishArmCampaignNpcCombat) ~= "function"
             or not SilverfishArmCampaignNpcCombat(host.pawn:GetAddress(), guest.pawn:GetAddress(),
                 detached:GetAddress(), target:GetAddress(), table.unpack(family)) then
@@ -625,7 +627,7 @@ local function read_rows(state, phase, status_row)
             approach.host, approach.guest, approach.host_distance, approach.guest_distance)
         local geometry = approach.geometry
         if geometry then
-            rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, flayer_sweep,
+            rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, types[view].trace_sweep,
                 geometry.floors, geometry.placements, geometry.trace, geometry.component)
             local impact = geometry.impact
             rows[#rows + 1] = status_row("native-campaign-npc-approach-impact", state.map, approach.member,

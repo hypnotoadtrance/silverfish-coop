@@ -219,7 +219,8 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
             time_of_impact, hit_distance, penetration_depth = map(float, impact[3:])
             guest_path = move["guest_pawn"].partition(" ")[2]
             component_path = geometry[7].partition(" ")[2]
-            if (sweep != 350 or not 0 < placements <= floors or geometry[6] != "guest_hit"
+            expected_sweep = {"NPC_Flayer_C": 350, "NPC_NotDeer_C": 300}.get(move["target"].partition(" ")[0])
+            if (sweep != expected_sweep or not 0 < placements <= floors or geometry[6] != "guest_hit"
                     or not guest_path or not component_path.startswith(guest_path + ".")
                     or not 0 < time_of_impact <= 1 or not 1 <= hit_distance <= sweep - 25
                     or penetration_depth != 0):
@@ -406,6 +407,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     launched = []
     flayer_combat = combat and family == "flayer"
+    sweep_combat = combat and family in ("flayer", "notdeer")
     evidence = {"map": MAP, "family": family, "mode": "replicated" if replicate else "observed",
                 "verification_scope": ("join" if join_only else "combat" if combat
                                        else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
@@ -688,8 +690,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                         and approach_pair(server, standing=not combat) == (host_pawn, guest_pawn)
                         and target in snapshot["host"]["members"]
                         and (not combat or stock_guest_hit(snapshot["host"], host_pawn, guest_pawn, natural["host"]["members"]))
-                        and (not flayer_combat or (snapshot["host"].get("approach_impact", {}).get("target") == target
-                                                  and stock_flayer_infection(server, snapshot["host"]))))
+                        and (not sweep_combat or snapshot["host"].get("approach_impact", {}).get("target") == target)
+                        and (not flayer_combat or stock_flayer_infection(server, snapshot["host"])))
 
             label = (f"No stock {family} attack verified detached guest combat" if combat
                      else "The approached cohort did not yield stock client replicas")
@@ -700,6 +702,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             if flayer_combat:
                 evidence["flayer_approach_impact"] = snapshot["host"]["approach_impact"]
                 evidence["stock_melee_sickness"] = snapshot["host"]["melee_sickness"]
+            elif sweep_combat:
+                evidence["stock_approach_impact"] = snapshot["host"]["approach_impact"]
         else:
             server, client, snapshot = await wait(f"No fixture-free stock {family} proof appeared", proved)
         if client.get("character_id") != invitation["character_id"]:
@@ -786,9 +790,9 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
     if options.cohort == "notdeer":
-        if (not options.notdeer_replay or not options.notdeer_replay.is_dir() or options.approach or options.combat
+        if (not options.notdeer_replay or not options.notdeer_replay.is_dir() or (options.approach and not options.combat)
                 or options.join_only or options.stock_refresh or options.projectile_tap or options.flayer_replay):
-            parser.error("NotDeer requires --notdeer-replay and uses only stock publication, veto, and reconnect")
+            parser.error("NotDeer requires --notdeer-replay and supports publication, reconnect, and optional --combat")
         options.replicate = True
     elif options.notdeer_replay:
         parser.error("--notdeer-replay requires --cohort notdeer")
