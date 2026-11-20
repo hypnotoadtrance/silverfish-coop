@@ -39,7 +39,7 @@ async def verify_disembark(run, guest_run, action, host_pawn, guest_pawn, charac
         raise ValueError("Stock lift disembark requires the original two seats and visit")
     guest_local_name = None
     study = {}
-    deadline = asyncio.get_running_loop().time() + 35
+    deadline = asyncio.get_running_loop().time() + 90
 
     def observe():
         nonlocal guest_local_name
@@ -130,33 +130,32 @@ async def verify_disembark(run, guest_run, action, host_pawn, guest_pawn, charac
 
     for seat in ("guest", "host"):
         pulses = []
-        for _ in range(8):
+        deadline = asyncio.get_running_loop().time() + 90
+        for _ in range(16):
             pawn = frame["pawns"][seat]
             if not pawn["on_deck"]:
                 raise RuntimeError(f"Stock lift {seat} lost the deck while lining up: {_brief(frame)}")
             lateral = EXIT_Y - pawn["position"][1]
             if abs(lateral) <= ALIGN_TOLERANCE:
                 break
-            coarse = abs(lateral) > 24
-            amount = .35 if coarse else .14
-            duration = min(250, max(110, round(4 * abs(lateral)))) if coarse else 110
-            frame = await pulse(frame, seat, "y", math.copysign(amount, lateral), duration, pulses)
+            duration = max(80, min(1000, round(27 * abs(lateral))))
+            frame = await pulse(frame, seat, "y", math.copysign(1, lateral), duration, pulses)
         if abs(frame["pawns"][seat]["position"][1] - EXIT_Y) > ALIGN_TOLERANCE:
-            raise RuntimeError(f"Stock lift {seat} could not align at the west opening: {_brief(frame)}")
+            raise RuntimeError(f"Stock lift {seat} could not align at the west opening: {_brief(frame)}; "
+                               f"last inputs: {pulses[-2:]}")
 
         # Put the first rider farther onto the continuous west rim so their
         # capsule leaves room for the second rider at the QuarterPipe landing.
         landing_x = -1985 if seat == "guest" else -1875
         target_x = -2030 if seat == "guest" else -1910
-        for _ in range(4):
+        for _ in range(24):
             pawn = frame["pawns"][seat]
             if not pawn["on_deck"] and _safe_landing(pawn["position"]) and pawn["position"][0] <= landing_x:
                 break
             if pawn["position"][2] < 2465 or abs(pawn["position"][1] - EXIT_Y) > 18:
                 raise RuntimeError(f"Stock lift {seat} missed the west landing: {_brief(frame)}")
-            speed = pawn["speed"] if type(pawn["speed"]) in (int, float) else 450
             distance = pawn["position"][0] - target_x
-            duration = max(220, min(560, round(1000 * (distance + 20) / max(250, speed))))
+            duration = max(220, min(1000, round(12 * distance)))
             frame = await pulse(frame, seat, "x", -1, duration, pulses)
         frame = await settle(frame, seat, confirmations=3)
         offsets = frame["pawns"]

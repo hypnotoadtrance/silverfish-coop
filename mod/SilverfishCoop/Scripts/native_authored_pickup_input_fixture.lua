@@ -491,23 +491,39 @@ function input.cistern_nfta_locker(fields, state, phase)
         error("stock_cistern_nfta_locker_fixture_scope_unavailable", 0)
     end
     local location, facing = vector(actor:K2_GetActorLocation()), rotation(actor:K2_GetActorRotation())
-    local door, timeline = actor.SM_Prop_Cabinet_Small_Door_01, actor.Timeline
+    local door = actor.SM_Prop_Cabinet_Small_Door_01
     if not location or square(location, {X = 5109.10794, Y = 11363.25031, Z = -2250}) > 1
         or not facing or math.abs(math.abs(facing.Yaw) - 180) > .2
-        or not owned(door, actor, "StaticMeshComponent") or not owned(timeline, actor, "TimelineComponent") then
+        or not owned(door, actor, "StaticMeshComponent") then
         error("stock_cistern_nfta_locker_fixture_geometry_unavailable", 0)
     end
-    local function opened()
-        local angle = rotation(door.RelativeRotation)
-        return actor.Locked == false and (timeline:IsPlaying() == true or angle and math.abs(angle.Yaw) > 1)
+    local box_type = StaticFindObject("/Script/Engine.BoxComponent")
+    if not valid(box_type) then error("stock_cistern_nfta_locker_fixture_box_class_unavailable", 0) end
+    local function box_count()
+        local boxes = actor:K2_GetComponentsByClass(box_type)
+        local shape = type(boxes)
+        if shape == "userdata" and type(boxes.type) == "function" then shape = boxes:type() end
+        return (shape == "table" or shape == "TArray") and #boxes or nil
     end
-    if opened() then return "stock_cistern_nfta_locker_already_open" end
+    local function read_opening()
+        local angle = rotation(door.RelativeRotation)
+        local offset = vector(door.RelativeLocation)
+        if actor.Locked or not angle or not offset then error("mutation_unverified_stock_cistern_nfta_locker_open", 0) end
+        -- The stock interaction retires its Box and starts a 0.3s latent door move.
+        if math.abs((angle.Yaw - 95 + 180) % 360 - 180) < .25
+            and square(offset, {X = -28.5, Y = 35, Z = 115}) < 1 then
+            return "stock_cistern_nfta_locker_opened"
+        end
+        return "stock_cistern_nfta_locker_opening"
+    end
+    local count = box_count()
+    if count == 0 then return read_opening() end
     local box = actor.Box
-    if not owned(box, actor, "BoxComponent") then error("stock_cistern_nfta_locker_fixture_box_unavailable", 0) end
+    if count ~= 1 or not owned(box, actor, "BoxComponent") then error("stock_cistern_nfta_locker_fixture_box_unavailable", 0) end
     input.open_cabinet(state, phase, pawn, actor, box, cistern_locker)
     if actor.Locked then error("stock_cistern_nfta_locker_locked", 0) end
-    if not opened() then error("mutation_unverified_stock_cistern_nfta_locker_open", 0) end
-    return "stock_cistern_nfta_locker_opening"
+    if not same(actor.Player, pawn) or box_count() ~= 0 then error("mutation_unverified_stock_cistern_nfta_locker_open", 0) end
+    return read_opening()
 end
 
 function input.approach_cabinet_guest(state, phase, pawn, actor, box, source)

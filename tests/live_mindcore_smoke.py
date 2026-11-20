@@ -466,6 +466,12 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
             if attempts[-1]["state"] != "unlocked":
                 raise RuntimeError("The stock Cistern locker broke both genuine lockpick charges")
             opened = await action(run, pickup.CISTERN_LOCKER_FIXTURE)
+        for _ in range(5):
+            if opened["locker"] != "stock_cistern_nfta_locker_opening":
+                break
+            await asyncio.sleep(.25)
+            opened = await action(run, pickup.CISTERN_LOCKER_FIXTURE)
+        assert opened["locker"] == "stock_cistern_nfta_locker_opened", opened
         proof["lift_key_locker"] = opened["locker"]
         source = pickup.CISTERN_OLD_NFTA_KEYCARD
         key = await collect_stock(authority, source)
