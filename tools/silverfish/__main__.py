@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from ipaddress import ip_address
 import json
 from pathlib import Path
 import uuid
@@ -36,10 +37,21 @@ def _bounded_count(value: str) -> int:
     return count
 
 
-def _target(parser: argparse.ArgumentParser) -> None:
+def _target(parser: argparse.ArgumentParser, *, include_title: bool = False) -> None:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--campaign")
     target.add_argument("--profile")
+    if include_title:
+        target.add_argument("--title-profile", help="isolated co-op title profile")
+
+
+def _handoff_generation(value: str) -> str:
+    try:
+        if value == "0" * 32 or uuid.UUID(hex=value).hex != value:
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected the exact nonzero lowercase title handoff generation") from None
+    return value
 
 
 def parser() -> argparse.ArgumentParser:
@@ -130,12 +142,20 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID on retry")
 
     inspect = commands.add_parser("status", help="read the latest structured session status")
-    _target(inspect)
+    _target(inspect, include_title=True)
     routes = commands.add_parser("routes", help="list the current map's stock exit catalog")
     _target(routes)
     events = commands.add_parser("events", help="read recent structured session events")
-    _target(events)
+    _target(events, include_title=True)
     events.add_argument("--tail", type=_bounded_count, default=30)
+
+    title_select = commands.add_parser("title-select", help="choose an offered Host or Join action")
+    title_select.add_argument("--title-profile", required=True)
+    title_select.add_argument("--handoff-generation", type=_handoff_generation, required=True)
+    title_select.add_argument("--role", choices=("host", "join"), required=True)
+    title_cancel = commands.add_parser("title-cancel", help="cancel an in-progress title handoff")
+    title_cancel.add_argument("--title-profile", required=True)
+    title_cancel.add_argument("--handoff-generation", type=_handoff_generation, required=True)
 
     action = commands.add_parser("action", help="perform a supported local action")
     _target(action)
@@ -249,6 +269,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _repository_run(opts) -> Path:
+    if getattr(opts, "title_profile", None) is not None:
+        return select_run(opts.work, "titles", opts.title_profile)
     if opts.campaign is not None:
         return select_run(opts.work, "campaigns", opts.campaign)
     return select_run(opts.work, "clients", opts.profile)
@@ -276,16 +298,32 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         raise ValueError("The packaged co-op title requires its matched embedded runtime")
     plans = {}
     if opts.campaign:
-        campaign = select_run(opts.work, "campaigns", opts.campaign)
-        mode, area = menu_host_start(campaign)
-        starting = {"start_preset": mode} if mode == "wanderer" else {}
-        port = opts.port or runtime.spare_udp_port()
-        expected = area if starting else None
-        plans["host"] = (embedded_title_plan.host_plan(opts.work, campaign, opts.bind, port, mode, expected,
-                                                      headless=headless)
-                         if embedded else host_plan(opts.work, campaign, opts.bind, port, headless=headless,
-                                                    expected_map=expected,
-                                                    **MENU_HOST_OPTIONS, **starting))
+        default_port = opts.port or runtime.spare_udp_port()
+
+        def make_host_plan(name, bind, port):
+            campaign = select_run(opts.work, "campaigns", name)
+            mode, area = menu_host_start(campaign)
+            starting = {"start_preset": mode} if mode == "wanderer" else {}
+            expected = area if starting else None
+            if embedded:
+                return embedded_title_plan.host_plan(opts.work, campaign, bind, port, mode, expected,
+                                                     headless=headless)
+            return host_plan(opts.work, campaign, bind, port, headless=headless, expected_map=expected,
+                             **MENU_HOST_OPTIONS, **starting)
+
+        configured = make_host_plan(opts.campaign, opts.bind, default_port)
+
+        def resolve_host(claim):
+            if claim.host_settings is None:
+                return configured
+            name, bind, port_text = claim.host_settings
+            port = int(port_text) if port_text else default_port
+            address = bind or opts.bind
+            if not 1 <= port <= 65535 or "%" in address:
+                raise ValueError("Host requires a valid UDP port and a numeric local address")
+            return make_host_plan(name or opts.campaign, str(ip_address(address)), port)
+
+        plans["host"] = replace(configured, resolve_claim=resolve_host)
     if opts.invite:
         guest = select_run(opts.work, "clients", opts.profile)
         invitation = opts.invite.resolve(strict=True)
@@ -293,13 +331,13 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
                          if embedded else join_plan(opts.work, guest, invitation, character_id=opts.character,
                                                     headless=headless))
     title = select_run(opts.work, "titles", opts.title_profile)
-    with Control(title / "run"):
+    with Control(title / "run") as control:
         mailbox = title / "run" / "game-bridge" / uuid.uuid4().hex
         profile = title / "game-user"
         process = runtime.launch(opts.work, profile, mailbox, headless=headless, title_fixture=headless,
                                  inspect_title_profile=on_title_ready is not None)
         try:
-            await TitleSession(runtime.Bridge(mailbox, process), plans, on_title_ready=on_title_ready,
+            await TitleSession(runtime.Bridge(mailbox, process), plans, control=control, on_title_ready=on_title_ready,
                                title_saved_directory=profile / "Saved" if on_title_ready is not None else None).run()
         finally:
             if process.poll() is None:
@@ -355,6 +393,11 @@ async def execute(opts):
         directory = select_run(opts.work, "campaigns", opts.campaign) / "run"
         return await submit(directory, "invite", name=opts.name, character=opts.character,
                             address=opts.address)
+
+    if operation in {"title-select", "title-cancel"}:
+        title = select_run(opts.work, "titles", opts.title_profile) / "run"
+        fields = {"role": opts.role} if operation == "title-select" else {}
+        return await submit(title, operation, handoff_generation=opts.handoff_generation, **fields)
 
     directory = _repository_run(opts) / "run"
     if operation == "status":

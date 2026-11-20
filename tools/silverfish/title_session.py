@@ -12,13 +12,16 @@ import time
 import uuid
 
 from . import native_title_entry, runtime
-from .title_handoff import ACTIONS, Claim, TitleHandoff, _isolated_stock_title, _stock_title
+from .control import Control
+from .title_handoff import ACTIONS, TOKEN, Claim, TitleHandoff, _isolated_stock_title, _stock_title
 
 
 STATUS_FILE = "title-session-status.json"
 _ROLE = {"host": "host", "join": "client"}
 _GAME_PHASE = {"host": "hosting", "join": "connected"}
 _PROGRESS = {"starting", "waiting_for_host", "hosting", "connected", "reconnecting"}
+_TITLE_ACTIVE = {"waiting_title", "offered", "starting", "ready", "failed"}
+_TITLE_EVENTS = {"ready", "stopped", "failed", "cleanup_unverified"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class SessionPlan:
     read_status: Callable[[], dict | None]
     ready: Callable[[dict], bool]
     producer_pid: Callable[[Claim], int | None] | None = None
+    resolve_claim: Callable[[Claim], "SessionPlan"] | None = None
 
 
 def _read_plan_status(plan: SessionPlan) -> dict:
@@ -114,7 +118,7 @@ class TitleSession:
     def __init__(self, bridge: runtime.Bridge, plans: Mapping[str, SessionPlan], *,
                  retire_title=None, on_title_ready: Callable[[], None] | None = None,
                  title_saved_directory: Path | None = None, poll_interval: float = .1,
-                 startup_timeout: float = 120, stall_timeout: float = 60):
+                 startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -136,6 +140,10 @@ class TitleSession:
         self._last_failure = None
         self._starting = False
         self._cancel_requested = False
+        self._control = control
+        self._control_published_at = None
+        self._control_generation = None
+        self._local_request = None
 
     def cancel_start(self) -> bool:
         """Cancel only the pending start, allowing a new offer after child cleanup."""
@@ -146,9 +154,84 @@ class TitleSession:
 
     def _publish(self, state: str, **fields) -> None:
         status = dict(schema=1, state=state, last_failure=self._last_failure, **fields)
-        if status != self._published:
+        changed = status != self._published
+        if changed:
             runtime.write_json(self._status_path, dict(status, updated_unix=time.time()))
             self._published = status
+        self._publish_control(force=changed)
+        if self._control is not None and changed and state in _TITLE_EVENTS:
+            self._control.event("title_" + state, **fields, last_failure=self._last_failure)
+
+    def _publish_control(self, *, force=False) -> None:
+        if self._control is None or self._published is None:
+            return
+        now = time.monotonic()
+        state = self._published["state"]
+        generation = self._handoff.generation if state == "offered" else None
+        if (force or generation != self._control_generation or self._control_published_at is None
+                or now - self._control_published_at >= 2):
+            self._control.status(role="title", active=state in _TITLE_ACTIVE, state=state, handoff_generation=generation,
+                                 actions=self._published.get("actions", []), attempt=self._published.get("attempt"),
+                                 progress=self._published.get("progress"), last_failure=self._last_failure)
+            self._control_published_at, self._control_generation = now, generation
+
+    def _poll_control(self, snapshot=None, *, attempt=None) -> None:
+        if self._control is None:
+            return
+        self._publish_control()
+        for path, request in self._control.requests():
+            if self._local_request is not None and path == self._local_request[0]:
+                continue
+            command, generation = request.get("action"), request.get("handoff_generation")
+            keys = {"generation", "action", "handoff_generation"}
+            if command == "title-select":
+                keys.add("role")
+            if (command not in ("title-select", "title-cancel") or request.keys() != keys
+                    or not isinstance(generation, str) or not TOKEN.fullmatch(generation) or generation == "0" * 32):
+                self._control.respond(path, False, error="title_invalid_request")
+            elif command == "title-select":
+                role = request["role"]
+                if role not in ACTIONS:
+                    self._control.respond(path, False, error="title_invalid_request")
+                    continue
+                try:
+                    error = self._handoff.queue_local(snapshot, generation, path.stem, role)
+                except OSError:
+                    error = "mailbox_unavailable"
+                if error:
+                    self._control.respond(path, False, error="title_" + error)
+                else:
+                    self._local_request = path, generation, role
+            elif not self._starting or attempt is None:
+                self._control.respond(path, False, error="title_launch_not_pending")
+            elif generation != attempt["generation"]:
+                self._control.respond(path, False, error="title_stale_generation")
+            elif self._cancel_requested:
+                self._control.respond(path, False, error="title_cancel_pending")
+            else:
+                self.cancel_start()
+                self._control.respond(path, True, state="accepted", attempt=attempt)
+                self._control.event("title_cancel_accepted", attempt=attempt)
+
+    def _selected(self, claim: Claim | None) -> None:
+        if self._control is None:
+            return
+        source = "panel"
+        if self._local_request is not None:
+            path, generation, role = self._local_request
+            error = self._handoff.last_refusal
+            if claim is not None and (claim.request_id, claim.generation, claim.action) == (path.stem, generation, role):
+                source = "control"
+                attempt = dict(action=claim.action, request_id=claim.request_id, generation=claim.generation)
+                self._control.respond(path, True, state="accepted", attempt=attempt)
+            elif claim is not None or error or self._handoff.generation != generation:
+                self._control.respond(path, False, error="title_" + (error or "handoff_consumed"))
+            else:
+                return
+            self._local_request = None
+        if claim is not None:
+            self._control.event("title_selection_accepted", source=source,
+                                attempt=dict(action=claim.action, request_id=claim.request_id, generation=claim.generation))
 
     async def run(self) -> None:
         if self._handoff is not None:
@@ -176,9 +259,14 @@ class TitleSession:
                         initial_frame = frame
                         if time.monotonic() >= title_deadline:
                             raise TimeoutError("The isolated co-op title did not become ready")
+                        if self._control is not None:
+                            self._publish("waiting_title", actions=[])
+                            self._poll_control()
                         await asyncio.sleep(self._poll_interval)
                         continue
+                self._poll_control(snapshot)
                 claim = self._handoff.poll(snapshot)
+                self._selected(claim)
                 if claim is None:
                     self._publish("offered" if offered else "waiting_title", actions=actions if offered else [])
                     await asyncio.sleep(self._poll_interval)
@@ -193,11 +281,23 @@ class TitleSession:
             self._publish("cancelled")
             raise
         finally:
+            if self._local_request is not None:
+                self._control.respond(self._local_request[0], False, error="title_stock_title_unready")
+                self._local_request = None
             self._handoff.close()
 
     async def _launch(self, claim: Claim, original_title: tuple) -> bool:
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
+        if plan.resolve_claim is not None:
+            try:
+                plan = plan.resolve_claim(claim)
+                if not isinstance(plan, SessionPlan):
+                    raise ValueError("Expected a resolved title session plan")
+            except (OSError, TypeError, ValueError, RuntimeError):
+                self._last_failure = dict(attempt, code="title_settings_invalid")
+                self._publish("failed", attempt=attempt)
+                return False
         baseline = _read_plan_status(plan).get("generation")
         started_wall, started = time.time(), time.monotonic()
         last_progress, deadline = started, started + self._startup_timeout
@@ -220,6 +320,7 @@ class TitleSession:
         retired = False
         try:
             while not task.done():
+                self._poll_control(attempt=attempt)
                 if self._cancel_requested:
                     error = "start_cancelled"
                     break
@@ -258,6 +359,9 @@ class TitleSession:
                         retired = True
                         self._last_failure = None
                         self._publish("ready", attempt=attempt, progress=_GAME_PHASE[claim.action])
+                        while self._control is not None and not task.done():
+                            self._poll_control()
+                            await asyncio.wait((task,), timeout=self._poll_interval)
                         await task
                         self._publish("stopped", attempt=attempt)
                         return True

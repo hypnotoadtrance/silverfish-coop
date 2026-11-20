@@ -9,6 +9,7 @@ import uuid
 
 from test_title_handoff import ready
 from tools.silverfish import native_title_entry, runtime, service
+from tools.silverfish.control import Control
 from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
 from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession, host_plan, join_plan
 from tools.silverfish.travel import OBSERVATORY
@@ -114,11 +115,139 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass
 
-    def supervise(self, **plans):
-        session = TitleSession(self.bridge, plans, retire_title=self.bridge.retire, poll_interval=.005)
+    def supervise(self, *, control=None, **plans):
+        session = TitleSession(self.bridge, plans, retire_title=self.bridge.retire, poll_interval=.005, control=control)
         task = asyncio.create_task(session.run())
         self.addAsyncCleanup(self.stop, task)
         return session, task
+
+    def read_control(self, control):
+        try:
+            return runtime.read_json(control.run / "status.json")
+        except FileNotFoundError:
+            return {}
+
+    def send_control(self, control, command, generation, **fields):
+        name = uuid.uuid4().hex + ".json"
+        runtime.write_json(control.run / "requests" / name, {
+            "generation": control.generation, "action": command, "handoff_generation": generation, **fields,
+        })
+        return control.run / "responses" / name
+
+    async def control_offer(self, control):
+        return await self.wait(lambda: self.read_control(control).get("handoff_generation"))
+
+    async def control_reply(self, response):
+        await self.wait(response.is_file)
+        return runtime.read_json(response)
+
+    async def test_control_select_waits_for_same_advancing_title_and_reports_accepted_then_ready(self):
+        control = self.enterContext(Control(self.directory / "control"))
+        child = Child("host")
+        _, task = self.supervise(control=control, host=child.plan())
+        generation = await self.control_offer(control)
+        self.assertEqual(self.read_control(control)["generation"], control.generation)
+        self.assertEqual(self.read_control(control)["actions"], ["host"])
+        denied = self.send_control(control, "title-select", generation, role="join")
+        self.assertEqual((await self.control_reply(denied))["error"], "title_unadvertised_action")
+        malformed = self.send_control(control, "title-select", generation, role="host", invite="confidential")
+        self.assertEqual((await self.control_reply(malformed))["error"], "title_invalid_request")
+        self.bridge.frozen = True
+        selection = self.send_control(control, "title-select", generation, role="host")
+        await self.wait(self.request_path.is_file)
+        self.assertFalse(selection.exists() or child.started.is_set())
+        self.bridge.frozen = False
+        reply = await self.control_reply(selection)
+        self.assertEqual(reply["state"], "accepted")
+        self.assertEqual(reply["attempt"], dict(action="host", generation=generation, request_id=selection.stem))
+        await child.started.wait()
+        self.assertTrue(self.bridge.alive)
+        child.ready()
+        await self.wait(lambda: self.read_control(control).get("state") == "ready")
+        self.assertFalse(self.bridge.alive)
+        late = self.send_control(control, "title-cancel", generation)
+        self.assertEqual((await self.control_reply(late))["error"], "title_launch_not_pending")
+        child.finish.set()
+        await task
+        self.assertFalse(self.read_control(control)["active"])
+        self.assertEqual(self.read_control(control)["state"], "stopped")
+        events = (control.run / "events.jsonl").read_text()
+        self.assertIn('"event": "title_selection_accepted"', events)
+        self.assertIn('"event": "title_ready"', events)
+        self.assertIn('"event": "title_stopped"', events)
+        self.assertNotIn("confidential", events)
+
+    async def test_physical_choice_and_control_cannot_race_to_start_two_children(self):
+        control = self.enterContext(Control(self.directory / "control"))
+        host, guest = Child("host"), Child("join")
+        _, task = self.supervise(control=control, host=host.plan(), join=guest.plan())
+        generation = await self.control_offer(control)
+        self.bridge.frozen = True
+        self.request("host", generation)
+        contender = self.send_control(control, "title-select", generation, role="join")
+        self.assertEqual((await self.control_reply(contender))["error"], "title_selection_pending")
+        self.bridge.frozen = False
+        await asyncio.wait_for(host.started.wait(), 1)
+        self.assertEqual((host.calls, guest.calls), (1, 0))
+        host.ready()
+        await self.wait(lambda: self.read_control(control).get("state") == "ready")
+        host.finish.set()
+        await task
+
+    async def test_control_cancel_is_bound_to_pending_attempt_and_waits_for_owned_cleanup(self):
+        control = self.enterContext(Control(self.directory / "control"))
+        child = Child("host")
+        child.can_cleanup.clear()
+        self.addCleanup(child.can_cleanup.set)
+        _, task = self.supervise(control=control, host=child.plan())
+        generation = await self.control_offer(control)
+        selected = await self.control_reply(self.send_control(control, "title-select", generation, role="host"))
+        self.assertTrue(selected["ok"])
+        await child.started.wait()
+        try:
+            bad = self.send_control(control, "title-cancel", "b" * 32)
+            self.assertEqual((await self.control_reply(bad))["error"], "title_stale_generation")
+            cancellation = await self.control_reply(self.send_control(control, "title-cancel", generation))
+            self.assertEqual((cancellation["state"], cancellation["attempt"]), ("accepted", selected["attempt"]))
+            await child.cleanup.wait()
+            self.assertTrue(self.bridge.alive)
+            self.assertIsNone(self.generation())
+            self.assertFalse(task.done())
+        finally:
+            child.can_cleanup.set()
+        newer = await self.control_offer(control)
+        self.assertNotEqual(generation, newer)
+        self.assertEqual(self.read_control(control)["last_failure"]["code"], "start_cancelled")
+        replay = self.send_control(control, "title-select", generation, role="host")
+        self.assertEqual((await self.control_reply(replay))["error"], "title_stale_generation")
+        self.assertEqual(child.calls, 1)
+
+    async def test_physical_settings_resolve_before_baseline_and_invalid_choices_are_redacted(self):
+        control = self.enterContext(Control(self.directory / "control"))
+        child = Child("host")
+        old_start, old_status = AsyncMock(), Mock()
+
+        def resolve(claim):
+            if claim.host_settings[0] != "verified_campaign":
+                raise ValueError("confidential invalid setting")
+            return child.plan()
+
+        _, task = self.supervise(control=control, host=SessionPlan(old_start, old_status, lambda _: True, resolve_claim=resolve))
+        generation = await self.control_offer(control)
+        self.request_path.write_bytes(f"2\t{generation}\t{'a' * 32}\thost\tinvalid\t\t\n".encode())
+        current = await self.wait(lambda: (now := self.read_control(control).get("handoff_generation")) and now != generation and now)
+        self.assertTrue(self.bridge.alive)
+        self.assertEqual(self.read_control(control)["last_failure"]["code"], "title_settings_invalid")
+        self.request_path.write_bytes(f"2\t{current}\t{'c' * 32}\thost\tverified_campaign\t127.0.0.1\t7777\n".encode())
+        await asyncio.wait_for(child.started.wait(), 1)
+        old_status.assert_not_called()
+        old_start.assert_not_awaited()
+        self.assertNotIn("verified_campaign", str(self.read_control(control)))
+        self.assertNotIn("confidential", (control.run / "events.jsonl").read_text())
+        child.ready()
+        await self.wait(lambda: self.read_control(control).get("state") == "ready")
+        child.finish.set()
+        await task
 
     async def test_retires_title_only_after_exact_child_and_advancing_original_title(self):
         child = Child("host")

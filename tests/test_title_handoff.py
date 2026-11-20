@@ -72,6 +72,31 @@ class TitleHandoffTests(unittest.TestCase):
         self.assert_refused("handoff_consumed", ready(5))
         self.assertFalse(self.handoff.refresh(ready(6), {"host": self.host}))
 
+    def test_local_choice_shares_the_stock_mailbox_and_cannot_replace_it(self):
+        generation = self.publish({"host": self.host, "join": self.join})
+        self.submit(generation, action="join")
+        physical = self.handoff.request_path.read_bytes()
+        self.assertEqual(self.handoff.queue_local(ready(2), generation, "b" * 32, "host"), "selection_pending")
+        self.assertEqual(self.handoff.request_path.read_bytes(), physical)
+        self.assertIsNone(self.handoff.poll(ready(2)))
+        self.assertEqual(self.handoff.poll(ready(3)), Claim("join", "a" * 32, generation, self.join))
+
+    def test_version_two_carries_bounded_host_settings_with_the_same_frame_and_one_use_gate(self):
+        generation = self.publish({"host": self.host, "join": self.join})
+        prefix = f"2\t{generation}\t{'a' * 32}\t".encode("ascii")
+        for data in (b"join\t\t\t\n", b"host\tpath/file\t127.0.0.1\t7777\n",
+                     b"host\t" + b"c" * 65 + b"\t\t\n", b"host\t\t\t123456\n"):
+            with self.subTest(data=data):
+                self.handoff.request_path.write_bytes(prefix + data)
+                self.assert_refused("malformed_request", ready(2))
+        self.handoff.request_path.write_bytes(prefix + b"host\tprivate_campaign\tfe80::1%3\t7777\n")
+        self.assertIsNone(self.handoff.poll(ready(2)))
+        self.assertIsNone(self.handoff.poll(ready(2)))
+        settings = "private_campaign", "fe80::1%3", "7777"
+        claim = self.handoff.poll(ready(3))
+        self.assertEqual(claim, Claim("host", "a" * 32, generation, self.host, settings))
+        self.assertNotIn(settings[0], repr(claim))
+
     def test_rejects_stale_generation_and_unadvertised_action(self):
         original = self.publish({"join": self.join})
         current = self.publish({"host": self.host}, sequence=2)
