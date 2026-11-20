@@ -2378,6 +2378,20 @@ class Host:
                     self.last_game = await bridge.command(action, pawn, source, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"pawn": pawn, "actor": native_authored_pickup.SOURCES[source][1]}
+                elif action == native_borough_barter.CRAFT_APPROACH and self.fixtures:
+                    character = self.roles().get("guest")
+                    members = self.native_recipients()
+                    guest = members.get(character, {})
+                    if (self.last_game.get("map") != native_borough_barter.OBSERVATORY or len(members) != 1
+                            or not guest.get("connected") or self.party["players"][character]["downed"]):
+                        raise ValueError("Choose the exact standing guest in the Observatory workbench fixture")
+                    moved = await bridge.restore("guest", {"location": [-5796.37, 539.75, 265.0]})
+                    pawn = moved.get("pawns", {}).get("guest", {})
+                    location = pawn.get("location")
+                    if (pawn.get("name") != guest["pawn"] or not location
+                            or math.dist(location, (-5796.37, 669.75, 150.0)) > 220):
+                        raise RuntimeError("The workbench fixture could not verify the guest placement")
+                    result = {"pawn": pawn["name"], "location": location}
                 elif action == "native-interaction-fixture":
                     self.last_game = await bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}

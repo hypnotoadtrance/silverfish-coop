@@ -4,7 +4,6 @@ import argparse
 import asyncio
 from hashlib import sha256
 import json
-import math
 from pathlib import Path
 from struct import unpack_from
 import subprocess
@@ -241,21 +240,7 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         assert await asyncio.wait_for(process.wait(), 18) == 0, process.returncode
 
     async def craft_board(guid):
-        target = (-5796.37, 669.75)
-        for _ in range(10):
-            state = json.loads((guest_run / "status.json").read_text(encoding="utf-8"))
-            location = state["game"]["pawns"]["local"]["location"]
-            proof["crafting_approach"] = location
-            distance = math.dist(target, location[:2])
-            if distance <= 140:
-                break
-            dx, dy = ((goal - actual) / distance for goal, actual in zip(target, location[:2], strict=True))
-            duration = max(130, min(1800, round((distance - 60) * 1.5)))
-            await action(profile, "walk", "--x", str(dx), "--y", str(dy), "--milliseconds", str(duration), "--continuous")
-            await asyncio.sleep(duration / 1000 + .55)
-        else:
-            raise AssertionError(f"The guest did not walk into stock workbench range: {location}")
-
+        proof["crafting_approach_fixture"] = await action(campaign, barter.CRAFT_APPROACH)
         refused = await action(profile, barter.CRAFT_ACTION, "--target", guid, expected=False)
         assert refused["error"] == "borough_barter_refused_detached_worn_crafting", refused
         assert guid in await inventory(profile, character)
