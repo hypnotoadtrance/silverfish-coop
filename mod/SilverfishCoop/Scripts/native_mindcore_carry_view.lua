@@ -12,7 +12,7 @@ local fixture = "native-mindcore-guest-carry-fixture"
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
-local heartbeat, input_path, is_downed, binding, sample
+local heartbeat, input_path, is_downed, binding, sample, scope_failure
 local input_sequence, aim_sequence = 0, 0
 local sequence_limit = 2 ^ 53
 
@@ -51,8 +51,11 @@ local function context(state, phase)
         or not pawn:IsLocallyControlled() or pawn:HasAuthority() or not controller:IsLocalController()
         or pawn:IsActorBeingDestroyed() or controller:IsActorBeingDestroyed() or detail.name ~= pawn:GetFullName()
         or #detail.name > 512 or detail.name:find("%c") then return nil, "pawn" end
-    if controller.Loading ~= false or not controller.MenuStack or controller.MenuStack:GetArrayNum() ~= 0
-        or pawn.Dead ~= false or is_downed(pawn) ~= false or valid(pawn.HeldObject) then return nil, "standing" end
+    if pawn.Dead ~= false then return nil, "dead" end
+    if is_downed(pawn) ~= false then return nil, "downed" end
+    if controller.Loading ~= false then return nil, "loading" end
+    if not controller.MenuStack or controller.MenuStack:GetArrayNum() ~= 0 then return nil, "menu" end
+    if valid(pawn.HeldObject) then return nil, "local_hold" end
     local camera = pawn.Camera
     if not owned(camera, pawn, "/Script/Engine.CameraComponent") then return nil, "camera" end
 
@@ -162,16 +165,23 @@ local function consume(current)
 end
 
 local function sync_input(state, phase)
-    local current = context(state, phase)
-    current = current and lease(current, os.time())
-    if not current or not arm(current) then view.clear(); return end
+    local current, reason = context(state, phase)
+    if not current then view.clear(); return reason end
+    current = lease(current, os.time())
+    if not current then view.clear(); return "lease" end
+    if not arm(current) then view.clear(); return "input" end
     consume(current)
-    sample_aim(current)
+    if not sample_aim(current) and current.state == "held" then return "aim" end
 end
 
 function view.sync(state, phase)
-    local ok = pcall(sync_input, state, phase)
-    if not ok then view.clear() end
+    local ok, reason = pcall(sync_input, state, phase)
+    if ok then
+        scope_failure = reason
+    else
+        view.clear()
+        scope_failure = "bridge_call"
+    end
 end
 
 local function aimed_rotation(eye, target, height)
@@ -283,11 +293,15 @@ function view.command(fields, state, phase)
 end
 
 function view.rows(state, phase, row)
+    local rows = {}
+    if enabled and phase == "connected" and state.map == map and scope_failure then
+        rows[#rows + 1] = row("native-mindcore-carry-view-scope", map, scope_failure)
+    end
     if not binding or phase ~= "connected" or state.map ~= map or os.time() > binding.stamp + 2
-        or not same(state.world, binding.world) or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return {} end
-    local rows = {row("native-mindcore-guest-carry", map, binding.name, core_name, binding.session, binding.epoch, binding.state)}
+        or not same(state.world, binding.world) or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return rows end
+    rows[#rows + 1] = row("native-mindcore-guest-carry", map, binding.name, core_name, binding.session, binding.epoch, binding.state)
     if sample then
-        rows[2] = row("native-mindcore-carry-aim", map, binding.name, core_name, binding.session, binding.epoch,
+        rows[#rows + 1] = row("native-mindcore-carry-aim", map, binding.name, core_name, binding.session, binding.epoch,
             sample.sequence, degrees(sample.pitch), degrees(sample.yaw))
     end
     return rows

@@ -131,6 +131,10 @@ end
 local function event(operation, source, serial)
     return row("native-mindcore-carry-toggle", serial, map, pawn_name, core.name, session, epoch, operation, source)
 end
+local function refuses_scope(reason)
+    local rows = sync()
+    return #rows == 1 and rows[1] == row("native-mindcore-carry-view-scope", map, reason) and not command("grab")
+end
 
 assert(#sync() == 1 and actuation == "grab")
 assert(not command("grab", "another pawn") and probes == 0)
@@ -152,19 +156,19 @@ latest = {3, "grab", "pickup"}
 assert(#sync() == 1 and event_lines[3]:find(event("grab", "pickup", 3), 1, true) == 1)
 
 overlap = true
-assert(#sync() == 0 and clears == 1 and not command("grab"))
+assert(refuses_scope("quiet_cradle") and clears == 1)
 overlap, role = false, 3
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("replicated_core"))
 role, lease_pawn = 1, "wrong pawn"
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("lease"))
 lease_pawn, now = pawn_name, 203
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("lease"))
 now, cradle.Status = 200, 1
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("cradle"))
 cradle.Status, downed = 0, true
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("downed"))
 downed, lease_contents = false, "attacker-controlled row\n"
-assert(#sync() == 0 and not command("grab"))
+assert(refuses_scope("lease"))
 
 ready = false
 local disabled = assert(loadfile(module, "t", env))()

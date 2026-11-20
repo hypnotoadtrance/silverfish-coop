@@ -20,6 +20,8 @@ CAPABILITY_TAG = "native-mindcore-carry-capability"
 CAPABILITY = "native_mindcore_carry_capability"
 VIEW_TAG = "native-mindcore-guest-carry"
 VIEW = "native_mindcore_guest_carry"
+VIEW_SCOPE_TAG = "native-mindcore-carry-view-scope"
+VIEW_SCOPE = "native_mindcore_carry_view_scope"
 AIM_TAG = "native-mindcore-carry-aim"
 AIM = "native_mindcore_carry_aim"
 INPUT = "native-mindcore-carry-input.tsv"
@@ -31,6 +33,8 @@ _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 _ANGLE = re.compile(r"-?(?:0|[1-9][0-9]{0,2})(?:\.[0-9]{1,4})?")
 _REASON = re.compile(r"[a-z0-9_]{1,96}")
 _STATES = {"held", "released", "mount_released", "failure"}
+_GAMEPLAY_FRESH_FOR = 2.0
+_NATIVE_HOLD_FOR = 2.0
 
 
 def token(value):
@@ -85,6 +89,14 @@ def parse_aim(fields):
     return dict(pawn=pawn, session=session, epoch=epoch, sequence=serial(fields[6]), pitch=pitch, yaw=yaw)
 
 
+def parse_view_scope(fields):
+    if (len(fields) != 3 or fields[:2] != [VIEW_SCOPE_TAG, core.MAP]
+            or fields[2] not in {"world", "driver", "pawn", "dead", "downed", "loading", "menu", "local_hold", "camera", "replicated_core",
+                                 "core_mesh", "cradle", "quiet_cradle", "mounted", "lease", "input", "aim", "bridge_call"}):
+        raise ValueError("Invalid local Core carry scope report")
+    return fields[2]
+
+
 def parse_input(fields):
     if (len(fields) != 11 or fields[0] != "native-mindcore-carry-toggle" or fields[7] not in ("grab", "release")
             or fields[8] not in ("interact", "pickup")):
@@ -103,6 +115,7 @@ STATUS_ROWS = {
     AUTHORITY_TAG: (AUTHORITY, "hosting", parse_authority),
     CAPABILITY_TAG: (CAPABILITY, "hosting", parse_capability),
     VIEW_TAG: (VIEW, "connected", parse_view),
+    VIEW_SCOPE_TAG: (VIEW_SCOPE, "connected", parse_view_scope),
     AIM_TAG: (AIM, "connected", parse_aim),
 }
 
@@ -327,7 +340,7 @@ class GuestInput:
         self.scope = self.lease = None
         self.sequence = self.sample_sequence = self.input_sequence = self.offset = 0
         self.heartbeat_at = self.aim_at = 0.0
-        self.held_since = 0.0
+        self.held_since = self.last_renewal_at = 0.0
         self.holder_seen = False
 
     def close(self):
@@ -335,7 +348,7 @@ class GuestInput:
             with suppress(OSError):
                 (self.client.bridge.directory / VIEW_LEASE).unlink(missing_ok=True)
         self.scope = self.lease = None
-        self.heartbeat_at = 0.0
+        self.heartbeat_at = self.last_renewal_at = 0.0
 
     def _events(self):
         try:
@@ -360,8 +373,9 @@ class GuestInput:
         row = client.gameplay.get(PUBLIC, {})
         pawn = client.last_game.get("pawns", {}).get("local", {}).get("name")
         member = client.gameplay.get("players", {}).get(client.viewer_role, {})
-        if (active and client.transport.game_access and time.monotonic() - client.gameplay_seen < 2
-                and client.last_game.get("map") == core.MAP and client.expected_zone == core.MAP
+        if (active and client.transport.connected and client.transport.game_access
+                and (client.last_game.get("state"), client.last_game.get("map"), client.expected_zone)
+                == ("connected", core.MAP, core.MAP)
                 and valid_pawn(pawn) and token(client.host_session) and token(client.zone_epoch)
                 and row.get("state") in {"ready", "held"} and not client.gameplay.get("wipe")
                 and member.get("character_id") == client.invite["character_id"] and member.get("downed") is False
@@ -395,7 +409,7 @@ class GuestInput:
             if request.edge == "grab" and result.get("state") == "held":
                 self.lease = lease
                 self.sample_sequence = client.last_game.get(AIM, {}).get("sequence", 0)
-                self.held_since = time.monotonic()
+                self.held_since = self.last_renewal_at = time.monotonic()
                 self.holder_seen = False
             elif request.edge == "drop" and result.get("state") in {"released", "mount_released"}:
                 self.lease = None
@@ -414,30 +428,50 @@ class GuestInput:
     async def poll(self, active):
         game = self.client.last_game
         current = self._scope(active)
+        now = time.monotonic()
+        aim = game.get(AIM, {})
+        aim_scope = (aim.get("pawn"), aim.get("session"), aim.get("epoch"))
+        report = self.client.gameplay.get(PUBLIC, {})
+        held = (report.get("state"), report.get("holder")) == ("held", self.client.invite["character_id"])
+        gameplay_fresh = now - self.client.gameplay_seen < _GAMEPLAY_FRESH_FOR
+        if not gameplay_fresh:
+            if (current and current == self.scope and self.lease and self.holder_seen and held
+                    and now - self.last_renewal_at < _NATIVE_HOLD_FOR):
+                # Wait for fresh gameplay without extending the authority's native deadline.
+                self.heartbeat_at = 0.0
+                if current == aim_scope:
+                    self.sample_sequence = max(self.sample_sequence, aim["sequence"])
+                for _ in self._events():
+                    pass
+                return
+            current = None
         if current != self.scope:
+            if self.lease:
+                self.client.control.event("native_mindcore_guest_carry_scope_ended", active=bool(active),
+                                          view_scope=game.get(VIEW_SCOPE),
+                                          gameplay_fresh=gameplay_fresh, public_state=report.get("state"))
             self.close()
             self.scope = current
         if self.lease:
-            report = self.client.gameplay.get(PUBLIC, {})
-            if (report.get("state"), report.get("holder")) == ("held", self.client.invite["character_id"]):
-                self.holder_seen = True
-            elif self.holder_seen or time.monotonic() - self.held_since > 1.5:
+            if (now - self.last_renewal_at >= _NATIVE_HOLD_FOR
+                    or not held and (self.holder_seen or now - self.held_since > 1.5)):
                 self.lease = None
                 self.heartbeat_at = 0
+            elif held:
+                self.holder_seen = True
         try:
-            now = time.monotonic()
             if self.scope and self.heartbeat_at <= now:
                 self._heartbeat(now)
             for event in self._events():
                 await self._input(event)
-            aim = game.get(AIM, {})
-            if (self.lease and self.scope == (aim.get("pawn"), aim.get("session"), aim.get("epoch"))
+            if (self.lease and self.scope == aim_scope
                     and aim["sequence"] > self.sample_sequence and now >= self.aim_at):
                 self.sample_sequence, self.aim_at = aim["sequence"], now + .12
                 self.sequence += 1
                 request = Request(self.scope[2], self.lease, "aim", self.sequence, (aim["pitch"], aim["yaw"]))
                 operation = uuid.uuid5(self.client.bridge.input_namespace, f"mindcore:{self.lease}:aim:{self.sequence}").hex
                 await self.client.gameplay_action(ACTION, operation, request.target())
+                self.last_renewal_at = time.monotonic()
             if self.scope and self.heartbeat_at <= now:
                 self._heartbeat(now)
         except (OSError, ValueError, RuntimeError) as error:
