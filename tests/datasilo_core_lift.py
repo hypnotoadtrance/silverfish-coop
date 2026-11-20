@@ -327,23 +327,39 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
     async def climb_first_east_stair():
         if not east_stairs:
             return
-        route = proof["east_stair_path"] = await action(run, lift.FIXTURE, target="route-east-stairs")
-        if route.get("complete") is not True:
-            raise RuntimeError("The stock east-stair path is incomplete")
+        route = proof["east_stair_path"] = await action(run, lift.FIXTURE, target="route-catwalk")
+        points = route["points"]
+        corridor = next((index for index, (x, y, z) in enumerate(points)
+                         if x > 2500 and -1500 < y < -1050 and 2680 < z < 2740), None)
+        if corridor is None or corridor + 1 == len(points):
+            raise RuntimeError("The stock path did not connect the east stairs to the upper corridor")
+        end, beyond = points[corridor:corridor + 2]
+        distance = math.dist(end[:2], beyond[:2])
+        if distance < 180 or abs(end[2] - beyond[2]) > 12:
+            raise RuntimeError("The east corridor did not provide room for both riders")
+
+        async def follow(seat, index, point):
+            x, y, floor = point
+            return await walk_to(f"follow the east stair path point {index} with the {seat}",
+                                 (x, y), 25, seat=seat,
+                                 reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
+
         base = proof["west_walkway"]
         facing = base["hold"]["yaw"]
-        for index, (x, y, floor) in enumerate(route["points"][1:], 1):
+        for index, (x, y, floor) in enumerate(points[1:corridor + 1], 1):
             outward = math.degrees(math.atan2(y, x))
             if abs((outward - facing + 180) % 360 - 180) > 28:
                 await turn("keep the raised Core toward the outside of the ring", outward, pitch=68)
                 facing = outward
-            for seat in ("carrier", "lead"):
-                frame = await walk_to(f"follow the east stair path point {index} with the {seat}",
-                                      (x, y), 25, seat=seat,
-                                      reached=lambda row: 48 < row[seat]["location"][2] - floor < 136)
+            frame = await follow("carrier", index, (x, y, floor))
             proof["east_stair_progress"] = {"point": index, "frame": frame}
-        finish = await observe("both players stand on the lower east stairs with the same Core", lambda row, *_: (
-            all(row[seat]["location"][2] > base[seat]["location"][2] + 30 for seat in ("lead", "carrier"))
+            if index > 1:
+                await follow("lead", index - 1, points[index - 1])
+        forward = [a + 180 * (b - a) / distance for a, b in zip(end[:2], beyond[:2], strict=True)]
+        await follow("carrier", corridor + 1, [*forward, end[2]])
+        await follow("lead", corridor, end)
+        finish = await observe("both players reach the upper east corridor with the same Core", lambda row, *_: (
+            all(row[seat]["location"][2] > base[seat]["location"][2] + 265 for seat in ("lead", "carrier"))
             and math.dist(row["prop"]["position"], row["guest_prop"]["position"]) < 55))
         assert finish["hold"]["lease"] == base["hold"]["lease"]
         proof["east_stair"] = finish
