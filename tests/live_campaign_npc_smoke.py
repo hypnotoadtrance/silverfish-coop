@@ -307,6 +307,20 @@ def stock_cohort(report: dict | None, replicate: bool, family: str = "husk") -> 
 
 def client_replica(report: dict | None, cohort: int, require_denial: bool, family: str = "husk") -> bool:
     saved = report.get("saved_squads", {}) if report else {}
+    not_deer_spawn_scope_ok = False
+    if report and family == "notdeer":
+        attempts = report["natural_calls"]
+        if attempts:
+            not_deer_spawn_scope_ok = (
+                attempts == report["spawn_denials"] == saved.get("calls") == saved.get("denials")
+                and report["stage"] == "stock_client_not_deer_load_denied"
+                and saved.get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer"
+            )
+        else:
+            not_deer_spawn_scope_ok = (
+                not require_denial and report["spawn_denials"] == saved.get("calls") == saved.get("denials") == 0
+                and report["stage"] == "awaiting_stock_cohort"
+            )
     return bool(report and report["receipts"] == report["replicated"] == 0
                 and report["cohort"] == 0 and not report["members"]
                 and report["simulated"] >= cohort > 0
@@ -315,9 +329,7 @@ def client_replica(report: dict | None, cohort: int, require_denial: bool, famil
                 and report["network"]["local_authority_initializes"] == 0
                 and (report["spawn_denials"] > 0 or not require_denial)
                 and (family != "notdeer" or (report.get("family") == "notdeer" and report["simulated"] == 1
-                     and report.get("replica") and report["stage"] == "stock_client_not_deer_load_denied"
-                     and saved.get("denials") == report["spawn_denials"]
-                     and saved.get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer")))
+                     and report.get("replica") and not_deer_spawn_scope_ok)))
 
 
 def stock_guest_hit(report: dict, host: str, guest: str, members: list[str]) -> bool:
@@ -777,7 +789,7 @@ if __name__ == "__main__":
         if (not options.notdeer_replay or not options.notdeer_replay.is_dir() or options.approach or options.combat
                 or options.join_only or options.stock_refresh or options.projectile_tap or options.flayer_replay):
             parser.error("NotDeer requires --notdeer-replay and uses only stock publication, veto, and reconnect")
-        options.replicate = options.require_client_denial = True
+        options.replicate = True
     elif options.notdeer_replay:
         parser.error("--notdeer-replay requires --cohort notdeer")
     if options.combat or options.stock_refresh:
