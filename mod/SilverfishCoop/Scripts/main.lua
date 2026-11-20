@@ -21,6 +21,7 @@ local native_wire_board = require("native_wire_board")
 local native_dialogue = require("native_dialogue")
 local native_borough_barter = require("native_borough_barter")
 local native_mosby_tape = require("native_mosby_tape")
+local native_mindcore = require("native_mindcore")
 local native_prototype_drill = require("native_prototype_drill_turnin")
 local native_mosby_station = require("native_mosby_station_view")
 local native_computer_board = require("native_computer_board")
@@ -447,7 +448,10 @@ local function run_command(fields, state, current_phase)
         native_host_dig_live.clear()
     end
     if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
-    if command == "travel" or command == "leave" or command == "join" then native_mosby_station.clear() end
+    if command == "travel" or command == "leave" or command == "join" then
+        native_mosby_station.clear()
+        native_mindcore.clear()
+    end
     if command == "travel" or command == "leave" or command == "join" then native_dust_cabinet.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_savlo_locker.clear() end
     if command == "join" or command == "leave" or command == "travel" then native_guest_drop_projection.clear() end
@@ -885,6 +889,7 @@ local function run_command(fields, state, current_phase)
         or native_dialogue.command(fields, state, current_phase)
         or native_borough_barter.command(fields, state, current_phase, players)
         or native_mosby_tape.command(fields, state, current_phase)
+        or native_mindcore.command(fields, state, current_phase)
         or native_prototype_drill.command(fields, state, current_phase)
         or native_mosby_station.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
@@ -1044,6 +1049,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

@@ -20,6 +20,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_mindcore
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
@@ -1171,6 +1172,14 @@ class Bridge:
                     if profile.key in data:
                         raise ValueError("Duplicate stock tape station proof")
                     data[profile.key] = native_mosby_tape.parse_exchange(fields)
+                elif fields[0] == "native-mindcore-scene":
+                    if native_mindcore.SCENE in data or (data.get("state"), data.get("map")) != ("hosting", native_mindcore.MAP):
+                        raise ValueError("Invalid Data Silo scene scope")
+                    data[native_mindcore.SCENE] = native_mindcore.parse_scene(fields)
+                elif fields[0] == "native-mindcore-tape":
+                    if native_mindcore.PROOF in data or native_mindcore.SCENE not in data:
+                        raise ValueError("Invalid Data Silo Results proof scope")
+                    data[native_mindcore.PROOF] = native_mindcore.parse_proof(fields)
                 elif fields[0] == "native-mosby-station-view":
                     data[native_mosby_station_view.KEY] = native_mosby_station_view.parse(fields)
                 elif fields[0] == "native-mosby-readings":

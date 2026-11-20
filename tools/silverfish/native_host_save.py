@@ -130,7 +130,7 @@ def _wipe_frames(world: dict) -> dict:
 
 
 def _escrow_frames(checkpoint: dict) -> list[dict]:
-    from . import native_prototype_drill
+    from . import native_mindcore, native_prototype_drill
 
     party = checkpoint["world"].get("party") or {}
     if type(party) is not dict:
@@ -239,6 +239,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
             operations.add((owner, trade["operation_id"]))
     if blanks & products:
         raise CampaignFormatError("A stock tape is both an exchange input and a product")
+    if not native_mindcore.valid_receipt(party, checkpoint["characters"]):
+        raise CampaignFormatError("The Data Silo upload has no exact preserved Results tape owner")
     mosby = party.get("native_mosby_rewards")
     if mosby is not None:
         if (type(mosby) is not dict or type(mosby.get("escrow")) is not dict or mosby["escrow"].get("map") != SCIENTIST_SHOP

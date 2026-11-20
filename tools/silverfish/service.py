@@ -34,7 +34,7 @@ from . import native_host_dig, native_host_dig_live, native_host_landmine
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
-from . import native_borough_barter, native_dust_cabinet, native_mosby_station_view, native_mosby_tape, native_smg_hold
+from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
@@ -54,6 +54,7 @@ NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolum
 GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start", "native-quest-turnin", "native-quest-list",
                         native_dialogue.OPEN, native_dialogue.CHOOSE, native_borough_barter.ACTION,
                         *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
+                        native_mindcore.PREFLIGHT, native_mindcore.UPLOAD,
                         native_prototype_drill.PREFLIGHT,
                         native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
@@ -1581,6 +1582,10 @@ class Host:
                 result = await native_borough_barter.trade(self, bridge, character, target, request["operation_id"])
             elif action in native_mosby_tape.PREFLIGHTS or action == native_mosby_tape.READINGS_PREFLIGHT:
                 result = await native_mosby_tape.preflight(self, bridge, character, action, target)
+            elif action == native_mindcore.PREFLIGHT:
+                result = await native_mindcore.preflight(self, bridge, character, target)
+            elif action == native_mindcore.UPLOAD:
+                result = await native_mindcore.upload(self, bridge, character, target, request["operation_id"])
             elif action == native_prototype_drill.PREFLIGHT:
                 result = await native_prototype_drill.preflight(self, bridge, character, action, target)
             elif action in native_mosby_tape.CONVERSIONS:

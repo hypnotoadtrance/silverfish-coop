@@ -38,6 +38,7 @@
 #include "finite_shop.hpp"
 #include "interaction_input.hpp"
 #include "authored_pickup.hpp"
+#include "mindcore.hpp"
 #include "broker_menu.hpp"
 #include "broker_input.hpp"
 #include "campaign_npc.hpp"
@@ -1369,6 +1370,7 @@ namespace
             silverfish::native_bag_projection::register_lua(lua);
             silverfish::native_interaction_input::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
+            silverfish::native_mindcore::register_lua(lua);
             silverfish::native_broker_menu::register_lua(lua);
             silverfish::native_broker_input::register_lua(lua);
             silverfish::campaign_npc::register_lua(lua);

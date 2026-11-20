@@ -1958,6 +1958,32 @@ namespace
 
 namespace silverfish::native_authored_pickup
 {
+    U::UWorld* qualify_mindcore_results(std::uintptr_t pawn, std::uintptr_t detached, std::uintptr_t canonical,
+                                       std::string_view guid)
+    {
+        constexpr TapeExchangeProfile silo{
+            STR("/Game/Classes/Maps/Maps_Dungeons/DataSilo_01_P.DataSilo_01_P"), nullptr, drill_test_results_tape.product};
+        if (!ready() || !env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || detached == canonical) return nullptr;
+        Guid identity;
+        if (!parse_guid(guid, identity)) return nullptr;
+        RowSchema rows;
+        TapeStores stores{rows};
+        if (!rows.bind() || !stores.valid()) return nullptr;
+        auto* owner = live_address(pawn, find<U::UClass>(pawn_path));
+        auto* saved = live_address(detached, rows.save);
+        auto* stock = live_address(canonical, rows.save);
+        auto* world = tape_owner_world(owner, saved, stock, silo);
+        auto* tape = find<U::UClass>(silo.product);
+        auto* cdo = tape ? tape->GetClassDefaultObject().Get() : nullptr;
+        auto* raw_ammo = field<U::FIntProperty>(rows.type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+        TapeStores::Found owned;
+        if (!world || !tape || !cdo || !raw_ammo || !stores.scan(saved, identity, owned) || owned.count != 1 ||
+            !owned.backpack_row || !rows.matches_actor(owned.backpack_row, cdo) ||
+            raw_ammo->GetPropertyValueInContainer(owned.backpack_row) != 0 ||
+            !exclusive_tape_ids(stores, world, owner, saved, stock, identity, identity)) return nullptr;
+        return world;
+    }
+
     void install_hooks()
     {
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || installed.load(std::memory_order_acquire)) return;
