@@ -511,6 +511,13 @@ namespace
             channel(box, set_channel, interactable, block);
             byte_call(box, set_enabled, 1); // QueryOnly, solely the stock interaction trace.
             actor->SetActorEnableCollision(true);
+            if (!stock_ammo)
+            {
+                // A disabled owner masks the effective mode seen by SetCollisionEnabled.
+                // The pistol has no active overlap, simulation, or mesh responses at this point.
+                for (auto* component : components)
+                    if (component != box) byte_call(component, set_enabled, 0);
+            }
             for (auto* component : components)
             {
                 const auto expected_mode = component == box ? 1 : 0;
