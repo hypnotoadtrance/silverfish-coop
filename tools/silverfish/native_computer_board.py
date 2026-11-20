@@ -95,7 +95,8 @@ CONTRACTS = {spec.quest_id: spec for spec in (
 )}
 PREFIXES = {spec.prefix: spec for spec in CONTRACTS.values()}
 PREFLIGHTS = {spec.command("preflight"): spec for spec in CONTRACTS.values()}
-AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values() if spec.pickup_source or spec.exchange}
+AUTHORED_APPROACHES = {spec.command("approach"): spec for spec in CONTRACTS.values()
+                       if spec.pickup_source or spec.exchange or spec is MISSING_CONTACT}
 XP_FIXTURES = {spec.command("xp-fixture"): spec for spec in CONTRACTS.values() if spec.fixture_xp is not None}
 
 

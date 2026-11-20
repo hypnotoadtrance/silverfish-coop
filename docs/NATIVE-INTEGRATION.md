@@ -60,6 +60,8 @@ Paired runs crossed the Docks–Dry Dock and Dry Dock–Refinery doors in both d
 
 Other paired runs crossed The Wall–Annex, Annex–Artifact Forge, and The Wall–Data Silo doors in both directions. The exact stock doors denied guest and distant-host requests. Regrouped crossings landed at the stock markers and restored the same guest. All original saves kept their hashes.
 
+Separate paired runs took the Southeast Road doors to Factory and Gunsmith and returned from both. Each direction passed the guest-interaction and 15-meter checks, reached the exact stock entrance, and restored the guest. The Gunsmith return used the stock basement floor for the distant-guest test. The original save hashes matched.
+
 The Observatory rest command and stock sleep screen both use the exact SavePoint and stock day cycle. A host and two guests rested for one game hour, left via the CrossRoads exit, and returned to the saved Observatory bed after all three went down. All three recovered full native health. The stock sleep-screen run measured unchanged desktop cursor bounds across 1,305 samples. The rest catalog covers 11 cooked beds, including City's verified neutral bed.
 
 A later headless run repeated this with a host and four guests. All four guests kept separate saves and were refused at the stock bed on both peers. The host confirmed sleep, all five returned to the exact Observatory bed after a wipe, and nine original save hashes matched. Sixty cursor samples taken with all five games active showed the full desktop bounds.

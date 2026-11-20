@@ -29,6 +29,7 @@ def snapshot(verb, *, pawn=HOST, guid=GUID, owner="host", completed=False):
 class MissingContactTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_canonical_exact_sealed_package_can_settle_once(self):
         self.assertEqual(native_wire_board.fixture_selection(BLACK_MARKET, SPEC.quest_id), (SPEC.quest_id,))
+        self.assertIs(board.AUTHORED_APPROACHES[SPEC.command("approach")], SPEC)
         with self.assertRaises(party.RuleError):
             native_wire_board.fixture_selection(OBSERVATORY, SPEC.quest_id)
         self.assertIsNone(SPEC.fixture_xp)
