@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 import uuid
 
-from tools.silverfish import native_guest_consumable, runtime, service
+from tools.silverfish import native_guest_consumable, native_guest_weapon, runtime, service
 
 
 class NativeGuestControlInvitationTests(unittest.IsolatedAsyncioTestCase):
@@ -94,8 +94,10 @@ class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
         self.pawn = "Player_FP_C Guest"
         self.guid = "ABCD" * 8
         self.use = {"sequence": 3, "map": self.area, "pawn": self.pawn, "guid": self.guid, "state": "using"}
+        self.displayed = {"state": "rendered", "sequence": 3, "map": self.area, "pawn": self.pawn, "offset": 0,
+                          "total": 1, "count": 1}
         self.game = {"state": "connected", "map": self.area, "pawns": {"local": {"name": self.pawn}},
-                     "native_guest_inventory_use_view": self.use}
+                     "native_guest_inventory_use_view": self.use, "native_inventory_view": self.displayed}
         self.bridge = SimpleNamespace(input_namespace=uuid.uuid4(), snapshot=Mock(return_value=self.game),
                                       command=AsyncMock(return_value=self.game))
         self.client = service.Client(Mock(), SimpleNamespace(address=("127.0.0.1", 8888)), {"character_id": "guest"},
@@ -103,7 +105,7 @@ class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
         self.client.host_session, self.client.zone_epoch = "session", "zone"
         self.client.gameplay_seen = time.monotonic()
         self.client.last_game = self.game
-        self.page = {"owner": "guest", "offset": 0, "items": [
+        self.page = {"owner": "guest", "offset": 0, "total": 1, "items": [
             {"guid": self.guid, "source": "backpack", "class_path": native_guest_consumable.BANDAGE_CLASS}
         ]}
         self.result = {"native_guest_bandage": {"state": "used", "map": self.area, "guid": self.guid}}
@@ -172,6 +174,77 @@ class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
         await self.client.service_inventory_use(True)
         self.bridge.command.assert_awaited_once_with("native-inventory-view-use-result", "3", self.area, self.guid,
                                                      "refused", timeout=2)
+
+    async def test_existing_open_view_can_request_adjacent_page_for_same_guest(self):
+        self.displayed.update(total=17, count=16)
+        scope = ("session", "zone", 3, self.area, self.pawn)
+        self.client.inventory_view_scope = (*scope, 0)
+        self.bridge.native_inventory_view_requests = Mock(return_value=[(3, "page", self.area, self.pawn, 16)])
+        self.page.update(offset=16, total=17)
+        self.page["items"][0].update(index=16, quantity=1)
+        page_view = dict(self.displayed, offset=16, count=1)
+        self.bridge.command.return_value = dict(self.game, native_inventory_view=page_view)
+        self.client.gameplay_action = AsyncMock(return_value={"native_inventory": self.page})
+        await self.client.service_inventory_view(True)
+        operation = uuid.uuid5(self.bridge.input_namespace, f"session:zone:{self.pawn}:inventory:3:16").hex
+        self.client.gameplay_action.assert_awaited_once_with("native-inventory-list", operation, "16")
+        self.bridge.command.assert_awaited_once_with("native-inventory-view-render", "3", self.area, "16", "17",
+            f"{self.guid}|backpack|16|1|{native_guest_consumable.BANDAGE_CLASS}", timeout=5)
+        self.assertEqual(self.client.inventory_view_scope, (*scope, 16))
+
+        self.bridge.native_inventory_view_requests.return_value = [(3, "page", self.area, self.pawn, 48)]
+        self.client.gameplay_action.reset_mock()
+        self.bridge.command.reset_mock()
+        await self.client.service_inventory_view(True)
+        self.client.gameplay_action.assert_not_awaited()
+        self.bridge.command.assert_awaited_once_with("native-inventory-view-unavailable", "3", self.area, "48", timeout=2)
+
+    async def test_qualified_item_can_be_used_on_second_page_only_while_still_displayed(self):
+        self.displayed.update(offset=16, total=17)
+        self.page.update(offset=16, total=17)
+        for current, accepted in ((dict(self.game, native_inventory_view=dict(self.displayed, offset=0)), False),
+                                  (self.game, True)):
+            with self.subTest(accepted=accepted):
+                self.bridge.snapshot.return_value = current
+                self.client.last_inventory_use = 0
+                self.client.gameplay_action = AsyncMock(side_effect=[{"native_inventory": self.page}, self.result])
+                await self.client.service_inventory_use(True)
+                check = [call("native-inventory-list", self.operation, "16")]
+                if accepted:
+                    check.append(call(native_guest_consumable.ACTION, self.operation, self.guid))
+                self.assertEqual(self.client.gameplay_action.await_args_list, check)
+
+    async def test_qualified_equipment_reads_exact_row_on_current_page(self):
+        self.displayed.update(offset=16, total=17)
+        item_class = sorted(native_guest_weapon.CLASS_PATHS)[0]
+        self.page.update(offset=16, total=17)
+        self.page["items"][0]["class_path"] = item_class
+        self.game["native_guest_inventory_equip_view"] = dict(self.use, state="equipping")
+        self.bridge.native_inventory_equip_requests = Mock(return_value=[(3, self.area, self.pawn, self.guid, item_class)])
+        self.client.gameplay_action = AsyncMock(side_effect=[{"native_inventory": self.page}, {"ok": True}])
+        await self.client.service_inventory_equip(True)
+        operation = uuid.uuid5(self.bridge.input_namespace, f"session:zone:{self.pawn}:inventory-equip:3").hex
+        self.assertEqual(self.client.gameplay_action.await_args_list, [
+            call("native-inventory-list", operation, "16"), call("native-guest-weapon-equip", operation, self.guid),
+        ])
+        self.bridge.command.assert_awaited_once_with("native-inventory-view-equip-result", "3", self.area, self.guid,
+                                                     "equipped", timeout=2)
+
+    def test_stock_open_close_and_valid_page_events_preserve_fragmented_rows(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            bridge = runtime.Bridge(path, None)
+            events = path / "native-inventory-view-events"
+            events.write_text(f"inventory-view\t3\topen\t{self.area}\t{self.pawn}\n"
+                              f"inventory-view\t3\tpage\t{self.area}\t{self.pawn}\t15\n"
+                              f"inventory-view\t3\tpage\t{self.area}\t{self.pawn}\t1", encoding="utf-8")
+            self.assertEqual(bridge.native_inventory_view_requests(), [(3, "open", self.area, self.pawn, 0)])
+            with events.open("a", encoding="utf-8") as stream:
+                stream.write(f"6\ninvalid\ninventory-view\t3\tclosed\t{self.area}\t{self.pawn}\n")
+            self.assertEqual(bridge.native_inventory_view_requests(), [
+                (3, "page", self.area, self.pawn, 16), (3, "closed", self.area, self.pawn, 0),
+            ])
+            self.assertEqual(bridge.native_inventory_view_requests(), [])
 
     def test_status_snapshot_reports_only_valid_inventory_use_rows(self):
         with TemporaryDirectory() as directory:

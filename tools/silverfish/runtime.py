@@ -608,7 +608,7 @@ class Bridge:
                             decoded))
         return results
 
-    def native_inventory_view_requests(self) -> list[tuple[int, bool, str, str]]:
+    def native_inventory_view_requests(self) -> list[tuple[int, str, str, str, int]]:
         try:
             with (self.directory / "native-inventory-view-events").open("rb") as stream:
                 stream.seek(self.inventory_view_offset)
@@ -620,10 +620,23 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) == 5 and fields[0] == "inventory-view" and fields[2] in ("open", "closed")
-                    and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
-                    and 0 < (sequence := int(fields[1])) < 2**53 and len(fields[3]) <= 256 and len(fields[4]) <= 512):
-                events.append((sequence, fields[2] == "open", fields[3], fields[4]))
+            if (len(fields) not in (5, 6) or fields[0] != "inventory-view"
+                    or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
+                    or not 0 < (sequence := int(fields[1])) < 2**53
+                    or not 0 < len(fields[3]) <= 256 or not 0 < len(fields[4]) <= 512):
+                continue
+            event, area, pawn = fields[2:5]
+            offset = 0
+            if event == "page" and len(fields) == 6:
+                number = fields[5]
+                if not number.isascii() or not number.isdigit() or len(number) > 4:
+                    continue
+                offset = int(number)
+                if not native_inventory.valid_page_offset(offset):
+                    continue
+            elif event not in ("open", "closed") or len(fields) != 5:
+                continue
+            events.append((sequence, event, area, pawn, offset))
         return events
 
     def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str]]:

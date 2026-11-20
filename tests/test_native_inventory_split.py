@@ -137,14 +137,17 @@ class StackSplitTests(unittest.IsolatedAsyncioTestCase):
     async def test_overlay_rechecks_exact_visible_selection_before_dispatching_split(self):
         view = {"state": "splitting", "sequence": 18, "map": OBSERVATORY,
                 "pawn": PAWN, "class_path": NINE_MM_BALL.item_path, "guid": GUID, "count": 9}
-        game = {"state": "connected", "map": OBSERVATORY, inventory.SPLIT_VIEW: view, "pawns": {"local": {"name": PAWN}}}
+        displayed = {"state": "rendered", "sequence": 18, "map": OBSERVATORY, "pawn": PAWN, "offset": 16}
+        game = {"state": "connected", "map": OBSERVATORY, inventory.SPLIT_VIEW: view, "pawns": {"local": {"name": PAWN}},
+                "native_inventory_view": displayed}
         item = {"source": "backpack", "guid": GUID, "class_path": NINE_MM_BALL.item_path, "quantity": 9,
                 "stackable": True, "important": False}
-        page = {"native_inventory": {"owner": "guest", "offset": 0, "items": [item]}}
+        page = {"native_inventory": {"owner": "guest", "offset": 16, "total": 17, "items": [item]}}
         result = {inventory.SPLIT_KEY: {"state": "split", "owner": "guest", "map": OBSERVATORY, "source_guid": GUID,
                                       "new_guid": "A" * 32, "class_path": NINE_MM_BALL.item_path, "quantity_before": 9,
                                       "split": 4, "remaining": 5}}
-        for latest, accepted in (({**game, inventory.SPLIT_VIEW: dict(view, state="closed")}, False), (game, True)):
+        for latest, accepted in (({**game, inventory.SPLIT_VIEW: dict(view, state="closed")}, False),
+                                 ({**game, "native_inventory_view": dict(displayed, offset=0)}, False), (game, True)):
             with self.subTest(accepted=accepted):
                 bridge = SimpleNamespace(input_namespace=uuid.uuid4(), snapshot=Mock(return_value=latest),
                                          command=AsyncMock(return_value=game))
@@ -155,6 +158,7 @@ class StackSplitTests(unittest.IsolatedAsyncioTestCase):
                 await inventory.service_split_view(client, True)
                 await inventory.service_split_view(client, True)
                 self.assertEqual(client.gameplay_action.await_count, 2 if accepted else 1)
+                self.assertEqual(client.gameplay_action.await_args_list[0].args[::2], ("native-inventory-list", "16"))
                 if accepted:
                     self.assertEqual(client.gameplay_action.await_args.args[::2], (inventory.SPLIT, f"{GUID}|4|9"))
                 bridge.command.assert_awaited_once_with("native-inventory-view-split-result", "18", OBSERVATORY, GUID,

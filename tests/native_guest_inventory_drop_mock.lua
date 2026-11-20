@@ -4,7 +4,9 @@ os.getenv = function(name)
     if name == "SILVERFISH_COOP_NATIVE_ZONE" or name == "SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"
         or name == "SILVERFISH_COOP_HEADLESS" then return "1" end
 end
-io.open = function() return { write = function() return true end, close = function() return true end } end
+local lines = {}
+io.open = function() return { write = function(_, line) lines[#lines + 1] = line; return true end,
+    close = function() return true end } end
 LoopInGameThreadWithDelay = function() end
 FText = function(message) return { ToString = function() return message end } end
 package.loaded.native_guest_armor = { is_body_path = function() return false end, is_helmet_path = function() return false end }
@@ -87,3 +89,34 @@ assert(not pcall(view.command, {"id", "native-inventory-view-drop-result", "5", 
     fixture, "connected"))
 view.command({"id", "native-inventory-view-drop-result", "5", map, guid, "dropped"}, fixture, "connected")
 assert(stage("drop") == "dropped" and text:ToString():find("Ammo dropped"))
+
+view.clear()
+opened = false
+view.sync(fixture, "connected")
+local first = {"id", "native-inventory-view-render", "5", map, "0", "17"}
+for index = 1, 16 do
+    first[#first + 1] = table.concat({("%032X"):format(index), "backpack", tostring(index - 1), "9", item}, "|")
+end
+view.command(first, fixture, "connected")
+for _ = 1, 15 do key("down") end
+assert(not text:ToString():find("Loading inventory page"))
+key("down")
+assert(lines[#lines] == table.concat({"inventory-view", "5", "page", map, pawn_name, "16"}, "\t"))
+assert(text:ToString():find("Loading inventory page"))
+key("confirm")
+assert(stage("drop") == nil and stage("split") == nil)
+assert(not pcall(view.command, first, fixture, "connected"))
+view.command({"id", "native-inventory-view-render", "5", map, "16", "17", row}, fixture, "connected")
+assert(text:ToString():find("Items 17-17 of 17", 1, true))
+key("drop")
+assert(stage("drop") == "confirming")
+key("back")
+key("up")
+assert(lines[#lines] == table.concat({"inventory-view", "5", "page", map, pawn_name, "0"}, "\t"))
+view.command(first, fixture, "connected")
+assert(text:ToString():find("Items 1-16 of 17", 1, true))
+key("down")
+assert(text:ToString():find("Loading inventory page"))
+key("back")
+assert(lines[#lines] == table.concat({"inventory-view", "5", "closed", map, pawn_name}, "\t"))
+assert(not pcall(view.command, {"id", "native-inventory-view-render", "5", map, "16", "17", row}, fixture, "connected"))

@@ -103,8 +103,8 @@ local function emit_line(path, fields)
     return written and closed
 end
 
-local function emit(current, sequence, open)
-    return emit_line(event_path, {"inventory-view", sequence, open and "open" or "closed", current.map, current.name})
+local function emit(current, sequence, event, offset)
+    return emit_line(event_path, {"inventory-view", sequence, event, current.map, current.name, offset})
 end
 
 local function take(current)
@@ -113,7 +113,10 @@ local function take(current)
     remove_display()
     observation = {context = current, sequence = sequence, state = open and "pending" or "closed"}
     if not can_view(current) then observation.state = "closed" end
-    if not emit(current, sequence, observation.state == "pending") then observation.state = "error" end
+    if observation.state == "pending" then observation.pending_offset = 0 end
+    if not emit(current, sequence, observation.state == "pending" and "open" or "closed") then
+        observation.state = "error"
+    end
     return true
 end
 
@@ -150,7 +153,8 @@ end
 local function page(fields)
     local offset, total = integer(fields[5], max_items), integer(fields[6], max_items)
     local count = #fields - 6
-    if not offset or not total or offset > total or count ~= math.min(page_size, total - offset) then
+    if not offset or not total or offset > total or (offset > 0 and offset == total)
+        or count ~= math.min(page_size, total - offset) then
         error("The authenticated inventory view page did not match its bounds", 0)
     end
     local records, seen, slots = {}, {}, {}
@@ -206,7 +210,9 @@ local function show()
         lines[#lines + 1] = (index == row.selection and "> " or "  ") .. entry.label
     end
     local selected = records[row.selection]
-    if row.drop_state == "confirming" then
+    if row.pending_offset then
+        lines[#lines + 1] = "Loading inventory page. End closes."
+    elseif row.drop_state == "confirming" then
         lines[#lines + 1] = string.format("Drop all %d rounds of 9mm Ball? Home confirms. End cancels.", selected.quantity)
     elseif row.drop_state == "dropping" then
         lines[#lines + 1] = "Ammo drop pending"
@@ -304,14 +310,24 @@ local function choose(current, action)
         elseif ready(current, true) then
             remove_display()
             row.state, row.equip_state, row.use_state, row.split_state, row.drop_state = "closed", nil, nil, nil, nil
-            emit(current, row.sequence, false)
+            row.pending_offset = nil
+            emit(current, row.sequence, "closed")
             return true
         end
-    elseif not row.request_guid and selected then
+    elseif not row.request_guid and not row.pending_offset and selected then
         if action == "up" or action == "down" then
             local direction = action == "up" and -1 or 1
-            row.selection = math.min(#row.records, math.max(1, row.selection + direction))
-            select_item()
+            local selection = row.selection + direction
+            if selection >= 1 and selection <= #row.records then
+                row.selection = selection
+                select_item()
+            else
+                local offset = row.offset + direction * page_size
+                select_item()
+                if offset >= 0 and offset < row.total and emit(current, row.sequence, "page", offset) then
+                    row.pending_offset = offset
+                end
+            end
         elseif action == "drop" and selected.droppable then
             select_item()
             row.drop_state, row.confirm_guid = "confirming", selected.guid
@@ -435,21 +451,29 @@ function inventory_view.command(fields, state, phase)
         show()
         return "verified inventory split result displayed"
     end
-    if observation.state ~= "pending" then
-        error("The authenticated inventory view is already displayed", 0)
+    local pending_offset = observation.pending_offset
+    if not pending_offset or observation.state ~= "pending" and observation.state ~= "rendered" then
+        error("No inventory page is awaiting an authenticated response", 0)
     end
-    if operation == "native-inventory-view-unavailable" and #fields == 4 then
-        observation.state = "error"
+    if operation == "native-inventory-view-unavailable" and #fields == 5
+        and integer(fields[5], max_items) == pending_offset then
+        observation.pending_offset = nil
+        if observation.state == "pending" then observation.state = "error" else show() end
         return "authenticated stock inventory view unavailable"
     end
     if operation ~= "native-inventory-view-render" or #fields < 6 or #fields > 6 + page_size then
         error("The authenticated stock inventory view response is incomplete", 0)
     end
     local offset, total, records = page(fields)
+    if offset ~= pending_offset then error("The inventory page response does not match the requested offset", 0) end
+    local previous = observation.offset
+    observation.pending_offset = nil
     observation.offset, observation.total, observation.count, observation.records = offset, total, #records, records
-    observation.selection = #records > 0 and 1 or 0
+    observation.selection = previous and offset < previous and #records or (#records > 0 and 1 or 0)
     select_item()
-    local ok, failure = pcall(render, current)
+    local ok, failure
+    if observation.state == "rendered" then ok, failure = pcall(show)
+    else ok, failure = pcall(render, current) end
     observation.state = ok and "rendered" or "error"
     if not ok then
         remove_display()

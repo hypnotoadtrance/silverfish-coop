@@ -89,16 +89,17 @@ async def service_view(client, active: bool) -> None:
                 or type(count) is not int or not 1 <= count <= record.MAX_QUANTITY):
             raise ValueError("The stock inventory drop confirmation expired")
         owner = client.invite["character_id"]
-        page = (await client.gameplay_action("native-inventory-list", operation, "0"))["native_inventory"]
-        if (page["owner"] != owner or page["offset"] != 0
-                or not any(droppable(row) and (row["guid"], row["quantity"]) == (guid, count) for row in page["items"])):
+        offset = native_inventory.displayed_offset(client.last_game, sequence, area, pawn)
+        if offset is None:
+            raise ValueError("The stock inventory drop confirmation expired")
+        page = await native_inventory.read_view_page(client, operation, offset)
+        if not any(droppable(row) and (row["guid"], row["quantity"]) == (guid, count) for row in page["items"]):
             raise ValueError("The selected full stack is no longer on your authenticated backpack page")
         current = client.bridge.snapshot() or {}
         if (view_identity(client, sequence, area, pawn) != identity or not client.transport.game_access
                 or client.suspended or client.needs_travel or client.server_transitioning
-                or client.inventory_drop_scope != identity or current.get("state") != "connected"
-                or current.get("map") != area or current.get(record.VIEW) != view
-                or current.get("pawns", {}).get("local", {}).get("name") != pawn):
+                or client.inventory_drop_scope != identity or current.get(record.VIEW) != view
+                or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
             raise ValueError("The stock inventory drop confirmation expired")
         receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{count}"))[RESULT]
         if (tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map")) != (

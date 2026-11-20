@@ -3997,6 +3997,7 @@ class Client:
         self.last_inventory_use = 0
         self.last_inventory_split = 0
         self.last_inventory_drop = 0
+        self.inventory_view_scope = None
         self.inventory_drop_scope = None
         self.last_crate_intent = 0
         self.last_broker_intent = 0
@@ -4325,24 +4326,36 @@ class Client:
 
     async def service_inventory_view(self, active: bool) -> None:
         requests = self.bridge.native_inventory_view_requests()
-        if not requests or not active or self.stopping or not self.host_session:
+        if not active or self.stopping or not self.host_session or not self.zone_epoch:
+            self.inventory_view_scope = self.inventory_drop_scope = None
             return
-        sequence, opened, area, pawn = requests[-1]
-        self.inventory_drop_scope = None
-        if (not opened or area != self.last_game.get("map")
+        if not requests:
+            return
+        sequence, event, area, pawn, offset = requests[-1]
+        if (area != self.last_game.get("map")
                 or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
+        scope = self.host_session, self.zone_epoch, sequence, area, pawn
+        if event == "page":
+            previous = native_inventory.displayed_offset(self.last_game, sequence, area, pawn)
+            if (previous is None or self.inventory_view_scope != (*scope, previous)
+                    or abs(offset - previous) != native_inventory.PAGE_SIZE):
+                with contextlib.suppress(OSError, RuntimeError, ValueError):
+                    self.last_game = await self.bridge.command("native-inventory-view-unavailable", str(sequence), area,
+                                                               str(offset), timeout=2)
+                return
+        else:
+            self.inventory_view_scope = self.inventory_drop_scope = None
+            if event != "open":
+                return
         identity = native_guest_drop.view_identity(self, sequence, area, pawn)
         operation = uuid.uuid5(self.bridge.input_namespace,
-                               f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}").hex
+                               f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}:{offset}").hex
         try:
-            result = await self.gameplay_action("native-inventory-list", operation, "0")
-            page = result["native_inventory"]
+            page = await native_inventory.read_view_page(self, operation, offset)
             items, total = page["items"], page["total"]
-            if (page["owner"] != self.invite["character_id"] or page["offset"] != 0
-                    or type(total) is not int or not 0 <= total <= native_inventory.MAX_ITEMS
-                    or type(items) is not list or len(items) != min(native_inventory.PAGE_SIZE, total)):
-                raise ValueError("The host did not return this guest's exact stock inventory page")
+            if native_guest_drop.view_identity(self, sequence, area, pawn) != identity:
+                raise ValueError("The inventory page request expired")
             splits = (self.gameplay.get(native_inventory.SPLIT_CAPABILITY) == 1
                       and self.last_game.get("native_inventory_split_view_capability") is True)
             drops = (self.gameplay.get(native_guest_drop_record.CAPABILITY) == 1
@@ -4356,20 +4369,21 @@ class Client:
                     options.append("drop")
                 entry = f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
                 entries.append(entry + ("|" + ",".join(options) if options else ""))
-            snapshot = await self.bridge.command("native-inventory-view-render", str(sequence), area, "0",
+            snapshot = await self.bridge.command("native-inventory-view-render", str(sequence), area, str(offset),
                                                  str(total), *entries, timeout=5)
             proof = snapshot.get("native_inventory_view", {})
             if proof != {"state": "rendered", "sequence": sequence, "map": area, "pawn": pawn,
-                         "offset": 0, "total": total, "count": len(items)}:
+                         "offset": offset, "total": total, "count": len(items)}:
                 raise RuntimeError("The stock inventory overlay did not verify the authenticated page")
             self.last_game = snapshot
-            if drops:
-                self.inventory_drop_scope = identity
+            self.inventory_view_scope = (*scope, offset)
+            self.inventory_drop_scope = identity if drops else None
             self.control.event("native_guest_inventory_rendered", operation_id=operation, **proof)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_inventory_view_rejected", operation_id=operation, reason=str(error))
             with contextlib.suppress(OSError, RuntimeError, ValueError):
-                await self.bridge.command("native-inventory-view-unavailable", str(sequence), area, timeout=2)
+                self.last_game = await self.bridge.command("native-inventory-view-unavailable", str(sequence), area,
+                                                           str(offset), timeout=2)
 
     async def service_inventory_equip(self, active: bool) -> None:
         entries = self.bridge.native_inventory_equip_requests()
@@ -4383,16 +4397,22 @@ class Client:
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
                 or not native_gold.valid_guid(guid) or not (armor or item_class in native_guest_weapon.CLASS_PATHS)):
             return
-        identifier = f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory-equip:{sequence}"
+        epoch = self.host_session, self.zone_epoch
+        identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
         operation = uuid.uuid5(self.bridge.input_namespace, identifier).hex
         outcome = "refused"
         try:
-            inspected = await self.gameplay_action("native-inventory-list", operation, "0")
-            page = inspected["native_inventory"]
-            if (page["owner"] != self.invite["character_id"] or page["offset"] != 0
-                    or not any(row["guid"] == guid and row["class_path"] == item_class
-                               and (not armor or row["source"] == "backpack") for row in page["items"])):
+            offset = native_inventory.displayed_offset(self.last_game, sequence, area, pawn)
+            if offset is None:
+                raise ValueError("The inventory equip confirmation expired")
+            page = await native_inventory.read_view_page(self, operation, offset)
+            if not any(row["guid"] == guid and row["class_path"] == item_class
+                       and (not armor or row["source"] == "backpack") for row in page["items"]):
                 raise ValueError("The selected stock item is no longer on the authenticated inventory page")
+            current = self.bridge.snapshot() or {}
+            if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
+                    or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
+                raise ValueError("The inventory equip confirmation expired")
             action = armor or "native-guest-weapon-equip"
             equipped = await self.gameplay_action(action, operation, guid)
             key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
@@ -4422,19 +4442,18 @@ class Client:
         operation = uuid.uuid5(self.bridge.input_namespace, f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-use:{sequence}").hex
         outcome = "refused"
         try:
-            inspected = await self.gameplay_action("native-inventory-list", operation, "0")
-            page = inspected["native_inventory"]
-            if page["owner"] != self.invite["character_id"] or page["offset"] != 0:
-                raise ValueError("The stock item is no longer on the authenticated inventory page")
+            offset = native_inventory.displayed_offset(self.last_game, sequence, area, pawn)
+            if offset is None:
+                raise ValueError("The inventory item confirmation expired")
+            page = await native_inventory.read_view_page(self, operation, offset)
             items = [row for row in page["items"] if row["guid"] == guid and row["source"] == "backpack"]
             item_class = items[0]["class_path"] if len(items) == 1 else None
             action = native_guest_consumable.COMMANDS.get(item_class)
             if not action or action in native_guest_consumable.MEALS and not self.invite.get("native_guest_mre"):
                 raise ValueError("The selected stock item is not available to use")
             current = self.bridge.snapshot() or {}
-            if ((self.host_session, self.zone_epoch) != epoch or current.get("state") != "connected"
-                    or current.get("map") != area or current.get("native_guest_inventory_use_view") != view
-                    or current.get("pawns", {}).get("local", {}).get("name") != pawn):
+            if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_use_view") != view
+                    or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
                 raise ValueError("The inventory item confirmation expired")
             consumed = await self.gameplay_action(action, operation, guid)
             report = consumed[native_guest_consumable.RESULT[action]]

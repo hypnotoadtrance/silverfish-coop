@@ -17,7 +17,8 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         view = record.parse_view(
             [record.VIEW_ROW, "5", MAP, PAWN, GUID, record.ITEM, phase, "9"], "connected", MAP,
         )
-        game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}, record.VIEW: view}
+        game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}, record.VIEW: view,
+                "native_inventory_view": {"state": "rendered", "sequence": 5, "map": MAP, "pawn": PAWN, "offset": 16}}
         stack = SimpleNamespace(admission="a" * 32)
         client = SimpleNamespace(
             last_game=game, zone_epoch="b" * 32, host_session="c" * 32, stack_drop_projection=stack,
@@ -34,7 +35,7 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
                 if rebind_during_read:
                     stack.admission = "d" * 32
                 return {"native_inventory": {
-                    "owner": "exact-owner", "offset": 0, "items": [
+                    "owner": "exact-owner", "offset": 16, "total": 17, "items": [
                         dict(guid=GUID, class_path=record.ITEM, quantity=snapshot_count, source="backpack", stackable=True,
                              important=False),
                     ],
@@ -51,7 +52,7 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         client.last_game[record.VIEW]["state"] = "dropping"
         await drop.service_view(client, True)
         preflight, mutation = client.gameplay_action.await_args_list
-        self.assertEqual(preflight.args, ("native-inventory-list", mutation.args[1], "0"))
+        self.assertEqual(preflight.args, ("native-inventory-list", mutation.args[1], "16"))
         self.assertEqual((mutation.args[0], mutation.args[-1]), (drop.DROP, f"{GUID}|9"))
         client.bridge.command.assert_awaited_once_with(record.VIEW_RESULT, "5", MAP, GUID, "dropped", timeout=2)
         await drop.service_view(client, True)
