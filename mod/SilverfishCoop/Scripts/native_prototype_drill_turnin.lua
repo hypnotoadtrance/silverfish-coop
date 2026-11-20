@@ -74,7 +74,7 @@ local function scope(state, phase)
     local name = state.map and state.map:match("/([^/]+)$")
     local driver = valid(state.world) and state.world.NetDriver
     if not enabled or not route or route.expanded and not expanded or not name or phase ~= "hosting"
-        or state.listening ~= true or state.server ~= false or not valid(driver) or valid(driver.ServerConnection)
+        or not state.listening or state.server or not valid(driver) or valid(driver.ServerConnection)
         or not same(driver.World, state.world) or state.world:GetFullName() ~= "World " .. state.map .. "." .. name then
         refuse("listen_scope_unavailable")
     end

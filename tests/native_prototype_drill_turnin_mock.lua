@@ -211,6 +211,9 @@ local function refuses(reason, action, ...)
 end
 
 reset()
+state.server = true
+refuses("native_prototype_drill_listen_scope_unavailable", "preflight", who)
+state.server = nil
 assert(command("preflight", who) and #events == 0)
 local before = rows()
 assert(#before == 4 and before[1].n == 23 and before[1][7] == guid(1) and before[1][8] == "guest")
