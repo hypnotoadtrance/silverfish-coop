@@ -33,13 +33,34 @@ namespace
     using Address = std::uintptr_t;
     using Clock = std::chrono::steady_clock;
 
-    constexpr auto world_package = STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P");
-    constexpr auto world_path = STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P");
-    constexpr auto spawner_path = STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Quest_AssassinTargetSpawn_BP_C_1");
+    struct Profile
+    {
+        const U::TCHAR* world_package;
+        const U::TCHAR* world;
+        const U::TCHAR* spawner;
+        const U::TCHAR* target;
+        const U::TCHAR* quest;
+        const U::TCHAR* death_flag;
+        std::string_view unverified_death;
+    };
+    constexpr Profile lenny{
+        STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Quest_AssassinTargetSpawn_BP_C_1"),
+        STR("/Game/Classes/NPCs/NPC_Characters/NPC_Lenny.NPC_Lenny_C"),
+        STR("Asn_Lenny_01"), STR("LennyDead"), "mutation_unverified_stock_lenny_death",
+    };
+    constexpr Profile spratt{
+        STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+        STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.Quest_AssassinTargetSpawn_BP_C_0"),
+        STR("/Game/Classes/NPCs/NPC_Characters/NPC_Spratt.NPC_Spratt_C"),
+        STR("Asn_Spratt"), nullptr, "mutation_unverified_stock_spratt_death",
+    };
+    constexpr std::array profiles{&lenny, &spratt};
     constexpr auto spawner_type = STR("/Game/Classes/ScriptingActors/Quest_AssassinTargetSpawn_BP.Quest_AssassinTargetSpawn_BP_C");
     constexpr auto pawn_type = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_type = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
-    constexpr auto target_type = STR("/Game/Classes/NPCs/NPC_Characters/NPC_Lenny.NPC_Lenny_C");
     constexpr auto npc_type = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C");
     constexpr auto projectile_type = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto instance_type = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
@@ -131,6 +152,7 @@ namespace
     {
         U::FWeakObjectPtr driver{}, connection{};
         const U::FWorldContext* context{};
+        const Profile* profile{};
     } pending;
     struct Guest { Address pawn{}, save{}; };
     struct Progress { int step{absent}, flag{}, cash{}, xp{}; };
@@ -142,9 +164,10 @@ namespace
     };
     struct Scope
     {
+        const Profile* profile{};
         U::FWeakObjectPtr world{}, instance{}, driver{}, host{}, save{}, spawner{}, target{};
-        U::UFunction *deal{}, *resolve{}, *calc{};
-        U::FObjectProperty* instigator{};
+        U::UFunction *deal{}, *resolve{}, *calc{}, *target_killed{};
+        U::FObjectProperty *instigator{}, *event_target{};
         U::FDoubleProperty* health{};
         U::UScriptStruct* quest_struct{};
         U::FIntProperty* step{};
@@ -156,6 +179,7 @@ namespace
         Progress before{}, after{};
         std::string actor{};
         std::string_view status{"watching"};
+        int target_killed_calls{};
         bool observed{}, replicated{};
     } scope;
 
@@ -184,9 +208,9 @@ namespace
         return live(driver) && live(connection) && type && connection->IsA(type) && object(connection, STR("Driver")) == driver;
     }
 
-    Network network(U::UWorld* world, bool allow_pending = false)
+    Network network(U::UWorld* world, const Profile& profile, bool allow_pending = false)
     {
-        if (!live(world) || world->GetPathName() != world_path) return {};
+        if (!live(world) || world->GetPathName() != profile.world) return {};
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!exact(instance, instance_type)) return {};
         auto* driver = object(world, STR("NetDriver"));
@@ -197,7 +221,7 @@ namespace
             if (server) return {};
             if (!allow_pending || driver != pending.driver.Get()) return {world, instance, driver, false};
         }
-        if (!allow_pending || !pending.context) return {};
+        if (!allow_pending || !pending.context || pending.profile != &profile) return {};
         auto* pending_driver = pending.driver.Get();
         if ((driver && driver != pending_driver) || !server_connection(pending.connection.Get(), pending_driver)) return {};
         return {world, instance, pending_driver, true};
@@ -209,28 +233,42 @@ namespace
             static_cast<U::AActor*>(actor)->GetLevel() == object(world, STR("PersistentLevel"));
     }
 
-    bool spawner_recipe(U::UObject* spawner, U::UWorld* world)
+    bool spawner_recipe(U::UObject* spawner, U::UWorld* world, const Profile& profile)
     {
-        if (!exact(spawner, spawner_type) || spawner->GetPathName() != spawner_path || !in_level(spawner, world)) return false;
+        if (!exact(spawner, spawner_type) || spawner->GetPathName() != profile.spawner || !in_level(spawner, world)) return false;
         auto* class_property = field<U::FClassProperty>(spawner, STR("AI_Class"));
-        auto* npc = find<U::UClass>(target_type);
+        auto* npc = find<U::UClass>(profile.target);
         auto* arrow = object(spawner, STR("Arrow"));
         auto* quest = field<U::FStructProperty>(spawner, STR("Quest"));
         auto* row_type = quest ? quest->GetStruct().Get() : nullptr;
         auto* row = field<U::FNameProperty>(row_type, STR("RowName"));
         auto* table = field<U::FObjectProperty>(row_type, STR("DataTable"));
         const auto row_data = quest ? quest->ContainerPtrToValuePtr<void>(spawner) : nullptr;
-        const U::FName wanted{STR("Asn_Lenny_01"), U::FNAME_Find};
-        const U::FName dead{STR("LennyDead"), U::FNAME_Find};
+        const U::FName wanted{profile.quest, U::FNAME_Find};
+        const auto dead = profile.death_flag ? U::FName{profile.death_flag, U::FNAME_Find} : U::FName{};
+        if (&profile == &spratt)
+        {
+            const auto empty_array = [spawner](const U::TCHAR* name) {
+                auto* property = field<U::FArrayProperty>(spawner, name);
+                return property && U::FScriptArrayHelper(property, property->ContainerPtrToValuePtr<void>(spawner)).Num() == 0;
+            };
+            if (!empty_array(STR("ActorsToActivate_OnSpawn")) || !empty_array(STR("ActorsToActivate_OnKill")) ||
+                !empty_array(STR("SquadMembers_Class")) ||
+                !equals<U::FBoolProperty>(spawner, STR("Clear_NearAnomalies"), true) ||
+                !equals<U::FBoolProperty>(spawner, STR("No Collision Fail"), true)) return false;
+        }
         return class_property && npc && class_property->GetObjectPropertyValue(class_property->ContainerPtrToValuePtr<void>(spawner)) == npc &&
             exact(arrow, STR("/Script/Engine.ArrowComponent")) && arrow->GetOuterPrivate() == spawner &&
-            row_data && row && table && !wanted.IsNone() && !dead.IsNone() && row->GetPropertyValueInContainer(row_data) == wanted &&
+            row_data && row && table && !wanted.IsNone() && (!profile.death_flag || !dead.IsNone()) &&
+            row->GetPropertyValueInContainer(row_data) == wanted &&
             table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row_data)) == find<U::UObject>(table_path) &&
             equals<U::FIntProperty>(spawner, STR("SpawnOn_Step"), 1) &&
             equals<U::FIntProperty>(spawner, STR("AddStepsOnKill"), 1) &&
             equals<U::FBoolProperty>(spawner, STR("Spawn_BeforeQuest"), false) &&
             map_member<U::FNameProperty, U::FIntProperty>(spawner, STR("AddFlags_OnDeath"), dead,
-                [](auto* value, const void* data, int size) { return size == 1 && data && value->GetPropertyValue(data) == 1; });
+                [&](auto* value, const void* data, int size) {
+                    return profile.death_flag ? size == 1 && data && value->GetPropertyValue(data) == 1 : size == 0;
+                });
     }
 
     U::UFunction* script(U::UClass* type, const U::TCHAR* name, int args)
@@ -242,8 +280,9 @@ namespace
 
     bool current(const Scope& candidate)
     {
+        if (!candidate.profile) return false;
         auto* world = static_cast<U::UWorld*>(candidate.world.Get());
-        const auto net = network(world);
+        const auto net = network(world, *candidate.profile);
         auto* host = candidate.host.Get();
         auto* save = candidate.save.Get();
         return net.world && !net.client && net.instance == candidate.instance.Get() && net.driver == candidate.driver.Get() &&
@@ -267,7 +306,8 @@ namespace
                 if (property->GetStruct().Get() != candidate.quest_struct) return false;
                 result.step = data ? candidate.step->GetPropertyValueInContainer(data) : absent;
                 return !data || result.step != absent;
-            }) && flag(candidate.flag, result.flag) && flag(candidate.cash, result.cash) && flag(candidate.xp, result.xp);
+            }) && (candidate.flag.IsNone() || flag(candidate.flag, result.flag)) &&
+            flag(candidate.cash, result.cash) && flag(candidate.xp, result.xp);
     }
 
     bool schema(Scope& next, U::UObject* target)
@@ -281,12 +321,22 @@ namespace
         next.health = field<U::FDoubleProperty>(target, STR("Health"));
         next.quest_struct = find<U::UScriptStruct>(quest_type);
         next.step = field<U::FIntProperty>(next.quest_struct, quest_step);
-        next.quest = U::FName{STR("Asn_Lenny_01"), U::FNAME_Find};
-        next.flag = U::FName{STR("LennyDead"), U::FNAME_Find};
+        next.quest = U::FName{next.profile->quest, U::FNAME_Find};
+        if (next.profile->death_flag) next.flag = U::FName{next.profile->death_flag, U::FNAME_Find};
         next.cash = U::FName{STR("Player_Cash"), U::FNAME_Find};
         next.xp = U::FName{STR("Player_Xp"), U::FNAME_Find};
+        if (next.profile == &spratt)
+        {
+            next.target_killed = script(next.spawner.Get()->GetClassPrivate(), STR("Event_Target_Killed"), 1);
+            next.event_target = field<U::FObjectProperty>(next.target_killed, STR("NPC_Ref"));
+            if (!next.target_killed || next.target_killed->GetParmsSize() != sizeof(void*) || !next.event_target ||
+                next.event_target->GetOffset_Internal() != 0 || next.event_target->GetPropertyClass().Get() != base ||
+                !next.event_target->HasAnyPropertyFlags(U::CPF_Parm) ||
+                next.event_target->HasAnyPropertyFlags(U::CPF_OutParm)) return false;
+        }
         return base && target->IsA(base) && next.deal && next.resolve && next.calc && next.instigator && next.health &&
-            next.step && !next.quest.IsNone() && !next.flag.IsNone() && !next.cash.IsNone() && !next.xp.IsNone() &&
+            next.step && !next.quest.IsNone() && (!next.profile->death_flag || !next.flag.IsNone()) &&
+            !next.cash.IsNone() && !next.xp.IsNone() &&
             target->GetFunctionByNameInChain(U::FName{STR("ResolveDeath")}) == next.resolve &&
             target->GetFunctionByNameInChain(U::FName{STR("DealDamage")}) == next.deal &&
             next.instigator->HasAnyPropertyFlags(U::CPF_Parm) && !next.instigator->HasAnyPropertyFlags(U::CPF_OutParm) &&
@@ -339,19 +389,26 @@ namespace
         if (name == begin)
         {
             static const U::FName stock_spawner{STR("Quest_AssassinTargetSpawn_BP_C")};
-            if (type->GetFName() != stock_spawner || script(receiver->GetClassPrivate(), STR("ReceiveBeginPlay"), 0) != fn ||
-                receiver->GetPathName() != spawner_path) return;
-            const auto net = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-            if (net.world && net.client && spawner_recipe(receiver, net.world)) call.PreventOriginalFunctionCall();
+            if (type->GetFName() != stock_spawner || script(receiver->GetClassPrivate(), STR("ReceiveBeginPlay"), 0) != fn) return;
+            const auto path = receiver->GetPathName();
+            for (const auto* profile : profiles)
+            {
+                if (path != profile->spawner) continue;
+                const auto net = network(static_cast<U::AActor*>(receiver)->GetWorld(), *profile, true);
+                if (net.world && net.client && spawner_recipe(receiver, net.world, *profile)) call.PreventOriginalFunctionCall();
+                return;
+            }
         }
         else if (name == initialize || name == perception)
         {
-            static const U::FName lenny{STR("NPC_Lenny_C")};
-            if (receiver->GetClassPrivate()->GetFName() != lenny || !exact(receiver, target_type) ||
+            static const U::FName lenny_name{STR("NPC_Lenny_C")}, spratt_name{STR("NPC_Spratt_C")};
+            const auto actor_name = receiver->GetClassPrivate()->GetFName();
+            const auto* profile = actor_name == lenny_name ? &lenny : actor_name == spratt_name ? &spratt : nullptr;
+            if (!profile || !exact(receiver, profile->target) ||
                 !equals<U::FByteProperty>(receiver, STR("Role"), 1) ||
                 receiver->GetFunctionByNameInChain(name) != fn || fn->GetReturnProperty() ||
                 fn->GetOuterPrivate() != find<U::UClass>(npc_type)) return;
-            const auto net = network(static_cast<U::AActor*>(receiver)->GetWorld());
+            const auto net = network(static_cast<U::AActor*>(receiver)->GetWorld(), *profile);
             if (net.world && net.client && in_level(receiver, net.world)) call.PreventOriginalFunctionCall();
         }
     }
@@ -384,9 +441,10 @@ namespace
     void before(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         client_guard(call, receiver, frame.Node());
-        if (!available() || !receiver || receiver != scope.target.Get() || frame.Object() != receiver ||
+        if (!available() || !receiver || frame.Object() != receiver ||
             call.OriginalFunctionCallPrevented() || scope.observed || Clock::now() >= scope.until) return;
         auto* node = frame.Node();
+        if (receiver != scope.target.Get()) return;
         if ((node != scope.deal && node != scope.resolve) || !current(scope) ||
             object(scope.spawner.Get(), STR("TargetNPC")) != receiver || !authority(receiver, scope.world.Get())) return;
         const double hp = scope.health->GetPropertyValueInContainer(receiver);
@@ -399,6 +457,7 @@ namespace
         else if (node == scope.resolve && !scope.death_frame && hp <= 0 && progress(scope, scope.before))
         {
             scope.death_frame = &frame;
+            scope.target_killed_calls = 0;
             auto* last = object(receiver, STR("LastDamagedMe"));
             if (last && scope.damage_frame && last == scope.current_shot.pawn.Get()) scope.shooter = scope.current_shot;
             else if (last && last == scope.lethal.pawn.Get()) scope.shooter = scope.lethal;
@@ -420,13 +479,15 @@ namespace
         scope.death_frame = nullptr;
         if (call.OriginalFunctionCallPrevented()) return;
         scope.observed = true;
-        scope.status = "mutation_unverified_stock_lenny_death";
+        scope.status = scope.profile->unverified_death;
         if (!current(scope) || !progress(scope, scope.after) || !equals<U::FBoolProperty>(receiver, STR("Alive"), false) ||
             scope.after.cash != scope.before.cash || scope.after.xp != scope.before.xp) return;
-        if (scope.before.step == 1 && scope.before.flag == 0 && scope.after.step == 2 && scope.after.flag == 1)
+        const bool stock_handler = scope.profile == &spratt ? scope.target_killed_calls == 1 : scope.after.flag == 1;
+        if (scope.before.step == 1 && scope.before.flag == 0 && scope.after.step == 2 && stock_handler)
             scope.status = "stock_objective_verified";
     }
 
+    template<const Profile& profile>
     int watch(const Lua& lua)
     {
         const auto argc = lua.get_stack_size();
@@ -443,9 +504,12 @@ namespace
             lua.set_string(diagnostic);
             return 1;
         };
-        auto* world = find<U::UWorld>(world_path);
-        const auto net = network(world);
-        if (!net.world || net.client) return respond("stock_lenny_scope_unqualified");
+        const auto refuse = [&](std::string_view lenny_reason, std::string_view spratt_reason) {
+            return respond(&profile == &spratt ? spratt_reason : lenny_reason);
+        };
+        auto* world = find<U::UWorld>(profile.world);
+        const auto net = network(world, profile);
+        if (!net.world || net.client) return refuse("stock_lenny_scope_unqualified", "stock_spratt_scope_unqualified");
         auto* save = object(net.instance, STR("SaveSlot_Ref"));
         auto* host = object(net.instance, STR("As Player FP"));
         auto* controller = object(host, STR("Controller"));
@@ -456,23 +520,24 @@ namespace
             !exact(controller, controller_type) || !authority(controller, world) ||
             object(controller, STR("Pawn")) != host || !live(player) || !local_type || !player->IsA(local_type) ||
             object(player, STR("PlayerController")) != controller)
-            return respond("stock_lenny_scope_unqualified");
+            return refuse("stock_lenny_scope_unqualified", "stock_spratt_scope_unqualified");
 
-        if (scope.host.Get() != host || scope.save.Get() != save || !current(scope))
+        if (scope.profile != &profile || scope.host.Get() != host || scope.save.Get() != save || !current(scope))
         {
             scope = {};
-            auto* spawner = find<U::UObject>(spawner_path);
-            if (!spawner_recipe(spawner, world) || !authority(spawner, world) ||
+            auto* spawner = find<U::UObject>(profile.spawner);
+            if (!spawner_recipe(spawner, world, profile) || !authority(spawner, world) ||
                 script(spawner->GetClassPrivate(), STR("Event_Target_Killed"), 1) == nullptr)
-                return respond("stock_lenny_spawner_unqualified");
+                return refuse("stock_lenny_spawner_unqualified", "stock_spratt_spawner_unqualified");
             auto* target = object(spawner, STR("TargetNPC"));
-            if (!live(target)) return respond("stock_lenny_target_unavailable");
-            if (!exact(target, target_type) || !authority(target, world) || !in_level(target, world) ||
+            if (!live(target)) return refuse("stock_lenny_target_unavailable", "stock_spratt_target_unavailable");
+            if (!exact(target, profile.target) || !authority(target, world) || !in_level(target, world) ||
                 !equals<U::FDoubleProperty>(target, STR("Max_Health"), 300.0) ||
                 !equals<U::FBoolProperty>(target, STR("Alive"), true) ||
                 object(spawner, STR("As Game Instance FP")) != net.instance)
-                return respond("stock_lenny_target_unqualified");
+                return refuse("stock_lenny_target_unqualified", "stock_spratt_target_unqualified");
             Scope next;
+            next.profile = &profile;
             next.world = world;
             next.instance = net.instance;
             next.driver = net.driver;
@@ -480,10 +545,10 @@ namespace
             next.save = save;
             next.spawner = spawner;
             next.target = target;
-            if (!schema(next, target)) return respond("stock_lenny_target_schema_unqualified");
+            if (!schema(next, target)) return refuse("stock_lenny_target_schema_unqualified", "stock_spratt_target_schema_unqualified");
             Progress initial;
             if (!progress(next, initial) || initial.step != 1 || initial.flag != 0)
-                return respond("stock_lenny_stock_progress_unqualified");
+                return refuse("stock_lenny_stock_progress_unqualified", "stock_spratt_stock_progress_unqualified");
             next.actor = RC::to_utf8_string(target->GetFullName());
             next.replicated = publish(target);
             scope = std::move(next);
@@ -515,12 +580,20 @@ namespace
         lua.set_string(scope.shooter.shot.empty() ? "-" : scope.shooter.shot);
         if (auto* target = scope.target.Get(); live(target)) lua.set_number(scope.health->GetPropertyValueInContainer(target));
         else lua.set_string("-");
+        if (&profile == &spratt)
+        {
+            stock(scope.before.cash);
+            stock(scope.after.cash);
+            stock(scope.target_killed_calls);
+            return 16;
+        }
         return 13;
     }
 
+    template<const Profile& profile>
     int clear(const Lua&)
     {
-        if (U::IsInGameThreadRaw()) scope = {};
+        if (U::IsInGameThreadRaw() && scope.profile == &profile) scope = {};
         return 0;
     }
 }
@@ -536,8 +609,14 @@ namespace silverfish::native_lenny_quest
         callbacks[1] = H::RegisterProcessLocalScriptFunctionPostCallback(
             after, {false, false, owner, STR("Verify exact stock Lenny objective")});
         callbacks[2] = H::RegisterProcessEventPreCallback(
-            [](Iteration& call, U::UObject* actor, U::UFunction* fn, void*) { client_guard(call, actor, fn); },
-            {false, false, owner, STR("Guard exact stock Lenny client birth")});
+            [](Iteration& call, U::UObject* actor, U::UFunction* fn, void* arguments) {
+                client_guard(call, actor, fn);
+                if (available() && scope.profile == &spratt && scope.death_frame && arguments &&
+                    actor == scope.spawner.Get() && fn == scope.target_killed && !call.OriginalFunctionCallPrevented() &&
+                    scope.event_target->GetObjectPropertyValue(scope.event_target->ContainerPtrToValuePtr<void>(arguments))
+                        == scope.target.Get()) ++scope.target_killed_calls;
+            },
+            {false, false, owner, STR("Guard stock assassination client birth and observe Spratt's exact callback")});
         callbacks[3] = H::RegisterLoadMapPreCallback(
             [](H::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
                 U::FURL url, U::UPendingNetGame* game, U::FString&) {
@@ -545,18 +624,21 @@ namespace silverfish::native_lenny_quest
                 pending = {};
                 if (!game || url.Map.IsEmpty()) return;
                 const std::wstring_view package{*url.Map};
-                if (package != world_package && package != world_path) return;
+                const Profile* profile = nullptr;
+                for (const auto* candidate : profiles)
+                    if (package == candidate->world_package || package == candidate->world) profile = candidate;
+                if (!profile) return;
                 auto* object_game = reinterpret_cast<U::UObject*>(game);
                 if (!exact(object_game, STR("/Script/Engine.PendingNetGame"))) return;
                 auto* driver = object(object_game, STR("NetDriver"));
                 auto* server = object(driver, STR("ServerConnection"));
-                if (server_connection(server, driver)) pending = {driver, server, &context};
-            }, {false, true, owner, STR("Scope the early Rail Yard client load")});
+                if (server_connection(server, driver)) pending = {driver, server, &context, profile};
+            }, {false, true, owner, STR("Scope the early stock assassination client load")});
         callbacks[4] = H::RegisterLoadMapPostCallback(
             [](H::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
                 U::FURL, U::UPendingNetGame*, U::FString&) {
                 if (available() && pending.context == &context) pending = {};
-            }, {false, true, owner, STR("Clear the early Rail Yard client load scope")});
+            }, {false, true, owner, STR("Clear the early stock assassination client load scope")});
         for (const auto callback : callbacks)
         {
             if (callback != H::ERROR_ID) continue;
@@ -579,7 +661,9 @@ namespace silverfish::native_lenny_quest
 
     void register_lua(Lua& lua)
     {
-        lua.register_function("SilverfishWatchLennyQuest", watch);
-        lua.register_function("SilverfishClearLennyQuest", clear);
+        lua.register_function("SilverfishWatchLennyQuest", watch<lenny>);
+        lua.register_function("SilverfishClearLennyQuest", clear<lenny>);
+        lua.register_function("SilverfishWatchSprattQuest", watch<spratt>);
+        lua.register_function("SilverfishClearSprattQuest", clear<spratt>);
     }
 }

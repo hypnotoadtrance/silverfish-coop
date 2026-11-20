@@ -26,6 +26,7 @@ local native_computer_board = require("native_computer_board")
 local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
 local native_lenny = require("native_lenny")
+local native_spratt = require("native_spratt")
 local native_flood_jammer_projection = require("native_flood_jammer_projection")
 local native_subway_valve = require("native_subway_valve")
 local native_turret_photo_quest = require("native_turret_photo_quest")
@@ -1018,6 +1019,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_meet_broker.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_lenny.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_spratt.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_subway_valve.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

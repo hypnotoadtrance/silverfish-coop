@@ -23,6 +23,7 @@ from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_stack_drop
 from . import native_black_box
+from . import native_spratt
 from . import native_subway_valve
 from . import native_kill_volume
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
@@ -1181,6 +1182,16 @@ class Bridge:
                 elif fields[0] == "native-lenny-aim" and len(fields) == 7 and valid_guid(fields[4]):
                     data["native_lenny_aim"] = dict(zip(("map", "pawn", "target", "guid"), fields[1:5]),
                                                    distance=_finite(fields[5]), component=fields[6])
+                elif fields[0] == "native-spratt-objective":
+                    if native_spratt.KEY in data:
+                        raise ValueError("Repeated stock Spratt objective report")
+                    if proof := native_spratt.parse_objective(fields, area=data.get("map"), phase=data.get("state")):
+                        data[native_spratt.KEY] = proof
+                elif fields[0] == "native-spratt-client":
+                    if native_spratt.CLIENT_KEY in data:
+                        raise ValueError("Repeated stock Spratt client report")
+                    if proof := native_spratt.parse_client(fields, area=data.get("map"), phase=data.get("state")):
+                        data[native_spratt.CLIENT_KEY] = proof
                 elif fields[0] in JAMMER_ROWS:
                     spec, kind = JAMMER_ROWS[fields[0]]
                     key = spec.key

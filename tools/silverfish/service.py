@@ -20,6 +20,7 @@ from . import (link, matrix_service, native_authored_pickup, native_blue, native
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
+from . import native_spratt
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
@@ -3063,6 +3064,7 @@ class Host:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             await native_flood_jammer.observe(self, bridge)
             await native_lenny.observe(self, bridge)
+            await native_spratt.observe(self, bridge)
             if self.guest_regen and any(row["state"].startswith("mutation_unverified_")
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True
