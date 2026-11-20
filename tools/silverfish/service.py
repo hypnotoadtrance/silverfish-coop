@@ -383,6 +383,7 @@ class Host:
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
             "character_id": active["character"]["character_id"], "disconnected": None,
             "restore": saved, "runtime_id": request.get("runtime_id"),
+            "entered": bool(active["resumed"] and previous and previous.get("entered")),
         }
         if not active["resumed"]:
             self.guest_pawn = None
@@ -666,13 +667,20 @@ class Host:
         if self.guest:
             lost = self.guest["disconnected"]
             character = self.guest["character_id"]
-            has_entered = self.guest_pawn or self.awaiting_zone_guest == character
+            # A temporary loss of the stock pawn does not end the authenticated lease.
+            has_entered = self.guest.get("entered") or self.guest_pawn or self.awaiting_zone_guest == character
             if (lost is None or time.monotonic() - lost < DEFAULT_RECONNECT_GRACE) and has_entered:
                 roles["guest"] = character
         return roles
 
     def role_pawn(self, role: str) -> tuple[str, object | None]:
-        return ("local" if role == "host" else "guest"), None
+        if role == "host":
+            return "local", None
+        if self.native_guest:
+            observed = self.last_game.get("pawns", {}).get("guest", {}).get("name")
+            if not self.guest_pawn or observed != self.guest_pawn:
+                return "", None
+        return "guest", None
 
     def restart_admission_refusal(self, request, *, capacity):
         guard = getattr(self, "restart_wipe_guard", None)
@@ -2260,6 +2268,7 @@ class Host:
                 self.last_game = restored
                 self.last_seen = time.monotonic()
             self.guest["restore"] = {}
+            self.guest["entered"] = True
             self.guest_pawn = pawn["name"]
             self.awaiting_zone_guest = None
             self.expired_characters.discard(self.guest["character_id"])

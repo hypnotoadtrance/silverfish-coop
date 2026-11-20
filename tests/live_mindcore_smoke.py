@@ -31,7 +31,7 @@ from tools.silverfish import native_savlo_locker as savlo_locker
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_tape_profiles import BLANK_CLASS, DRILL, INSTRUCTIONS, drill_download_unlocked
-from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, RUIN_FIELDS, SCIENTIST_SHOP
+from tools.silverfish.travel import CISTERN, CROSSROADS, DEAD_BRIDGE, OBSERVATORY, RUIN_FIELDS, SCIENTIST_SHOP
 
 
 STONE_MAZE = "/Game/Classes/Maps/Maps_OverWorld/StoneMaze_P"
@@ -146,7 +146,7 @@ def lift_riders_match(host_frame, guest_frame, host_pawn, guest_pawn):
 
 async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=False, instructions=False,
                    carry_only=False, shared_core=False, guest_carry=False, lift_ride=False, lift_keycard=False,
-                   lift_disembark=False, upper_door=False, upper_door_keycard=False):
+                   lift_disembark=False, upper_door=False, upper_door_keycard=False, stock_hazard_wipe=False):
     upper_door = upper_door or upper_door_keycard
     if instructions and resume:
         raise ValueError("Start from the Scientist Results checkpoint to buy a genuine second blank")
@@ -162,6 +162,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         raise ValueError("Verify the stock landing after riding the lift")
     if upper_door and (not resume or stock_input or instructions or carry_only or guest_carry or lift_ride or shared_core):
         raise ValueError("Verify the upper door separately from a dormant Data Silo checkpoint")
+    if stock_hazard_wipe and (not resume or stock_input or lift_ride
+                              or upper_door or instructions or carry_only or guest_carry or shared_core):
+        raise ValueError("Run the stock hazard wipe separately from the dormant lower lift checkpoint")
     if not (runtime.qualified_authored_routes(work)
             and runtime.staged_script(work, "native_mindcore.lua", core.FLAG)
             and runtime.staged_script(work, "native_mindcore_fixture.lua", fixture.INSTALL)):
@@ -186,10 +189,15 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     if not originals:
         raise ValueError("Supply the original Saved directory for isolation verification")
     data, inputs, conversion, guest_id, prior_routes = baseline_inputs(work, baseline, resume=resume)
+    if stock_hazard_wipe:
+        saved_host = data["world"].get("host", {})
+        if data["world"]["map"] != core.MAP or math.dist(saved_host["location"], [-1672, -49, 120]) > 15:
+            raise ValueError("Use the paired dormant checkpoint on the lower lift in the stock hazard")
     if upper_door_keycard:
         claims = data["world"]["party"].get(pickup.STATE_KEY, {})
         if any(source in claims for source in (pickup.FORT_LETO_LOCKER_KEY, pickup.SAVLO_KEYCARD)):
             raise ValueError("Use a dormant checkpoint with the placed Fort Leto key and Trench keycard unclaimed")
+    if upper_door_keycard or stock_hazard_wipe:
         for index, frame in enumerate(native_host_save.references(data)):
             inputs[f"stock_save_{index}"] = native_host_save.slot_path(baseline / "game-user", frame["slot"])
     initial_inputs = {key: sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
@@ -243,6 +251,23 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
     def events():
         with (run / "events.jsonl").open(encoding="utf-8") as stream:
             return [json.loads(line) for line in stream if line.endswith("\n")]
+
+    async def verify_stock_hazard_wipe(authority):
+        previous = authority["generation"], authority["zone_epoch"]
+        ready = await paired(OBSERVATORY, previous)
+        assert ready["generation"] == authority["generation"]
+        journal = events()
+        downs = [row for row in journal if row["event"] == "gameplay_action"
+                 and row.get("effect") in ("downed", "party_wipe")]
+        assert [(row["target"], row["effect"], row["health"]) for row in downs] == [
+            ("host", "downed", 0), (character, "party_wipe", 0),
+        ], downs
+        respawn, = (row for row in journal if row["event"] == "party_respawn_committed")
+        assert (respawn["map"], respawn["stock_rest"]) == (OBSERVATORY, True)
+        assert downs[0]["revision"] < downs[1]["revision"] < respawn["revision"]
+        await action(run, "checkpoint")
+        proof["stock_hazard_wipe"] = {"native_downs": downs, "respawn": respawn,
+                                     "same_host": ready["generation"], "same_guest": character}
 
     async def travel(authority, leg, *, receipts="routes"):
         area, destination, entrance, kind, actor = leg
@@ -622,6 +647,10 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         port = opening["endpoint"]["port"]
         guest_job = await start_guest()
         authority = await paired(start_area)
+        if stock_hazard_wipe:
+            await verify_stock_hazard_wipe(authority)
+            proof["verified"] = True
+            return proof
         if lift_keycard:
             authority = await retrieve_lift_key(authority)
         if upper_door_keycard:
@@ -928,10 +957,12 @@ if __name__ == "__main__":
     parser.add_argument("--upper-door", action="store_true", help="verify physical passage and late join at the upper door")
     parser.add_argument("--upper-door-keycard", action="store_true",
                         help="collect the stock Savlo keycard and unlock the upper door with genuine Interact")
+    parser.add_argument("--stock-hazard-wipe", action="store_true",
+                        help="verify stock lower-lift damage downs both players before a wipe to the host bed")
     options = parser.parse_args()
     paths = (value.resolve(strict=True) for value in (options.work, options.baseline, options.vanilla_saved))
     asyncio.run(exercise(*paths, resume=options.resume, stock_input=options.stock_input or options.instructions,
                          instructions=options.instructions, carry_only=options.carry_only, shared_core=options.shared_core,
                           guest_carry=options.guest_carry, lift_ride=options.lift_ride, lift_keycard=options.lift_keycard,
                           lift_disembark=options.lift_disembark, upper_door=options.upper_door,
-                         upper_door_keycard=options.upper_door_keycard))
+                         upper_door_keycard=options.upper_door_keycard, stock_hazard_wipe=options.stock_hazard_wipe))

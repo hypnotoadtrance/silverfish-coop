@@ -1,11 +1,87 @@
 import unittest
 import uuid
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import party
+from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.multi_host import MultiHost
-from tools.silverfish.service import Client, Host
+from tools.silverfish.service import PROTOCOL, Client, Host
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+
+
+class LegacyGuestWipeRosterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_entered_guest_stays_in_wipe_roster_without_a_stock_pawn(self):
+        def frame(sequence, connection=None):
+            pawns = {"local": {"name": "Host pawn", "health": 250, "location": [0, 0, 0]}}
+            rows = []
+            state = {"mode": "host", "state": "hosting", "map": CROSSROADS, "server_connection": False,
+                     "sequence": sequence, "remote_clients": int(connection is not None), "pawns": pawns,
+                     "native_roster": {"state": "qualified", "driver": "d1",
+                                       "count": int(connection is not None), "connections": rows}}
+            if connection:
+                name, controller = f"Player_FP_C Guest_{connection}", f"PlayerControler_FP_C Guest_{connection}"
+                rows.append({"state": "ready", "id": connection, "connection": f"IpConnection Guest_{connection}",
+                             "pawn": name, "controller": controller})
+                pawns["guest"] = {"name": name, "controller": controller, "health": 40, "location": [100, 0, 0]}
+                state["native_guest_save"] = {"state": "bound", "pawn": name}
+            return state
+
+        directory = Path(self.enterContext(TemporaryDirectory()))
+        store = self.enterContext(CampaignStore(directory))
+        invite = dict(store.issue_invitation("Guest", "Scout"), protocol_version=PROTOCOL, game_build="build")
+        guest, character = invite["guest_id"], invite["character_id"]
+        host = Host(store, Mock(), "build", None, "127.0.0.1", 0, False, None,
+                    native_backend="cpp", native_events=True, native_guest=True, authored_zones=True,
+                    verify_native_roster=True)
+        host.last_game = frame(1)
+        host.checkpoint = Mock(return_value=1)
+        host.checkpoint_native = AsyncMock(return_value=2)
+        bridge = Mock()
+        transport = Mock()
+        self.assertTrue(host.admit(invite)["accepted"])
+        self.assertEqual(host.roles(), {"host": "host"})
+
+        bridge.snapshot.return_value = frame(2, "c1")
+        await host.observe(bridge, transport)
+        self.assertEqual(host.role_pawn("guest"), ("guest", None))
+        self.assertEqual(host.act("host", uuid.uuid4().hex, "native-down", "host", 1000)["effect"], "downed")
+
+        bridge.snapshot.return_value = frame(3)
+        await host.observe(bridge, transport)
+        self.assertIsNone(host.guest_pawn)
+        roles = {"host": "host", "guest": character}
+        self.assertEqual(host.roles(), roles)
+        self.assertEqual(host.travel_refusal(OBSERVATORY, roles), {
+            "ok": False, "error": "travel_blocked", "blockers": [{"id": character, "reason": "missing_pawn"}],
+        })
+        host.last_game = frame(3, "c2")
+        self.assertNotIn(character, host.authoritative_pawns(roles))
+        self.assertEqual(host.native_recipients(), {})
+        host.last_game = frame(3)
+        await host.settle_wipe(bridge, transport)
+        self.assertTrue(host.party["players"]["host"]["downed"])
+        self.assertIsNone(host.party["wipe"])
+        host.checkpoint_native.assert_not_awaited()
+
+        lease = host.guest["lease_id"]
+        host.disconnected(guest)
+        self.assertEqual(host.roles(), roles)
+        self.assertTrue(host.admit(invite)["resumed"])
+        self.assertEqual(host.guest["lease_id"], lease)
+        self.assertEqual(host.roles(), roles)
+        bridge.snapshot.return_value = frame(4, "c2")
+        await host.observe(bridge, transport)
+        self.assertEqual(host.authoritative_pawns(roles)[character]["health"], 40)
+        self.assertIsNone(host.travel_refusal(OBSERVATORY, roles))
+
+        host.confirmed_guest_leaves.add(guest)
+        host.disconnected(guest)
+        self.assertEqual(host.roles(), {"host": "host"})
+        await host.settle_wipe(bridge, transport)
+        host.checkpoint_native.assert_awaited_once()
 
 
 class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):
