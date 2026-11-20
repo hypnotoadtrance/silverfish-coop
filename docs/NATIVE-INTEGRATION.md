@@ -62,6 +62,8 @@ Other paired runs crossed The Wall–Annex, Annex–Artifact Forge, and The Wall
 
 Separate paired runs took the Southeast Road doors to Factory and Gunsmith and returned from both. Each direction passed the guest-interaction and 15-meter checks, reached the exact stock entrance, and restored the guest. The Gunsmith return used the stock basement floor for the distant-guest test. The original save hashes matched.
 
+Paired runs crossed the NorthEast Rail–Trash Pit overlap and the Trash Pit–The Throat door in both directions. The overlaps blocked the guest and the separated host. Both doors refused the guest and required the host to regroup before opening. The Throat return test placed the distant guest on the stock lower floor to test vertical separation. The party returned to the exact NorthEast Rail marker, and the original save hashes matched.
+
 The Observatory rest command and stock sleep screen both use the exact SavePoint and stock day cycle. A host and two guests rested for one game hour, left via the CrossRoads exit, and returned to the saved Observatory bed after all three went down. All three recovered full native health. The stock sleep-screen run measured unchanged desktop cursor bounds across 1,305 samples. The rest catalog covers 11 cooked beds, including City's verified neutral bed.
 
 A later headless run repeated this with a host and four guests. All four guests kept separate saves and were refused at the stock bed on both peers. The host confirmed sleep, all five returned to the exact Observatory bed after a wipe, and nine original save hashes matched. Sixty cursor samples taken with all five games active showed the full desktop bounds.
