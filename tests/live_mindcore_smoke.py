@@ -830,6 +830,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, stock_input=F
         dormant_checkpoint, dormant_flags = await flags()
         assert tuple(row.get(core.FLAG, 0) for row in dormant_flags) == (0, 0), dormant_flags
         if guest_carry:
+            from datasilo_core_lift import equip_stock_protection
+
+            proof["stock_carry_gear"] = await equip_stock_protection(run, guest_run, action, helmet_profile="dust-filter")
             original_guest, original_host = await inventory(guest_run, character), await inventory(run, "host")
             await action(run, carry.APPROACH_FIXTURE, target=character)
             readied = await wait(guest_run, lambda state: (
