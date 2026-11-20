@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import suppress
+from ipaddress import ip_address
 import json
 import os
 from pathlib import Path
@@ -85,7 +86,7 @@ async def title_choice(work, case, action, plan, processes, tasks, *, timeout=65
 
 
 async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_rejoin: bool = False,
-                 multiparty: bool = False) -> None:
+                 multiparty: bool = False, bind: str = "127.0.0.1", invite_address: str | None = None) -> None:
     if os.name != "nt":
         raise OSError("The co-op title handoff requires a staged Windows game")
     if (abrupt_rejoin or multiparty) and not embedded:
@@ -162,7 +163,8 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
         monitor.check(recovered_host, recovered_guest)
         first_authentications = sum(event.get("event") == "client_link_authenticated" for event in _events(guest_run))
 
-        invitation = await submit(host_run, "invite", name="Second title guest", character="Second Title Scout")
+        invitation = await submit(host_run, "invite", name="Second title guest", character="Second Title Scout",
+                                  address=invite_address)
         if invitation.get("ok") is not True or invitation["character_id"] == first_character:
             raise RuntimeError("The second title guest does not have a separate host-owned character")
         second_character = invitation["character_id"]
@@ -335,22 +337,23 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
     try:
         port = runtime.spare_udp_port()
         if embedded:
-            host = embedded_title_plan.host_plan(work, campaign, "127.0.0.1", port, "wanderer", OBSERVATORY, headless=True)
+            host = embedded_title_plan.host_plan(work, campaign, bind, port, "wanderer", OBSERVATORY, headless=True)
         else:
-            host = host_plan(work, campaign, "127.0.0.1", port, headless=True,
+            host = host_plan(work, campaign, bind, port, headless=True,
                              native_events=True, native_guest=True, native_zones=True, start_zone=OBSERVATORY)
         evidence["host_title"] = await title_choice(work, case, "host", host, processes, tasks)
         hosting = await wait(host_run, lambda state: state.get("state") == "hosting"
                              and state.get("game", {}).get("map") == OBSERVATORY)
-        assert hosting["endpoint"] == {"address": "127.0.0.1", "port": port}, hosting["endpoint"]
-        evidence["host"] = {"map": OBSERVATORY, "port": port, "title_survived_until_host_ready": True}
+        assert hosting["endpoint"] == {"address": bind, "port": port}, hosting["endpoint"]
+        evidence["host"] = {"map": OBSERVATORY, "bind": bind, "port": port, "title_survived_until_host_ready": True}
         if embedded:
             assert hosting["pid"] != os.getpid()
             evidence["host"]["worker_pid"] = hosting["pid"]
 
-        invitation = await submit(host_run, "invite", name="Title guest", character="Title Scout")
+        invitation = await submit(host_run, "invite", name="Title guest", character="Title Scout", address=invite_address)
         assert invitation["ok"] is True
         invite_file = Path(invitation["invite_file"])
+        assert runtime.read_json(invite_file)["host"] == (invite_address or bind)
         guest = (embedded_title_plan.guest_plan(work, profile, invite_file, None, headless=True) if embedded else
                  join_plan(work, profile, invite_file, headless=True))
         evidence["guest_title"] = await choose_guest(case, guest)
@@ -430,11 +433,16 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--embedded", action="store_true")
+    parser.add_argument("--bind", type=ip_address, default=ip_address("127.0.0.1"))
+    parser.add_argument("--invite-address", type=ip_address)
     scenario = parser.add_mutually_exclusive_group()
     scenario.add_argument("--abrupt-rejoin", action="store_true", help="kill and relaunch only the owned embedded guest")
     scenario.add_argument("--multiparty", action="store_true", help="join two embedded guests in a fresh Observatory campaign")
     options = parser.parse_args()
     if (options.abrupt_rejoin or options.multiparty) and not options.embedded:
         parser.error("--abrupt-rejoin and --multiparty require --embedded")
+    if options.bind.is_unspecified and options.invite_address is None:
+        parser.error("use --invite-address for a wildcard host bind")
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
-                       embedded=options.embedded, abrupt_rejoin=options.abrupt_rejoin, multiparty=options.multiparty))
+                       embedded=options.embedded, abrupt_rejoin=options.abrupt_rejoin, multiparty=options.multiparty,
+                       bind=str(options.bind), invite_address=str(options.invite_address) if options.invite_address else None))
