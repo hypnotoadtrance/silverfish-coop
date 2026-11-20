@@ -282,6 +282,8 @@ A later run tested the owner-only floor cue with the original Interact binding. 
 
 An Observatory run also dropped a full 9mm stack from the guest's inventory overlay on a host running without fixtures. The guest cancelled the first confirmation and kept the stack. The next confirmation removed the exact nine rounds and committed the same GUID to owner-only escrow. Replay left the inventory unchanged, and the original single-player save hashes matched.
 
+CrossRoads passed the same full-stack confirmation on a host running without fixtures. The guest reclaimed the drop through its stock Interact cue. The original GUID and all nine rounds returned to the owner's backpack, the host's inventory matched its baseline, and all original save hashes matched.
+
 Two guests collected separate authored ammunition stacks through stock Interact. The first carried 14 buckshot shells from Slums. The second collected 10 .45 Ball rounds in CrossRoads. The host refused a stale visit, a wrong-map source, an out-of-range claim, and a second claim on the same source. Each guest retained their own exact stack through Rail Yard travel, a same-port restart, and a revisit to Slums. The host inventory and original save hashes matched.
 
 A separate three-instance run collected the same .45 placement into a guest's existing 10-round backpack stack. The stock calculation increased it to 20 rounds under the original stack GUID. The pickup kept a distinct source receipt, other inventories matched, and the owner kept the 20-round stack after same-port restart.
