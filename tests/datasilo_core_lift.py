@@ -441,10 +441,16 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
                     previous = points[index - 1]
                     rising_from_north_landing = 3280 < previous[2] < 3350 and 3570 < floor < 3650
                     if rising_from_north_landing:
-                        dx, dy = x - previous[0], y - previous[1]
-                        heading = math.degrees(math.atan2(dy, dx))
-                        await turn("aim the Core up the next east staircase", heading, pitch=52)
-                        facing = heading
+                        await turn("aim the Core along the east stair centerline", -45, pitch=52)
+                        facing = -45
+                        treads = proof["north_stair_treads"] = []
+                        # Centers of the two cooked stair meshes follow X + Y = 3676.8.
+                        for height, point in ((3300, (1722, 1955)), (3450, (1985, 1692)), (3600, (2169, 1508))):
+                            tread = await walk_to(f"carry the Core along the center of the Z {height} stair",
+                                                  point, 15, pulse_limit=600, reached=lambda row: (
+                                                      48 < row["carrier"]["location"][2] - height < 136
+                                                      and abs(sum(row["prop"]["position"][:2]) - 3676.8) < 110))
+                            treads.append(tread)
                         frame = await follow("carrier", index, (x, y, floor), pulse_limit=600)
                     else:
                         outward = math.degrees(math.atan2(y, x))
