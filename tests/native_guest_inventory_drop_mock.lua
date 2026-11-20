@@ -88,7 +88,7 @@ assert(stage("drop") == "dropping")
 assert(not pcall(view.command, {"id", "native-inventory-view-drop-result", "5", map, ("B"):rep(32), "dropped"},
     fixture, "connected"))
 view.command({"id", "native-inventory-view-drop-result", "5", map, guid, "dropped"}, fixture, "connected")
-assert(stage("drop") == "dropped" and text:ToString():find("Ammo dropped"))
+assert(stage("drop") == "dropped" and text:ToString():find("Item dropped"))
 
 view.clear()
 opened = false

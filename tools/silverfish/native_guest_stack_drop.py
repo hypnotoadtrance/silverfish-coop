@@ -1,4 +1,4 @@
-"""Verify and retire the exact stock 9mm birth for a qualified native drop."""
+"""Verify and retire the exact stock actor birth for a qualified native drop."""
 
 import asyncio
 import re
@@ -61,12 +61,16 @@ def parse(fields: list[str], state: str, area: str) -> dict:
             or flag not in ("0", "1") or not _STATUS.fullmatch(status)):
         raise ValueError("Invalid stock stack drop identity or quantity")
     ok = flag == "1"
-    if ok and (status != SUCCESS or not native_guest_drop_record.actor_matches(area, actor) or not valid_guid(new_guid) or new_guid == guid):
+    item = native_guest_drop_record.actor_class_path(area, actor) if ok else None
+    if ok and (status != SUCCESS or not native_guest_drop_record.valid_quantity(item, int(raw_count))
+               or not valid_guid(new_guid) or new_guid == guid):
         raise ValueError("The stock actor or stock-converted GUID was not verified")
     if not ok and (not status.startswith((REFUSAL, UNSAFE)) or (actor, new_guid) != ("-", "-")):
         raise ValueError("Invalid isolated stock stack drop refusal")
     proof = dict(map=map_name, pawn=pawn, slot=slot, guid=guid, quantity=int(raw_count), ok=ok, status=status,
                  actor=actor if ok else None, new_guid=new_guid if ok else None)
+    if ok and fields[0] == BIRTH:
+        proof["class_path"] = item
     if len(fields) == 13:
         location = list(map(float, fields[10:]))
         if not ok or not native_guest_drop_record.valid_position(location):
@@ -136,7 +140,9 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
                 raise party.RuleError(reason)
             raise RuntimeError(reason or "The stock stack drop actor retirement was unverified")
         actor = proof.get("actor")
-        if (proof.get("status") != SUCCESS or not native_guest_drop_record.actor_matches(area, actor)
+        item = native_guest_drop_record.actor_class_path(area, actor)
+        if (proof.get("status") != SUCCESS or not native_guest_drop_record.valid_quantity(item, count)
+                or not fixture and item != proof.get("class_path")
                 or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid):
             raise RuntimeError("The stock stack drop actor and typed conversion did not verify")
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)

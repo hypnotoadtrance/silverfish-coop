@@ -60,7 +60,8 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
     async def test_debit_publishes_one_required_guest_frame_and_exact_escrow(self):
         host, source, escrow, replacement, item, expected = self.make_world()
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.reply(host, "debit", source, replacement)))
-        birth = {probe.KEY: {"map": MAP, "pawn": PAWN, "slot": source["slot"], "revision": 42, "location": POS}}
+        birth = {probe.KEY: {"map": MAP, "pawn": PAWN, "slot": source["slot"], "revision": 42, "location": POS,
+                             "class_path": record.ITEM}}
         prepared = {"bag": escrow, "replacement": replacement}
         with (patch.object(probe, "perform", AsyncMock(return_value=birth)),
               patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})),
@@ -146,7 +147,8 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         host.store.status.return_value["world"] = {"native_host_save": source}
         pawn = host.last_game["pawns"]["local"]["name"]
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.reply(host, "debit", source, replacement, recipient="host")))
-        birth = {probe.KEY: {"map": MAP, "pawn": pawn, "slot": source["slot"], "revision": 42, "location": POS}}
+        birth = {probe.KEY: {"map": MAP, "pawn": pawn, "slot": source["slot"], "revision": 42, "location": POS,
+                             "class_path": record.ITEM}}
         with (patch.object(probe, "perform", AsyncMock(return_value=birth)),
               patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})),
               patch.object(drop.native_inventory_death, "prepare", AsyncMock(return_value={"bag": escrow, "replacement": replacement}))):

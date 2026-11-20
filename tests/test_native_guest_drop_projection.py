@@ -101,7 +101,7 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         view.next_sync = 0.
         await view.sync(client, True)
         client.bridge.command.assert_awaited_once()
-        self.assertEqual(view.current, (proof["epoch"], ID, PAWN, MAP))
+        self.assertEqual(view.current, (proof["epoch"], ID, PAWN, MAP, record.ITEM))
         with self.assertRaisesRegex(party.RuleError, "intent_stale"):
             await view.reclaim(client, OPERATION, (proof["epoch"], ID))
         with self.assertRaisesRegex(party.RuleError, "fixture_scope_unavailable"):
@@ -113,6 +113,26 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.last_game[projection.KEY], proof)
         self.assertEqual([call.args[0] for call in client.bridge.command.await_args_list],
                          [projection.SYNC, projection.SYNC])
+
+    async def test_pistol_ledger_requires_the_exact_pistol_projection(self):
+        client, view = self.client(), projection.Projection()
+        client.gameplay[record.STATE][ID].update(class_path=record.LIGHT_PISTOL, quantity=1)
+        pistol = f"Wep_LightPistol_C {WORLD}Wep_LightPistol_C_8"
+
+        async def sync(command, area, epoch, drop_id, *args, timeout):
+            self.assertEqual(command, projection.SYNC)
+            self.assertEqual(args, ("10.0", "20.0", "40.0", record.LIGHT_PISTOL))
+            row = [projection.ROW, area, epoch, drop_id, PAWN, pistol, "0"]
+            return {**client.last_game, projection.KEY: projection.parse(row, "connected", area)}
+
+        client.bridge.command.side_effect = sync
+        await view.sync(client, True)
+        proof = client.last_game[projection.KEY]
+        self.assertEqual(proof["actor"], pistol)
+        proof["actor"] = ACTOR
+        with self.assertRaisesRegex(party.RuleError, "intent_stale"):
+            await view.reclaim(client, OPERATION, (proof["epoch"], ID))
+        client.gameplay_action.assert_not_awaited()
 
     async def test_old_epoch_cannot_reclaim_but_same_durable_drop_gets_new_projection(self):
         client, view = self.client(), projection.Projection()

@@ -79,6 +79,10 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(drop.droppable(row))
         for replacement in ({"quantity": 201}, {"important": True}, {"source": "equipment"}, {"stackable": False}):
             self.assertFalse(drop.droppable({**row, **replacement}))
+        pistol = dict(row, class_path=record.LIGHT_PISTOL, stackable=False)
+        self.assertTrue(drop.droppable(pistol))
+        self.assertFalse(drop.droppable(dict(pistol, quantity=7)))
+        self.assertFalse(drop.droppable(dict(pistol, important=True)))
         report = [record.VIEW_ROW, "5", MAP, PAWN, GUID, record.ITEM, "dropping", "201"]
         with self.assertRaises(ValueError):
             record.parse_view(report, "connected", MAP)

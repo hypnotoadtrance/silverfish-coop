@@ -41,6 +41,11 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto game_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
+    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
+    constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
+    constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
+    constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
+    constexpr auto weapon_tick_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveTick");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto row_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto spawn_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:SpawnItemActor");
@@ -296,8 +301,8 @@ namespace
     struct ProbeScope
     {
         U::FWeakObjectPtr game, world, actor;
-        U::UClass* ammo{};
-        U::UFunction* spawn{};
+        U::UClass* type{};
+        U::UFunction *spawn{}, *weapon_tick{};
         U::FObjectProperty* newborn{};
         U::FFrame* frame{};
         bool active{}, saw_stock_frame{};
@@ -309,14 +314,14 @@ namespace
         if (!scope.active || !function || !U::IsInGameThreadRaw() || call.OriginalFunctionCallPrevented()) return;
         auto* guarded = scope.actor.Get();
         if (!guarded && scope.frame) guarded = object_value(scope.newborn, scope.frame->Locals());
-        if (!live(guarded) || guarded->GetClassPrivate() != scope.ammo ||
+        if (!live(guarded) || guarded->GetClassPrivate() != scope.type ||
             static_cast<U::AActor*>(guarded)->GetWorld() != scope.world.Get()) return;
         const auto name = function->GetFName();
         static const U::FName interact{STR("SendInteractionToActor")};
         static const U::FName store{STR("PutInInventory")};
         static const U::FName pickup{STR("PickUp_Object")};
         static const U::FName add{STR("AddItemToInventory")};
-        if ((receiver == guarded && (name == interact || name == store || name == pickup)) ||
+        if ((receiver == guarded && (name == interact || name == store || name == pickup || function == scope.weapon_tick)) ||
             (receiver == scope.game.Get() && name == add && args &&
              function == find<U::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory")) &&
              object_value(parameter<U::FObjectProperty>(function, STR("Item"), 0), args) == guarded))
@@ -349,12 +354,12 @@ namespace
         const auto ready = [] { return std::ranges::none_of(hooks, [](auto hook) { return hook == H::ERROR_ID; }); };
         if (ready()) return true;
         constexpr auto owner = STR("SilverfishCoopNative");
-        hooks[0] = H::RegisterProcessLocalScriptFunctionPreCallback(pre, {false, false, owner, STR("Fence one isolated stock ammo spawn")});
-        hooks[1] = H::RegisterProcessLocalScriptFunctionPostCallback(post, {false, false, owner, STR("Pin the exact isolated stock ammo birth")});
+        hooks[0] = H::RegisterProcessLocalScriptFunctionPreCallback(pre, {false, false, owner, STR("Fence one isolated stock item spawn")});
+        hooks[1] = H::RegisterProcessLocalScriptFunctionPostCallback(post, {false, false, owner, STR("Pin the exact isolated stock item birth")});
         hooks[2] = H::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* receiver, U::UFunction* function, void* arguments) {
                 protect(call, receiver, function, arguments);
-            }, {false, false, owner, STR("Fence the isolated stock ammo actor's native events")});
+            }, {false, false, owner, STR("Fence the isolated stock item actor's native events")});
         if (ready()) return true;
         silverfish::native_guest_stack_drop::uninstall_hooks();
         return false;
@@ -365,6 +370,22 @@ namespace
         return fn && owner && fn->GetOuterPrivate() == owner && fn->GetNumParms() == count &&
             !fn->GetReturnProperty() && fn->GetParmsSize() <= sizeof(Arguments::storage) &&
             !fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
+    }
+
+    U::UFunction* exact_pistol_tick(U::UClass* pistol)
+    {
+        auto* weapon = find<U::UClass>(weapon_base_path);
+        auto* equipment = find<U::UClass>(equipment_base_path);
+        auto* base = find<U::UClass>(item_path);
+        auto* begin = find<U::UFunction>(weapon_begin_path);
+        auto* tick = find<U::UFunction>(weapon_tick_path);
+        if (!weapon || !equipment || !base || pistol->GetSuperStruct() != weapon ||
+            weapon->GetSuperStruct() != equipment || equipment->GetSuperStruct() != base ||
+            !stock_function(begin, weapon, 0) || begin->GetParmsSize() != 0 ||
+            !stock_function(tick, weapon, 1) || !parameter<U::FFloatProperty>(tick, STR("DeltaSeconds"), 0) ||
+            pistol->GetFunctionByNameInChain(begin->GetFName()) != begin ||
+            pistol->GetFunctionByNameInChain(tick->GetFName()) != tick) return nullptr;
+        return tick;
     }
 
     using Position = std::array<double, 3>;
@@ -480,25 +501,41 @@ namespace
             return reply(lua, false, "native_guest_stack_drop_scope_unavailable");
         const auto pawn = lua.get_integer(), save = lua.get_integer(), frozen = lua.get_integer();
         const auto id = parse_guid(lua.get_string());
-        const auto rounds = lua.get_integer();
+        const auto count = lua.get_integer();
         if (pawn <= 0 || save <= 0 || frozen <= 0 || frozen == save ||
-            id == Guid{} || rounds < 1 || rounds > max_rounds)
+            id == Guid{} || count < 1 || count > max_rounds)
             return reply(lua, false, "native_guest_stack_drop_arguments_unqualified");
         Inventory inventory;
         if (!inventory.bound()) return reply(lua, false, "native_guest_stack_drop_inventory_schema");
         const auto owner = owners(pawn, save, frozen, inventory);
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
-        auto* ammo = find<U::UClass>(ammo_path);
-        auto* defaults = ammo ? ammo->GetClassDefaultObject().Get() : nullptr;
         const auto* row = inventory.exact_row(owner.frozen, id);
-        if (!ammo || !defaults ||
-            !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), true) ||
+        auto* ammo = find<U::UClass>(ammo_path);
+        auto* pistol = find<U::UClass>(pistol_path);
+        auto* candidate = object_value(inventory.klass, row);
+        const bool stack = ammo && candidate == ammo;
+        auto* type = stack ? ammo : candidate == pistol ? pistol : nullptr;
+        if (!type || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
+            inventory.never_drop->GetPropertyValueInContainer(row))
+            return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
+        auto* defaults = type->GetClassDefaultObject().Get();
+        if (!defaults || defaults->GetClassPrivate() != type ||
+            !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), stack) ||
             !boolean(defaults, STR("DespawnIfPlayerOwns"), false) || !boolean(defaults, STR("bReplicates"), false))
-            return reply(lua, false, "native_guest_stack_drop_stock_9mm_default_flags_unqualified");
-        if (!row || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
-            inventory.klass->GetObjectPropertyValue(inventory.klass->ContainerPtrToValuePtr<void>(row)) != ammo ||
-            inventory.never_drop->GetPropertyValueInContainer(row) || inventory.quantity->GetPropertyValueInContainer(row) != rounds)
+            return reply(lua, false, stack ? "native_guest_stack_drop_stock_9mm_default_flags_unqualified" :
+                "native_guest_stack_drop_stock_pistol_default_flags_unqualified");
+        const auto stored = inventory.quantity->GetPropertyValueInContainer(row);
+        if (stack && stored != count)
             return reply(lua, false, "native_guest_stack_drop_stock_9mm_row_unqualified");
+        U::UFunction* weapon_tick{};
+        if (!stack)
+        {
+            auto* magazine = field<U::FIntProperty>(defaults, STR("MagSize"));
+            const auto capacity = magazine ? magazine->GetPropertyValueInContainer(defaults) : 0;
+            if (count != 1 || capacity < 1 || capacity > max_rounds || stored < 0 || stored > capacity ||
+                !field<U::FIntProperty>(defaults, STR("Ammo")) || !(weapon_tick = exact_pistol_tick(type)))
+                return reply(lua, false, "native_guest_stack_drop_stock_pistol_row_unqualified");
+        }
 
         std::array<Value, 4> stock_before;
         auto stores = inventory.stores();
@@ -560,17 +597,17 @@ namespace
         instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(buffer), nullptr);
         actor_owner->SetObjectPropertyValue(actor_owner->ContainerPtrToValuePtr<void>(buffer), nullptr);
         Scene before;
-        if (!before.collect(ammo, owner.world) || before.count == before.actors.size())
+        if (!before.collect(type, owner.world) || before.count == before.actors.size())
             return reply(lua, false, "native_guest_stack_drop_scene_bounds");
-        scope = {owner.game, owner.world, {}, ammo, spawn, newborn, nullptr, true, false};
+        scope = {owner.game, owner.world, {}, type, spawn, weapon_tick, newborn, nullptr, true, false};
         owner.game->ProcessEvent(spawn, buffer);
         scope.frame = nullptr;
 
         auto* spawned = object_value(output, buffer);
         auto* birth = scope.actor.Get();
-        if (!birth && exact_actor(spawned, ammo, owner.world) && !before.contains(spawned)) scope.actor = spawned;
+        if (!birth && exact_actor(spawned, type, owner.world) && !before.contains(spawned)) scope.actor = spawned;
         Scene after;
-        if (!after.collect(ammo, owner.world)) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_stock_census");
+        if (!after.collect(type, owner.world)) return reply(lua, false, "mutation_unverified_native_guest_stack_drop_stock_census");
         U::UObject* added{};
         for (std::size_t i = 0; i < after.count; ++i)
         {
@@ -589,8 +626,14 @@ namespace
         else if (!near_arrow(spawned, origin, location)) qualification = "native_guest_stack_drop_stock_transform_unqualified";
         else if (object(spawned, STR("As Game Instance FP")) != owner.game || object(spawned, STR("Owner")) ||
             object(spawned, STR("Instigator")) || !byte(spawned, STR("Item_RespawnMode"), 0) ||
-            !boolean(spawned, STR("Stacks"), true) || !boolean(spawned, STR("Physics"), true) || !boolean(spawned, STR("bReplicates"), false))
+            !boolean(spawned, STR("Stacks"), stack) || !boolean(spawned, STR("Physics"), true) || !boolean(spawned, STR("bReplicates"), false))
             qualification = "native_guest_stack_drop_stock_actor_flags_unqualified";
+        if (qualification.empty() && !stack)
+        {
+            auto* ammo_property = field<U::FIntProperty>(spawned, STR("Ammo"));
+            if (!ammo_property || ammo_property->GetPropertyValueInContainer(spawned) != stored)
+                qualification = "native_guest_stack_drop_stock_pistol_magazine_changed";
+        }
         auto reflected = qualification.empty() ? converted(inventory, spawned, owner.pawn) : Value{};
         const auto fresh = reflected ? inventory.identity(reflected.get()) : Guid{};
         if (reflected)
@@ -605,7 +648,7 @@ namespace
         if ((live(spawned) && spawned != added) || (live(birth) && birth != added))
             return reply(lua, false, "mutation_unverified_native_guest_stack_drop_birth_identity");
         Scene final;
-        if (!final.collect(ammo, owner.world) || final.count != before.count ||
+        if (!final.collect(type, owner.world) || final.count != before.count ||
             !std::all_of(final.actors.begin(), final.actors.begin() + final.count, [&](const auto& item) { return before.contains(item.Get()); }))
             return reply(lua, false, "mutation_unverified_native_guest_stack_drop_scene_readback");
         scope = {};
@@ -622,7 +665,7 @@ namespace
         lua.set_string("stock_spawn_verified_and_retired");
         lua.set_string(name);
         lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", fresh[0], fresh[1], fresh[2], fresh[3]));
-        lua.set_integer(rounds);
+        lua.set_integer(count);
         for (auto axis : location) lua.set_number(axis);
         return 8;
     }

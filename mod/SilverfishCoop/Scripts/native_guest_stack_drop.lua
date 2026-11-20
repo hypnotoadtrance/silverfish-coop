@@ -3,6 +3,7 @@ local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local players = require("players")
 local maps = require("native_guest_drop_maps")
+local drop_items = require("native_guest_drop_items")
 
 local action = "native-guest-stack-drop-probe"
 local birth = "native-guest-stack-drop-birth"
@@ -121,17 +122,22 @@ function stack_drop.command(fields, state, phase)
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$") then
         error("mutation_unverified_native_guest_stack_drop_receipt", 0)
     end
-    local stock_actor_prefix = "Ammo_Pistol_BP_C " .. state.map .. "." .. maps[state.map]
-        .. ":PersistentLevel.Ammo_Pistol_BP_C_"
-    if ok and (status ~= "stock_spawn_verified_and_retired" or actual_count ~= count or not item_guid(new_guid) or new_guid == guid
-                or type(actor) ~= "string" or actor:sub(1, #stock_actor_prefix) ~= stock_actor_prefix
-                or not actor:sub(#stock_actor_prefix + 1):match("^%d+$") or not coordinate(x) or not coordinate(y)
-                or not coordinate(z)) then
-        error("mutation_unverified_native_guest_stack_drop_readback", 0)
+    if ok then
+        local qualified
+        for class, profile in pairs(drop_items.profiles) do
+            if count <= profile.maximum and drop_items.actor_path(class, state.map, maps[state.map], actor) then
+                qualified = true
+                break
+            end
+        end
+        if not qualified or status ~= "stock_spawn_verified_and_retired" or actual_count ~= count
+            or not item_guid(new_guid) or new_guid == guid or not coordinate(x) or not coordinate(y) or not coordinate(z) then
+            error("mutation_unverified_native_guest_stack_drop_readback", 0)
+        end
     end
     observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,
         actor = ok and actor or "-", new_guid = ok and new_guid or "-", location = ok and {x, y, z}}
-    return "isolated stock ammo drop probe reported"
+    return "isolated stock inventory drop probe reported"
 end
 
 function stack_drop.rows(state, phase, status_row)

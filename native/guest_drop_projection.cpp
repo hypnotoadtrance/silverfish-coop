@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -38,10 +39,14 @@ namespace
 
     constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto ammo_base_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
+    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
+    constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
+    constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
-    constexpr auto mesh_path = STR("/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Ammo_Pistol.SM_Ammo_Pistol");
+    constexpr auto ammo_mesh_path = STR("/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Ammo_Pistol.SM_Ammo_Pistol");
     constexpr auto interaction_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto ammo_begin_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C:ReceiveBeginPlay");
+    constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
     constexpr auto convert_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto add_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
@@ -50,11 +55,14 @@ namespace
     constexpr auto heartbeat = std::chrono::seconds(2);
     constexpr auto hidden_retention = std::chrono::seconds(8);
     constexpr double range = 250.0;
+    constexpr std::size_t component_limit = 24;
+
+    enum class Display { ammo, pistol };
 
     struct Actor
     {
-        U::FWeakObjectPtr object, box, ammo_type, ammo_base, item_base;
-        U::FWeakObjectPtr interaction, ammo_begin, converter, add_inventory;
+        U::FWeakObjectPtr object, box, display_type, display_base, equipment_base, item_base;
+        U::FWeakObjectPtr interaction, begin, converter, add_inventory;
         bool begin_veto{};
     } projection;
 
@@ -62,6 +70,7 @@ namespace
     {
         U::FWeakObjectPtr pawn, world, driver, connection;
         bool host{};
+        Display display{Display::ammo};
         std::string epoch, id;
         Position source{};
         double visual_z{};
@@ -268,12 +277,15 @@ namespace
         return inert(actor);
     }
 
-    bool stock_schema(U::UClass* ammo, U::UClass* ammo_base, U::UClass* item_base)
+    bool stock_schema(U::UClass* type, U::UClass* base, U::UClass* item_base, bool stock_ammo)
     {
-        if (!ammo || !ammo_base || !item_base || ammo->GetSuperStruct() != ammo_base || ammo_base->GetSuperStruct() != item_base)
+        auto* equipment_base = stock_ammo ? nullptr : find<U::UClass>(equipment_base_path);
+        auto* parent = stock_ammo ? item_base : equipment_base;
+        if (!type || !base || !item_base || !parent || type->GetSuperStruct() != base || base->GetSuperStruct() != parent ||
+            (equipment_base && equipment_base->GetSuperStruct() != item_base))
             return false;
         auto* interaction = find<U::UFunction>(interaction_path);
-        auto* begin = find<U::UFunction>(ammo_begin_path);
+        auto* begin = find<U::UFunction>(stock_ammo ? ammo_begin_path : weapon_begin_path);
         auto* converter = find<U::UFunction>(convert_path);
         auto* add = find<U::UFunction>(add_path);
         auto* pawn_type = find<U::UClass>(pawn_path);
@@ -286,16 +298,19 @@ namespace
             interaction->GetOuterPrivate() != item_base || interaction->GetNumParms() != 2 ||
             interaction->GetParmsSize() != 16 || interaction->GetReturnProperty() ||
             player->GetPropertyClass().Get() != pawn_type || hit->GetPropertyClass().Get() != scene_type ||
-            begin->GetOuterPrivate() != ammo_base || begin->GetNumParms() || begin->GetParmsSize() ||
+            begin->GetOuterPrivate() != base || begin->GetNumParms() || begin->GetParmsSize() ||
+            type->GetFunctionByNameInChain(begin->GetFName()) != begin ||
+            type->GetFunctionByNameInChain(interaction->GetFName()) != interaction ||
             convert_item->GetPropertyClass().Get() != item_base || add_item->GetPropertyClass().Get() != item_base)
             return false;
         for (auto* function : {interaction, begin, converter, add})
             if (function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
-        projection.ammo_type = ammo;
-        projection.ammo_base = ammo_base;
+        projection.display_type = type;
+        projection.display_base = base;
+        projection.equipment_base = equipment_base;
         projection.item_base = item_base;
         projection.interaction = interaction;
-        projection.ammo_begin = begin;
+        projection.begin = begin;
         projection.converter = converter;
         projection.add_inventory = add;
         return true;
@@ -318,11 +333,12 @@ namespace
             return;
         }
         auto* owner = function->GetOuterPrivate();
-        if ((owner != projection.ammo_type.Get() && owner != projection.ammo_base.Get() && owner != projection.item_base.Get()) ||
+        if (!owner || (owner != projection.display_type.Get() && owner != projection.display_base.Get() &&
+            owner != projection.equipment_base.Get() && owner != projection.item_base.Get()) ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return;
-        if (function == projection.ammo_begin.Get()) projection.begin_veto = true;
+        if (function == projection.begin.Get()) projection.begin_veto = true;
         if (function != projection.interaction.Get() || !lease.visible || !scope_current() || !inert(actor)) return;
         auto* pawn = read(field<U::FObjectProperty>(function, STR("Player")), args);
         auto* box = read(field<U::FObjectProperty>(function, STR("HitComponent")), args);
@@ -475,16 +491,17 @@ namespace
             return arguments[1];
         }
 
-        bool configure(U::AActor* actor, U::UObject* box, U::UObject* mesh)
+        bool configure(U::AActor* actor, U::UObject* box, std::span<U::UObject* const> components, bool stock_ammo)
         {
             // Cooked Player_FP.LookTrace uses TraceTypeQuery index 4 for InteractionTarget_Component.
             // DefaultEngine's Interactable profile maps that trace to ECC_GameTraceChannel3.
             constexpr std::uint8_t visibility = 3;
             constexpr std::uint8_t interactable = 16;
             constexpr std::uint8_t block = 2;
-            if (channel(box, response, interactable, 0xff) != block || channel(box, response, visibility, 0xff) != 0)
+            if (stock_ammo && (channel(box, response, interactable, 0xff) != block ||
+                channel(box, response, visibility, 0xff) != 0))
                 return false;
-            for (auto* component : {box, mesh})
+            for (auto* component : components)
             {
                 byte_call(component, simulate, 0);
                 byte_call(component, overlap, 0);
@@ -494,10 +511,10 @@ namespace
             channel(box, set_channel, interactable, block);
             byte_call(box, set_enabled, 1); // QueryOnly, solely the stock interaction trace.
             actor->SetActorEnableCollision(true);
-            if (byte_call(box, enabled, 0xff) != 1 || byte_call(mesh, enabled, 0xff) != 0) return false;
-            for (auto* component : {box, mesh})
+            for (auto* component : components)
             {
-                if (byte_call(component, simulating, 0) || byte_call(component, overlaps, 0)) return false;
+                if (byte_call(component, enabled, 0xff) != (component == box ? 1 : 0) ||
+                    byte_call(component, simulating, 0) || byte_call(component, overlaps, 0)) return false;
                 for (std::uint8_t index = 0; index < 32; ++index)
                     if (channel(component, response, index, 0xff) != (component == box && index == interactable ? block : 0))
                         return false;
@@ -506,27 +523,94 @@ namespace
         }
     };
 
+    bool owned_component(U::AActor* actor, U::UObject* component, const U::UClass* type)
+    {
+        return type && live(component) && component->GetOuterPrivate() == actor && component->GetClassPrivate() == type;
+    }
+
+    bool pistol_components(U::AActor* actor, U::UObject* box, Collision& collision)
+    {
+        auto* mesh_type = find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"));
+        auto* skeletal_type = find<U::UClass>(STR("/Script/Engine.SkeletalMeshComponent"));
+        auto* arrow_type = find<U::UClass>(STR("/Script/Engine.ArrowComponent"));
+        auto* primitive = find<U::UClass>(STR("/Script/Engine.PrimitiveComponent"));
+        auto* component_type = find<U::UClass>(STR("/Script/Engine.ActorComponent"));
+        if (!arrow_type || !primitive || !component_type) return false;
+        auto* tick_on = collision.native<U::FBoolProperty>(STR("/Script/Engine.ActorComponent:SetComponentTickEnabled"),
+                                                          component_type, STR("bEnabled"));
+        auto* ticking = collision.native<U::FBoolProperty>(STR("/Script/Engine.ActorComponent:IsComponentTickEnabled"),
+                                                          component_type, STR("ReturnValue"), true);
+        if (!tick_on || !ticking) return false;
+        auto* skeleton = object(actor, STR("Wep_Skeli"));
+        if (!owned_component(actor, skeleton, skeletal_type)) return false;
+        constexpr std::array mesh_fields{STR("Mesh_Frame"), STR("Mesh_Mag"), STR("Mesh_Slide")};
+        constexpr std::array mesh_assets{
+            STR("/Game/Classes/Weapons/Wep_Assets/Wep_Models/LightPistol_Frame.LightPistol_Frame"),
+            STR("/Game/Classes/Weapons/Wep_Assets/Wep_Models/LightPistol_Mag.LightPistol_Mag"),
+            STR("/Game/Classes/Weapons/Wep_Assets/Wep_Models/LightPistol_Slide.LightPistol_Slide"),
+        };
+        std::array<U::UObject*, 5> required{box, skeleton};
+        for (std::size_t index = 0; index < mesh_fields.size(); ++index)
+        {
+            auto* mesh = object(actor, mesh_fields[index]);
+            auto* asset = find<U::UObject>(mesh_assets[index]);
+            if (!owned_component(actor, mesh, mesh_type) || !asset || object(mesh, STR("StaticMesh")) != asset)
+                return false;
+            required[index + 2] = mesh;
+        }
+        const auto owned_primitives = actor->K2_GetComponentsByClass(primitive);
+        const auto owned_components = actor->K2_GetComponentsByClass(component_type);
+        if (owned_primitives.Num() < static_cast<int>(required.size()) ||
+            owned_primitives.Num() > static_cast<int>(component_limit) ||
+            owned_components.Num() < owned_primitives.Num() || owned_components.Num() > static_cast<int>(component_limit))
+            return false;
+        std::array<U::UObject*, component_limit> components{};
+        for (int index = 0; index < owned_primitives.Num(); ++index)
+        {
+            auto* component = owned_primitives[index];
+            const auto prior = std::span{components}.first(index);
+            if ((!owned_component(actor, component, arrow_type) &&
+                 std::ranges::find(required, component) == required.end()) ||
+                std::ranges::find(prior, component) != prior.end()) return false;
+            components[index] = component;
+        }
+        const auto live_primitives = std::span{components}.first(owned_primitives.Num());
+        if (!std::ranges::all_of(required, [&](auto* component) {
+            return std::ranges::find(live_primitives, component) != live_primitives.end();
+        })) return false;
+        for (int index = 0; index < owned_components.Num(); ++index)
+        {
+            auto* component = owned_components[index];
+            if (!live(component) || component->GetOuterPrivate() != actor) return false;
+            Collision::byte_call(component, tick_on, 0);
+            if (Collision::byte_call(component, ticking, 0xff)) return false;
+        }
+        return collision.configure(actor, box, live_primitives, false);
+    }
+
     const char* spawn_projection()
     {
-        auto* ammo = find<U::UClass>(ammo_path);
+        const bool stock_ammo = lease.display == Display::ammo;
+        auto* type = find<U::UClass>(stock_ammo ? ammo_path : pistol_path);
+        auto* base = find<U::UClass>(stock_ammo ? ammo_base_path : weapon_base_path);
+        auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
         auto* const world = U::Cast<U::UWorld>(lease.world.Get());
         Spawn spawn;
         Collision collision;
-        if (!scope_current() || !stock_schema(ammo, find<U::UClass>(ammo_base_path), find<U::UClass>(item_path))
+        if (!scope_current() || !stock_schema(type, base, find<U::UClass>(item_path), stock_ammo)
+            || !defaults || defaults->GetClassPrivate() != type || !boolean(defaults, STR("bReplicates"), false)
             || !spawn.bind() || !collision.bind()) return "stock_drop_projection_schema_unavailable";
-        auto* stock_mesh = find<U::UObject>(mesh_path);
         auto* box_type = find<U::UClass>(STR("/Script/Engine.BoxComponent"));
-        auto* mesh_type = find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"));
-        if (!stock_mesh || !box_type || !mesh_type) return "stock_drop_projection_assets_unavailable";
+        if (!box_type) return "stock_drop_projection_assets_unavailable";
 
         DeferredArgs deferred;
         deferred.world = world;
-        deferred.type = ammo;
+        deferred.type = type;
         deferred.transform = U::FTransform{U::FQuat(0, 0, 0, 1),
             U::FVector(lease.source[0], lease.source[1], lease.visual_z), U::FVector(1, 1, 1)};
         spawn.statics->ProcessEvent(spawn.begin, &deferred);
         auto* actor = deferred.result;
-        if (!mutable_actor(actor) || actor->GetClassPrivate() != ammo || actor->GetWorld() != world ||
+        if (!mutable_actor(actor) || actor->GetClassPrivate() != type || actor->GetWorld() != world ||
             actor->HasAnyFlags(U::RF_WasLoaded)) return "stock_drop_projection_deferred_actor_unavailable";
 
         projection.object = actor;
@@ -543,13 +627,21 @@ namespace
             !silverfish::native_guest_drop_maps::persistent_actor(actor, world))
             return "stock_drop_projection_stock_begin_veto_unverified";
         auto* box = object(actor, STR("Box"));
-        auto* mesh = object(actor, STR("SM_Ammo_HevRifle"));
-        if (!live(box) || box->GetOuterPrivate() != actor || box->GetClassPrivate() != box_type ||
-            !live(mesh) || mesh->GetOuterPrivate() != actor || mesh->GetClassPrivate() != mesh_type ||
-            object(mesh, STR("StaticMesh")) != stock_mesh) return "stock_drop_projection_components_unverified";
+        if (!owned_component(actor, box, box_type)) return "stock_drop_projection_components_unverified";
         actor->SetActorTickEnabled(false);
-        if (!inert(actor) || actor->IsActorTickEnabled() || !byte(actor, STR("RemoteRole"), 0) ||
-            !collision.configure(actor, box, mesh)) return "stock_drop_projection_inert_state_unverified";
+        if (!inert(actor) || actor->IsActorTickEnabled() || !byte(actor, STR("RemoteRole"), 0))
+            return "stock_drop_projection_inert_state_unverified";
+        if (stock_ammo)
+        {
+            auto* mesh = object(actor, STR("SM_Ammo_HevRifle"));
+            auto* asset = find<U::UObject>(ammo_mesh_path);
+            if (!owned_component(actor, mesh, find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"))) ||
+                !asset || object(mesh, STR("StaticMesh")) != asset)
+                return "stock_drop_projection_components_unverified";
+            const std::array components{box, mesh};
+            if (!collision.configure(actor, box, components, true)) return "stock_drop_projection_inert_state_unverified";
+        }
+        else if (!pistol_components(actor, box, collision)) return "stock_drop_projection_pistol_components_unverified";
 
         if (!show(actor)) return "stock_drop_projection_visible_actor_unverified";
         projection.box = box;
@@ -565,7 +657,9 @@ namespace
 
     int sync(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 7 || !lua.is_integer(1) || !lua.is_string(2) || !lua.is_string(3))
+        const auto arguments = lua.get_stack_size();
+        if (!ready() || (arguments != 7 && arguments != 8) || !lua.is_integer(1) || !lua.is_string(2) || !lua.is_string(3) ||
+            (arguments == 8 && !lua.is_string(8)))
             return report(lua, false, "stock_drop_projection_sync_arguments");
         for (int index = 4; index <= 7; ++index)
             if (!lua.is_number(index)) return report(lua, false, "stock_drop_projection_position_arguments");
@@ -574,6 +668,15 @@ namespace
         Position source{};
         for (auto& axis : source) axis = lua.get_number();
         const double visual = lua.get_number();
+        const auto class_path = arguments == 8 ? lua.get_string() : "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C";
+        Display display;
+        if (class_path == "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C") display = Display::ammo;
+        else if (class_path == "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C") display = Display::pistol;
+        else
+        {
+            clear();
+            return report(lua, false, "stock_drop_projection_class_unqualified");
+        }
         auto* pawn = input::current_local_pawn(address);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         auto* driver = object(world, STR("NetDriver"));
@@ -590,9 +693,10 @@ namespace
         auto* existing = static_cast<U::AActor*>(projection.object.Get());
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
-            lease.host == (connection == nullptr) && lease.connection.Get() == connection &&
+            lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.display == display &&
             lease.source == source && mutable_actor(existing) &&
-            live(projection.box.Get()) && object(existing, STR("Box")) == projection.box.Get())
+            existing->GetClassPrivate() == projection.display_type.Get() && live(projection.box.Get()) &&
+            object(existing, STR("Box")) == projection.box.Get())
         {
             lease.expiry = Clock::now() + heartbeat;
             if (lease.visible || (inert(existing) && show(existing))) return report(lua, true, "projected");
@@ -606,6 +710,7 @@ namespace
         lease.driver = driver;
         lease.connection = connection;
         lease.host = connection == nullptr;
+        lease.display = display;
         lease.epoch = epoch;
         lease.id = id;
         lease.source = source;

@@ -54,15 +54,14 @@ def _near(host, character: str, row: dict) -> bool:
             and math.dist(origin["location"], row["location"]) <= party.INTERACT_RANGE)
 
 
-def _qualified_item(row: dict, guid: str, count: int) -> bool:
+def _qualified_item(row: dict, guid: str, count: int, item: str) -> bool:
     return (row.get("guid"), row.get("quantity"), row.get("class_path"), row.get("source"),
-            row.get("stackable"), row.get("important")) == (guid, count, record.ITEM, "backpack", True, False)
+            row.get("stackable"), row.get("important")) == (guid, count, item, "backpack", record.STACKABLE[item], False)
 
 
 def droppable(row: dict) -> bool:
-    guid, count = row.get("guid"), row.get("quantity")
-    return (valid_guid(guid) and type(count) is int and 1 <= count <= record.MAX_QUANTITY
-            and _qualified_item(row, guid, count))
+    guid, count, item = row.get("guid"), row.get("quantity"), row.get("class_path")
+    return valid_guid(guid) and record.valid_quantity(item, count) and _qualified_item(row, guid, count, item)
 
 
 def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
@@ -85,16 +84,15 @@ async def service_view(client, active: bool) -> None:
                 or time.monotonic() - client.gameplay_seen >= 3 or client.gameplay.get(record.CAPABILITY) != 1
                 or not record.supported_map(area) or area != client.last_game.get("map")
                 or not pawn or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")
-                or client.inventory_drop_scope != identity or item != record.ITEM or not valid_guid(guid)
-                or type(count) is not int or not 1 <= count <= record.MAX_QUANTITY):
+                or client.inventory_drop_scope != identity or not valid_guid(guid) or not record.valid_quantity(item, count)):
             raise ValueError("The stock inventory drop confirmation expired")
         owner = client.invite["character_id"]
         offset = native_inventory.displayed_offset(client.last_game, sequence, area, pawn)
         if offset is None:
             raise ValueError("The stock inventory drop confirmation expired")
         page = await native_inventory.read_view_page(client, operation, offset)
-        if not any(droppable(row) and (row["guid"], row["quantity"]) == (guid, count) for row in page["items"]):
-            raise ValueError("The selected full stack is no longer on your authenticated backpack page")
+        if not any(_qualified_item(row, guid, count, item) for row in page["items"]):
+            raise ValueError("The selected item is no longer on your authenticated backpack page")
         current = client.bridge.snapshot() or {}
         if (view_identity(client, sequence, area, pawn) != identity or not client.transport.game_access
                 or client.suspended or client.needs_travel or client.server_transitioning
@@ -103,9 +101,9 @@ async def service_view(client, active: bool) -> None:
             raise ValueError("The stock inventory drop confirmation expired")
         receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{count}"))[RESULT]
         if (tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "class_path", "map")) != (
-                "dropped", operation, owner, guid, count, record.ITEM, area)
+                "dropped", operation, owner, guid, count, item, area)
                 or not record.valid_position(receipt.get("location"))):
-            raise RuntimeError("The host did not verify the exact dropped 9mm stack")
+            raise RuntimeError("The host did not verify the exact dropped inventory item")
         result = "dropped"
         client.control.event("native_guest_inventory_stack_dropped", operation_id=operation, view_sequence=sequence, **receipt)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
@@ -115,9 +113,9 @@ async def service_view(client, active: bool) -> None:
         client.last_game = await client.bridge.command(record.VIEW_RESULT, str(sequence), area, guid, result, timeout=2)
 
 
-async def _escrow_item(host, bridge, frame: dict, guid: str, count: int) -> None:
+async def _escrow_item(host, bridge, frame: dict, guid: str, count: int, item: str) -> None:
     items = (await native_inventory.read_complete(host, bridge, frame))["items"]
-    if len(items) != 1 or not _qualified_item(items[0], guid, count):
+    if len(items) != 1 or not _qualified_item(items[0], guid, count, item):
         raise RuntimeError("The isolated stack drop escrow does not contain the exact single typed row")
 
 
@@ -213,7 +211,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             raise party.RuleError("native_guest_stack_drop_out_of_range")
         escrow = original["escrow"]
         await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
-        await _escrow_item(host, bridge, escrow, original["guid"], original["quantity"])
+        await _escrow_item(host, bridge, escrow, original["guid"], original["quantity"], original["class_path"])
         candidate = party.load_party(host.party)
         row = candidate[record.STATE][target]
         row.update(claim_id=operation, claimed_by=character)
@@ -231,23 +229,24 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             or any(row["owner"] == character or row["guid"] == guid for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")
     birth = (await probe.perform(host, bridge, character, guid, count, fixture=False))[probe.KEY]
-    location = birth.get("location")
+    location, item = birth.get("location"), birth.get("class_path")
     campaign = host.store.status()
     source = native_inventory.saved_frame(host, campaign, character)
-    if (not record.valid_position(location) or (birth.get("map"), birth.get("pawn")) != (area, pawn)
+    if (not record.valid_position(location) or not record.valid_quantity(item, count)
+            or (birth.get("map"), birth.get("pawn")) != (area, pawn)
             or not isinstance(source, dict) or (source.get("map"), source.get("slot")) != (area, birth["slot"])
             or campaign.get("revision") != birth["revision"]):
         raise RuntimeError("The stock stack drop did not verify its placement and exact frozen owner frame")
     items = (await native_inventory.read_complete(host, bridge, source))["items"]
     dropped = next((item for item in items if item["guid"] == guid), None)
-    if not dropped or not _qualified_item(dropped, guid, count):
-        raise party.RuleError("native_guest_stack_drop_stock_9mm_row_unqualified")
+    if not dropped or not _qualified_item(dropped, guid, count, item):
+        raise party.RuleError("native_guest_stack_drop_stock_item_row_unqualified")
     prepared = await native_inventory_death.prepare(host, bridge, {
         "source": source, "kept": [item["guid"] for item in items if item["guid"] != guid], "dropped": [guid], "discarded": []})
     escrow = prepared["bag"]
-    await _escrow_item(host, bridge, escrow, guid, count)
+    await _escrow_item(host, bridge, escrow, guid, count, item)
     candidate = party.load_party(host.party)
     candidate.setdefault(record.STATE, {})[operation] = dict(owner=character, guid=guid, quantity=count,
-        class_path=record.ITEM, map=area, location=location, claim_id=None, escrow=escrow)
+        class_path=item, map=area, location=location, claim_id=None, escrow=escrow)
     return await _settle(host, bridge, character, action, target, operation, operation, source,
                          prepared["replacement"], candidate, scope)

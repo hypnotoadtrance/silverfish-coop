@@ -2,6 +2,7 @@ local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
 local drop_maps = require("native_guest_drop_maps")
+local drop_items = require("native_guest_drop_items")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -20,9 +21,8 @@ local meals = {
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
-local drop_ammo = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local split_ammo = {
-    [drop_ammo] = true,
+    [drop_items.ammo] = true,
     ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
     ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
 }
@@ -189,11 +189,12 @@ local function page(fields)
             error("The authenticated inventory split row did not qualify", 0)
         end
         local droppable = options == "drop" or options == "split,drop"
-        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or class ~= drop_ammo or quantity > 200) then
+        local drop_profile = drop_items.profiles[class]
+        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or not drop_profile or quantity > drop_profile.maximum) then
             error("The authenticated inventory drop row did not qualify", 0)
         end
         if usable then name = consumable end
-        if droppable then name = "9mm Ball" end
+        if droppable then name = drop_profile.label end
         records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
             droppable = droppable, name = name, quantity = quantity, splittable = splittable,
             label = string.format("%s   %d x %s", sources[source], quantity, name)}
@@ -213,13 +214,15 @@ local function show()
     if row.pending_offset then
         lines[#lines + 1] = "Loading inventory page. End closes."
     elseif row.drop_state == "confirming" then
-        lines[#lines + 1] = string.format("Drop all %d rounds of 9mm Ball? Home confirms. End cancels.", selected.quantity)
+        local description = selected.class == drop_items.ammo
+            and string.format("all %d rounds of %s", selected.quantity, selected.name) or selected.name
+        lines[#lines + 1] = "Drop " .. description .. "? Home confirms. End cancels."
     elseif row.drop_state == "dropping" then
-        lines[#lines + 1] = "Ammo drop pending"
+        lines[#lines + 1] = "Drop pending"
     elseif row.drop_state == "dropped" then
-        lines[#lines + 1] = "Ammo dropped. Reopen inventory to refresh."
+        lines[#lines + 1] = "Item dropped. Reopen inventory to refresh."
     elseif row.drop_state == "refused" then
-        lines[#lines + 1] = "Ammo drop unavailable. Reopen inventory to refresh."
+        lines[#lines + 1] = "Drop unavailable. Reopen inventory to refresh."
     elseif row.split_state == "confirming" then
         lines[#lines + 1] = string.format("Split off %d rounds? Home confirms. End cancels.", selected.quantity // 2)
     elseif row.split_state == "splitting" then
@@ -228,9 +231,10 @@ local function show()
         lines[#lines + 1] = "Ammo stack split. Reopen inventory to refresh."
     elseif row.split_state == "refused" then
         lines[#lines + 1] = "Ammo stack split unavailable. Reopen inventory to refresh."
-    elseif selected and selected.droppable then
-        local split = selected.splittable and " Home splits half the stack." or ""
-        lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a full stack drop." .. split .. " End closes."
+    elseif selected and selected.droppable and (not selected.equippable or row.equip_state == "selecting") then
+        local other = selected.splittable and " Home splits half the stack."
+            or selected.equippable and " Home equips the selected item." or ""
+        lines[#lines + 1] = "Page Up / Page Down selects. Delete prepares a drop." .. other .. " End closes."
     elseif selected and selected.splittable then
         lines[#lines + 1] = "Page Up / Page Down selects. Home splits half the stack. End closes."
     elseif row.use_state == "confirming" then

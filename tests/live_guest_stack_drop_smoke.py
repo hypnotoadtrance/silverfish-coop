@@ -1,4 +1,4 @@
-"""Verify a durable native stock 9mm drop and authenticated party pickup."""
+"""Verify a durable native stock 9mm or loaded Light Pistol drop and party pickup."""
 
 import argparse
 import asyncio
@@ -18,16 +18,23 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
 from tools.silverfish import native_guest_drop_projection as projection, native_host_save
 from tools.silverfish import native_host_stack_drop as host_drop_input
+from tools.silverfish.native_guest_weapon import FIRE_CLASSES
 
 
 EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
+PISTOL = FIRE_CLASSES["light-pistol"]
+UNSUPPORTED_PISTOL = FIRE_CLASSES["light-pistol-suppressed"]
 
 
 async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
-                 host_origin_menu=None):
+                 host_origin_menu=None, light_pistol=False):
     host_origin = host_origin or host_origin_menu is not None
-    mode = f"host-menu-{host_origin_menu}" if host_origin_menu else "host-origin" if host_origin else claimant
+    claimant = "teammate" if light_pistol else claimant
+    mode = (f"host-menu-{host_origin_menu}" if host_origin_menu else
+            "host-origin" if host_origin else "light-pistol" if light_pistol else claimant)
+    item_class, quantity = (PISTOL, 1) if light_pistol else (record.ITEM, 9)
+    actor_class = item_class.rsplit(".", 1)[1]
     name = f"manual-stack-drop-{mode}-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     run = campaign / "run"
@@ -41,7 +48,8 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
     flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones",
              "--max-guests", "2", "--start-zone", record.OBSERVATORY)
     originals = saved_hashes(originals_path)
-    evidence, jobs = {"claimant": "guest" if host_origin else claimant, "host_origin": host_origin}, []
+    evidence, jobs = {"claimant": "guest" if host_origin else claimant, "host_origin": host_origin,
+                      "class_path": item_class}, []
 
     async def command(*arguments, success=True):
         process = await asyncio.create_subprocess_exec(*cli, *arguments, cwd=REPO, stdout=asyncio.subprocess.PIPE,
@@ -84,10 +92,16 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         assert page["owner"] == character and page["offset"] == 0 and page["next_offset"] is None, page
         return page["items"]
 
+    async def inspect_loaded_pistol(target, guid):
+        report = (await action(target, "native-guest-weapon-inspect", "--target", guid))["native_guest_weapon"]
+        assert (report["guid"], report["status"], report["stored_ammo"], report["actor_ammo"]) == (
+            guid, "backpack", 7, -1), report
+        return report
+
     def saved():
         checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
         native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
-        return checkpoint["world"]["party"][record.STATE]
+        return checkpoint["world"]["party"].get(record.STATE, {})
 
     async def projected(viewer, viewer_id, drop_id, dropper):
         def predicate(frame):
@@ -104,7 +118,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
         frame = await wait(run if viewer == host else clients[viewer], predicate)
         proof = frame["game"][projection.KEY]
-        assert proof["pawn"] and proof["actor"].startswith("Ammo_Pistol_BP_C "), proof
+        assert proof["pawn"] and proof["actor"].startswith(actor_class + " "), proof
         return proof
 
     def exact_position(frame, character, role):
@@ -238,16 +252,34 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         host_items = await inventory(host, "host")
         if other in clients:
             other_items = await inventory(other, other_id)
-        await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", source)
+        if light_pistol:
+            unsupported = uuid.uuid4().hex.upper()
+            await action(host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", unsupported,
+                         "--kind", "light-pistol-suppressed")
+            await action(host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", source,
+                         "--kind", "light-pistol")
+            evidence["loaded_source"] = await inspect_loaded_pistol(owner, source)
+        else:
+            await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", source)
         initial_items = await inventory(owner, owner_id)
         typed, = (item for item in initial_items if item["guid"] == source)
-        assert (typed["source"], typed["class_path"], typed["quantity"]) == ("backpack", record.ITEM, 9), typed
+        assert (typed["source"], typed["class_path"], typed["quantity"]) == ("backpack", item_class, quantity), typed
         drop_site = await place(owner_id, "near")
-        request = (drop.DROP, "--target", f"{source}|9", "--operation-id", attempt)
+        if light_pistol:
+            excluded, = (item for item in initial_items if item["guid"] == unsupported)
+            assert (excluded["source"], excluded["class_path"], excluded["quantity"]) == (
+                "backpack", UNSUPPORTED_PISTOL, 1), excluded
+            refused = await action(owner, drop.DROP, "--target", f"{unsupported}|1", success=False)
+            assert refused["error"] == "native_guest_stack_drop_stock_item_row_unqualified", refused
+            assert await inventory(owner, owner_id) == initial_items
+            assert not saved()
+            evidence["unsupported_selection"] = {"item": excluded, "requested_quantity": 1, "error": refused["error"]}
+
+        request = (drop.DROP, "--target", f"{source}|{quantity}", "--operation-id", attempt)
         dropped = (await action(owner, *request))[drop.RESULT]
         evidence["drop"] = dropped
-        assert (dropped["state"], dropped["drop_id"], dropped["owner"], dropped["guid"], dropped["quantity"]) == (
-            "dropped", attempt, owner_id, source, 9), dropped
+        assert (dropped["state"], dropped["drop_id"], dropped["owner"], dropped["guid"], dropped["quantity"],
+                dropped["class_path"]) == ("dropped", attempt, owner_id, source, quantity, item_class), dropped
         assert record.valid_position(dropped["location"])
         assert math.dist(dropped["location"], drop_site["location"]) < 180, (dropped, drop_site)
         assert (await action(owner, *request))[drop.RESULT] == dropped
@@ -312,6 +344,8 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert await inventory(owner, owner_id) == [item for item in initial_items if item["guid"] != source]
             if recipient != host:
                 assert await inventory(host, "host") == host_items
+            if light_pistol:
+                evidence["loaded_recipient"] = await inspect_loaded_pistol(recipient, source)
             duplicate = await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id, success=False)
             assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
             evidence["verified"] = True
@@ -412,9 +446,14 @@ if __name__ == "__main__":
     origin.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
     origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu"),
                         help="drop through the selected stock host inventory route, then pick up the stack as the guest")
+    origin.add_argument("--light-pistol", action="store_true",
+                        help="verify a loaded stock Light Pistol drop and pickup by a second guest")
     settings = parser.parse_args()
     if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
         parser.error("host-origin tests run separately from claimant-only tests")
+    if settings.light_pistol and (settings.visible_projection or settings.claimant == "host"):
+        parser.error("--light-pistol verifies stock Interact pickup by a second guest")
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
                        visible_projection=settings.visible_projection, claimant=settings.claimant,
-                       host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu))
+                       host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu,
+                       light_pistol=settings.light_pistol))

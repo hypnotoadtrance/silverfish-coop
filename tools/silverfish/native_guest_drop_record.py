@@ -1,4 +1,4 @@
-"""Validate the durable ledger for shared native stock 9mm stacks."""
+"""Validate the durable ledger for shared native stock inventory drops."""
 
 import math
 import re
@@ -15,6 +15,8 @@ VIEW = "native_guest_inventory_drop_view"
 VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
 ITEM = NINE_MM_BALL.item_path
+LIGHT_PISTOL = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
+STACKABLE = {ITEM: True, LIGHT_PISTOL: False}
 MAPS = {OBSERVATORY: "Observitory_P", CROSSROADS: "CrossRoads_P"}
 MAX_DROPS = 128
 MAX_ACTIVE = 4
@@ -41,25 +43,36 @@ def _paths(actor_class: str) -> dict:
 
 
 _PAWN_PATHS = _paths("Player_FP_C")
-_ACTOR_PATHS = _paths("Ammo_Pistol_BP_C")
+_ACTOR_PATHS = {path: _paths(path.rsplit(".", 1)[1]) for path in STACKABLE}
 
 
 def pawn_matches(area, name) -> bool:
     return supported_map(area) and isinstance(name, str) and _PAWN_PATHS[area].fullmatch(name) is not None
 
 
+def actor_class_path(area, name) -> str | None:
+    if supported_map(area) and isinstance(name, str):
+        return next((path for path, names in _ACTOR_PATHS.items() if names[area].fullmatch(name)), None)
+
+
 def actor_matches(area, name) -> bool:
-    return supported_map(area) and isinstance(name, str) and _ACTOR_PATHS[area].fullmatch(name) is not None
+    return actor_class_path(area, name) is not None
+
+
+def valid_quantity(path, count) -> bool:
+    if not isinstance(path, str) or path not in STACKABLE or type(count) is not int:
+        return False
+    return 1 <= count <= (MAX_QUANTITY if STACKABLE[path] else 1)
 
 
 def parse_view(fields: list[str], state: str, area: str) -> dict:
     if len(fields) != 8 or state != "connected" or not supported_map(area):
         raise ValueError("Unexpected stock inventory drop view")
     _, number, reported_area, pawn, guid, item, phase, quantity = fields
-    if (reported_area != area or not pawn_matches(area, pawn) or not valid_guid(guid) or item != ITEM
+    if (reported_area != area or not pawn_matches(area, pawn) or not valid_guid(guid)
             or phase not in {"confirming", "dropping", "dropped", "refused"}
             or not re.fullmatch(r"[1-9][0-9]{0,15}", number) or int(number) >= 2**53
-            or not re.fullmatch(r"[1-9][0-9]{0,2}", quantity) or int(quantity) > MAX_QUANTITY):
+            or not re.fullmatch(r"[1-9][0-9]{0,2}", quantity) or not valid_quantity(item, int(quantity))):
         raise ValueError("Invalid stock inventory drop view")
     return dict(sequence=int(number), map=area, pawn=pawn, guid=guid, class_path=item, state=phase, count=int(quantity))
 
@@ -88,8 +101,7 @@ def active_frames(data: dict, members) -> list[dict]:
             fields |= {"claimed_by"}
         if ((owner, drop_id) in operations or (claim_id is not None and not valid_id(claim_id))
                 or row.keys() != fields
-                or not valid_guid(row.get("guid")) or type(row.get("quantity")) is not int
-                or not 1 <= row["quantity"] <= MAX_QUANTITY or row.get("class_path") != ITEM
+                or not valid_guid(row.get("guid")) or not valid_quantity(row.get("class_path"), row.get("quantity"))
                 or not supported_map(row.get("map")) or not valid_position(row.get("location"))):
             raise ValueError("Invalid stock stack drop payload")
         operations.add((owner, drop_id))

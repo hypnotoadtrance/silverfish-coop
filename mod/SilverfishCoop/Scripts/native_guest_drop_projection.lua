@@ -1,9 +1,9 @@
 local projection = {}
 local maps = require("native_guest_drop_maps")
+local drop_items = require("native_guest_drop_items")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local ammo_class = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local color = { R = 0, G = 0, B = 0, A = 1 }
 local current
 
@@ -67,7 +67,8 @@ end
 local function proof()
     if not current or type(SilverfishReadNativeGuestDropProjection) ~= "function" then return end
     local active, epoch, id, actor, sequence = SilverfishReadNativeGuestDropProjection()
-    if active == true and current.epoch == epoch and current.id == id and type(actor) == "string" then
+    if active == true and current.epoch == epoch and current.id == id
+        and drop_items.actor_path(current.class, current.map, maps[current.map], actor) then
         return actor, sequence
     end
 end
@@ -95,7 +96,7 @@ local function fixture(pawn, id)
     local displayed, before = proof()
     if not headless or not current or current.id ~= id or not displayed or type(before) ~= "number"
         or type(SilverfishProbeNativeInteractInput) ~= "function" then error("stock_drop_projection_fixture_scope_unavailable", 0) end
-    local path = displayed:match("^Ammo_Pistol_BP_C (%S+)$")
+    local path = drop_items.actor_path(current.class, current.map, maps[current.map], displayed)
     local actor = path and StaticFindObject(path)
     local box = valid(actor) and actor.Box
     local camera = pawn.Camera
@@ -155,24 +156,29 @@ function projection.command(fields, state, phase)
         local pawn = local_pawn(state, phase)
         local area, epoch, id = fields[3], fields[4], fields[5]
         local source = { tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]) }
-        if #fields ~= 8 or area ~= state.map or not pawn or not identifier(epoch) or not identifier(id) or not coordinate(source[1])
+        local class = fields[9] or drop_items.ammo
+        if (#fields ~= 8 and #fields ~= 9) or not drop_items.profiles[class]
+            or area ~= state.map or not pawn or not identifier(epoch) or not identifier(id) or not coordinate(source[1])
             or not coordinate(source[2]) or not coordinate(source[3])
             or type(SilverfishSyncNativeGuestDropProjection) ~= "function" then
             projection.clear()
             error("stock_drop_projection_snapshot_unqualified", 0)
         end
         local cached = current and same(pawn, current.pawn) and current.map == area and current.epoch == epoch and current.id == id
+            and current.class == class
             and source[1] == current.source[1] and source[2] == current.source[2] and source[3] == current.source[3]
         if not cached then projection.clear() end
-        if not valid(StaticFindObject(ammo_class)) then LoadAsset(ammo_class) end
+        if not valid(StaticFindObject(class)) then LoadAsset(class) end
         local visual_z = cached and current.visual_z or floor_z(state, source)
+        local extra = class ~= drop_items.ammo and {class} or {}
         local ok, detail = SilverfishSyncNativeGuestDropProjection(pawn:GetAddress(), epoch, id,
-            source[1], source[2], source[3], visual_z)
+            source[1], source[2], source[3], visual_z, table.unpack(extra))
         if not ok then
             projection.clear()
             error(detail, 0)
         end
-        current = { pawn = pawn, world = state.world, map = area, epoch = epoch, id = id, source = source, visual_z = visual_z }
+        current = { pawn = pawn, world = state.world, map = area, epoch = epoch, id = id, class = class,
+            source = source, visual_z = visual_z }
         return "stock drop projection synchronized"
     end
 end

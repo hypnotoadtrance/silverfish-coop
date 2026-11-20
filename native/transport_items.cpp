@@ -45,6 +45,7 @@ namespace
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
     constexpr auto pistol_ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
+    constexpr auto light_pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -842,7 +843,7 @@ namespace
     }
 
     [[nodiscard]] bool exact_canonical_drop_row(Unreal::UObject* save, const ItemView& card,
-                                                const Guid& guid, std::int32_t count, Unreal::UObject* ammo_class)
+                                                const Guid& guid, std::int32_t saved_ammo, Unreal::UObject* item_class)
     {
         auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
         auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
@@ -868,8 +869,8 @@ namespace
         {
             const auto* row = pack.GetRawPtr(index);
             if (fields.read(row) != guid) continue;
-            if (found || object_value(class_field, row) != ammo_class ||
-                count_field->GetPropertyValueInContainer(row) != count || never_drop->GetPropertyValueInContainer(row))
+            if (found || object_value(class_field, row) != item_class ||
+                count_field->GetPropertyValueInContainer(row) != saved_ammo || never_drop->GetPropertyValueInContainer(row))
                 return false;
             found = true;
         }
@@ -903,10 +904,13 @@ namespace
         }
         if (!exact_class(card, card_path)) return;
         const auto candidate = card_item(card);
-        auto* ammo_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
-        if (candidate.panel != panel || !ammo_class || ammo_class->GetPathName() != pistol_ammo_path) return;
+        auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
+        if (candidate.panel != panel || !item_class) return;
+        const auto class_path = item_class->GetPathName();
+        const bool stack = class_path == pistol_ammo_path;
+        if (!stack && class_path != light_pistol_path) return;
 
-        // Suppress stock TakeCard even when the selected 9mm row is stale or a request is already pending.
+        // Suppress stock TakeCard even when the selected row is stale or a request is already pending.
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented()) return;
 
@@ -929,9 +933,10 @@ namespace
         auto* count_field = field<Unreal::FIntProperty>(candidate.structure, item_ammo_name);
         if (!fields.valid() || !count_field) return;
         const Guid guid = fields.read(candidate.value);
-        const auto count = count_field->GetPropertyValueInContainer(candidate.value);
-        if (guid == Guid{} || count < 1 || count > max_drop_ammo ||
-            !exact_canonical_drop_row(save, candidate, guid, count, ammo_class)) return;
+        const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
+        if (guid == Guid{} || saved_ammo < (stack ? 1 : 0) || saved_ammo > max_drop_ammo ||
+            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
+        const auto count = stack ? saved_ammo : 1;
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
                                             screen, panel, from_menu ? "context_menu" : "ctrl_click"};
     }

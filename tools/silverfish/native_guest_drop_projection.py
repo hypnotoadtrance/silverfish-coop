@@ -40,13 +40,15 @@ def _nearby_projection(game, rows, session: str, zone: str, viewer: str, admissi
             or not record.valid_position(origin) or type(rows) is not dict or not 1 <= len(rows) <= record.MAX_ACTIVE):
         return None
     if any(not record.valid_id(drop_id) or type(row) is not dict
-           or (row.get("drop_id"), row.get("map"), row.get("class_path")) != (drop_id, area, record.ITEM)
+           or (row.get("drop_id"), row.get("map")) != (drop_id, area)
+           or not record.valid_quantity(row.get("class_path"), row.get("quantity"))
            or not isinstance(row.get("owner"), str) or not row["owner"]
            or not record.valid_position(row.get("location")) for drop_id, row in rows.items()):
         return None
     drop_id = min(rows, key=lambda key: (math.dist(origin, rows[key]["location"]), key))
     epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{session}:{zone}:{viewer}:{admission}:{area}").hex
-    return epoch, drop_id, pawn, area, rows[drop_id]["location"]
+    row = rows[drop_id]
+    return epoch, drop_id, pawn, area, row["class_path"], row["location"]
 
 
 def _desired(client, active: bool, admission: str):
@@ -90,8 +92,9 @@ class Projection:
     @staticmethod
     def _matches(snapshot, desired):
         proof = snapshot.get(KEY, {})
-        epoch, drop_id, pawn, area, _ = desired
-        return (proof.get("epoch"), proof.get("drop_id"), proof.get("pawn"), proof.get("map")) == (epoch, drop_id, pawn, area)
+        epoch, drop_id, pawn, area, item, _ = desired
+        return ((proof.get("epoch"), proof.get("drop_id"), proof.get("pawn"), proof.get("map")) == (epoch, drop_id, pawn, area)
+                and record.actor_class_path(area, proof.get("actor")) == item)
 
     async def _clear(self, bridge, game):
         if self.current is not None or game.get(KEY):
@@ -108,14 +111,15 @@ class Projection:
         # A stalled read can age the snapshot. Let native hide
         # the actor and renew its same weak identity when the next authenticated frame arrives.
         now = time.monotonic()
-        if not fresh or (self.current == desired[:4] and now < self.next_sync):
+        if not fresh or (self.current == desired[:5] and now < self.next_sync):
             return game
-        epoch, drop_id, _, area, xyz = desired
+        epoch, drop_id, _, area, item, xyz = desired
         self.next_sync = now + .6
-        snapshot = await bridge.command(SYNC, area, epoch, drop_id, *(str(axis) for axis in xyz), timeout=2)
+        args = () if item == record.ITEM else (item,)
+        snapshot = await bridge.command(SYNC, area, epoch, drop_id, *(str(axis) for axis in xyz), *args, timeout=2)
         if not self._matches(snapshot, desired):
             raise RuntimeError("The exact local stock drop projection was unverified")
-        self.current = desired[:4]
+        self.current = desired[:5]
         self.last_error = None
         return snapshot
 
@@ -132,16 +136,16 @@ class Projection:
             host.last_game, host.last_seen = game, time.monotonic()
 
     def _qualify_claim(self, game, desired, fresh, target):
-        if (not fresh or desired is None or self.current != desired[:4] or desired[:2] != target
+        if (not fresh or desired is None or self.current != desired[:5] or desired[:2] != target
                 or self.claimed == target or not self._matches(game, desired)):
             raise party.RuleError("native_guest_drop_projection_intent_stale")
 
-    def _accept_claim(self, result, target, claimant):
+    def _accept_claim(self, result, target, claimant, item):
         from .native_guest_drop import RESULT
 
         receipt = result.get(RESULT, {})
-        if (receipt.get("state"), receipt.get("drop_id"), receipt.get("claimed_by", receipt.get("owner"))) != (
-                "reclaimed", target[1], claimant):
+        if (receipt.get("state"), receipt.get("drop_id"), receipt.get("claimed_by", receipt.get("owner")),
+                receipt.get("class_path")) != ("reclaimed", target[1], claimant, item):
             raise RuntimeError("The exact claimant did not receive a stock drop pickup receipt")
         self.claimed = target
         return result
@@ -149,17 +153,18 @@ class Projection:
     async def reclaim(self, client, operation: str, target: tuple[str, str]):
         from .native_guest_drop import RECLAIM
 
-        self._qualify_claim(client.last_game, _desired(client, True, self.admission), _fresh(client), target)
+        desired = _desired(client, True, self.admission)
+        self._qualify_claim(client.last_game, desired, _fresh(client), target)
         result = await client.gameplay_action(RECLAIM, operation, target[1])
-        return self._accept_claim(result, target, client.invite["character_id"])
+        return self._accept_claim(result, target, client.invite["character_id"], desired[4])
 
     async def reclaim_host(self, host, bridge, operation: str, target: tuple[str, str]):
         from .native_guest_drop import RECLAIM, perform
 
-        self._qualify_claim(host.last_game, _host_desired(host, self.admission), time.monotonic() - host.last_seen < 2,
-                            target)
+        desired = _host_desired(host, self.admission)
+        self._qualify_claim(host.last_game, desired, time.monotonic() - host.last_seen < 2, target)
         result = await perform(host, bridge, "host", RECLAIM, target[1], operation)
-        return self._accept_claim(result, target, "host")
+        return self._accept_claim(result, target, "host", desired[4])
 
     async def fixture(self, client, drop_id: str | None):
         client.last_game = await self._fixture(client.bridge, client.last_game, _desired(client, True, self.admission),
@@ -174,7 +179,7 @@ class Projection:
 
     async def _fixture(self, bridge, game, desired, fresh, drop_id):
         if (not fresh or not record.valid_id(drop_id) or desired is None
-                or self.current != desired[:4] or desired[1] != drop_id
+                or self.current != desired[:5] or desired[1] != drop_id
                 or not self._matches(game, desired)):
             raise party.RuleError("stock_drop_projection_fixture_scope_unavailable")
         before = game[KEY]["sequence"]
