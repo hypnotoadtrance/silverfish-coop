@@ -12,6 +12,7 @@ from tools.silverfish import native_mindcore_fixture as fixture
 
 EXIT_Y = 64.0
 UPPER_LANDING_Z = 2400.0
+LOWER_DECK_WEST_EDGE_X = -1732.3
 # Stock HoldObject uses the camera's horizontal heading above level pitch.
 CARRY_PITCH = 3
 
@@ -350,7 +351,7 @@ async def verify_core_lift(run, guest_run, action, authority, character, proof, 
         await turn("lift the Core above the west railing", 180, pitch=68)
         await walk_to("move the held Core inward from the west rail", (-1654, EXIT_Y), 8, reached=on_deck)
         proof["above_lower_rail"] = await observe("verify the Core is above the rail and inside the cabin", lambda row, *_: (
-            row["prop"]["position"][0] > -1720 and row["prop"]["position"][2] >= 154), timeout=5)
+            row["prop"]["position"][0] > LOWER_DECK_WEST_EDGE_X and row["prop"]["position"][2] >= 154), timeout=5)
         await turn("rotate the raised Core along the longer side of the cabin", -90, pitch=52)
         proof["inside_lower_rail"] = await observe("let the Core clear the west rail before moving the carrier", lambda row, *_: (
             row["prop"]["position"][0] > -1705 and row["prop"]["position"][1] < 55
