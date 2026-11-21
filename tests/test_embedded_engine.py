@@ -228,12 +228,11 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
 class WindowsStartupTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows startup proof")
     def test_reads_the_current_os_process_without_a_subprocess(self):
-        with patch.dict(os.environ, {embedded.OPT_IN_ENV: "engine-test"}):
-            startup = embedded._current_startup((embedded.OPT_IN_ENV,))
+        startup = embedded._current_startup(("SystemRoot",))
         self.assertEqual(startup.pid, os.getpid())
         self.assertTrue(startup.image.is_absolute() and startup.image.is_file())
         self.assertTrue(startup.argv)
-        self.assertEqual(startup.environment[embedded.OPT_IN_ENV], "engine-test")
+        self.assertEqual(startup.environment["SystemRoot"], os.environ["SystemRoot"])
 
     def test_preflight_allows_a_fresh_or_regular_private_saved_tree(self):
         workspace = Path(self.enterContext(TemporaryDirectory())).resolve()

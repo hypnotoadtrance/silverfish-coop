@@ -2,6 +2,8 @@
 
 `SilverfishCoopEmbeddedRuntime` starts the packaged Python session worker inside the isolated Project Silverfish process. Once the engine tick hook runs on the game thread, it starts one worker thread. Python owns the typed startup request and acquires the exact host or guest engine lease before issuing gameplay commands. Native startup reads the launch environment and verifies the runtime package.
 
+The staged host game starts without `-MULTIHOME` or `-port`. The campaign service passes the selected private UDP port to Unreal when it starts hosting, and verifies the socket belongs to that game and binds only to loopback. The guest still starts with `-MULTIHOME=127.0.0.1` and connects to its own local relay.
+
 ## Build and layout
 
 Build this CMake target with the pinned x64 UE4SS toolchain. Supply the UE4SS checkout as `SILVERFISH_UE4SS_SOURCE_DIR`, the exact CPython 3.14 runtime's headers as `SILVERFISH_CPYTHON_INCLUDE_DIR`, and the lowercase SHA-256 of its package's `runtime-manifest.json` as `SILVERFISH_RUNTIME_MANIFEST_SHA256`. An unpinned build remains inactive. The DLL resolves the necessary Python exports when it loads the verified interpreter at runtime.
