@@ -84,22 +84,34 @@ async def stock_menu_fixture(client, guid, operation: str) -> dict:
             or not record.supported_map(area) or not record.valid_id(epoch)):
         raise ValueError("Select an item in a connected guest's stock backpack")
     snapshot = await client.bridge.command("native-inventory-view-fixture", "stock-drop", epoch, guid, timeout=5)
-    match = re.fullmatch(r"stock guest drop ([0-9A-F]{32}) ([1-9][0-9]{0,2})",
+    match = re.fullmatch(r"stock guest drop ([0-9A-F]{32}) ([1-9][0-9]{0,2}) ([1-9][0-9]{0,15})",
                          snapshot.get("ack", {}).get("message", ""))
     if (not match or match[1] != guid or int(match[2]) > record.MAX_QUANTITY
             or (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"))
             != ("connected", area, pawn) or client.zone_epoch != epoch):
         raise RuntimeError("The stock screen did not verify the selected backpack drop")
     client.last_game = snapshot
-    quantity = int(match[2])
-    receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}"))[RESULT]
-    if (tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "map"))
-            != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
-            or not record.valid_quantity(receipt.get("class_path"), quantity)
-            or not record.valid_position(receipt.get("location"))):
-        raise RuntimeError("The host did not settle the stock guest backpack drop")
-    client.guest_ui.next_poll = 0.0
-    return {RESULT: receipt, "stock_inventory_proof": match[0]}
+    quantity, sequence = int(match[2]), match[3]
+    accepted = False
+    finish = ("native-inventory-stock-drop-finish", epoch, sequence)
+    try:
+        receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(RESULT)
+        if (not isinstance(receipt, dict)
+                or tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "map"))
+                != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
+                or not record.valid_quantity(receipt.get("class_path"), quantity)
+                or not record.valid_position(receipt.get("location"))):
+            raise RuntimeError("The host did not settle the stock guest backpack drop")
+        await client.guest_ui.refresh(client)
+        accepted = True
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"The stock guest backpack could not refresh: {error}") from error
+    finally:
+        if not accepted:
+            with suppress(OSError, RuntimeError, ValueError):
+                await client.bridge.command(*finish, "refused", timeout=3)
+    client.last_game = await client.bridge.command(*finish, "dropped", timeout=5)
+    return {RESULT: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
 
 
 async def service_view(client, active: bool) -> None:

@@ -159,6 +159,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert selected is not None, contents
         dropped = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=selected["guid"])
         assert dropped["ok"], dropped
+        assert re.fullmatch(r"verified open stock backpack refresh with \d+ cards",
+                            dropped.get("stock_inventory_proof", "")), dropped
         stock_drop_proof = dropped[native_guest_drop.RESULT]
         assert (stock_drop_proof["guid"], stock_drop_proof["class_path"], stock_drop_proof["quantity"]) == (
             selected["guid"], selected["class_path"], selected["quantity"],

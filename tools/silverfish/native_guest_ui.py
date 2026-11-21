@@ -86,21 +86,7 @@ class GuestView:
         if self.request is not None and self.request.done():
             request, self.request = self.request, None
             try:
-                result = request.result()["native_guest_ui"]
-                digest = result["digest"]
-                if ((result["map"], result["epoch"], result["owner"]) != (area, epoch, character)
-                        or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)):
-                    raise ValueError("The co-op view belongs to another visit")
-                if digest != self.digest:
-                    encoded = result["payload"]
-                    if not isinstance(encoded, str) or len(encoded) > 27_000:
-                        raise ValueError("Invalid co-op view encoding")
-                    stream = zlib.decompressobj()
-                    contents = stream.decompress(base64.b64decode(encoded, validate=True), MAX_BYTES + 1)
-                    if not stream.eof or stream.unused_data or sha256(contents).hexdigest() != digest:
-                        raise ValueError("Invalid co-op view content")
-                    await self.project(client, character, validate(contents, area, character))
-                    self.digest = digest
+                await self.receive(client, request.result()["native_guest_ui"], area, epoch, character)
                 self.last_error = None
             except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
                 description = str(error)
@@ -111,6 +97,33 @@ class GuestView:
         if self.request is None and now >= self.next_poll:
             self.next_poll = now + 3
             self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, self.digest))
+
+    async def receive(self, client, result, area, epoch, character):
+        digest = result["digest"]
+        if ((result["map"], result["epoch"], result["owner"]) != (area, epoch, character)
+                or (client.last_game.get("map"), client.zone_epoch) != (area, epoch)
+                or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)):
+            raise ValueError("The co-op view belongs to another visit")
+        if digest == self.digest:
+            return
+        encoded = result["payload"]
+        if not isinstance(encoded, str) or len(encoded) > 27_000:
+            raise ValueError("Invalid co-op view encoding")
+        stream = zlib.decompressobj()
+        contents = stream.decompress(base64.b64decode(encoded, validate=True), MAX_BYTES + 1)
+        if not stream.eof or stream.unused_data or sha256(contents).hexdigest() != digest:
+            raise ValueError("Invalid co-op view content")
+        await self.project(client, character, validate(contents, area, character))
+        self.digest = digest
+
+    async def refresh(self, client):
+        """Project a newly committed inventory while the requesting screen is still mounted."""
+        await self.close()
+        area, epoch = client.last_game.get("map"), client.zone_epoch
+        character = client.invite["character_id"]
+        reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
+        await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+        self.next_poll = time.monotonic() + 3
 
     async def project(self, client, character, contents):
         nonce = uuid.uuid4().hex
