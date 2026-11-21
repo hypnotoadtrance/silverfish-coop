@@ -437,6 +437,7 @@ local function bind(state, phase, name, raw_health, slot, proof)
         guest_save.clear(name)
         error("Could not verify the detached guest save binding", 0)
     end
+    if slot or (proof and proof.profile) then guest.pawn:Compile_VoxSetup() end
     if slot and character then slot_owners[slot] = character end
     return "native guest save bound"
 end

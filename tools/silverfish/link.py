@@ -879,7 +879,7 @@ class HostLink:
                     result = await result
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
-                return _encode_response(result, snapshot=payload == {"action": "snapshot"})
+                return _encode_response(result, snapshot=payload.get("action") == "snapshot")
         except TimeoutError:
             return _encode_action({"error": "timed_out"})
         except Exception:

@@ -253,7 +253,12 @@ local function project(state, phase, character, path)
         error("The stock co-op Journal view failed readback", 0)
     end
     for _, name in pairs(slots) do old[name] = view[name] end
-    if view.Character[creator.name_field]:ToString() ~= "" then old.Character = view.Character end
+    if view.Character[creator.name_field]:ToString() ~= "" then
+        local old_voice, old_pitch = creator.voice(old.Character)
+        local voice, pitch = creator.voice(view.Character)
+        old.Character = view.Character
+        if old_voice ~= voice or old_pitch ~= pitch then pawn:Compile_VoxSetup() end
+    end
     old.JournalEntries = view.JournalEntries
     old.ActiveQuests = view.ActiveQuests
     if count(old.JournalEntries) ~= note_count or #old.ActiveQuests ~= quest_count then

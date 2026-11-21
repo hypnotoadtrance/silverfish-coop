@@ -63,6 +63,14 @@ function profile.observe(character, recipe)
         leaf(character[badge], patch_root), table.concat(traits, ",")}, "|")
 end
 
+function profile.voice(character)
+    local personality, level = text(character[voice]), character[pitch]
+    if type(personality) == "string" and personality:match("^%w[%w_]*$") and #personality <= 30
+        and personality ~= "None" and personality ~= "Mute" and level > 0 and level <= 3 then
+        return personality, level
+    end
+end
+
 local function parse(model)
     local fields = {}
     for field in (model .. "|"):gmatch("([^|]*)|") do fields[#fields + 1] = field end

@@ -184,6 +184,7 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
     profile = characters[character]["state"]["creator_profile"]
     assert appearance.split("|")[:2] == [face, plumage]
     assert profile.split("|")[0] == "kit2" and "WeirdLuck" in profile.split("|")[6].split(",")
+    assert profile.split("|")[1] == "Fem_02"
     await click(guest, "character:1", "confirm")
     joined = await wait(guest.client / "run", lambda frame: frame.get("state") == "connected"
                         and frame.get("gameplay_fresh") is True)
@@ -197,7 +198,48 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
             for outfit in frame.get("native_avatar_outfits", {}).values()))
     pawn = authoritative["native_guest_save"]["pawn"]
     await host.bridge.wait_for(lambda frame: frame.get("native_player_avatars", {}).get(pawn, {}).get("head_roll") == 0)
+    nonce = uuid.uuid4().hex
+    await host.bridge.command("native-guest-ui-read", pawn, nonce)
+    host_view = host.bridge.directory / f"native-guest-ui-{nonce}.tsv"
+    rows = host_view.read_text(encoding="ascii").splitlines()
+    assert any(row.startswith("item\tbackpack\t") and "Random_GearBag_Starter_C" in row for row in rows)
+    assert any(row.startswith("character\t") and "WeirdLuck" in row for row in rows)
     return joined, appearance, profile
+
+
+async def verify_voice_and_bullet_time(host: Seat, guest: Seat, hosted: dict, joined: dict) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    async def heard(run, generation, cue):
+        async with asyncio.timeout(8):
+            while True:
+                for event in events(run, generation, "native_voice_played"):
+                    if event.get("cue") == cue:
+                        return event["personality"]
+                await asyncio.sleep(.12)
+
+    async with asyncio.timeout(12):
+        while not events(guest_run, joined["generation"], "native_guest_ui_projected"):
+            await asyncio.sleep(.12)
+    await guest.bridge.command("native-voice-fixture", "cough")
+    assert await heard(host_run, hosted["generation"], "cough") == "Fem_02"
+    await host.bridge.command("native-voice-fixture", "hurt")
+    host_voice = await heard(guest_run, joined["generation"], "hurt")
+
+    async def shift(seat, verb):
+        snapshot = await seat.bridge.command("native-time-shift-fixture", verb)
+        active, dilation, walk = snapshot["ack"]["message"].split(";")
+        return int(active), float(dilation), float(walk)
+
+    host_before, guest_before = await asyncio.gather(shift(host, "observe"), shift(guest, "observe"))
+    active, dilation, walk = await shift(host, "start")
+    assert active == 1 and dilation == 1 and walk > host_before[2]
+    assert await shift(guest, "observe") == guest_before
+    async with asyncio.timeout(6):
+        while (await shift(host, "observe"))[0]:
+            await asyncio.sleep(.15)
+    return {"guest_cough": "Fem_02", "host_hurt": host_voice, "bullet_time_world_dilation": dilation,
+            "owner_walk_speed_before": host_before[2], "owner_walk_speed_during": walk}
 
 
 async def leave_tutorial(seat: Seat) -> dict:
@@ -325,6 +367,7 @@ async def drive_creator(title: Seat, guest: Seat, evidence: dict) -> None:
     joined, appearance, profile = await join_created_campaign(seat, guest)
     evidence.update(guest_pid=joined["pid"], guest_character=joined["character_id"], direct_ip_joined=True,
                     guest_face_and_plumage=appearance.split("|")[:2], guest_avatar_head_roll=0)
+    evidence.update(await verify_voice_and_bullet_time(seat, guest, hosted, joined))
     print("Second stock title joined the created campaign over Direct IP", flush=True)
     stopped = await leave_tutorial(seat)
     guest_stopped = await wait(guest.client / "run", lambda frame: frame.get("state") == "stopped")
@@ -336,7 +379,6 @@ async def drive_creator(title: Seat, guest: Seat, evidence: dict) -> None:
     assert saved["characters"][joined["character_id"]]["state"]["native_guest_save"]
     assert saved["characters"][joined["character_id"]]["state"]["creator_appearance"] == appearance
     assert saved["characters"][joined["character_id"]]["state"]["creator_profile"] == profile
-    assert saved["characters"][joined["character_id"]]["state"]["native_guest_save"]["backpack"] > 0
     evidence["stock_pause_returned_both_titles"] = True
 
     sibling, sibling_attempt = await enter_creator(title)

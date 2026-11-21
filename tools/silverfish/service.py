@@ -42,6 +42,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
+from . import native_voice
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -246,6 +247,7 @@ class Host:
         self.last_stock_enemy_drop_sequence = 0
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
+        self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -1681,6 +1683,9 @@ class Host:
         member = self.native_recipients().get(character) if self.native_guest else None
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
+            self.voice_audio.observed(self.last_game, self.zone_epoch)
+            if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
+                gameplay[native_voice.KEY] = voice_frame
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
@@ -1715,7 +1720,13 @@ class Host:
         if not identity:
             return {"ok": False, "error": "guest_not_active"}
         role, character = identity
-        if request == {"action": "snapshot"}:
+        if request.get("action") == "snapshot" and set(request) in (
+                {"action"}, {"action", "voice_events", "zone_epoch"}):
+            if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
+                member = self.native_recipients().get(character) if self.native_guest else None
+                if member and member["connected"] and time.monotonic() - self.last_seen < 2:
+                    self.voice_audio.observed(self.last_game, self.zone_epoch)
+                    self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request.get("voice_events"))
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
@@ -3719,6 +3730,11 @@ class Host:
             self.last_game = await self.pickup_playback.sync(
                 bridge, self.control, self.last_game, self.pickup_audio.frame(self.last_game, self.zone_epoch),
                 self.zone_epoch, self.control.generation)
+            if not self.transitioning:
+                self.voice_audio.observed(self.last_game, self.zone_epoch)
+                listener = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                frame = self.voice_audio.frame(self.last_game, self.zone_epoch, listener, host=True)
+                self.last_game = await self.voice_playback.sync(bridge, self.control, self.last_game, frame, self.zone_epoch)
             try:
                 if not shared_pickups:
                     await self.stack_drop_projection.sync_host(self, bridge)
@@ -4482,6 +4498,7 @@ class Client:
         self.expected_zone = None
         self.loot_tracking = None
         self.pickup_playback = native_pickup_audio.Playback()
+        self.voice_playback = native_voice.Playback()
         self.next_snapshot = 0.0
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
@@ -5053,7 +5070,11 @@ class Client:
         if now >= self.next_snapshot:
             self.next_snapshot = now + 0.5
             try:
-                reply = await self.transport.request({"action": "snapshot"}, timeout=2)
+                request = {"action": "snapshot"}
+                if not self.needs_travel and not self.server_transitioning and self.zone_epoch:
+                    if events := native_voice.client_events(self.last_game):
+                        request.update(voice_events=events, zone_epoch=self.zone_epoch)
+                reply = await self.transport.request(request, timeout=2)
                 if reply.get("ok"):
                     self.gameplay = reply["gameplay"]
                     viewer = reply.get("viewer_role")
@@ -5072,6 +5093,9 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
+                    if not self.needs_travel and not self.server_transitioning and self.last_game.get("state") == "connected":
+                        self.last_game = await self.voice_playback.sync(
+                            self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), epoch)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
         if (now >= self.next_projection and not self.needs_travel and not self.server_transitioning

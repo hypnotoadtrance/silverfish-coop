@@ -31,6 +31,7 @@ from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_player_avatar
+from . import native_voice
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
@@ -1578,6 +1579,17 @@ class Bridge:
                     data["native_guest_stock_creator"] = {"state": creator_state, "attempt": attempt,
                                                           "appearance": None if appearance == "-" else appearance,
                                                           "profile": None if profile == "-" else profile}
+                elif fields[0] == "native-voice-speaker" and len(fields) == 4 and data.get("state") == "hosting":
+                    name, personality, pitch = fields[1:]
+                    pitch = _finite(pitch)
+                    if name.startswith("Player_FP_C ") and native_voice.speaker(personality, pitch):
+                        data.setdefault("native_voice_speakers", {})[name] = [personality, pitch]
+                elif fields[0] == "native-voice-event" and len(fields) == 4 and data.get("state") in {"hosting", "connected"}:
+                    events = data.setdefault("native_voice_events", [])
+                    nonce, kind, name = fields[1:]
+                    if (len(events) < native_voice.LIMIT and nonce.isdecimal() and len(nonce) <= 15
+                            and kind in native_voice.EVENTS and name.startswith("Player_FP_C ")):
+                        events.append([int(nonce), kind, name])
                 elif fields[0] == "native-stock-creator" and len(fields) == 4:
                     creator_state, area, slot = fields[1:]
                     if (creator_state not in {"opening", "creating", "cancelled", "failed", "travelling", "verified"}

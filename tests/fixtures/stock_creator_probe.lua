@@ -171,7 +171,11 @@ function actions.gueststyle(menu, switch, page)
         and menu.Setting_Selector_StartMap:GetIsEnabled() == false, "campaign_choices_enabled_for_guest")
     pick(menu.Setting_Selector_Kit, 2)
     local personality = menu.Selector_Vox_Type
-    pick(personality, (personality.IndexOutput + 1) % personality.Settings:GetArrayNum())
+    local choice
+    for index = 1, personality.Settings:GetArrayNum() do
+        if value_text(personality.Settings[index]) == "Fem_02" then choice = index - 1 end
+    end
+    pick(personality, assert(choice, "stock voice choice unavailable"))
     local stance = menu.Setting_Selector_Stance
     pick(stance, (stance.IndexOutput + 1) % stance.Settings:GetArrayNum())
     pick(menu.Setting_Selector_Passives, 2)
