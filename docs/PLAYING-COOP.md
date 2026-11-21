@@ -1,12 +1,12 @@
 # Playing Project Silverfish Co-op
 
-Use Direct IP on Windows. The installed title entry opens the matched private co-op stage. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
+Use Direct IP on Windows. The resident trial opens co-op from the same game process that displays the title. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. Use the same Steam game build and the same trial ZIP. Extract it and double-click `Install.cmd` once on each PC. Setup includes the matching UE4SS loader and Project Silverfish signature. A fresh workspace needs roughly 5.2 GB for the private game copy. Start Project Silverfish through Steam and press **F7** for **Open Co-op** on the stock title. [Trial ZIP setup](../bootstrap/README.md#install-from-a-trial-zip)
+Close the game on both PCs. Use the same Steam game build and the same resident trial ZIP. Extract it and run `Install.cmd` on each PC. Setup includes the matching UE4SS loader and Project Silverfish signature. Start Project Silverfish through Steam and press **F7** to host or **F8** to join from the title. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
 
-Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, allow inbound UDP on the chosen port and use the host PC's LAN address in the invitation. Use `127.0.0.1` when both players run on the same PC.
+Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
 ## Stage the development build
 
@@ -30,15 +30,15 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-After the [stock title setup](../bootstrap/README.md#install-the-stock-title-entry), open co-op from the title. In the isolated title, press **F7** to open Host settings. Edit the campaign, UDP port, and numeric listening address. Use **F8** to move between fields, **F7** to start, or **F9** to return to the title panel. A blank field uses its configured default. Up to four guests can join the campaign. The headless trial verified the fields and selected endpoint. Foreground keyboard and focus still need a live check.
+At the title, press **F7** to open Host settings. Choose a campaign name, UDP port, numeric listening address, and optional password. Use **F8** to move between fields or **F9** to return to the title panel. Blank fields use the configured defaults. **F10** opens the stock character creator for a new campaign. **F7** resumes the named campaign or opens the creator if the name is unused. Up to four guests can join. The resident trial verified the controls through headless input. Foreground keyboard and focus still need a live check.
 
-## Create an invitation while hosting
+## Create an invitation in the development build
 
 Open the stock **Journal** in the active co-op campaign with **J** or your configured key. Press **F7** to open the invite form. Enter the participant's name, their starter character's name, and the address they can reach. Use **F8** to advance through the fields. Leave the address blank to use the configured host address. On the review screen, press **F7** to create the invitation, then press **F7** again to copy it once it is ready. Share the invitation privately. It contains the guest credential. **F9** returns to the Journal. The host can also share the private invitation file from the campaign's `run\invites` directory.
 
 ## Join from the co-op title
 
-Press **F8**, paste the host's invitation text into the masked field, and press **F7** to load the host's character list. Use **F8** to cycle through your characters and the option to create one. **F7** selects the current character or opens creation. After selecting a character, leave the local profile blank to use its configured name, or enter a different name. Press **F7** to join. **F9** backs out of the current step.
+At the title, press **F8**. Enter the host's numeric IP and UDP port, pressing **F7** after each field. Enter the password if the host set one and press **F7** to connect. Use **F8** to cycle through your saved characters and the option to create one. Press **F7** to select or create a character, then **F7** to join. **F9** backs out of the current step.
 
 ## Host and join from the development CLI
 
@@ -81,7 +81,7 @@ Leave both games running during a brief network interruption. The guest can retr
 
 If the guest game closes unexpectedly, reopen co-op and select the same character. Join can wait about two minutes while the host saves the old pawn and Unreal clears its connection. The replacement then joins close to the host with its saved inventory. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
 
-Reuse the invitation and character selection for a later session. Keep the host campaign's `save` and `game-user` directories together. The native campaign uses both for its checkpoint and stock save generations. Restart the host with the same campaign name and native flags. Its saved zone is selected on startup.
+In the resident trial, reopen the same campaign name and have the guest select the same character. The host resumes in its saved zone. For development CLI sessions, reuse the invitation and native flags, and keep the campaign's `save` directory together with its stock save generations.
 
 The invitation fingerprint covers the game, the staged Lua scripts, the co-op launcher code, and the native add-on when enabled. After both PCs update to the same mod revision, the host can run `action --campaign expedition refresh-invite --target GUEST_ID` to refresh the existing invitation. The guest and selected character IDs stay the same.
 

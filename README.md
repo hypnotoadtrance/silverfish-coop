@@ -2,7 +2,7 @@
 
 A Windows Direct IP prototype with a native campaign stage. The largest loopback test used one host and four guests. [18 locked rules](docs/DESIGN.md) · [In-game integration plan](docs/IN-GAME-INTEGRATION.md)
 
-The launcher copies the stock game into a separate runtime, installs a small UE4SS bridge in the copy, and starts Unreal with a separate user-data directory. Players connect directly to the host's UDP port using an authenticated, encrypted QUIC connection. The launcher relays game packets to Unreal over loopback. [Player and automation guide](docs/PLAYING-COOP.md)
+The Windows trial installs the UE4SS bridge into the existing game and routes co-op saves to separate campaign scopes. Players connect to the host's UDP port over an authenticated, encrypted QUIC connection. The embedded runtime relays game packets to Unreal over loopback. [Player and automation guide](docs/PLAYING-COOP.md)
 
 ## Setup
 
