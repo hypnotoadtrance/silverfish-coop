@@ -65,11 +65,11 @@ class VoiceQueue:
         key = pawn, local, event
         if key in self.seen:
             return
-        self.seen.append(key)
         voice = game.get("native_voice_speakers", {}).get(pawn)
         origin = next((entry.get("location") for entry in game.get("pawns", {}).values() if entry.get("name") == pawn), None)
         if not voice or not valid_position(origin):
             return
+        self.seen.append(key)
         now = time.monotonic()
         if now - self.previous.get((pawn, kind), -10) < 0.55:
             return
@@ -107,19 +107,21 @@ class Playback:
             if not isinstance(cue, list) or len(cue) != 5:
                 continue
             nonce, kind, personality, pitch, location = cue
-            if (not valid_id(nonce) or nonce in self.seen or not isinstance(kind, str) or kind not in EVENTS
+            if (not valid_id(nonce) or nonce in self.seen or nonce in selected or not isinstance(kind, str) or kind not in EVENTS
                     or not speaker(personality, pitch) or not valid_position(location)):
                 continue
-            self.seen.append(nonce)
             if math.dist(origin, location) <= RANGE:
                 selected[nonce] = (kind, personality)
                 arguments.append("|".join((nonce, kind, personality, str(pitch), *map(str, location))))
+            else:
+                self.seen.append(nonce)
         if not arguments:
             return game
         try:
             result = await bridge.command(COMMAND, game["map"], epoch, *arguments, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError):
             return game
+        self.seen.extend(selected)
         for nonce in result.get("ack", {}).get("message", "").split(","):
             if nonce in selected:
                 kind, personality = selected[nonce]

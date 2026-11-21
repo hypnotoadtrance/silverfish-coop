@@ -220,21 +220,22 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
 async def verify_voice_and_bullet_time(host: Seat, guest: Seat, hosted: dict, joined: dict) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
-    async def heard(run, generation, cue):
-        async with asyncio.timeout(8):
-            while True:
+    async def heard(run, generation, speaker, cue):
+        for attempt in range(2):
+            await speaker.bridge.command("native-voice-fixture", cue)
+            deadline = asyncio.get_running_loop().time() + 4
+            while asyncio.get_running_loop().time() < deadline:
                 for event in events(run, generation, "native_voice_played"):
                     if event.get("cue") == cue:
                         return event["personality"]
                 await asyncio.sleep(.12)
+        raise AssertionError(f"The other player did not receive the stock {cue} cue")
 
     async with asyncio.timeout(12):
         while not events(guest_run, joined["generation"], "native_guest_ui_projected"):
             await asyncio.sleep(.12)
-    await guest.bridge.command("native-voice-fixture", "cough")
-    assert await heard(host_run, hosted["generation"], "cough") == "Fem_02"
-    await host.bridge.command("native-voice-fixture", "hurt")
-    host_voice = await heard(guest_run, joined["generation"], "hurt")
+    assert await heard(host_run, hosted["generation"], guest, "cough") == "Fem_02"
+    host_voice = await heard(guest_run, joined["generation"], host, "hurt")
 
     async def shift(seat, verb):
         snapshot = await seat.bridge.command("native-time-shift-fixture", verb)

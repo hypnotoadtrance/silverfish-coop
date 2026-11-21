@@ -42,7 +42,7 @@ local function capture(context, sound)
     for kind, property in pairs(fields) do
         if same(pawn[property[1]], cue) then
             counter = counter + 1
-            events[#events + 1] = {id = counter, kind = kind, pawn = name, expires = os.time() + 2}
+            events[#events + 1] = {id = counter, kind = kind, pawn = name, expires = os.time() + 4}
             if #events > 12 then table.remove(events, 1) end
             return
         end
