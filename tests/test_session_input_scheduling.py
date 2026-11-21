@@ -60,10 +60,16 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(wait, .5)
             self.assertEqual(requests.get_nowait(), "guest interaction")
 
-    async def test_guest_idle_wait_wakes_for_new_primary_and_inventory_events(self):
+    async def test_guest_idle_wait_wakes_for_supported_gameplay_events(self):
         streams = (
             ("native-guest-primary-events", "primary_input_offset"),
+            ("native-guest-held-fire-events", "held_fire_offset"),
             ("native-inventory-view-events", "inventory_view_offset"),
+            ("native-guest-inventory-equip-events", "inventory_equip_offset"),
+            ("native-shop-view-events", "shop_view_offset"),
+            ("native-wire-board-events", "wire_board_offset"),
+            ("native-dialogue-events", "dialogue_offset"),
+            ("native-mosby-station-events", "mosby_station_offset"),
         )
         for filename, offset in streams:
             with self.subTest(filename=filename), TemporaryDirectory() as temporary:
@@ -78,6 +84,39 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 with path.open("ab") as stream:
                     stream.write(b"new press\n")
                 await asyncio.wait_for(waiting, .20)
+
+    async def test_bridge_does_not_spin_when_a_record_has_not_been_consumed(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), Mock())
+            path = bridge.directory / "input.tsv"
+            path.write_bytes(b"interact\t12")
+            await asyncio.wait_for(bridge.wait_for_interaction(5), .2)
+            self.assertEqual(bridge.interactions(), [])
+            wait = asyncio.create_task(bridge.wait_for_interaction(5))
+            self.addAsyncCleanup(self.cancel_wait, wait)
+            await asyncio.sleep(.06)
+            self.assertFalse(wait.done())
+            with path.open("ab") as stream:
+                stream.write(b"\n")
+            await asyncio.wait_for(wait, .2)
+            self.assertEqual(len(bridge.interactions()), 1)
+
+    async def test_bridge_wakes_when_game_publishes_status_backed_interactions(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), Mock())
+            path = bridge.directory / "status.tsv"
+            frame = "schema\t1\nseq\t{}\nsession\tclient\tconnected\tObservatory\t1\t0\n"
+            path.write_text(frame.format(1), encoding="utf-8")
+            self.assertEqual(bridge.snapshot()["sequence"], 1)
+            wait = asyncio.create_task(bridge.wait_for_interaction(5, guest=True))
+            self.addAsyncCleanup(self.cancel_wait, wait)
+            await asyncio.sleep(.06)
+            self.assertFalse(wait.done())
+            temp = path.with_suffix(".tmp")
+            temp.write_text(frame.format(2), encoding="utf-8")
+            temp.replace(path)
+            await asyncio.wait_for(wait, .2)
+            self.assertEqual(bridge.snapshot()["sequence"], 2)
 
     async def cancel_wait(self, task):
         task.cancel()

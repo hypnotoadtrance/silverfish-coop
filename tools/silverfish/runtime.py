@@ -690,28 +690,50 @@ class Bridge:
         self.wire_board_offset = 0
         self.dialogue_offset = 0
         self.mosby_station_offset = 0
+        self._input_wake_sizes: dict[str, int] = {}
+        self._status_revision: tuple[int, int] | None = None
         self._status_text = ""
         self._status_snapshot: dict | None = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
-        """Wake for local input or pending network work between idle ticks."""
+        """Wake for local input, a new game frame, or pending network work."""
         deadline = time.monotonic() + timeout
-        streams = [(self.directory / "input.tsv", self.input_offset)]
+        streams = [("input.tsv", self.input_offset)]
         if guest:
             streams.extend((
-                (self.directory / "native-guest-primary-events", self.primary_input_offset),
-                (self.directory / "native-inventory-view-events", self.inventory_view_offset),
+                ("native-guest-primary-events", self.primary_input_offset),
+                ("native-guest-held-fire-events", self.held_fire_offset),
+                ("native-inventory-view-events", self.inventory_view_offset),
+                ("native-guest-inventory-equip-events", self.inventory_equip_offset),
+                ("native-shop-view-events", self.shop_view_offset),
+                ("native-wire-board-events", self.wire_board_offset),
+                ("native-dialogue-events", self.dialogue_offset),
+                ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
             if wake_if is not None and wake_if():
                 return
-            await asyncio.sleep(min(.025, remaining))
-            for path, offset in streams:
+            try:
+                published = (self.directory / "status.tsv").stat()
+            except OSError:
+                pass
+            else:
+                if (published.st_mtime_ns, published.st_size) != self._status_revision:
+                    return
+            ready = False
+            for filename, offset in streams:
                 try:
-                    if path.stat().st_size > offset:
-                        return
+                    size = (self.directory / filename).stat().st_size
                 except OSError:
-                    pass
+                    continue
+                # A partial record or a disabled consumer may leave unread bytes.
+                # Wake once for each append and let the consumer keep its own offset.
+                if size > offset and size != self._input_wake_sizes.get(filename):
+                    self._input_wake_sizes[filename] = size
+                    ready = True
+            if ready:
+                return
+            await asyncio.sleep(min(.025, remaining))
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -1087,7 +1109,10 @@ class Bridge:
     def snapshot(self) -> dict | None:
         """Return the current read-only bridge frame, parsing each write once."""
         try:
-            text = (self.directory / "status.tsv").read_text(encoding="utf-8")
+            with (self.directory / "status.tsv").open(encoding="utf-8") as stream:
+                published = os.fstat(stream.fileno())
+                text = stream.read()
+            self._status_revision = published.st_mtime_ns, published.st_size
             if text == getattr(self, "_status_text", None):
                 return self._status_snapshot
             self._status_text, self._status_snapshot = text, None
