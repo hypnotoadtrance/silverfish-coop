@@ -9,11 +9,15 @@ import uuid
 from . import party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
+from .travel import BLACK_MARKET
 
 
 TAG = "native-stock-enemy-drop"
 KEY = "native_stock_enemy_drops"
 FIXTURE = "native-stock-enemy-escrow-fixture"
+BROKER_KEY_FIXTURE = "native-stock-broker-key-fixture"
+BROKER_CUE_TAG = "native-stock-broker-cue-removed"
+BROKER_CUE = "native_stock_broker_cue_removed"
 PROOF_TAG = "native-stock-enemy-escrow"
 PROOF_KEY = "native_stock_enemy_escrow"
 STATE = "native_stock_enemy_loot"
@@ -143,6 +147,23 @@ def published(data, game):
     return visible
 
 
+def broker_cue_frame(game, epoch):
+    if game.get("map") == BLACK_MARKET and game.get(BROKER_CUE) is True:
+        return {"map": BLACK_MARKET, "epoch": epoch}
+    return None
+
+
+async def project_broker_cue(bridge, game, frame, epoch):
+    if (game.get("state") != "connected" or game.get("map") != BLACK_MARKET or game.get(BROKER_CUE) is True
+            or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch)
+            or frame != {"map": BLACK_MARKET, "epoch": epoch}):
+        return game
+    result = await bridge.command("native-stock-broker-cue-remove", timeout=3)
+    if (result.get("state"), result.get("map"), result.get(BROKER_CUE)) != ("connected", BLACK_MARKET, True):
+        raise RuntimeError("Stock Broker dialogue collision removal did not verify")
+    return result
+
+
 def _public(row):
     return {key: value for key, value in row.items() if key != "escrow"}
 
@@ -217,6 +238,7 @@ async def observe(host, bridge):
 
 async def claim(host, bridge, character, guid, operation):
     from . import native_host_save, native_loot
+    from .native_world_loot import stock_enemy_identity
 
     player = host.party["players"].get(character)
     pawn = native_loot._scope(host, character)
@@ -242,7 +264,8 @@ async def claim(host, bridge, character, guid, operation):
     try:
         try:
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
-                                            *(str(axis) for axis in roll["transform"]["position"]), timeout=7)
+                                            *(str(axis) for axis in roll["transform"]["position"]),
+                                            stock_enemy_identity(guid), timeout=7)
         except RuntimeError as error:
             if str(error) in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
                               "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:

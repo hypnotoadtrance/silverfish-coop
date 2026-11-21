@@ -3,20 +3,59 @@ local guest_save = require("guest_save")
 local shell_view = require("native_enemy_shell_view")
 local transport = require("native_transport")
 local world, latest, observed
-local proof, bank, claim
+local proof, bank, claim, broker_defeated
+local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
+local black_market_level = black_market .. ".Shop_BlackMarket_01:PersistentLevel."
+local broker_path = black_market_level .. "NPC_Broker_C_1"
+local broker_class = "/Game/Classes/NPCs/NPC_Characters/NPC_Broker.NPC_Broker_C"
+local broker_cue_path = black_market_level .. "Generic_Interact_BP_C_1"
+local broker_cue_class = "/Game/Classes/ScriptingActors/Generic_Interact_BP.Generic_Interact_BP_C"
 
 local function same(a, b)
     return a and b and a:IsValid() and b:IsValid() and a:GetAddress() == b:GetAddress()
 end
 
+local function market_scope(state, phase)
+    return state.map == black_market and state.listening and (phase == "hosting" or phase == "connected")
+        and state.server == (phase == "connected") and same(state.world, StaticFindObject(black_market .. ".Shop_BlackMarket_01"))
+end
+
+local function broker_cue_removed()
+    local cue = StaticFindObject(broker_cue_path)
+    return not cue or not cue:IsValid() or cue:IsActorBeingDestroyed()
+        or (cue:GetActorEnableCollision() == false and cue.bHidden == true)
+end
+
+local function remove_broker_cue(fields, state, phase)
+    if #fields ~= 2 or phase ~= "connected" or not market_scope(state, phase) then
+        error("stock_broker_cue_scope_unavailable", 0)
+    end
+    if not broker_cue_removed() then
+        local cue = StaticFindObject(broker_cue_path)
+        if not same(cue:GetClass(), StaticFindObject(broker_cue_class)) or not same(cue:GetWorld(), state.world)
+            or not same(cue:GetOuter(), state.world.PersistentLevel) or cue:GetFullName() ~= "Generic_Interact_BP_C " .. broker_cue_path then
+            error("stock_broker_cue_identity_unavailable", 0)
+        end
+        -- The host's stock BrokerDeath destroys this interaction actor. A stale guest copy blocks the key's trace.
+        cue:SetActorEnableCollision(false)
+        cue:SetActorHiddenInGame(true)
+        if not broker_cue_removed() then error("stock_broker_cue_removal_unverified", 0) end
+    end
+    return "stock Broker dialogue collision removed"
+end
+
 function drops.rows(state, phase, row)
+    local rows = {}
+    if phase == "connected" and market_scope(state, phase) and broker_cue_removed() then
+        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
+    end
     if phase ~= "hosting" or state.server ~= false or not state.listening
-        or type(SilverfishReadStockEnemyDrop) ~= "function" then return {} end
+        or type(SilverfishReadStockEnemyDrop) ~= "function" then return rows end
     local pawn = state.local_pawn and state.local_pawn.pawn
     if not pawn or not pawn:IsValid() or not same(pawn:GetWorld(), state.world) then return {} end
     if not same(world, state.world) then
         world, latest, observed = state.world, 0, {}
-        proof, bank, claim = nil, nil, nil
+        proof, bank, claim, broker_defeated = nil, nil, nil, nil
     end
     local address = pawn:GetAddress()
     for _ = 1, 64 do
@@ -24,13 +63,19 @@ function drops.rows(state, phase, row)
         if math.type(sequence) ~= "integer" or sequence <= latest then break end
         latest = sequence
         observed[#observed + 1] = {sequence, roll, npc, killer, actor, class, live and 1 or 0}
+        if live and npc == "NPC_Broker_C " .. broker_path
+            and class == "/Game/Classes/Items/Key_Items/BrokersKey.BrokersKey_C" then
+            broker_defeated = true
+        end
         if #observed > 128 then
             local expired = table.remove(observed, 1)[1]
             if proof and proof[1] == expired then proof = nil end
             if bank and bank[1] == expired then bank = nil end
         end
     end
-    local rows = {}
+    if broker_defeated and market_scope(state, phase) then
+        rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
+    end
     for _, record in ipairs(observed) do
         rows[#rows + 1] = row("native-stock-enemy-drop", state.map, table.unpack(record))
     end
@@ -115,12 +160,13 @@ end
 local function transfer(fields, state, phase)
     claim = nil
     local name, slot, guid = fields[3], fields[4], fields[5]
-    local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
+    local x, y, z, identity = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]), fields[9]
     local host, fresh = transport.scoped_host(state, phase)
     local stock = host and host.pawn.Save
-    if phase ~= "hosting" or #fields ~= 8 or not fresh or not stock or not stock:IsValid()
+    if phase ~= "hosting" or #fields ~= 9 or not fresh or not stock or not stock:IsValid()
         or not valid_slot(slot) or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$")
         or not finite(x, 1e7) or not finite(y, 1e7) or not finite(z, 1e7)
+        or #identity ~= 32 or not identity:match("^[0-9a-f]+$")
         or type(SilverfishClaimNativeLootEscrow) ~= "function" then
         error("stock_enemy_loot_claim_scope_unavailable", 0)
     end
@@ -133,7 +179,9 @@ local function transfer(fields, state, phase)
     end
     if not pawn or not save or not save:IsValid() or not same(pawn:GetWorld(), state.world)
         or not same(pawn.Save, save) or pawn.Dead ~= false then error("stock_enemy_loot_claimant_unavailable", 0) end
-    if not shell_view.clear_line(pawn, {X = x, Y = y, Z = z}, true) then
+    local position = {X = x, Y = y, Z = z}
+    if not shell_view.clear_line(pawn, position, true)
+        and not require("native_guest_drop_projection").authority_sight(state, phase, pawn, identity, position) then
         error("stock_enemy_loot_out_of_reach_or_obstructed", 0)
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -146,7 +194,25 @@ local function transfer(fields, state, phase)
     return "exact stock NPC item transferred"
 end
 
+local function broker_key_fixture(fields, state, phase)
+    if #fields ~= 2 or phase ~= "hosting" or not market_scope(state, phase)
+        or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then
+        error("stock_broker_key_fixture_unavailable", 0)
+    end
+    local host, ready = transport.scoped_host(state, phase)
+    local broker = StaticFindObject(broker_path)
+    local kind = StaticFindObject(broker_class)
+    if not ready or not host or not broker or not broker:IsValid() or not same(broker:GetClass(), kind)
+        or not same(broker:GetWorld(), state.world) or not same(broker:GetOuter(), state.world.PersistentLevel)
+        or not broker:HasAuthority() or broker:IsActorBeingDestroyed() or not finite(broker.Health, 100000)
+        or broker.Health <= 0 then error("stock_broker_key_fixture_scope_unavailable", 0) end
+    broker:InstantKill(host.pawn)
+    return "stock Broker death invoked in the isolated loot fixture"
+end
+
 function drops.command(fields, state, phase)
+    if fields[2] == "native-stock-broker-cue-remove" then return remove_broker_cue(fields, state, phase) end
+    if fields[2] == "native-stock-broker-key-fixture" then return broker_key_fixture(fields, state, phase) end
     if fields[2] == "native-stock-enemy-escrow-fixture" then return capture(fields, state, phase, true) end
     if fields[2] == "native-stock-enemy-loot-bank" then return capture(fields, state, phase, false) end
     if fields[2] == "native-stock-enemy-loot-claim" then return transfer(fields, state, phase) end

@@ -1558,6 +1558,11 @@ class Bridge:
                     if len(drops) >= 128 or report["actor"] in drops:
                         raise ValueError("Repeated or oversized stock enemy drop observation")
                     drops[report["actor"]] = report
+                elif fields[0] == native_stock_enemy_drops.BROKER_CUE_TAG:
+                    if (fields[1:] != [native_stock_enemy_drops.BLACK_MARKET] or data.get("map") != fields[1]
+                            or data.get("state") not in {"hosting", "connected"}):
+                        raise ValueError("Invalid stock Broker dialogue collision observation")
+                    data[native_stock_enemy_drops.BROKER_CUE] = True
                 elif fields[0] == native_stock_enemy_drops.PROOF_TAG:
                     data[native_stock_enemy_drops.PROOF_KEY] = native_stock_enemy_drops.parse_escrow(fields, data)
                 elif fields[0] == native_stock_enemy_drops.BANKED:

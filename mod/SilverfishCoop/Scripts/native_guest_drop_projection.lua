@@ -88,6 +88,24 @@ function projection.take_press(pawn)
     end
 end
 
+function projection.authority_sight(state, phase, pawn, id, position)
+    local viewer = phase == "hosting" and local_pawn(state, phase)
+    local item = viewer and world_items[id]
+    if not item or not same(viewer, item.pawn) or not same(state.world, item.world)
+        or type(SilverfishReadNativeGuestDropProjection) ~= "function" then return false end
+    local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(item.slot)
+    if active ~= true or epoch ~= item.epoch or exact ~= id or not drop_items.actor_path(item.class, item.map, maps[item.map], name) then
+        return false
+    end
+    local path = name:match("^%S+ (.+)$")
+    local actor = path and StaticFindObject(path)
+    if not valid(actor) or actor:GetFullName() ~= name then return false end
+    local point = actor:K2_GetActorLocation()
+    if not point or not coordinate(point.X) or not coordinate(point.Y) or not coordinate(point.Z)
+        or (point.X - position.X)^2 + (point.Y - position.Y)^2 + (point.Z - position.Z)^2 > 5^2 then return false end
+    return pickup_fixture.stock_item_sight(pawn, actor)
+end
+
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
     if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then

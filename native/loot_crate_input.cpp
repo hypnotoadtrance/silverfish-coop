@@ -239,6 +239,7 @@ namespace
         Clock::time_point expires{}, receipt{};
         std::uint64_t observed{};
         bool pried{};
+        bool pry_started{};
         U::FWeakObjectPtr pry_guest{};
         Clock::time_point tool_deadline{};
     };
@@ -298,13 +299,17 @@ namespace
             if (!stock_function(crate, method, 1, sizeof(std::int32_t)) || !entry ||
                 silverfish::shared_loot::permits_stock_script(crate, method)) return;
             const auto point = entry->GetPropertyValueInContainer(args);
-            if (profile->stock_class->pry_entry && point == profile->stock_class->pry_entry)
+            const auto& stock = *profile->stock_class;
+            if (stock.pry_start_entry && point == stock.pry_start_entry && scoped && local.host &&
+                now < active->tool_deadline && active->pry_guest.Get() && boolean(crate, STR("Locked"), true))
+                active->pry_started = true;
+            if (stock.pry_entry && point == stock.pry_entry)
             {
                 // The stock pry delay ends in this independent roll entry.
                 // Capture it for the host before any stock items can spawn.
                 call.PreventOriginalFunctionCall();
                 if (call.OriginalFunctionCallPrevented() && scoped && local.host && sequence < max_sequence &&
-                    boolean(crate, STR("Locked"), false) && boolean(crate, STR("Looted"), false))
+                    boolean(crate, STR("Locked"), stock.pry_start_entry != 0) && boolean(crate, STR("Looted"), false))
                 {
                     active->observed = ++sequence;
                     active->receipt = now + receipt_lifetime;
@@ -439,6 +444,7 @@ namespace
                     reinterpret_cast<std::uintptr_t>(stock), owner) && owner.save != owner.stock)
             {
                 scope.pry_guest = owner.pawn;
+                scope.pry_started = false;
                 scope.tool_deadline = now + std::chrono::seconds(6);
                 armed = true;
             }
@@ -457,7 +463,8 @@ namespace
             if (index > 0 && index <= static_cast<std::int64_t>(scopes.size()))
             {
                 auto& scope = scopes[static_cast<std::size_t>(index - 1)];
-                if (scope.host && !scope.pried && pawn > 0 && reinterpret_cast<std::intptr_t>(scope.pry_guest.Get()) == pawn &&
+                if (scope.host && !scope.pried && !scope.pry_started && pawn > 0 &&
+                    reinterpret_cast<std::intptr_t>(scope.pry_guest.Get()) == pawn &&
                     boolean(scope.crate.Get(), STR("Locked"), true))
                 {
                     scope.pry_guest = U::FWeakObjectPtr{};

@@ -26,6 +26,7 @@ CLASS_CAPACITIES = {
     'Loot_Car_02_BP_C': 3,
     'LootLocker_Small_BP_C': 4,
     'LootLocker_Secure_BP_C': 3,
+    'Loot_ArmorLocker_BP_C': 3,
 }
 
 MIXED_GUARANTEE_CLASSES = frozenset({
@@ -47,10 +48,19 @@ KEYLESS_LOCK_CLASSES = frozenset({
 KEYED_LOCK_CLASSES = frozenset({
     'LootLocker_Small_BP_C',
     'LootLocker_Secure_BP_C',
+    'Loot_ArmorLocker_BP_C',
 })
 
 KEY_UNLOCK_ONLY_CLASSES = frozenset({
     'LootLocker_Secure_BP_C',
+})
+
+ARMOR_FIRST_CLASSES = frozenset({
+    'Loot_ArmorLocker_BP_C',
+})
+
+DEFERRED_PRY_CLASSES = frozenset({
+    'Loot_ArmorLocker_BP_C',
 })
 
 CONTAINER_PLACEMENTS = (
@@ -3325,4 +3335,29 @@ CONTAINER_PLACEMENTS = (
     ('LootLocker_Secure_BP_C', '/Game/Classes/Maps/Maps_OverWorld/Trench_01_P', 'LootLocker_Secure_BP_C_7', -584002304, None, True, None, 'LockerKey_30_C', False),
     ('LootLocker_Secure_BP_C', '/Game/Classes/Maps/Maps_OverWorld/Trench_01_P', 'LootLocker_Secure_BP_C_8', -584002304, None, True, None, 'LockerKey_230_C', False),
     ('LootLocker_Secure_BP_C', '/Game/Classes/Maps/Maps_OverWorld/Trench_01_P', 'LootLocker_Secure_BP_C_9', -584002304, None, True, None, 'LockerKey_002_C', False),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Anex_01_P', 'Loot_ArmorLocker_BP_C_1', -1666249568, 'ArmorLocker_Rare', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Anex_01_P', 'Loot_ArmorLocker_BP_C_2', -1640369888, 'ArmorLocker_Special', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Cistern_P', 'Loot_ArmorLocker_BP_C_1', -957426688, 'ArmorLocker_Uncommon', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Cistern_P', 'Loot_ArmorLocker_BP_C_3', -692587008, 'ArmorLocker_Uncommon', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P', 'Loot_ArmorLocker_BP_C_1', -746971008, 'ArmorLocker_Millitary_Old', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P', 'Loot_ArmorLocker_BP_C_1', -1528244896, 'ArmorLocker_Uncommon', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P', 'Loot_ArmorLocker_BP_C_2', -1951109348, 'ArmorLocker_Uncommon', True, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P', 'Loot_ArmorLocker_BP_C_1', -1590075360, 'ArmorLocker_Rare', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P', 'Loot_ArmorLocker_BP_C_1', -1744987344, 'ArmorLocker_Special', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P', 'Loot_ArmorLocker_BP_C_3', -602740480, 'ArmorLocker_Millitary', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P', 'Loot_ArmorLocker_BP_C_1', -1833796208, 'ArmorLocker_Uncommon', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P', 'Loot_ArmorLocker_BP_C_2', -1833796208, 'ArmorLocker_Rare', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/Subway_01_P', 'Loot_ArmorLocker_BP_C_1', -431409536, 'ArmorLocker_Rare', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P', 'Loot_ArmorLocker_BP_C_1', -605426176, 'ArmorLocker_Rare', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/Beach_01_P', 'Loot_ArmorLocker_BP_C_1', -702597120, 'ArmorLocker_Millitary_Old', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P', 'Loot_ArmorLocker_BP_C_1', -1247596672, 'ArmorLocker_Special', False, None, None, True),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P', 'Loot_ArmorLocker_BP_C_2', -1414410816, 'ArmorLocker_Millitary', False, None, None, True),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/RailYard_P', 'Loot_ArmorLocker_BP_C_1', -368907648, 'ArmorLocker_Millitary', True, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P', 'Loot_ArmorLocker_BP_C_1', -290963456, None, False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/Slums_P', 'Loot_ArmorLocker_BP_C_1', -435621248, None, False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P', 'Loot_ArmorLocker_BP_C_1', -627094400, None, False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P', 'Loot_ArmorLocker_BP_C_2', -1024750528, 'ArmorLocker_Special', False, None),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01', 'Loot_ArmorLocker_BP_C_1', -1985412152, 'ArmorLocker_Special', False, None, 'BrokersKey_C', True),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01', 'Loot_ArmorLocker_BP_C_2', -1985412152, 'ArmorLocker_Rare', False, None, 'BrokersKey_C', True),
+    ('Loot_ArmorLocker_BP_C', '/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01', 'Loot_ArmorLocker_BP_C_3', -1985412152, 'ArmorLocker_Special', False, None, 'BrokersKey_C', True),
 )

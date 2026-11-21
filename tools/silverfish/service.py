@@ -803,6 +803,8 @@ class Host:
                 view[native_enemy_shells.FRAME_KEY] = frame
         if drops := native_stock_enemy_drops.published(self.party, self.last_game):
             view[native_stock_enemy_drops.STATE] = drops
+        if broker_cue := native_stock_enemy_drops.broker_cue_frame(self.last_game, self.zone_epoch):
+            view[native_stock_enemy_drops.BROKER_CUE] = broker_cue
         if pending := pending_cube(self.party):
             cube, itinerary = pending
             view["pending_item_travel"] = {"item": cube, "source": itinerary["source"],
@@ -2558,6 +2560,10 @@ class Host:
                 elif action == native_stock_enemy_drops.FIXTURE and self.fixtures:
                     self.last_game, result = await native_stock_enemy_drops.escrow_fixture(bridge, self.last_game, request.get("target"))
                     self.last_seen = time.monotonic()
+                elif action == native_stock_enemy_drops.BROKER_KEY_FIXTURE and self.fixtures:
+                    self.last_game = await bridge.command(action, timeout=4)
+                    self.last_seen = time.monotonic()
+                    result = {"map": self.last_game["map"]}
                 elif action == native_enemy_loot.APPROACH:
                     result = await native_enemy_loot.approach(self, bridge, request.get("target"))
                 elif action == native_stock_enemy_drops.CLAIM:
@@ -2837,12 +2843,13 @@ class Host:
                 elif action == "native-loot-vehicle-pry-fixture" and self.native_loot_input and self.fixtures:
                     crate = request.get("target")
                     if not isinstance(crate, str) or self.last_game.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not True:
-                        raise party.RuleError("Select a locked stock vehicle on the current map")
+                        raise party.RuleError("Select a locked stock container on the current map")
                     snapshot = await bridge.command(action, crate, timeout=5)
-                    if snapshot.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not False:
-                        raise RuntimeError("The stock vehicle pry did not unlock the exact trunk")
+                    locked = native_loot.pry_defers_unlock(crate)
+                    if snapshot.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not locked:
+                        raise RuntimeError("The stock container pry did not report the expected latch state")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
-                    result = {native_loot.VEHICLE_LOCKS: {crate: False}}
+                    result = {native_loot.VEHICLE_LOCKS: {crate: locked}}
                 elif action == native_stock_door.FIXTURE and self.fixtures:
                     actor = request.get("target")
                     if not isinstance(actor, str) or actor not in self.last_game.get(native_stock_door.KEY, {}):
@@ -4985,6 +4992,8 @@ class Client:
                 if time.monotonic() - self.gameplay_seen < 3:
                     self.last_game = await native_stock_door.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
+                    self.last_game = await native_stock_enemy_drops.project_broker_cue(
+                        self.bridge, self.last_game, self.gameplay.get(native_stock_enemy_drops.BROKER_CUE), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(

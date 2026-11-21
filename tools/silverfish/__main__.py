@@ -248,7 +248,7 @@ def parser() -> argparse.ArgumentParser:
         "native-stock-door-interact", "native-stock-door-fixture", "native-stock-door-input-fixture",
         "native-stock-door-stage-fixture",
         "native-stock-door-trace",
-        "native-stock-enemy-escrow-fixture", "native-stock-enemy-loot-claim",
+        "native-stock-enemy-escrow-fixture", "native-stock-broker-key-fixture", "native-stock-enemy-loot-claim",
         "native-loose-pickup-claim", "native-loose-pickup-approach", "native-loose-pickup-fixture",
         "native-loose-pickup-expire-fixture",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",

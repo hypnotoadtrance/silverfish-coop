@@ -97,12 +97,13 @@ local function ignite(current, state, phase, pawn_name, guid)
         and SilverfishCancelNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress()) then
         error("stock_blowtorch_stock_action_busy", 0)
     end
-    if saved_fuel ~= loaded - 1 or scope.crate.Locked ~= false then
+    if saved_fuel ~= loaded - 1 or scope.crate.Locked ~= (current.profile.deferred_pry == true) then
         error("mutation_unverified_stock_blowtorch_use", 0)
     end
     tool_report = {kind = "blowtorch", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
         before = loaded, after = saved_fuel}
-    return "stock blowtorch spent one charge and unlocked the vehicle"
+    return current.profile.deferred_pry and "stock blowtorch spent one charge and started the pry delay"
+        or "stock blowtorch spent one charge and unlocked the container"
 end
 
 function input.update(state, phase, profile)
@@ -425,10 +426,10 @@ local function pry_with_crowbar(current, state, phase, pawn_name, guid)
     if scope.crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress()) then
         error("stock_crowbar_stock_action_busy", 0)
     end
-    if scope.crate.Locked ~= false then error("mutation_unverified_stock_crowbar_use", 0) end
+    if scope.crate.Locked ~= (current.profile.deferred_pry == true) then error("mutation_unverified_stock_crowbar_use", 0) end
     tool_report = {kind = "crowbar", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
         before = before, after = after}
-    return "stock crowbar unlocked the vehicle"
+    return current.profile.deferred_pry and "stock crowbar started the pry delay" or "stock crowbar unlocked the container"
 end
 
 function input.pry_tool_input_fixture(state, phase, target, dispatch)
@@ -491,10 +492,10 @@ function input.command(fields, state, phase)
         if not current or current.crate.Locked ~= true then error("native_loot_vehicle_pry_fixture_unavailable", 0) end
         local scope = loot.qualify(state, phase, current.name, profile.name)
         scope.crate:PriedOpen_Lock()
-        if scope.crate.Locked ~= false or scope.crate.Looted ~= false then
+        if scope.crate.Locked ~= (profile.deferred_pry == true) or scope.crate.Looted ~= false then
             error("native_loot_vehicle_pry_readback_unverified", 0)
         end
-        return "stock vehicle pry unlocked the trunk"
+        return profile.deferred_pry and "stock fixture started the pry delay" or "stock fixture unlocked the container"
     end
     if command == "native-loot-vehicle-locks" or command == "native-loot-restore-key-unlocks" then
         local restore = command == "native-loot-restore-key-unlocks"

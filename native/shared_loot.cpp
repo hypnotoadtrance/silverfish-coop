@@ -626,6 +626,56 @@ namespace
         bool weapon_returned{};
     };
 
+    struct ArmorLockerRoll
+    {
+        Unreal::FStructProperty* stream{};
+        std::array<std::int32_t, 2> final_seeds{};
+        std::array<bool, 3> draws{true, false, false};
+
+        bool predict(const Context& context)
+        {
+            auto* stream_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.RandomStream"));
+            stream = field<Unreal::FStructProperty>(context.crate, STR("StreamSeed"));
+            auto* initial = field<Unreal::FIntProperty>(stream_type, STR("InitialSeed"));
+            auto* current = field<Unreal::FIntProperty>(stream_type, STR("Seed"));
+            auto* math = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetMathLibrary"));
+            auto* draw = find<Unreal::UFunction>(STR("/Script/Engine.KismetMathLibrary:RandomBoolWithWeightFromStream"));
+            struct Draw
+            {
+                std::array<std::int32_t, 2> seeds{};
+                float weight{};
+                std::uint8_t accepted{};
+            } parameters;
+            auto* input = field<Unreal::FStructProperty>(draw, STR("RandomStream"));
+            auto* weight = argument<Unreal::FFloatProperty>(draw, STR("Weight"), false, offsetof(Draw, weight));
+            auto* output = field<Unreal::FBoolProperty>(draw, STR("ReturnValue"));
+            if (!stream_type || !stream || stream->GetStruct().Get() != stream_type || stream->GetSize() != sizeof(parameters.seeds) ||
+                !initial || initial->GetOffset_Internal() != 0 || !current || current->GetOffset_Internal() != sizeof(std::int32_t) ||
+                !math || !draw || draw->GetOuterPrivate() != math->GetClassPrivate() || !draw->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+                draw->GetNumParms() != 3 || draw->GetParmsSize() <= offsetof(Draw, accepted) || draw->GetParmsSize() > sizeof(Draw) ||
+                !input || !input->HasAnyPropertyFlags(Unreal::CPF_Parm) || input->GetOffset_Internal() != 0 ||
+                input->GetStruct().Get() != stream_type || input->GetSize() != sizeof(parameters.seeds) ||
+                !weight || !output || output != draw->GetReturnProperty() || output->GetOffset_Internal() != offsetof(Draw, accepted))
+                return false;
+
+            const auto* stock = stream->ContainerPtrToValuePtr<std::array<std::int32_t, 2>>(context.crate);
+            parameters.seeds = *stock;
+            const auto initial_seed = parameters.seeds[0];
+            // Use the engine on a copy. The stock ladder still owns and advances the live stream.
+            constexpr std::array chances{0.66f, 0.33f};
+            for (std::size_t index = 0; index < chances.size(); ++index)
+            {
+                const auto before = parameters.seeds[1];
+                parameters.weight = chances[index];
+                math->ProcessEvent(draw, &parameters);
+                if (parameters.seeds[0] != initial_seed || parameters.seeds[1] == before) return false;
+                draws[index + 1] = context.guarantee_spawn || output->GetPropertyValueInContainer(&parameters);
+            }
+            final_seeds = parameters.seeds;
+            return true;
+        }
+    };
+
     struct OpenScope
     {
         const Context& context;
@@ -641,6 +691,7 @@ namespace
         SeedFixture* fixture{};
         std::array<int, 2> table_draws{};
         std::array<int, 2> karma_draws{};
+        ArmorLockerRoll armor{};
     };
 
     using Clock = std::chrono::steady_clock;
@@ -747,8 +798,8 @@ namespace
         if (!account && !roll) return;
         // AffectKarma uses the container's setting. Weapon-first crates can
         // independently select the gun draw's guarantee through the stock stream.
-        if (account ? scope.context.guarantee_spawn :
-            !scope.spawns[index].output || scope.spawns[index].guaranteed || scope.spawns[index].finished)
+        if (scope.context.profile->stock_class->armor_first || (account ? scope.context.guarantee_spawn :
+            !scope.spawns[index].output || scope.spawns[index].guaranteed || scope.spawns[index].finished))
         {
             scope.problem = "stock_loot_guaranteed_karma_branch_changed";
             return;
@@ -849,6 +900,19 @@ namespace
     {
         const auto& stock = *scope.context.profile->stock_class;
         const bool guaranteed = scope.context.guarantee_spawn;
+        if (stock.armor_first)
+        {
+            const auto& expected = scope.armor;
+            if (!expected.stream ||
+                *expected.stream->ContainerPtrToValuePtr<std::array<std::int32_t, 2>>(scope.context.crate) != expected.final_seeds)
+                return false;
+            for (std::size_t index = 0; index < expected.draws.size(); ++index)
+            {
+                const auto& spawn = scope.spawns[index];
+                if (spawn.finished != expected.draws[index] || (spawn.finished && !spawn.guaranteed)) return false;
+            }
+            return true;
+        }
         if (!stock.weapon_first)
         {
             return std::all_of(scope.spawns.begin(), scope.spawns.begin() + stock.slots, [guaranteed](const auto& spawn) {
@@ -978,7 +1042,7 @@ namespace
         if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried);
             !failure.empty()) return result(lua, false, failure);
         Unreal::UClass* key{};
-        if (context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
+        if (!pried && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
         {
             auto* key_field = field<Unreal::FClassProperty>(context.crate, STR("KeyItem"));
             if (key_field) key = static_cast<Unreal::UClass*>(
@@ -1010,6 +1074,8 @@ namespace
         schema.opener->SetObjectPropertyValue(schema.opener->ContainerPtrToValuePtr<void>(&input), context.pawn);
         schema.hit_component->SetObjectPropertyValue(schema.hit_component->ContainerPtrToValuePtr<void>(&input), context.box);
         OpenScope scope{context, schema};
+        if (context.profile->stock_class->armor_first && !scope.armor.predict(context))
+            return result(lua, false, "stock_armor_locker_stream_unavailable");
         if (force_nonempty) scope.fixture = &fixture;
         bool restored = true;
         {
@@ -1053,7 +1119,9 @@ namespace
             if (!restored) scope.problem = "stock_loot_fixture_original_stream_unverified";
             else if (key && scope.key_checks != 1) scope.problem = "stock_container_key_lookup_missing";
             else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
-            else if (!context.guarantee_spawn && scope.accounts != 1)
+            else if (pried && !read_bool(context.crate, STR("Locked"), false))
+                scope.problem = "stock_loot_pry_lock_not_released";
+            else if (!context.guarantee_spawn && !context.profile->stock_class->armor_first && scope.accounts != 1)
                 scope.problem = "stock_loot_open_karma_query_unverified";
             else if (!verified_spawn_route(scope))
                 scope.problem = "stock_loot_open_roll_calls_unverified";
@@ -1363,7 +1431,8 @@ namespace silverfish::shared_loot
         const auto* profile = authored_profile(crate);
         if (!profile) return refuse("crate_settings_profile");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
-        if (!read_bool(crate, STR("IgnoreKarma"), false)) return refuse("crate_settings_ignore_karma");
+        if (!read_bool(crate, STR("IgnoreKarma"), profile->stock_class->armor_first)) return refuse("crate_settings_ignore_karma");
+        if (profile->stock_class->armor_first && !read_bool(crate, STR("Seeded"), true)) return refuse("crate_settings_seeded");
         if (profile->stock_class->pry_entry)
         {
             auto* key_field = field<Unreal::FClassProperty>(crate, STR("KeyItem"));
@@ -1453,7 +1522,7 @@ namespace silverfish::shared_loot
         const auto* profile = authored_profile(crate);
         if (!profile || !profile->stock_class->pry_entry || !read_bool(crate, STR("Locked"), true) ||
             !read_bool(crate, STR("Looted"), false)) return false;
-        auto* jiggle = crate->GetFunctionByNameInChain(Unreal::FName{STR("Jiggle_Locked")});
+        auto* jiggle = crate->GetFunctionByNameInChain(Unreal::FName{profile->stock_class->jiggle_function});
         if (!blueprint(jiggle, crate->GetClassPrivate(), 0) || jiggle->GetParmsSize() != 0) return false;
         crate->ProcessEvent(jiggle, nullptr);
         return true;

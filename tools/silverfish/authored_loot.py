@@ -2,7 +2,8 @@
 
 import math
 
-from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEY_UNLOCK_ONLY_CLASSES,
+from .authored_container_placements import (ARMOR_FIRST_CLASSES, CLASS_CAPACITIES, CONTAINER_PLACEMENTS,
+                                            DEFERRED_PRY_CLASSES, KEY_UNLOCK_ONLY_CLASSES,
                                             KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
@@ -528,6 +529,8 @@ def loot_capacity(container: str) -> int:
 def valid_loot_trait_calls(container: str, calls: object) -> bool:
     if type(calls) is not int:
         return False
+    if container.partition(" ")[0] in ARMOR_FIRST_CLASSES:
+        return calls == 0
     if container in GUARANTEED_CRATES:
         # The first gun slot can run one independent karma query even when
         # the container guarantees its fallback items.

@@ -22,6 +22,9 @@ namespace silverfish::authored_loot
         bool weapon_first{};
         std::int32_t pry_entry{};
         bool key_unlock_only{};
+        bool armor_first{};
+        const RC::CharType* jiggle_function{STR("Jiggle_Locked")};
+        std::int32_t pry_start_entry{};
     };
 
     inline constexpr StockClass small_crate{
@@ -173,7 +176,13 @@ namespace silverfish::authored_loot
         STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C:SendInteractionToActor"),
         STR("/Game/Classes/Actors/Lootables/LootLocker_Secure_BP.LootLocker_Secure_BP_C:ExecuteUbergraph_LootLocker_Secure_BP"),
         0x8E6, 3, false, false, secure_locker_spawners, false, 0x1B, true};
-    inline constexpr std::array stock_classes{&small_crate, &cult_crate, &loot_stash, &suitcase, &trunk, &toolbox, &cargo_crate, &large_cabinet, &small_cabinet, &office_desk, &fancy_cabinet, &low_table, &tool_cabinet, &medical_cabinet, &shelf_cabinet, &fridge, &wardrobe, &gun_wardrobe, &large_crate, &cult_large_crate, &weapon_crate, &artifact_chest, &dumpster, &car_01, &car_02, &small_locker, &secure_locker};
+    inline constexpr std::array armor_locker_spawners{STR("Loot_SpawnerArmor"), STR("Loot_Spawner1"), STR("Loot_Spawner3")};
+    inline constexpr StockClass armor_locker{
+        STR("/Game/Classes/Actors/Lootables/Loot_ArmorLocker_BP.Loot_ArmorLocker_BP_C"),
+        STR("/Game/Classes/Actors/Lootables/Loot_ArmorLocker_BP.Loot_ArmorLocker_BP_C:SendInteractionToActor"),
+        STR("/Game/Classes/Actors/Lootables/Loot_ArmorLocker_BP.Loot_ArmorLocker_BP_C:ExecuteUbergraph_Loot_ArmorLocker_BP"),
+        0x6AC, 3, false, true, armor_locker_spawners, false, 0xF, false, true, STR("JiggleLock"), 0x772};
+    inline constexpr std::array stock_classes{&small_crate, &cult_crate, &loot_stash, &suitcase, &trunk, &toolbox, &cargo_crate, &large_cabinet, &small_cabinet, &office_desk, &fancy_cabinet, &low_table, &tool_cabinet, &medical_cabinet, &shelf_cabinet, &fridge, &wardrobe, &gun_wardrobe, &large_crate, &cult_large_crate, &weapon_crate, &artifact_chest, &dumpster, &car_01, &car_02, &small_locker, &secure_locker, &armor_locker};
 
     struct Profile
     {
@@ -7541,5 +7550,55 @@ namespace silverfish::authored_loot
                 STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P:PersistentLevel.LootLocker_Secure_BP_C_8"), -584002304, nullptr, true, 0, &secure_locker, {}, false, STR("LockerKey_230_C"), false},
         Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P"),
                 STR("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P.Trench_01_P:PersistentLevel.LootLocker_Secure_BP_C_9"), -584002304, nullptr, true, 0, &secure_locker, {}, false, STR("LockerKey_002_C"), false},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P.Anex_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P.Anex_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1666249568, STR("ArmorLocker_Rare"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P.Anex_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P.Anex_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1640369888, STR("ArmorLocker_Special"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -957426688, STR("ArmorLocker_Uncommon"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.Loot_ArmorLocker_BP_C_3"), -692587008, STR("ArmorLocker_Uncommon"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P.FortLeto_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -746971008, STR("ArmorLocker_Millitary_Old"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P.Lab_E206_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1528244896, STR("ArmorLocker_Uncommon"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P.Lab_EastWing_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P.Lab_EastWing_P:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1951109348, STR("ArmorLocker_Uncommon"), true, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P.OldPipes_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/OldPipes_01_P.OldPipes_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1590075360, STR("ArmorLocker_Rare"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P.Perdition_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P.Perdition_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1744987344, STR("ArmorLocker_Special"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P.Refinery_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Refinery_01_P.Refinery_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_3"), -602740480, STR("ArmorLocker_Millitary"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P.Slums_Tunnel_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P.Slums_Tunnel_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1833796208, STR("ArmorLocker_Uncommon"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P.Slums_Tunnel_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Slums_Tunnel_01_P.Slums_Tunnel_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1833796208, STR("ArmorLocker_Rare"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -431409536, STR("ArmorLocker_Rare"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P"),
+                STR("/Game/Classes/Maps/Maps_Dungeons/UtilityTunnels_01_P.UtilityTunnels_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -605426176, STR("ArmorLocker_Rare"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P.Beach_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/Beach_01_P.Beach_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -702597120, STR("ArmorLocker_Millitary_Old"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1247596672, STR("ArmorLocker_Special"), false, 0, &armor_locker, {}, false, nullptr, true},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1414410816, STR("ArmorLocker_Millitary"), false, 0, &armor_locker, {}, false, nullptr, true},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -368907648, STR("ArmorLocker_Millitary"), true, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P.SavloEstate_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -290963456, nullptr, false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/Slums_P.Slums_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -435621248, nullptr, false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P.TheWall_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P.TheWall_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -627094400, nullptr, false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P.TheWall_01_P"),
+                STR("/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P.TheWall_01_P:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1024750528, STR("ArmorLocker_Special"), false, 0, &armor_locker},
+        Profile{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
+                STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Loot_ArmorLocker_BP_C_1"), -1985412152, STR("ArmorLocker_Special"), false, 0, &armor_locker, {}, false, STR("BrokersKey_C"), true},
+        Profile{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
+                STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Loot_ArmorLocker_BP_C_2"), -1985412152, STR("ArmorLocker_Rare"), false, 0, &armor_locker, {}, false, STR("BrokersKey_C"), true},
+        Profile{STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
+                STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.Loot_ArmorLocker_BP_C_3"), -1985412152, STR("ArmorLocker_Special"), false, 0, &armor_locker, {}, false, STR("BrokersKey_C"), true},
     };
 }

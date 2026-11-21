@@ -6,7 +6,7 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import (CRATES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
+from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
 
@@ -36,6 +36,10 @@ CASH_RANGES = {
 
 def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
+
+
+def pry_defers_unlock(crate: str) -> bool:
+    return crate.partition(" ")[0] in DEFERRED_PRY_CLASSES
 
 
 def _scope(host, character: str) -> str:
@@ -279,9 +283,11 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
                 raise party.RuleError(str(error)) from error
             raise
         proof = snapshot.get(result_key, {})
+        deferred_unlock = pry_defers_unlock(crate)
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("crate"), proof.get("pawn"), proof.get("guid"))
-                != ("hosting", area, area, crate, pawn, guid) or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not False):
-            raise RuntimeError(f"The stock {kind} did not report the authenticated tool and unlocked container")
+                != ("hosting", area, area, crate, pawn, guid)
+                or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not deferred_unlock):
+            raise RuntimeError(f"The stock {kind} did not report the authenticated tool and expected latch state")
 
         def ready(frame):
             row = frame.get("native_loot_guest_pries", {}).get(crate, {})

@@ -191,15 +191,12 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
     return false, valid(component) and "interact:" .. component_name(component) or obstruction or "interact:-"
 end
 
-function input.loose_sight(state, phase, profile, pawn, actor)
-    if phase ~= "hosting" or not state.listening or state.server ~= false or state.map ~= profile.map
-        or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
-        or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
-        or actor:GetFullName() ~= profile.name .. " " .. profile.path or pawn.Dead ~= false then return false end
+function input.stock_item_sight(pawn, actor)
+    if not valid(pawn) or pawn.Dead ~= false or not pawn:HasAuthority() or not valid(actor) or not actor:HasAuthority()
+        or not same(pawn:GetWorld(), actor:GetWorld()) then return false end
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local camera, box = pawn.Camera, actor.Box
-    if not valid(trace) or not owned(camera, pawn, "CameraComponent") or not owned(box, actor, "BoxComponent")
-        or not same(box, actor.RootComponent) then return false end
+    if not valid(trace) or not owned(camera, pawn, "CameraComponent") or not owned(box, actor, "BoxComponent") then return false end
     local origin, eye = vector(pawn:K2_GetActorLocation()), vector(camera:K2_GetComponentLocation())
     local center, limit = vector(box:K2_GetComponentLocation()), pawn.InteractionRange
     if not origin or not eye or not center or not finite(limit) or limit <= 0 or limit > 1000
@@ -212,6 +209,13 @@ function input.loose_sight(state, phase, profile, pawn, actor)
         if stock_sight(trace, pawn, box, eye, point, limit, ignored) then return true end
     end
     return false
+end
+
+function input.loose_sight(state, phase, profile, pawn, actor)
+    if phase ~= "hosting" or not state.listening or state.server ~= false or state.map ~= profile.map
+        or not same(pawn:GetWorld(), state.world) or not valid(actor) or actor:GetFullName() ~= profile.name .. " " .. profile.path
+        or not same(actor.Box, actor.RootComponent) then return false end
+    return input.stock_item_sight(pawn, actor)
 end
 
 function input.authority_sight(state, phase, profile, pawn, actor)

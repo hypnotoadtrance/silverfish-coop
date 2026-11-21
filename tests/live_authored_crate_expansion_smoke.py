@@ -19,7 +19,7 @@ if str(REPO) not in sys.path:
 
 from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
-from tools.silverfish import native_loose_pickup as loose
+from tools.silverfish import native_loose_pickup as loose, native_stock_enemy_drops, native_world_loot
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
                                            lockable_container, loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
@@ -90,13 +90,19 @@ FAMILY_SCENES = {
     "stock-locker-blowtorch": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
     "stock-locker-key": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
     "stock-secure-locker-blowtorch": (LAKE, "LootLocker_Secure_BP_C", "LootLocker_Secure_BP_C_3"),
+    "stock-armor-locker": ("/Game/Classes/Maps/Maps_OverWorld/Slums_P", "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
+    "stock-armor-locker-blowtorch": (RAIL_YARD, "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
+    "stock-armor-locker-key": (BLACK_MARKET, "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
 }
 PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar",
-                   "stock-locker-blowtorch": "blowtorch", "stock-secure-locker-blowtorch": "blowtorch"}
+                   "stock-locker-blowtorch": "blowtorch", "stock-secure-locker-blowtorch": "blowtorch",
+                   "stock-armor-locker-blowtorch": "blowtorch"}
 SAWMILL_KEY_ACTOR = f"{FOREST}.Forest_01_P:PersistentLevel.Sawmill_Key_C_1"
+BROKER_KEY_CLASS = "/Game/Classes/Items/Key_Items/BrokersKey.BrokersKey_C"
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish, *_ in CONTAINER_PLACEMENTS
                            if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C",
-                                                            "Loot_ArtifactChest_01_C", "LootLocker_Secure_BP_C"}}
+                                                            "Loot_ArtifactChest_01_C", "LootLocker_Secure_BP_C",
+                                                            "Loot_ArmorLocker_BP_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -164,12 +170,13 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     desk = name == DESK_SCENE
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     pry_tool = PRY_TOOL_SCENES.get(name)
-    key_scene = name == "stock-locker-key"
+    broker_key_scene = name == "stock-armor-locker-key"
+    key_scene = name == "stock-locker-key" or broker_key_scene
     tool_before, tool_after = (3, 2) if pry_tool == "blowtorch" else (-1, -1)
     targets = [full_name(area, actor, family) for actor in actors]
     permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
     random_lids = {crate: lid for crate in targets if (lid := random_lid(crate))}
-    verify_restore = permanent or bool(random_lids) or key_scene
+    verify_restore = (permanent or bool(random_lids) or key_scene) and not broker_key_scene
     assert all(CRATES.get(crate) == area for crate in targets)
     if name in GUARANTEED_SCENES:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
@@ -236,7 +243,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def locked_container(state):
         locks = state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {})
-        locker = family in {"LootLocker_Small_BP_C", "LootLocker_Secure_BP_C"}
+        locker = family in {"LootLocker_Small_BP_C", "LootLocker_Secure_BP_C", "Loot_ArmorLocker_BP_C"}
         if locker:
             candidates = targets
         else:
@@ -412,7 +419,62 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     denied = stock_input_result(guest_run, crate, press["sequence"])
                     assert denied["event"] == "native_stock_crate_interaction_rejected" and denied["reason"] == "stock_vehicle_locked", denied
                     assert not public_roll(await wait(run, lambda state: lock_status(state, crate) is True), crate)
-                    if key_scene:
+                    if broker_key_scene:
+                        await command("action", *host, "native-meet-broker-approach", "--target", "host")
+                        await command("action", *host, "native-meet-broker-approach", "--target", character)
+                        await command("action", *host, native_stock_enemy_drops.BROKER_KEY_FIXTURE)
+
+                        def broker_drop(frame):
+                            rows = frame.get("campaign", {}).get("world", {}).get("party", {}).get(native_stock_enemy_drops.STATE, {})
+                            return next((row for row in rows.values() if row.get("class_path") == BROKER_KEY_CLASS
+                                         and row.get("source", "").endswith(":PersistentLevel.NPC_Broker_C_1")), None)
+
+                        banked = broker_drop(await wait(run, broker_drop))
+                        key_guid = banked["guid"]
+                        identity = native_world_loot.stock_enemy_identity(key_guid)
+                        for directory in (run, guest_run):
+                            await wait(directory, lambda state: state.get("game", {}).get(native_stock_enemy_drops.BROKER_CUE) is True
+                                       and identity in state["game"].get(native_world_loot.KEY, {}))
+                        frame = await wait(run, broker_drop)
+                        loot = frame["campaign"]["world"]["party"][native_stock_enemy_drops.STATE]
+                        remaining = [native_world_loot.stock_enemy_identity(drop["guid"]) for drop in loot.values()
+                                     if drop["source"] == banked["source"] and drop["claimed_by"] is None]
+                        remaining.remove(identity)
+                        remaining.insert(0, identity)
+                        key_pickup = None
+                        while remaining:
+                            blocked = []
+                            for target in remaining:
+                                try:
+                                    await command("action", *host, native_world_loot.APPROACH, "--target", f"guest@{target}")
+                                    pressed_item = await command("action", *guest, native_world_loot.FIXTURE, "--target", target)
+                                except RuntimeError as error:
+                                    if "world_loot_fixture_no_clear_sight" not in str(error) and "world_loot_fixture_focus_unavailable" not in str(error):
+                                        raise
+                                    blocked.append((target, str(error)))
+                                    continue
+                                assert pressed_item[native_world_loot.KEY][target]["sequence"] > 0, pressed_item
+                                await wait(guest_run, lambda state: target not in state.get("game", {}).get(native_world_loot.KEY, {}))
+                                if target == identity:
+                                    key_pickup = "stock_interact"
+                                    break
+                            else:
+                                if len(blocked) == len(remaining):
+                                    await command("action", *host, native_world_loot.APPROACH, "--target", f"guest@{identity}")
+                                    await command("action", *guest, native_stock_enemy_drops.CLAIM, "--target", key_guid)
+                                    key_pickup = "validated_world_loot_claim"
+                                    evidence["stock_broker_key_headless_focus"] = dict(blocked)[identity]
+                                    break
+                                remaining = [target for target, _ in blocked]
+                                continue
+                            break
+                        evidence["stock_broker_key_pickup"] = key_pickup
+                        await wait(run, lambda state: (broker_drop(state) or {}).get("claimed_by") == character)
+                        key_item = await typed_inventory_item(character, key_guid)
+                        assert key_item and key_item["class_path"] == BROKER_KEY_CLASS, key_item
+                        evidence["stock_broker_key"] = key_item
+                        await command("action", *host, "native-loot-approach", "--target", crate)
+                    elif key_scene:
                         target = f"loose:{SAWMILL_KEY_ACTOR}"
                         cabinet = full_name(FOREST, "LootCabnet_Small_BP_C_1")
                         await command("action", *host, "native-loot-approach", "--target", cabinet)
@@ -499,6 +561,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
                 assert all(status_of(committed, sibling) != "exhausted" and status_of(replicated, sibling) != "exhausted"
                            for sibling in sibling_names)
+            elif family == "Loot_ArmorLocker_BP_C":
+                assert roll["trait_calls"] == 0 and roll["items"], roll
+                assert roll["items"][0]["class_path"].startswith("/Game/Classes/Armor_Items/"), roll
+                if crate in GUARANTEED_CRATES:
+                    assert len(roll["items"]) == 3, roll
             elif crate in GUARANTEED_CRATES:
                 assert valid_loot_trait_calls(crate, roll["trait_calls"]) and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
             elif cabinet:
@@ -518,7 +585,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
             claim = None
             item = None
-            if roll["items"]:
+            if broker_key_scene:
+                armor = roll["items"][0]
+                identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll['id']}:{armor['guid']}").hex
+                projected = await wait(guest_run, lambda state: identity in state.get("game", {}).get(native_world_loot.KEY, {}))
+                assert projected["game"][native_world_loot.KEY][identity]["class_path"] == armor["class_path"]
+                assert await typed_inventory_item(character, evidence["stock_broker_key"]["guid"]) == evidence["stock_broker_key"]
+                evidence["stock_broker_armor_projection"] = projected["game"][native_world_loot.KEY][identity]
+            elif roll["items"]:
                 selected = roll["items"][-1 if loot_capacity(crate) > 4 else 0]
                 guid = selected["guid"]
                 target = f"{guid}@{crate}"
