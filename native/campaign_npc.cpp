@@ -21,6 +21,7 @@
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FURL.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/GameplayStatics.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/SoftObjectPtr.hpp>
 #include <Unreal/UnrealInitializer.hpp>
@@ -1339,46 +1340,59 @@ namespace
         auto* flayer = find<U::UClass>(flayer_class);
         auto* not_deer = operate_not_deer ? find<U::UClass>(not_deer_class) : nullptr;
         auto* antfarm = find<U::UClass>(antfarm_class);
-        U::UObjectGlobals::ForEachUObject([&](U::UObject* object_ptr, int, int) {
-            if (!live(object_ptr)) return RC::LoopAction::Continue;
-            auto* type = object_ptr->GetClassPrivate();
-            if ((type == husk || type == flayer || (not_deer && type == not_deer)) && in_level(object_ptr, active.world))
+
+        if (auto* base = find<U::UClass>(npc_base))
+        {
+            std::vector<U::AActor*> npcs;
+            U::UGameplayStatics::GetAllActorsOfClass(active.world, base, npcs);
+            for (auto* actor : npcs)
             {
+                if (!actor) continue;
+                auto* type = actor->GetClassPrivate();
+                if ((type != husk && type != flayer && type != not_deer) || !in_level(actor, active.world))
+                    continue;
                 auto& counts = type == flayer ? scope.flayers.counts : type == not_deer ? scope.not_deer.counts : scope.counts;
-                if (type == not_deer && byte_field(object_ptr, STR("Faction")) != not_deer_profile.faction)
+                if (type == not_deer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
                 {
                     ++counts.other;
-                    return RC::LoopAction::Continue;
+                    continue;
                 }
-                const auto role = byte_field(object_ptr, STR("Role"));
+                const auto role = byte_field(actor, STR("Role"));
                 if (role == 3)
                 {
                     ++counts.authority;
-                    if (bool_field(object_ptr, STR("bReplicates"), true) &&
-                        bool_field(object_ptr, STR("bReplicateMovement"), true) && byte_field(object_ptr, STR("RemoteRole")) == 1)
+                    if (bool_field(actor, STR("bReplicates"), true) &&
+                        bool_field(actor, STR("bReplicateMovement"), true) && byte_field(actor, STR("RemoteRole")) == 1)
                         ++counts.authority_network_ready;
                 }
                 else if (role == 1)
                 {
                     ++counts.simulated;
-                    if (live(object(object_ptr, STR("Controller")))) ++counts.simulated_controllers;
+                    if (live(object(actor, STR("Controller")))) ++counts.simulated_controllers;
                     if (type == not_deer)
                     {
-                        if (counts.simulated == 1) scope.not_deer_replica = object_ptr;
+                        if (counts.simulated == 1) scope.not_deer_replica = actor;
                         else scope.not_deer_replica.Reset();
                     }
                 }
                 else ++counts.other;
             }
-            else if (type == antfarm && static_cast<U::AActor*>(object_ptr)->GetWorld() == active.world &&
-                     object(object_ptr, STR("GameInstance")) == active.instance && live(object(object_ptr, STR("LoadedCell"))))
+        }
+
+        if (antfarm)
+        {
+            std::vector<U::AActor*> farms;
+            U::UGameplayStatics::GetAllActorsOfClass(active.world, antfarm, farms);
+            for (auto* actor : farms)
             {
+                if (!live(actor) || actor->GetClassPrivate() != antfarm || actor->GetWorld() != active.world ||
+                    object(actor, STR("GameInstance")) != active.instance || !live(object(actor, STR("LoadedCell"))))
+                    continue;
                 ++scope.counts.antfarm_initialized;
                 ++scope.flayers.counts.antfarm_initialized;
                 if (not_deer) ++scope.not_deer.counts.antfarm_initialized;
             }
-            return RC::LoopAction::Continue;
-        });
+        }
     }
 
     void push_name(const Lua& lua, U::UObject* item)

@@ -894,6 +894,7 @@ namespace
         const auto requested = lua.get_integer(1);
         if (requested <= 0 || !silverfish::native_interaction_input::current_guest_pawn(requested)) return 0;
         stash_lease = Clock::now() + lease;
+        if (!stash_input.pending.sequence) return 0;
         auto* actor = stash_input.actor.Get();
         if (!stock_stash(actor)) return 0;
         const auto accepted = take_interaction_sequence(requested, stash_input);
