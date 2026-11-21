@@ -4926,8 +4926,9 @@ class Client:
                 self.control.respond(path, False, error=str(error))
 
     async def run(self) -> None:
-        pause_exit = (native_session_exit.PauseExit(self.bridge.directory, self.control, "guest")
-                      if isinstance(self.bridge.process, EmbeddedEngine) and self.invite.get("native_zones") else None)
+        engine = self.bridge.process if isinstance(self.bridge.process, EmbeddedEngine) else None
+        pause_exit = (native_session_exit.PauseExit(self.bridge.directory, self.control, "guest", engine=engine)
+                      if engine is not None and self.invite.get("native_zones") else None)
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         try:
             await self.run_session(pause_exit=pause_exit)
