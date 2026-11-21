@@ -30,6 +30,7 @@ from . import native_loot, native_world_loot
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_stock_door
+from . import native_player_avatar
 from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
@@ -2475,10 +2476,25 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif fields[0] == "native-player-avatar" and len(fields) == 5:
-                    area, pawn, status, diagnostic = fields[1:]
+                elif fields[0] == "native-player-avatar" and len(fields) in (5, 8):
+                    area, pawn, status, diagnostic = fields[1:5]
                     if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):
-                        data.setdefault("native_player_avatars", {})[pawn] = {"state": status, "diagnostic": diagnostic}
+                        avatar = {"state": status, "diagnostic": diagnostic}
+                        if len(fields) == 8:
+                            player_id, body, head = fields[5:]
+                            if (player_id == "-" or native_player_avatar.valid_id(player_id)) and all(
+                                    map(native_player_avatar.valid_path, (body, head))):
+                                avatar.update(player_id=None if player_id == "-" else int(player_id), body=body, head=head)
+                        data.setdefault("native_player_avatars", {})[pawn] = avatar
+                elif fields[0] == native_player_avatar.TAG:
+                    player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
+                    outfits = data.setdefault(native_player_avatar.KEY, {})
+                    if player_id in outfits or any(row["pawn"] == outfit["pawn"] for row in outfits.values()):
+                        raise ValueError("Duplicate authoritative outfit identity")
+                    outfits[player_id] = outfit
+                elif (fields[0] == "native-avatar-outfits-receipt" and len(fields) == 2
+                      and data.get("state") == "connected" and native_player_avatar.REQUEST_ID.fullmatch(fields[1])):
+                    data[native_player_avatar.RECEIPT] = fields[1]
             if data.get("schema") == 1 and "state" in data:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):

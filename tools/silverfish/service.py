@@ -39,6 +39,7 @@ from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_stock_door
+from . import native_player_avatar
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -756,6 +757,8 @@ class Host:
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
+        if (outfits := native_player_avatar.frame(self)) is not None:
+            view[native_player_avatar.KEY] = outfits
         if type(self.last_game.get(native_stash.SETTING)) is bool:
             view[native_stash.SETTING] = self.last_game[native_stash.SETTING]
             view[native_stash.SITES] = self.last_game.get(native_stash.SITES, {})
@@ -5045,6 +5048,8 @@ class Client:
                 await self.downed_markers.sync(self)
                 await native_dead_drop.project_client(self)
                 if time.monotonic() - self.gameplay_seen < 3:
+                    self.last_game = await native_player_avatar.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_player_avatar.KEY), self.zone_epoch)
                     self.last_game = await native_stock_door.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
                     self.last_game = await native_stock_enemy_drops.project_broker_cue(

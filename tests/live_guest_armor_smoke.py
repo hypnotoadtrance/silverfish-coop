@@ -139,6 +139,37 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             async def recognition():
                 return (await act(host, DISGUISE_PROBE, "--target", "guest"))["native_guest_disguise"]
 
+            def remote_avatar(state):
+                game = state["game"]
+                pawn = game.get("pawns", {}).get("guest", {}).get("name")
+                avatar = game.get("native_player_avatars", {}).get(pawn, {})
+                if avatar.get("player_id") is not None and not avatar.get("diagnostic"):
+                    return avatar
+
+            async def visible_outfit(body, head):
+                def shown(state):
+                    avatar = remote_avatar(state)
+                    if avatar and (avatar.get("body"), avatar.get("head")) == (body, head):
+                        return avatar
+
+                host_view = await wait(run, shown)
+                game = host_view["game"]
+                host_pawn = game["pawns"]["local"]["name"]
+                host_id, host_outfit = next((int(key), row) for key, row in game["native_avatar_outfits"].items()
+                                            if row["pawn"] == host_pawn)
+                guest_id = remote_avatar(host_view)["player_id"]
+                assert host_id != guest_id
+                assert game["native_avatar_outfits"][str(guest_id)]["pawn"] == game["pawns"]["guest"]["name"]
+
+                def shows_host(state):
+                    avatar = remote_avatar(state)
+                    return state["game"].get("native_avatar_outfits_receipt") and avatar and (
+                        avatar["player_id"], avatar["body"], avatar["head"]
+                    ) == (host_id, host_outfit["body"], host_outfit["head"])
+
+                guest_view = await wait(client_run, shows_host)
+                return {"host": remote_avatar(host_view), "guest": remote_avatar(guest_view)}
+
             before = await recognition()
             assert before["host"]["configured"] == before["guest"]["configured"] == 0, before
             uniform = await seed("conscript-uniform")
@@ -158,6 +189,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             gear_row(saved, helmet, "helmet", STANDARD_INFANTRY_HELMET_PATH)
             assert await inventory(host, "host") == host_before
             evidence["stock_recognition"] = {"before": before, "armor_only": armor_only, "active": active}
+            evidence["avatar_outfits"] = {"equipped": await visible_outfit(CONSCRIPT_UNIFORM_PATH, STANDARD_INFANTRY_HELMET_PATH)}
 
             await act(client, "drop-link")
             await wait(run, lambda s: any(
@@ -170,6 +202,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             resumed = await recognition()
             assert resumed == active, resumed
             evidence["stock_recognition"]["brief_reconnect"] = resumed
+            evidence["avatar_outfits"]["brief_reconnect"] = await visible_outfit(CONSCRIPT_UNIFORM_PATH, STANDARD_INFANTRY_HELMET_PATH)
 
             await stop(host, authority)
             await stop(client, guest)
@@ -183,6 +216,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             assert (restored["guest"], restored["host"]) == (active["guest"], active["host"]), restored
             assert restored["npc"] == active["npc"] and restored["pawn"] != active["pawn"], restored
             assert await inventory(client, character) == saved and await inventory(host, "host") == host_before
+            evidence["avatar_outfits"]["restored"] = await visible_outfit(CONSCRIPT_UNIFORM_PATH, STANDARD_INFANTRY_HELMET_PATH)
             await equip_from_overlay(goggles, "native_guest_helmet")
             broken = await recognition()
             assert (broken["guest"], broken["host"]) == (before["guest"], before["host"]), broken
@@ -192,6 +226,7 @@ async def verify(work, vanilla_saved, *, stock_input=False, dust_filter=False, g
             gear_row(swapped, goggles, "helmet", GOGGLES_PATH)
             assert gear_row(swapped, uniform, "armor", CONSCRIPT_UNIFORM_PATH) == saved[uniform]
             evidence["stock_recognition"].update(restored=restored, incompatible_helmet=broken)
+            evidence["avatar_outfits"]["goggles"] = await visible_outfit(CONSCRIPT_UNIFORM_PATH, GOGGLES_PATH)
             evidence["verified"] = True
             return
 
