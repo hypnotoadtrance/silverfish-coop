@@ -33,8 +33,8 @@ async def choose(run, choice, previous=None):
     return generation
 
 
-def paired_checkpoint(directory, character):
-    profile = directory / "game-user"
+def paired_checkpoint(directory, character, *, profile=None):
+    profile = directory / "game-user" if profile is None else profile
     checkpoint = CampaignStore.read_existing(
         directory / "save", verify_world=service.verify_travel_checkpoint,
         verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data),

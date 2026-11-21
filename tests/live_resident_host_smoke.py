@@ -2,8 +2,9 @@
 
 import argparse
 import asyncio
-from hashlib import sha256
+from hashlib import file_digest, sha256
 from pathlib import Path
+import shutil
 import sys
 import uuid
 
@@ -25,7 +26,15 @@ from live_same_process_listener_smoke import choose_ports
 from live_stock_pause_exit_smoke import paired_checkpoint, stock_pause
 
 
-async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
+def stock_save_hashes(profile: Path) -> dict[str, str]:
+    fingerprints = {}
+    for path in (profile / "Saved" / "SaveGames").glob("*.sav"):
+        with path.open("rb") as stream:
+            fingerprints[path.name] = file_digest(stream, "sha256").hexdigest()
+    return fingerprints
+
+
+async def verify(work: Path, original: Path, *, direct: bool = False, title_profiles: bool = False) -> None:
     originals = saved_hashes(original)
     if ("steamapps" in {part.casefold() for part in work.parts} or work.is_relative_to(original)
             or original.is_relative_to(work) or not originals or not embedded_title_plan.installed(work)):
@@ -36,7 +45,17 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
     print(case, flush=True)
     campaign = select_run(work, "campaigns", name)
     guest = select_run(work, "clients", name)
-    profile = campaign / "game-user"
+    profile = work / "titles" / f"{name}-host" / "game-user" if title_profiles else campaign / "game-user"
+    guest_profile = work / "titles" / f"{name}-guest" / "game-user" if title_profiles else guest / "game-user"
+    solo_baselines = {}
+    if title_profiles:
+        for seat in (profile, guest_profile):
+            saves = seat / "Saved" / "SaveGames"
+            saves.mkdir(parents=True)
+            for stock_save in (original / "SaveGames").glob("*.sav"):
+                shutil.copyfile(stock_save, saves / stock_save.name)
+            solo_baselines[seat] = stock_save_hashes(seat)
+            assert "Config.sav" in solo_baselines[seat] and len(solo_baselines[seat]) > 1
     nonce = uuid.uuid4().hex
     host_run, guest_run = campaign / "run", guest / "run"
     mailbox = host_run / "game-bridge" / nonce
@@ -49,7 +68,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
                              title_fixture=True, pause_fixture=True, resident_title=True, **options)
     bridge = runtime.Bridge(mailbox, process)
     guest_process = None
-    evidence = {"verified": False, "title_pid": process.pid, "direct_ip": direct, "sessions": []}
+    evidence = {"verified": False, "title_pid": process.pid, "direct_ip": direct,
+                "independent_title_profiles": title_profiles, "sessions": []}
 
     async def offer(game_bridge, game_profile, action):
         frame = await game_bridge.wait_for(lambda game: _isolated_stock_title(game, game_profile / "Saved")
@@ -97,7 +117,6 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         assert scope == uuid.UUID(first["campaign"]["campaign_id"]).hex
         guest_nonce = uuid.uuid4().hex
         guest_mailbox = guest_run / "game-bridge" / guest_nonce
-        guest_profile = guest / "game-user"
         guest_mailbox.mkdir(parents=True)
         if direct:
             # Start with the standard full native stage before the operator knows
@@ -190,7 +209,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         await offer(guest_bridge, guest_profile, "join")
         assert not owns_udp_port(guest_process.pid, first_guest_port)
         await wait(host_run, lambda value: value.get("state") == "hosting" and not value["campaign"]["leases"])
-        detached = paired_checkpoint(campaign, character)["guest_save"]["slot"]
+        detached = paired_checkpoint(campaign, character, profile=profile)["guest_save"]["slot"]
         if direct:
             await open_direct()
             await form("password")
@@ -247,6 +266,12 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         assert final["revision"] > checkpoint["revision"] and final["world"][native_host_save.SCOPE_FIELD] == scope
         evidence["sessions"].append({"pid": second["pid"], "port": edited_port, "revision": final["revision"],
                                      "restored_slot": save["slot"], "scope_released": True})
+        if title_profiles:
+            host_scope = native_host_save.checkpoint_profile(profile, final)
+            guest_scope_directory = native_host_save.directory(native_host_save.SaveScope(guest_profile, guest_scope))
+            assert native_host_save.directory(host_scope).is_dir() and guest_scope_directory.is_dir()
+            assert not (campaign / "game-user").exists() and not (guest / "game-user").exists()
+            evidence["separate_title_and_ledger"] = True
         evidence["verified"] = True
     finally:
         if guest_process is not None and guest_process.poll() is None:
@@ -254,9 +279,15 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         if process.poll() is None:
             await runtime.stop_game(process)
         evidence["original_saves_verified"] = saved_hashes(original) == originals
+        if title_profiles:
+            evidence["stock_slots_preserved"] = {seat.parent.name: stock_save_hashes(seat) == baseline
+                                                 for seat, baseline in solo_baselines.items()}
+            evidence["verified"] &= all(evidence["stock_slots_preserved"].values())
         evidence["verified"] &= evidence["original_saves_verified"]
         runtime.write_json(case / "resident-host-verification.json", evidence)
         assert evidence["original_saves_verified"], "The original player saves changed"
+        if title_profiles:
+            assert all(evidence["stock_slots_preserved"].values()), "The isolated stock slots or settings changed"
 
 
 if __name__ == "__main__":
@@ -264,5 +295,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--direct", action="store_true")
+    parser.add_argument("--title-profiles", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True), direct=args.direct))
+    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True),
+                       direct=args.direct, title_profiles=args.title_profiles))

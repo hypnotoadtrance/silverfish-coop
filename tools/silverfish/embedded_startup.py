@@ -383,7 +383,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
         return runtime.read_json(campaign / "run" / "status.json")
 
     def host_plan(bind, port, password=""):
-        mode, area = service.menu_host_start(campaign)
+        mode, area = service.menu_host_start(campaign, profile=saved.parent)
 
         async def start():
             private = runtime.spare_udp_port()
@@ -391,7 +391,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
                 private = runtime.spare_udp_port()
             if private == port:
                 raise RuntimeError("A distinct private Unreal port was not available")
-            engine = EmbeddedEngine(os.getpid(), mailbox, saved, private)
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, private, session_directory=campaign)
             await engine.observe_title()
             await service.host_game(
                 work, campaign, bind, port, headless, resident_engine=engine,
@@ -414,7 +414,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
         return host_plan(bind, port, claim.direct_password or "")
 
     plan = replace(host_plan(default_bind, default_port), resolve_claim=resolve)
-    await _resident_title(mailbox, saved, {"host": plan})
+    await _resident_title(mailbox, saved, campaign, {"host": plan})
 
 
 async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
@@ -444,7 +444,7 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
 
     async def start():
         with _pinned_invite(path, selection.invite_sha256) as invitation:
-            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
             await engine.observe_title()
             await service.join_game(work, directory, invitation, headless, selection.character_id,
                                     resident_engine=engine)
@@ -454,7 +454,7 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
 
     plan = SessionPlan(start, status, lambda frame: frame.get("character_id") == selection.character_id
                        and frame.get("gameplay_fresh") is True)
-    await _resident_title(mailbox, saved, {"join": plan})
+    await _resident_title(mailbox, saved, directory, {"join": plan})
 
 
 async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
@@ -486,7 +486,7 @@ async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, save
             raise ValueError("Expected an authenticated Direct IP connection")
 
         async def start():
-            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
             await engine.observe_title()
             await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
 
@@ -498,15 +498,15 @@ async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, save
 
     plan = SessionPlan(no_selection, status, lambda _: False, resolve_claim=resolve)
     try:
-        await _resident_title(mailbox, saved, {"join": plan}, join_settings=settings)
+        await _resident_title(mailbox, saved, directory, {"join": plan}, join_settings=settings)
     finally:
         await settings.close()
 
 
-async def _resident_title(mailbox, saved, plans, *, join_settings=None):
+async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None):
     from .title_session import TitleSession
 
-    title = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+    title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None, join_settings=join_settings).run()
 

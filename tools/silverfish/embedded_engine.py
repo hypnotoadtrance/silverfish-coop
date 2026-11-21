@@ -156,7 +156,6 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     role_path = _exact_existing(work / _ROLE_ROOTS[role] / directory.name)
     if directory.resolve(strict=True) != role_path:
         raise ValueError("The profile does not belong to the staged engine role")
-    profile = _exact_existing(role_path / "game-user")
     bridge = Path(startup.environment.get(BRIDGE_ENV) or "")
     if not _UUID.fullmatch(bridge.name) or bridge != role_path / "run" / "game-bridge" / bridge.name:
         raise ValueError("The embedded worker lacks its exact role bridge")
@@ -164,9 +163,16 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
 
     options = _options(startup.argv)
     requested_directory = Path(options.get("userdir", ""))
-    if not requested_directory.is_absolute() or requested_directory.resolve(strict=True) != profile:
-        raise ValueError("The engine was not started with its isolated user directory")
     resident = required_env.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
+    if requested_directory != role_path / "game-user":
+        seat = requested_directory.parent
+        if (not resident or requested_directory.name != "game-user" or seat.parent != work / "titles"
+                or not NAME.fullmatch(seat.name)):
+            raise ValueError("The engine was not started with its isolated user directory")
+        for branch in (seat.parent, seat):
+            _assert_no_reparse(branch.lstat())
+            _exact_existing(branch)
+    profile = _exact_existing(requested_directory)
     expected_bind = "127.0.0.1" if role == "client" and not resident else None
     if "port" in options or options.get("multihome") != expected_bind:
         raise ValueError("The engine startup network options do not match its staged role")
@@ -194,11 +200,13 @@ class EmbeddedEngine:
     _lock = threading.Lock()
     _used = False
 
-    def __init__(self, pid: int, mailbox: Path, saved_directory: Path, internal_port: int | None):
+    def __init__(self, pid: int, mailbox: Path, saved_directory: Path, internal_port: int | None, *,
+                 session_directory: Path):
         self.pid = pid
         self.internal_port = internal_port
         self.returncode = None
         self.bridge = runtime.Bridge(mailbox, self)
+        self.session_directory = session_directory
         self._saved_directory = saved_directory
         self._save_scope = None
         self._sequence = 0
@@ -232,7 +240,7 @@ class EmbeddedEngine:
             if cls._used:
                 raise RuntimeError("The staged engine lease was already used in this process")
             cls._used = True
-        engine = cls(startup.pid, mailbox, saved_directory, internal_port)
+        engine = cls(startup.pid, mailbox, saved_directory, internal_port, session_directory=directory)
         await engine.observe_title(timeout=timeout)
         return engine
 

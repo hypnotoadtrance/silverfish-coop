@@ -135,7 +135,8 @@ namespace
         ~CommandArguments() { if (values) LocalFree(values); }
     };
 
-    bool matches_command_line(const fs::path& image, const fs::path& profile, bool legacy_loopback)
+    bool matches_command_line(const fs::path& image, const fs::path& profile, const fs::path& work,
+                              bool resident, bool legacy_loopback)
     {
         const CommandArguments arguments;
         if (!arguments.values || arguments.count < 2 ||
@@ -150,7 +151,15 @@ namespace
             if (windows_equal(name, L"-userdir"))
             {
                 const fs::path supplied(value);
-                if (userdir || !windows_path_equal(supplied, profile) || !exact_path(supplied, true)) return false;
+                if (userdir || !exact_path(supplied, true)) return false;
+                if (!windows_path_equal(supplied, profile))
+                {
+                    const auto seat = supplied.parent_path();
+                    if (!resident || !windows_equal(supplied.filename().native(), L"game-user") ||
+                        !windows_path_equal(seat.parent_path(), work / L"titles") ||
+                        !profile_name(seat.filename().native()) || !exact_path(seat, true) ||
+                        !exact_path(seat.parent_path(), true)) return false;
+                }
                 userdir = true;
             }
             if (windows_equal(name, L"-multihome"))
@@ -197,7 +206,7 @@ namespace
 
         state = L"startup_scope_arguments_refused";
         const bool resident = environment(L"SILVERFISH_COOP_RESIDENT_TITLE") == L"1";
-        if (!matches_command_line(image, profile, guest && !resident)) return {};
+        if (!matches_command_line(image, profile, work, resident, guest && !resident)) return {};
         return mod / L"runtime";
     }
 

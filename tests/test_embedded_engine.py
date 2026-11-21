@@ -155,6 +155,25 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
                 await self.host()
         self.bridge_type.assert_not_called()
 
+    async def test_resident_title_seat_and_campaign_are_independent(self):
+        role = self.campaign
+        seat = self.work / "titles" / "Player"
+        profile = seat / "game-user"
+        (profile / "Saved").mkdir(parents=True)
+        source = self.process_spec(role)
+        startup = replace(source, argv=(source.argv[0], f"-userdir={profile}"))
+        with self.assertRaisesRegex(ValueError, "isolated user directory"):
+            embedded._qualify(startup, self.work, role, "host", {})
+
+        flags = {"SILVERFISH_COOP_RESIDENT_TITLE": "1"}
+        self.startup.return_value = replace(startup, environment={**startup.environment, **flags})
+        self.frames = [self.frame(1, seat), self.frame(2, seat)]
+        engine = await embedded.EmbeddedEngine.acquire(
+            self.work, role, role="host", internal_port=28016, required_env=flags)
+        self.assertEqual(engine.session_directory, role)
+        self.assertEqual(engine.profile, profile)
+        self.assertEqual(engine.bridge.directory, self.bridge_path(role))
+
     async def test_effective_directory_other_than_os_userdir_fails_closed(self):
         self.frames = [self.frame(1, self.client)]
         with self.assertRaisesRegex(ValueError, "effective Unreal save directory"):

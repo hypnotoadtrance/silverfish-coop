@@ -3605,8 +3605,8 @@ def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_
                 staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
 
 
-def menu_host_start(directory: Path) -> tuple[str, str]:
-    profile = directory / "game-user"
+def menu_host_start(directory: Path, *, profile: Path | None = None) -> tuple[str, str]:
+    profile = directory / "game-user" if profile is None else profile
     checkpoint = CampaignStore.read_existing(
         directory / "save", verify_world=verify_travel_checkpoint,
         verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data),
@@ -3629,7 +3629,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None) -> None:
     if resident_engine is not None:
         if (embedded_port is not None or resident_engine.internal_port is None
-                or resident_engine.profile != directory / "game-user"):
+                or resident_engine.session_directory != directory):
             raise ValueError("The resident title does not own this campaign profile")
         embedded_port = resident_engine.internal_port
     if embedded_port is not None and (type(embedded_port) is not int or not 1 <= embedded_port <= 65535
@@ -3692,7 +3692,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     if expanded_zones and not (native_zones and staged_script(work, "authored_zone_maps.lua")
                                and (not native_zone_walls or staged_script(work, "authored_wall_routes.lua"))):
         raise ValueError("Expanded stock routes require --native-zones and the current stage")
-    profile = directory / "game-user"
+    profile = resident_engine.profile if resident_engine is not None else directory / "game-user"
     with Control(directory / "run") as control, CampaignStore(
         directory / "save", verify_world=verify_travel_checkpoint,
         verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
@@ -5128,7 +5128,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                     guest_inventory_view: bool = False, guest_primary_input: bool = False,
                     embedded_engine: bool = False, resident_engine: EmbeddedEngine | None = None) -> None:
     if resident_engine is not None and (embedded_engine or resident_engine.internal_port is not None
-                                        or resident_engine.profile != directory / "game-user"):
+                                        or resident_engine.session_directory != directory):
         raise ValueError("The resident title does not own this guest profile")
     build = staged_build(work)
     if isinstance(invitation, direct_ip.Connection):
@@ -5155,7 +5155,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                     work, directory, "client", headless, None, game_options)
                 process, bridge = embedded, embedded.bridge
                 await embedded.select_save_scope(
-                    native_host_save.SaveScope(directory / "game-user", uuid.UUID(invite["character_id"]).hex))
+                    native_host_save.SaveScope(embedded.profile, uuid.UUID(invite["character_id"]).hex))
                 transport = await link.start_client(game_pid=process.pid if resident_engine is not None else None)
             else:
                 transport = await link.start_client()
