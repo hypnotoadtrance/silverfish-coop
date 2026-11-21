@@ -223,7 +223,8 @@ function projection.command(fields, state, phase)
     elseif command == "native-world-loot-approach" then
         local id, pawn_name = fields[3], fields[4]
         local item, pawn = world_items[id]
-        if not item or #fields ~= 4 or not same(state.world, item.world) then
+        local scope = item or (current and current.id == id and current)
+        if not scope or #fields ~= 4 or not same(state.world, scope.world) then
             error("world_loot_fixture_scope_unavailable", 0)
         end
         for _, member in ipairs(state.pawns) do
@@ -232,8 +233,12 @@ function projection.command(fields, state, phase)
                 break
             end
         end
-        local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(item.slot)
-        local path = active and epoch == item.epoch and exact == id and name:match("^%S+ (/Game/[%w_./:%-]+)$")
+        local name = proof()
+        if item then
+            local active, epoch, exact, actor = SilverfishReadNativeGuestDropProjection(item.slot)
+            name = active and epoch == item.epoch and exact == id and actor or nil
+        end
+        local path = name and name:match("^%S+ (/Game/[%w_./:%-]+)$")
         local actor = path and StaticFindObject(path)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= name then
             error("world_loot_fixture_scope_unavailable", 0)

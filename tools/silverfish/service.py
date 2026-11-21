@@ -2433,7 +2433,8 @@ class Host:
                     role, _, identity = (request.get("target") or "").partition("@")
                     character = self.roles().get(role)
                     pawn = native_loot._scope(self, character)
-                    if not pawn or identity not in self.last_game.get(native_world_loot.KEY, {}):
+                    manual_drop = self.last_game.get(native_guest_drop_projection.KEY, {}).get("drop_id")
+                    if not pawn or (identity not in self.last_game.get(native_world_loot.KEY, {}) and identity != manual_drop):
                         raise party.RuleError("world_loot_fixture_scope_unavailable")
                     self.last_game = await bridge.command(action, identity, pawn, timeout=5)
                     self.last_seen = time.monotonic()
