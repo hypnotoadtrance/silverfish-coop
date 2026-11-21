@@ -8,11 +8,12 @@ local classes = {
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
+local overlap = "BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local world, fixture_kind
+local world, world_map, fixture_kind
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -32,6 +33,15 @@ local function replica(actor)
     local driver = valid(current) and current.NetDriver
     local server = valid(driver) and driver.ServerConnection
     return valid(server) and same(driver.World, current) and same(server.Driver, driver)
+end
+
+local function placement(actor)
+    if type(SilverfishQualifyNativePlacedTrap) ~= "function" then return end
+    local path = actor:GetFullName():match("^%S+ (.+)$")
+    if path then
+        local placed, guest = SilverfishQualifyNativePlacedTrap(path)
+        if placed then return path, guest end
+    end
 end
 
 local function burner_source(actor)
@@ -62,8 +72,9 @@ function fields.start(role)
         local class = actor:GetClass():GetFullName()
         if seat == "host" then
             if class == effects.blast_class and in_world(actor, world) then effects.observe_blast(actor, active) end
-        elseif (kinds[class] or class == fire_jet) and replica(actor) then
-            actor:SetActorEnableCollision(false)
+        elseif kinds[class] or class == fire_jet then
+            local _, local_copy = placement(actor)
+            if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
         end
     end)
     RegisterBeginPlayPostHook(function(context)
@@ -74,13 +85,16 @@ function fields.start(role)
         local class = actor:GetClass():GetFullName()
         local kind = kinds[class]
         if not kind and class ~= fire_jet then return end
-        if seat == "host" and not actor:HasAuthority() or seat == "client" and not replica(actor) then return end
+        local placed, local_copy
+        if kind then placed, local_copy = placement(actor) end
+        if seat == "host" and not actor:HasAuthority()
+            or seat == "client" and not local_copy and not replica(actor) then return end
         if seat == "client" then actor:SetActorEnableCollision(false) end
         local address = actor:GetAddress()
         if class == fire_jet then
             if seat == "client" or in_world(actor, world) and burner_source(actor) then pending_fires[address] = actor end
         else
-            pending[address] = {actor = actor, kind = kind}
+            pending[address] = {actor = actor, kind = kind, placed = placed}
             if seat == "host" and fixture_kind == kind then fixtures[kind] = actor end
         end
     end)
@@ -93,11 +107,28 @@ end
 function fields.command(args, state, phase)
     local effect = effects.command(args, state, phase)
     if effect ~= nil then return effect end
-    if args[2] == "native-anomaly-trigger-fixture" then
+    if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture" then
+        local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
         local trap = fixtures[args[3]]
+        if not trap then
+            for _, entry in pairs(active) do
+                if entry.placed == args[3] then trap = entry.actor; break end
+            end
+        end
+        if #args ~= 3 or not headless or not in_world(trap, state.world) or not valid(trap.Sphere) then
+            error("Trap trigger probe unavailable", 0)
+        end
+        if guest_probe then
+            local pawn = state.local_pawn and state.local_pawn.pawn
+            if phase ~= "connected" or not in_world(pawn, state.world) or not pawn:IsLocallyControlled()
+                or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
+                error("Placed trap guest overlap probe unavailable", 0)
+            end
+            trap[overlap](trap, trap.Sphere, pawn, pawn.CapsuleComponent, 0, false, {})
+            return "Stock placed trap guest overlap invoked"
+        end
         local guest = #state.guests == 1 and state.guests[1].pawn
-        if #args ~= 3 or not host_fixture or phase ~= "hosting" or state.map ~= crossroads
-            or not in_world(trap, state.world) or not valid(trap.Sphere) or not in_world(guest, state.world)
+        if not host_fixture or phase ~= "hosting" or not in_world(guest, state.world)
             or not guest:HasAuthority() or guest:IsLocallyControlled() then error("Trap trigger probe unavailable", 0) end
         local center = trap.Sphere:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
@@ -139,8 +170,8 @@ end
 
 function fields.rows(state, phase, row)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then return {} end
-    if not same(world, state.world) then
-        active, fires, fixtures, world = {}, {}, {}, state.world
+    if not same(world, state.world) or world_map ~= state.map then
+        active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
     end
     for address, entry in pairs(pending) do
@@ -148,7 +179,7 @@ function fields.rows(state, phase, row)
         if in_world(actor, world) then
             if phase == "connected" then
                 if actor:GetActorEnableCollision() == false then active[address] = entry end
-            elseif actor:ActorHasTag(FName("Anomaly")) then
+            elseif entry.placed or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
                 actor:SetReplicates(true)
@@ -180,17 +211,26 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
+            if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
+                actor:SetActorEnableCollision(false)
+            end
             live = live + 1
             local position = actor:K2_GetActorLocation()
-            rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z,
-                actor:GetActorEnableCollision() and 1 or 0)
+            local collision = actor:GetActorEnableCollision() and 1 or 0
+            rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
+            if entry.placed then
+                rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
+                    collision, actor:GetLocalRole())
+            end
         else
             active[address] = nil
         end
     end
-    local skipped = phase == "connected" and type(SilverfishReadNativeAnomalySkips) == "function"
-        and SilverfishReadNativeAnomalySkips(world:GetAddress()) or 0
-    rows[#rows + 1] = row("native-anomaly-field", live, skipped)
+    local skipped, blocked = 0, 0
+    if phase == "connected" and type(SilverfishReadNativeAnomalySkips) == "function" then
+        skipped, blocked = SilverfishReadNativeAnomalySkips(world:GetAddress())
+    end
+    rows[#rows + 1] = row("native-anomaly-field", live, skipped, blocked or 0)
     for address, fire in pairs(fires) do
         if valid(fire) and not fire:IsActorBeingDestroyed() then
             local position, particles = fire:K2_GetActorLocation(), fire.NI_FireMassive

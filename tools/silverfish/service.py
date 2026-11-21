@@ -5542,7 +5542,7 @@ class Client:
                 elif action == "native-interaction-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
-                elif action == "native-anomaly-field-fixture":
+                elif action in {"native-anomaly-field-fixture", "native-placed-anomaly-guest-fixture"}:
                     self.last_game = await self.bridge.command(action, request.get("target") or "-", timeout=4)
                     result = {"native_anomaly_field": self.last_game.get("native_anomaly_field", {})}
                 elif action == native_enemy_shells.FIXTURE and self.transport.game_access:

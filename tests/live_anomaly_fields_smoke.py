@@ -17,10 +17,15 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.control import submit
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish.travel import CROSSROADS, LAB_E206
+
+PLACED = {
+    "lab-e206": (LAB_E206, "burner", "BurnerTrap_BP_C_1", 2),
+    "perdition": ("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P", "starburst", "Starburst_BP_C_5", 5),
+}
 
 
-async def verify(work, vanilla, activate):
+async def verify(work, vanilla, activate, placed):
     name = f"anomaly-field-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -31,6 +36,7 @@ async def verify(work, vanilla, activate):
         raise ValueError("Choose a populated copied singleplayer Saved folder")
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     flags = ("--native-zones", "--headless")
+    area = PLACED[placed][0] if placed else CROSSROADS
     jobs = []
     proof = {"verified": False}
 
@@ -48,6 +54,9 @@ async def verify(work, vanilla, activate):
 
     def positions(status):
         return status.get("game", {}).get("native_anomaly_positions", [])
+
+    def placed_traps(status):
+        return status.get("game", {}).get("native_placed_anomalies", {})
 
     def projected(status, trap):
         return next((row for row in positions(status) if row["kind"] == trap["kind"]
@@ -70,7 +79,7 @@ async def verify(work, vanilla, activate):
                 and math.dist(event["location"], source) < 5]
 
     try:
-        await launch(host, "host", "host", "--campaign", name, "--port", "0", "--start-zone", CROSSROADS,
+        await launch(host, "host", "host", "--campaign", name, "--port", "0", "--start-zone", area,
                      "--native-guest", "--native-events", "--native-expanded-zones", "--fixtures", *flags)
         initial = await wait(host, lambda row: row.get("state") == "hosting" and scene(row))
         job = await asyncio.create_subprocess_exec(*cli, "invite", "--campaign", name, "--name", "Field guest",
@@ -82,34 +91,58 @@ async def verify(work, vanilla, activate):
             raise RuntimeError(errors.decode(errors="replace"))
         invite = json.loads(output)
 
-        # Generate the stock fields before admission to verify hot join receives their placement.
         traps = {}
-        for kind in ("starburst", "burner"):
-            earlier = {tuple(entry["location"]) for entry in positions(initial) if entry["kind"] == kind}
-            result = await submit(host, "native-anomaly-field-fixture", target=kind)
-            assert result["ok"], result
-            initial = await wait(host, lambda row: any(entry["kind"] == kind and tuple(entry["location"]) not in earlier
-                                                     for entry in positions(row)))
-            trap, = [entry for entry in positions(initial) if entry["kind"] == kind and tuple(entry["location"]) not in earlier]
-            assert trap["collision"], trap
-            traps[kind] = trap
+        targets = {}
+        authored = {}
+        if placed:
+            _, kind, name_in_level, expected = PLACED[placed]
+            target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{name_in_level}"
+            initial = await wait(host, lambda row: len(placed_traps(row)) == expected and target in placed_traps(row))
+            authored = placed_traps(initial)
+            traps[kind] = authored[target]
+            targets[kind] = target
+            assert all(trap["collision"] and trap["role"] == 3 for trap in authored.values()), authored
+            proof["placed_host_paths"] = authored
+        else:
+            # Generate the stock fields before admission to verify hot join receives their placement.
+            for kind in ("starburst", "burner"):
+                earlier = {tuple(entry["location"]) for entry in positions(initial) if entry["kind"] == kind}
+                result = await submit(host, "native-anomaly-field-fixture", target=kind)
+                assert result["ok"], result
+                initial = await wait(host, lambda row: any(entry["kind"] == kind and tuple(entry["location"]) not in earlier
+                                                         for entry in positions(row)))
+                trap, = [entry for entry in positions(initial) if entry["kind"] == kind and tuple(entry["location"]) not in earlier]
+                assert trap["collision"], trap
+                traps[kind], targets[kind] = trap, kind
         proof["host"] = traps
 
         await launch(guest, "guest", "join", "--profile", name, "--invite", invite["invite_file"], *flags)
         def replicas_visible(row):
-            return row.get("state") == "connected" and all(projected(row, trap) for trap in traps.values())
+            return (row.get("state") == "connected" and all(projected(row, trap) for trap in traps.values())
+                    and placed_traps(row).keys() == authored.keys())
 
         peer = await wait(guest, replicas_visible)
         replicas = {kind: projected(peer, trap) for kind, trap in traps.items()}
         assert all(not replica["collision"] for replica in replicas.values()), replicas
         proof["guest"] = replicas
-        prior = scene(peer)["suppressed"]
-        for kind in traps:
-            result = await submit(guest, "native-anomaly-field-fixture", target=kind)
+        if placed:
+            copies = placed_traps(peer)
+            for path, original_trap in authored.items():
+                copy = copies[path]
+                assert copy["kind"] == original_trap["kind"] and not copy["collision"], copy
+                assert math.dist(copy["location"], original_trap["location"]) < 3, copy
+                assert sum(math.dist(row["location"], copy["location"]) < 3 for row in positions(peer)) == 1, copy
+            proof["placed_guest_paths"] = copies
+            counter, fixture = "blocked_triggers", "native-placed-anomaly-guest-fixture"
+        else:
+            counter, fixture = "suppressed", "native-anomaly-field-fixture"
+        prior = scene(peer)[counter]
+        for target in targets.values():
+            result = await submit(guest, fixture, target=target)
             assert result["ok"], result
-        vetoed = await wait(guest, lambda row: scene(row).get("suppressed", 0) >= prior + len(traps))
+        vetoed = await wait(guest, lambda row: scene(row).get(counter, 0) >= prior + len(traps))
         assert scene(vetoed)["live"] == scene(peer)["live"], vetoed
-        proof["local_spawns_suppressed"] = scene(vetoed)["suppressed"] - prior
+        proof[counter] = scene(vetoed)[counter] - prior
         assert (await submit(guest, "drop-link"))["ok"]
         await wait(guest, lambda row: row.get("reconnect_suspended") and not row.get("link_connected"))
         resumed = await submit(guest, "reconnect", timeout=35)
@@ -122,27 +155,38 @@ async def verify(work, vanilla, activate):
             health = first["game"]["pawns"]["local"]["health"]
             guest_health = first["game"]["pawns"]["guest"]["health"]
             assert health > 0 and guest_health > 0, first["game"]["pawns"]
-            triggered = await submit(host, "native-anomaly-trigger-fixture", target="starburst")
-            assert triggered["ok"], triggered
-            await wait(guest, lambda _: {event["cue"] for event in played_cues()} == {"charge", "blast"}, timeout=14)
-            cues = played_cues()
-            assert len(cues) == 2 and all(event["particles"] for event in cues), cues
-            proof["starburst_cues"] = cues
-            struck = await wait(host, lambda row: row.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
-                                or (row.get("game", {}).get("pawns", {}).get("guest", {}).get("health") or guest_health) < guest_health,
-                                timeout=8)
-            assert struck["game"]["pawns"]["local"]["health"] == health and not struck["gameplay"]["wipe"], struck["game"]["pawns"]
-            proof["starburst_guest_effect"] = struck["game"]["player_effects"].get("guest")
-            triggered = await submit(host, "native-anomaly-trigger-fixture", target="burner")
-            assert triggered["ok"], triggered
-            burning = await wait(host, lambda row: jet(row, traps["burner"]["location"], 250), timeout=16)
-            host_jet = jet(burning, traps["burner"]["location"], 250)
-            viewed = await wait(guest, lambda row: (jet(row, host_jet["location"], 3) or {}).get("particles_active"), timeout=10)
-            guest_jet = jet(viewed, host_jet["location"], 3)
-            assert host_jet["collision"] and not guest_jet["collision"] and guest_jet["particles_active"], (host_jet, guest_jet)
-            await wait(guest, lambda row: row.get("state") == "connected" and not jet(row, host_jet["location"], 3), timeout=15)
-            await wait(host, lambda row: not jet(row, host_jet["location"], 3), timeout=8)
-            proof["burner_jet"] = {"host": host_jet, "guest": guest_jet, "expired_on_both": True}
+            for kind, target in targets.items():
+                triggered = await submit(host, "native-anomaly-trigger-fixture", target=target)
+                assert triggered["ok"], triggered
+                if kind == "starburst":
+                    await wait(guest, lambda _: {event["cue"] for event in played_cues()} == {"charge", "blast"}, timeout=14)
+                    cues = played_cues()
+                    assert len(cues) == 2 and all(event["particles"] for event in cues), cues
+                    proof["starburst_cues"] = cues
+                else:
+                    burning = await wait(host, lambda row: jet(row, traps[kind]["location"], 250), timeout=16)
+                    host_jet = jet(burning, traps[kind]["location"], 250)
+                    viewed = await wait(guest, lambda row: (jet(row, host_jet["location"], 3) or {}).get("particles_active"), timeout=10)
+                    guest_jet = jet(viewed, host_jet["location"], 3)
+                    assert host_jet["collision"] and not guest_jet["collision"] and guest_jet["particles_active"], (host_jet, guest_jet)
+                    await wait(guest, lambda row: row.get("state") == "connected" and not jet(row, host_jet["location"], 3), timeout=15)
+                    await wait(host, lambda row: not jet(row, host_jet["location"], 3), timeout=8)
+                    proof["burner_jet"] = {"host": host_jet, "guest": guest_jet, "expired_on_both": True}
+                struck = await wait(host, lambda row: row.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
+                                    or (row.get("game", {}).get("pawns", {}).get("guest", {}).get("health") or guest_health) < guest_health,
+                                    timeout=8)
+                assert struck["game"]["pawns"]["local"]["health"] == health and not struck["gameplay"]["wipe"], struck["game"]["pawns"]
+                proof[f"{kind}_guest_effect"] = {
+                    "state": struck["game"]["player_effects"].get("guest", {}).get("state"),
+                    "health_before": guest_health,
+                    "health_after": struck["game"]["pawns"]["guest"]["health"],
+                }
+                if placed:
+                    nearby = await wait(guest, replicas_visible)
+                    copy = placed_traps(nearby)[target]
+                    assert not copy["collision"] and math.dist(copy["location"], traps[kind]["location"]) < 3, copy
+                    assert sum(math.dist(row["location"], copy["location"]) < 3 for row in positions(nearby)) == 1, copy
+                    proof["placed_active_guest"] = copy
             after = await wait(host, lambda row: row.get("game", {}).get("pawns", {}).get("local", {}).get("health") is not None)
             assert after["game"]["pawns"]["local"]["health"] == health, after["game"]["pawns"]
             proof["host_health_preserved"] = health
@@ -172,5 +216,6 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--activate", action="store_true")
+    parser.add_argument("--placed", choices=PLACED)
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed))

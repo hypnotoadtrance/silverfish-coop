@@ -112,7 +112,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Preserve the Crossroads frog's hop animation on peers and let guests pick it up through the same host-authoritative action as the host.
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
-- Extend host-generated anomaly synchronization to the remaining field types, placed anomalies, and their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
+- Extend anomaly synchronization to more field and map-placed hazard types, including their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
 - Propagate the host's explosive-canister destruction and explosion to connected guests. Exercise it with stock ranged fire so the receiving view shows the shot and the resulting world change.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
@@ -140,6 +140,8 @@ The guest damage guard now covers the simulated copies of the other players as w
 The host replicates stock Starburst and Burner Trap actors spawned by an anomaly field. Guests skip the stock field generation call when it selects either of those trap types, and the replicated traps disable guest collision. A muted Crossroads loopback matched both trap locations on late join, exercised the stock `ForceSpawn` Blueprint branch on the guest, and confirmed that the placements survived a reconnect. [Anomaly field test](../tests/live_anomaly_fields_smoke.py)
 
 A second Crossroads check with the guest rendering offscreen triggered both traps using a stock player pawn. The guest spawned the Starburst charge and blast particle systems at the host's sphere and received the stock positional sound calls. The host downed the guest and kept its own health. The Burner Trap's stock fire jet kept collision on the host, showed active particles with collision disabled on the guest, and expired on both seats. Audio was muted for that test. [Trap activation test](../tests/live_anomaly_fields_smoke.py)
+
+Starbursts and Burner Traps loaded directly from a map use the same co-op authority. The mod identifies the map-loaded actor by its stock path, disables its guest collision, and blocks its guest overlap callback. In Lab E206 and Perdition, both replicas reported the original actor paths through reconnect. A host-triggered trap damaged the guest alone and played the matching effects on the guest. Each placed trap had one copy at its location, including the Perdition traps that were outside replication range at join. [Placed trap tests](../tests/live_anomaly_fields_smoke.py)
 
 The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.
 

@@ -2368,10 +2368,21 @@ class Bridge:
                         "fresh": fields[4] == "1", "status": fields[5],
                         "pawn": None if fields[6] == "-" else fields[6], "volume": None if fields[7] == "-" else fields[7],
                     }
-                elif fields[0] == "native-anomaly-field" and len(fields) == 3:
-                    live, suppressed = map(int, fields[1:])
-                    if 0 <= live <= 1024 and 0 <= suppressed and data.get("state") in {"hosting", "connected"}:
-                        data["native_anomaly_field"] = {"live": live, "suppressed": suppressed}
+                elif fields[0] == "native-anomaly-field" and len(fields) in {3, 4}:
+                    live, suppressed = map(int, fields[1:3])
+                    blocked = int(fields[3]) if len(fields) == 4 else 0
+                    if 0 <= live <= 1024 and suppressed >= 0 and blocked >= 0 and data.get("state") in {"hosting", "connected"}:
+                        data["native_anomaly_field"] = {"live": live, "suppressed": suppressed, "blocked_triggers": blocked}
+                elif fields[0] == "native-placed-anomaly" and len(fields) == 8:
+                    placed = data.setdefault("native_placed_anomalies", {})
+                    area = data.get("map", "")
+                    path, kind, x, y, z, collision, role = fields[1:]
+                    # Map-loaded guest actors can have ROLE_None until they enter replication range.
+                    if (area.startswith("/Game/Classes/Maps/") and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")
+                            and len(path) <= 512 and len(placed) < 1024 and kind in {"starburst", "burner"}
+                            and collision in {"0", "1"} and role in {"0", "1", "3"}):
+                        placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
+                                        "collision": collision == "1", "role": int(role)}
                 elif fields[0] == "native-starburst-cue" and len(fields) == 7 and data.get("state") == "hosting":
                     cues = data.setdefault(native_starburst_effects.KEY, [])
                     serial, kind, *components = fields[1:]
