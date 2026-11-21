@@ -79,7 +79,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
-                   restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False) -> dict:
+                   restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
+                   stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -355,7 +356,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"].startswith(f"{projectile} "), observed
             proof_log["enemy_loot_from_exact_guest_projectile"] = observed
             if stock_drop_census:
-                from tools.silverfish.native_stock_enemy_drops import FIXTURE, KEY, PROOF_KEY
+                from tools.silverfish import native_host_save, native_stock_enemy_drops
+                from tools.silverfish.native_stock_enemy_drops import KEY
 
                 def same_kill(frame):
                     return [item for item in frame.get("game", {}).get(KEY, {}).values()
@@ -370,11 +372,19 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert all(item["live_at_capture"] for item in reports if item["class_path"] != SHELLS), reports
                 proof_log["stock_drop_census"] = reports
                 weapon = next(item for item in reports if item["class_path"].startswith("/Game/Classes/Weapons/"))
-                converted = accepted("round-trip the dropped weapon payload",
-                                     await combat_action(run, FIXTURE, weapon["actor"]))[PROOF_KEY]
-                assert (converted["sequence"], converted["class_path"], converted["actor"]) == (
-                    weapon["sequence"], weapon["class_path"], weapon["actor"]), converted
-                proof_log["stock_dropped_weapon_payload"] = converted
+                campaign = run.parent
+
+                def durable_drop(_):
+                    saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
+                    loot = saved["world"]["party"].get(native_stock_enemy_drops.STATE, {})
+                    return next((row for row in loot.values() if row["actor"] == weapon["actor"]), None)
+
+                durable = durable_drop(await wait(run, durable_drop, timeout=12))
+                native_host_save.verify_record(campaign / "game-user", durable["escrow"])
+                assert (durable["class_path"], durable["killer"], durable["claimed_by"]) == (
+                    weapon["class_path"], invitation["character_id"], None), durable
+                assert durable["ammo"] > 0, durable
+                proof_log["stock_dropped_weapon_payload"] = durable
             bounty = actor_proof(resolved, "native_enemy_bounty", target)
             if bounty:
                 proof_log["stock_enemy_bounty_scope"] = bounty
@@ -387,7 +397,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 ), bounty
             return remaining, observed
 
-        async def restart_with_unclaimed_shell(guid, target):
+        async def restart_pair():
             old = status(run)
             port = old["endpoint"]["port"]
             for process, controller in reversed(processes.copy()):
@@ -400,19 +410,24 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             renewed = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
             assert (renewed["guest_id"], renewed["character_id"]) == (invitation["guest_id"], invitation["character_id"])
             await start("client-restart.txt", client, "join", *client, "--invite", renewed["invite_file"], "--headless", "--native-zones")
-            resumed = await wait(guest_run, lambda state: state.get("gameplay_fresh") and state.get("zone_epoch") == restored["zone_epoch"]
-                                 and actor_proof(state, "native_enemy_loot_death_view", target).get("state") == "present")
-            await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound"
-                       and actor_proof(state, "native_enemy_loot", target).get("state") == "watching")
-            selected = f"enemy-shell:{old['zone_epoch']}:{guid}"
+            await wait(guest_run, lambda state: state.get("gameplay_fresh") and state.get("zone_epoch") == restored["zone_epoch"])
+            await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            return old["zone_epoch"], restored["zone_epoch"]
+
+        async def restart_with_unclaimed_shell(guid, target):
+            old_epoch, restored_epoch = await restart_pair()
+            resumed = await wait(guest_run, lambda state: actor_proof(state, "native_enemy_loot_death_view", target).get(
+                "state") == "present")
+            await wait(run, lambda state: actor_proof(state, "native_enemy_loot", target).get("state") == "watching")
+            selected = f"enemy-shell:{old_epoch}:{guid}"
             stale = await combat_action(run, "native-enemy-loot-claim", selected)
             assert stale.get("ok") is False and stale.get("error") == "native_enemy_loot_stale_focus", stale
             evidence["restart_unclaimed_shell"] = {
-                "guid": guid, "drop_epoch": old["zone_epoch"], "interaction_epoch": restored["zone_epoch"],
+                "guid": guid, "drop_epoch": old_epoch, "interaction_epoch": restored_epoch,
                 "former_input_refused": stale["error"], "restored_stock_npc": actor_proof(resumed, "native_enemy_loot_death_view", target),
-                "character_id": renewed["character_id"],
+                "character_id": invitation["character_id"],
             }
-            return restored["zone_epoch"]
+            return restored_epoch
 
         async def share(target, proof_log, observed, *, defer_until_restart=False):
             if shared_enemy_loot:
@@ -558,6 +573,85 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         settled["game"]["pawns"]["local"]["name"], exact_pawn
                     )
                     proof_log["client_cqc_death_view_after_reconnect"] = actor_proof(rejoined, "native_enemy_loot_death_view", target)
+        async def pickup_stock_weapon(payload, stock_source):
+            from tools.silverfish import native_host_save, native_stock_enemy_drops, native_world_loot
+
+            guid = payload["guid"]
+            identity = native_world_loot.stock_enemy_identity(guid)
+            area = payload["map"]
+
+            def projection(state):
+                return state.get("game", {}).get(native_world_loot.KEY, {}).get(identity, {})
+
+            async def look(directory):
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    state = status(directory)
+                    if projection(state).get("class_path") == payload["class_path"]:
+                        return projection(state)
+                    await asyncio.sleep(.2)
+                raise AssertionError({
+                    "directory": str(directory), "expected": identity, "world": state.get("state"),
+                    "pawns": state["game"].get("pawns"), "items": state["game"].get(native_world_loot.KEY),
+                    "errors": state["game"].get(native_world_loot.ERROR_KEY),
+                    "public": state.get("gameplay", {}).get(native_stock_enemy_drops.STATE),
+                })
+
+            shells = await wait(run, lambda state: any(row["bandit"] == stock_source for row in state.get(
+                "gameplay", {}).get("native_enemy_loot_rolls", {}).values()))
+            shell = next(item for item in shells["gameplay"]["native_enemy_loot_rolls"].values() if item["bandit"] == stock_source)
+            if restart_unclaimed_weapon:
+                await restart_pair()
+                campaign = run.parent
+                saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
+                assert saved["world"]["party"][native_stock_enemy_drops.STATE][guid] == payload
+                native_host_save.verify_record(campaign / "game-user", payload["escrow"])
+                evidence["restart_unclaimed_weapon"] = {"guid": guid, "port": status(run)["endpoint"]["port"],
+                                                        "character_id": invitation["character_id"]}
+            for role in ("host", "guest"):
+                accepted(f"place the {role} near the stock loot", await combat_action(
+                    run, "native-enemy-loot-approach", f"{role}|{shell['guid']}"))
+            visible = await look(run), await look(guest_run)
+            accepted("approach the visible stock weapon", await combat_action(
+                run, native_world_loot.APPROACH, f"guest@{identity}"))
+            if status(run)["gameplay"]["players"]["guest"]["downed"]:
+                accepted("place the host in revive range", await combat_action(
+                    run, native_world_loot.APPROACH, f"host@{identity}"))
+                result = accepted("revive the guest before picking up the weapon", await combat_action(
+                    run, "interact", invitation["character_id"]))
+                assert result["effect"] == "revive", result
+                await wait(run, lambda state: state["gameplay"]["players"]["guest"]["downed"] is False
+                           and state["game"].get("player_effects", {}).get("guest", {}).get("state") == "standing")
+            pressed = accepted("pick up the weapon with stock Interact", await combat_action(
+                guest_run, native_world_loot.FIXTURE, identity))[native_world_loot.KEY][identity]
+            assert pressed["map"] == area and pressed["sequence"] > 0, pressed
+
+            def claim_event(_):
+                events = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                return next((entry for line in events if (entry := json.loads(line)).get("guid") == guid
+                             and entry.get("event") == "native_stock_enemy_loot_claimed"), None)
+
+            commit = claim_event(await wait(run, claim_event, timeout=12))
+            assert (commit["claimed_by"], commit["ammo"]) == (invitation["character_id"], payload["ammo"]), commit
+            for directory in (run, guest_run):
+                await wait(directory, lambda state: state.get("active") and not projection(state))
+            replay = accepted("replay the stock weapon claim", await combat_action(
+                guest_run, native_stock_enemy_drops.CLAIM, guid, operation_id=commit["operation_id"]))
+            assert replay[native_stock_enemy_drops.CLAIM_KEY]["guid"] == guid, replay
+            competing = await combat_action(run, native_stock_enemy_drops.CLAIM, guid)
+            assert competing["error"] == "stock_enemy_loot_already_claimed", competing
+            inventory = accepted("inspect the stock weapon in the guest's backpack",
+                                 await combat_action(guest_run, "native-inventory-list"))["native_inventory"]
+            item, = [row for row in inventory["items"] if row["guid"] == guid]
+            assert item["class_path"] == payload["class_path"], item
+            campaign = run.parent
+            saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
+            native_host_save.verify_checkpoint(campaign / "game-user", saved)
+            durable = saved["world"]["party"][native_stock_enemy_drops.STATE][guid]
+            assert "escrow" not in durable and durable["claimed_by"] == invitation["character_id"], durable
+            return {"visible": visible, "press": pressed, "claim": commit, "inventory": item,
+                    "competing_claim": competing["error"], "replayed": replay[native_stock_enemy_drops.CLAIM_KEY]}
+
         if enemy_loot and both_cqc:
             encounters = evidence["stock_cqc_encounters"] = {first_target: {}, second_target: {}}
             # Complete both stock fights before keeping the party exposed during
@@ -571,6 +665,9 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 second_drops = encounters[second_target]["stock_drop_census"]
                 assert first_drops[0]["roll"] != second_drops[0]["roll"]
                 assert {item["actor"] for item in first_drops}.isdisjoint(item["actor"] for item in second_drops)
+                if stock_weapon_input:
+                    second = encounters[second_target]
+                    second["stock_weapon_pickup"] = await pickup_stock_weapon(second["stock_dropped_weapon_payload"], second_target)
             if not stock_drop_census or stock_shell_input:
                 await share(first_target, encounters[first_target], first_observed)
                 await share(second_target, encounters[second_target], second_observed, defer_until_restart=restart_unclaimed_shells)
@@ -580,6 +677,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert final == {first["guid"]: first, second["guid"]: second}, final
         elif enemy_loot:
             _, observed = await fight(target, evidence, remaining)
+            if stock_weapon_input:
+                evidence["stock_weapon_pickup"] = await pickup_stock_weapon(evidence["stock_dropped_weapon_payload"], target)
             if not stock_drop_census or stock_shell_input:
                 await share(target, evidence, observed)
     finally:
@@ -610,7 +709,8 @@ async def main(args) -> None:
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
                        automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc,
                        stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells,
-                       refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census)
+                       refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census,
+                       stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon)
 
 
 if __name__ == "__main__":
@@ -634,11 +734,17 @@ if __name__ == "__main__":
     parser.add_argument("--restart-unclaimed-shells", action="store_true", help="restart before claiming the second stock shell stack")
     parser.add_argument("--stock-drop-census", action="store_true",
                         help="verify observed ammunition and weapon payloads; add --stock-shell-input to test shell pickup too")
+    parser.add_argument("--stock-weapon-input", action="store_true", help="claim the stock dropped weapon through Interact")
+    parser.add_argument("--restart-unclaimed-weapon", action="store_true", help="restart before the stock weapon pickup")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
     if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
         parser.error("--refinery-cqc requires --both-cqc and its own encounter")
     placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
+    if args.restart_unclaimed_weapon:
+        args.stock_weapon_input = True
+    if args.stock_weapon_input:
+        args.stock_drop_census = True
     if args.stock_drop_census and not args.automatic_cqc_loot:
         parser.error("--stock-drop-census requires --automatic-cqc-loot")
     if args.both_cqc and not args.automatic_cqc_loot:

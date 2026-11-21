@@ -46,6 +46,8 @@ namespace silverfish::shared_loot
     bool qualify_escrow_owner(std::uintptr_t pawn, std::uintptr_t save, std::uintptr_t stock, EscrowOwner& owner);
     bool qualify_escrow_owner_in_world(RC::Unreal::UWorld* world, std::uintptr_t pawn, std::uintptr_t save,
                                       std::uintptr_t stock, EscrowOwner& owner);
+    bool qualify_stock_drop_capture(RC::Unreal::UWorld* world, std::uintptr_t pawn, std::uintptr_t stock,
+                                    EscrowOwner& owner);
     bool verified_escrow_roll(std::uintptr_t crate, const ContainerAddresses& addresses, std::size_t slots,
                               EscrowOwner& owner, ContainerActors& actors, bool consume);
     bool permits_stock_interaction(RC::Unreal::UObject* crate, RC::Unreal::UObject* pawn,

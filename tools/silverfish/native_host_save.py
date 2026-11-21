@@ -9,6 +9,7 @@ import re
 import stat
 import uuid
 
+from . import native_stock_enemy_drops
 from .campaign import CampaignFormatError
 from .authored_loot import CRATES, loot_capacity, random_lid, valid_item_transform, valid_lid_angle, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
@@ -249,6 +250,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
     try:
         manual_drops = stack_drop_frames(party, checkpoint["characters"])
+        stock_enemy_drops = native_stock_enemy_drops.active_frames(party, checkpoint["characters"])
         dug_package = dig_escrow_frames(party, checkpoint["characters"])
     except ValueError as error:
         raise CampaignFormatError(str(error)) from error
@@ -333,6 +335,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
             + [roll["escrow"] for roll in enemy_rolls.values() if "escrow" in roll]
             + [bag["escrow"] for bag in bags.values() if "escrow" in bag]
             + manual_drops
+            + stock_enemy_drops
             + dug_package
             + quests)
 

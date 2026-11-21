@@ -73,6 +73,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-guest-stack-drop": 36.0,
     "native-stash-move": 36.0,
     "native-guest-stack-reclaim": 24.0,
+    "native-stock-enemy-loot-claim": 24.0,
     "native-subway-valve-activate": 24.0,
     "native-quest-interact": 15.0,
     "native-quest-list": 15.0,

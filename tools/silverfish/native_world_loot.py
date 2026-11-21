@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from itertools import chain
 
-from . import native_enemy_shells, native_guest_drop_record, native_loot, party
+from . import native_enemy_shells, native_guest_drop_record, native_loot, native_stock_enemy_drops, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
@@ -131,7 +131,19 @@ def _player_items(drops, area):
                    native_guest_drop_record.PICKUP_ACTION, drop_id, True)
 
 
-def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None):
+def stock_enemy_identity(guid):
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-loot:{guid}").hex
+
+
+def _stock_enemy_items(drops, area):
+    if not isinstance(drops, dict):
+        return
+    for guid, row in drops.items():
+        if valid_guid(guid) and isinstance(row, dict) and row.get("map") == area:
+            yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"), native_stock_enemy_drops.CLAIM, guid)
+
+
+def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
@@ -139,7 +151,7 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
         return {}
     visible = []
     for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
-                      _player_items(player_drops or {}, area)):
+                      _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area)):
         if (not isinstance(item.class_path, str) or len(item.class_path) > 256
                 or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
             continue
@@ -159,7 +171,7 @@ class Projection:
         self.items = {}
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
-                   player_drops=None):
+                   player_drops=None, stock_enemy_drops=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -168,7 +180,7 @@ class Projection:
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
-                            player_drops=player_drops) if active else {}
+                            player_drops=player_drops, stock_enemy_drops=stock_enemy_drops) if active else {}
         args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
             for field in ("position", "rotation", "scale") for axis in item.transform[field])))
             for identity, item in sorted(self.items.items()))

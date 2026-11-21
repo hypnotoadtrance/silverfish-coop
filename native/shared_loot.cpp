@@ -261,14 +261,15 @@ namespace
         return found;
     }
 
-    std::string_view qualify_opener(Address pawn, Address save, Address stock, Context& context)
+    std::string_view qualify_opener(Address pawn, Address save, Address stock, Context& context,
+                                    bool capture_only = false)
     {
         auto* player_type = find<Unreal::UClass>(pawn_class);
         auto* save_type = find<Unreal::UClass>(save_class);
         if (!live(context.world) || !player_type || !save_type) return "stock_opener_world_or_class_unavailable";
         context.pawn = live_object_at(pawn);
         if (!context.pawn || context.pawn->GetClassPrivate() != player_type ||
-            !authority(context.pawn, context.world) || !read_bool(context.pawn, STR("Dead"), false))
+            !authority(context.pawn, context.world) || (!capture_only && !read_bool(context.pawn, STR("Dead"), false)))
             return "standing_stock_opener_unavailable";
         context.save = object_field(context.pawn, STR("Save"));
         context.instance = object_field(context.world, STR("OwningGameInstance"));
@@ -283,7 +284,8 @@ namespace
         if (!instance_type || !controller_type || !live(context.instance) ||
             context.instance->GetClassPrivate() != instance_type || !live(context.save) || !live(context.stock) ||
             context.save->GetClassPrivate() != save_type || context.stock->GetClassPrivate() != save_type ||
-            address(context.save) != save || address(context.stock) != stock || !std::isfinite(hp) || hp <= 0.0 ||
+            address(context.save) != save || address(context.stock) != stock || !health || !std::isfinite(hp) ||
+            (capture_only ? context.save != context.stock : hp <= 0.0) ||
             !authority(context.controller, context.world) || context.controller->GetClassPrivate() != controller_type ||
             object_field(context.controller, STR("Pawn")) != context.pawn || !live(context.player) ||
             !live(driver) || object_field(driver, STR("World")) != context.world ||
@@ -1451,6 +1453,16 @@ namespace silverfish::shared_loot
         Context context;
         context.world = world;
         if (!qualify_opener(pawn, save, stock, context).empty()) return false;
+        owner = {context.world, context.pawn, context.save, context.stock};
+        return true;
+    }
+
+    bool qualify_stock_drop_capture(Unreal::UWorld* world, Address pawn, Address stock, EscrowOwner& owner)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening) return false;
+        Context context;
+        context.world = world;
+        if (!qualify_opener(pawn, stock, stock, context, true).empty()) return false;
         owner = {context.world, context.pawn, context.save, context.stock};
         return true;
     }

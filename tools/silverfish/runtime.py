@@ -1559,6 +1559,10 @@ class Bridge:
                     drops[report["actor"]] = report
                 elif fields[0] == native_stock_enemy_drops.PROOF_TAG:
                     data[native_stock_enemy_drops.PROOF_KEY] = native_stock_enemy_drops.parse_escrow(fields, data)
+                elif fields[0] == native_stock_enemy_drops.BANKED:
+                    data[native_stock_enemy_drops.BANK_KEY] = native_stock_enemy_drops.parse_bank(fields, data)
+                elif fields[0] == native_stock_enemy_drops.CLAIMED:
+                    data[native_stock_enemy_drops.CLAIM_KEY] = native_stock_enemy_drops.parse_claim(fields, data)
                 elif fields[0] == "native-enemy-loot" and len(fields) == 18 and fields[13] in ("0", "1"):
                     _enemy_row(data, "native_enemy_loot", fields[2], {"map": fields[1], "bandit": fields[2], "state": fields[3], "hits": int(fields[4]),
                                                  "killer_role": fields[5], "killer_pawn": fields[6], "projectile": fields[7],

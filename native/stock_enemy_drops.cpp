@@ -280,7 +280,7 @@ namespace silverfish::stock_enemy_drops
         auto* pawn = object(instance, STR("As Player FP"));
         auto* stock = object(instance, STR("SaveSlot_Ref"));
         if (address(pawn) != host ||
-            !shared_loot::qualify_escrow_owner_in_world(world, host, address(stock), address(stock), context)) return false;
+            !shared_loot::qualify_stock_drop_capture(world, host, address(stock), context)) return false;
         const auto found = std::ranges::find_if(recent, [requested](const auto& row) { return row.sequence == requested; });
         if (found == recent.end()) return false;
         auto* candidate = found->actor.Get();

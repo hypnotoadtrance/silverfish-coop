@@ -1,8 +1,13 @@
-"""Verified stock NPC drop identities from the host's live world."""
+"""Persist and transfer physical items from verified stock NPC loot rolls."""
 
+import asyncio
+import math
 import re
+import time
 import uuid
 
+from . import party
+from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 
 
@@ -11,6 +16,13 @@ KEY = "native_stock_enemy_drops"
 FIXTURE = "native-stock-enemy-escrow-fixture"
 PROOF_TAG = "native-stock-enemy-escrow"
 PROOF_KEY = "native_stock_enemy_escrow"
+STATE = "native_stock_enemy_loot"
+BANK = "native-stock-enemy-loot-bank"
+BANKED = "native-stock-enemy-loot-banked"
+BANK_KEY = "native_stock_enemy_loot_banked"
+CLAIM = "native-stock-enemy-loot-claim"
+CLAIMED = "native-stock-enemy-loot-claimed"
+CLAIM_KEY = "native_stock_enemy_loot_claim"
 _MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_]+)+")
 _CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_/]+\.([A-Za-z0-9_]+_C)")
 _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
@@ -55,3 +67,212 @@ async def escrow_fixture(bridge, game, actor):
             drop["map"], drop["sequence"], drop["actor"], drop["class_path"]):
         raise RuntimeError("The stock NPC drop escrow did not verify")
     return reply, {PROOF_KEY: proof}
+
+
+def parse_bank(fields, game):
+    if len(fields) != 17 or not re.fullmatch(r"SFCoop_[0-9a-f]{32}", fields[7]):
+        raise ValueError("Invalid banked stock enemy drop frame")
+    report = parse_escrow(fields[:7], game)
+    axes = list(map(float, fields[8:]))
+    transform = dict(position=axes[:3], rotation=axes[3:6], scale=axes[6:9])
+    if not valid_item_transform(transform):
+        raise ValueError("Invalid banked stock enemy drop transform")
+    return dict(report, slot=fields[7], transform=transform)
+
+
+def parse_claim(fields, game):
+    if len(fields) != 9 or fields[1] != game.get("map") or game.get("state") != "hosting":
+        raise ValueError("Invalid stock enemy loot claim frame")
+    _, area, pawn, slot, guid, status, *values = fields
+    if (not re.fullmatch(r"SFCoop_[0-9a-f]{32}", slot) or not valid_guid(guid)
+            or status not in ("claimed", "already_claimed", "cash_credited")
+            or not all(re.fullmatch(r"[0-9]{1,10}", value) for value in values)):
+        raise ValueError("Invalid stock enemy loot claim payload")
+    amount, before, after = map(int, values)
+    if status == "cash_credited":
+        if not 0 < amount == after - before or not 0 <= before < after < 2**31:
+            raise ValueError("Invalid stock enemy loot cash credit")
+    elif (amount, before, after) != (0, 0, 0):
+        raise ValueError("Unexpected cash in stock enemy item transfer")
+    return dict(map=area, pawn=pawn, slot=slot, guid=guid, status=status, amount=amount, before=before, after=after)
+
+
+def active_frames(data, members):
+    records = data.get(STATE, {})
+    if not isinstance(records, dict):
+        raise ValueError("Invalid stock enemy loot ledger")
+    owners = set(members) | {None, "host"}
+    frames = []
+    for guid, row in records.items():
+        if not valid_guid(guid) or not isinstance(row, dict) or row.get("guid") != guid:
+            raise ValueError("Invalid stock enemy loot identity")
+        area, class_path, source = (row.get(key) for key in ("map", "class_path", "source"))
+        actor = row.get("actor")
+        ammo, killer, claimant = (row.get(key) for key in ("ammo", "killer", "claimed_by"))
+        if (not isinstance(area, str) or not _MAP.fullmatch(area)
+                or not isinstance(class_path, str) or len(class_path) > 256 or not _CLASS.fullmatch(class_path)
+                or not isinstance(source, str) or len(source) > 512
+                or not isinstance(actor, str) or len(actor) > 512
+                or not valid_item_transform(row.get("transform")) or type(ammo) is not int or not -2**31 <= ammo < 2**31
+                or any((value is not None and not isinstance(value, str)) or value not in owners
+                       for value in (killer, claimant))):
+            raise ValueError("Invalid stock enemy loot payload")
+        level = re.escape(f"{area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
+        if (not re.fullmatch(level + r"[A-Za-z0-9_]+", source)
+                or not re.fullmatch(re.escape(class_path.rsplit(".", 1)[1]) + " " + level + r"[A-Za-z0-9_]+", actor)):
+            raise ValueError("Invalid stock enemy loot source")
+        if claimant is None:
+            if not isinstance(frame := row.get("escrow"), dict) or frame.get("map") != area:
+                raise ValueError("Unclaimed stock enemy loot has no save generation")
+            frames.append(frame)
+        elif "escrow" in row:
+            raise ValueError("Claimed stock enemy loot still references escrow")
+    return frames
+
+
+def published(data, game):
+    from .native_guest_drop_record import valid_position
+
+    points = [row["location"] for row in game.get("pawns", {}).values() if valid_position(row.get("location"))]
+    area = game.get("map")
+    visible = {}
+    for guid, row in data.get(STATE, {}).items():
+        if (row["map"] == area and row["claimed_by"] is None
+                and any(math.dist(point, row["transform"]["position"]) <= 2000 for point in points)):
+            visible[guid] = {key: row[key] for key in ("map", "class_path", "transform", "ammo")}
+    return visible
+
+
+def _public(row):
+    return {key: value for key, value in row.items() if key != "escrow"}
+
+
+def _available(host):
+    game = host.last_game
+    return (host.native_profile is not None and game.get("state") == "hosting"
+            and game.get("native_world_loot_version", 0) >= 1 and not host.stopping
+            and not host.transitioning and not host.native_checkpoint_unsafe and not host.party["wipe"])
+
+
+async def observe(host, bridge):
+    from . import native_enemy_loot, native_host_save, native_loot
+
+    if not _available(host):
+        return
+    observed = sorted((row for row in host.last_game.get(KEY, {}).values()
+                       if row["sequence"] > host.last_stock_enemy_drop_sequence), key=lambda row: row["sequence"])
+    if not observed:
+        return
+    candidate = party.load_party(host.party)
+    records = candidate.setdefault(STATE, {})
+    committed = []
+    try:
+        for drop in observed[:8]:
+            seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
+            if (not drop["live_at_capture"] or
+                    drop["class_path"] == native_enemy_loot.SHELLS
+                    and native_enemy_loot.source_for(host.last_game, drop["source"]).get("ammo_actor") == actor):
+                host.last_stock_enemy_drop_sequence = seq
+                continue
+            slot = native_host_save.new_slot()
+            host.native_checkpoint_unsafe = True
+            try:
+                snapshot = await bridge.command(BANK, str(seq), slot, timeout=7)
+            except RuntimeError as error:
+                reason = str(error)
+                if reason not in {"stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
+                                  "stock_enemy_escrow_host_not_ready"}:
+                    raise
+                host.native_checkpoint_unsafe = bool(committed)
+                if reason == "stock_enemy_escrow_host_not_ready":
+                    break
+                host.last_stock_enemy_drop_sequence = seq
+                host.control.event("native_stock_enemy_loot_capture_refused", sequence=seq, actor=actor, reason=reason)
+                continue
+            proof = snapshot.get(BANK_KEY, {})
+            guid = proof.get("guid")
+            if ((proof.get("map"), proof.get("sequence"), proof.get("actor"), proof.get("class_path"), proof.get("slot"))
+                    != (area, seq, actor, drop["class_path"], slot) or not valid_guid(guid) or guid in records):
+                raise RuntimeError("The physical stock enemy item retirement did not verify")
+            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+            killer = next((character for character in host.roles().values()
+                           if drop["killer"] and native_loot._scope(host, character) == drop["killer"]), None)
+            record = {key: proof[key] for key in ("map", "guid", "class_path", "ammo", "transform")}
+            records[guid] = dict(record, source=drop["source"].partition(" ")[2], actor=actor, killer=killer,
+                                 claimed_by=None, escrow=frame)
+            host.last_game, host.last_seen = snapshot, time.monotonic()
+            host.last_stock_enemy_drop_sequence = seq
+            committed.append((drop, records[guid]))
+        if committed:
+            revision = await host.checkpoint_native(bridge, candidate)
+            host.party = candidate
+            host.native_checkpoint_unsafe = False
+            for drop, record in committed:
+                host.control.event("native_stock_enemy_loot_banked", revision=revision, sequence=drop["sequence"],
+                                   **_public(record))
+    finally:
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+
+
+async def claim(host, bridge, character, guid, operation):
+    from . import native_host_save, native_loot
+
+    player = host.party["players"].get(character)
+    pawn = native_loot._scope(host, character)
+    if (not _available(host) or not player or not pawn or not valid_guid(guid) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
+        raise party.RuleError("stock_enemy_loot_claim_scope_unavailable")
+    fingerprint = [CLAIM, guid, None]
+    for receipt in host.party["receipts"].get(character, []):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    roll = host.party.get(STATE, {}).get(guid)
+    if not roll or roll["map"] != host.last_game.get("map"):
+        raise party.RuleError("stock_enemy_loot_item_unavailable")
+    if roll["claimed_by"] is not None:
+        raise party.RuleError("stock_enemy_loot_already_claimed")
+    if player["downed"] or character in host.party["pending_spawns"]:
+        raise party.RuleError("stock_enemy_loot_claimant_unavailable")
+
+    frame = roll["escrow"]
+    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
+                                            *(str(axis) for axis in roll["transform"]["position"]), timeout=7)
+        except RuntimeError as error:
+            if str(error) in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
+                              "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(CLAIM_KEY, {})
+        if tuple(proof.get(key) for key in ("map", "pawn", "slot", "guid")) != (roll["map"], pawn, frame["slot"], guid):
+            raise RuntimeError("The stock enemy loot transfer did not match the exact claimant")
+        candidate = party.load_party(host.party)
+        committed = candidate[STATE][guid]
+        committed["claimed_by"] = character
+        committed.pop("escrow")
+        if roll["class_path"] in native_loot.CASH_RANGES:
+            credit = native_loot._verified_cash_credit(
+                {"status": proof.get("status"), "cash": proof}, roll, snapshot.get("native_wallet"))
+            candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
+            committed["wallet_credit"] = credit
+        elif proof.get("status") not in ("claimed", "already_claimed"):
+            raise RuntimeError("The stock enemy item transfer did not verify")
+        result = {CLAIM_KEY: _public(committed)}
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        host.party = candidate
+        host.native_checkpoint_unsafe = False
+        host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **_public(committed))
+        return result
+    finally:
+        if host.native_checkpoint_unsafe:
+            host.stopping = True

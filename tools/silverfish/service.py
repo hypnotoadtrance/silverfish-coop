@@ -79,7 +79,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
-                        native_authored_pickup.ACTION, native_enemy_loot.CLAIM,
+                        native_authored_pickup.ACTION, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
@@ -237,6 +237,7 @@ class Host:
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.world_loot = native_world_loot.Projection()
+        self.last_stock_enemy_drop_sequence = 0
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
@@ -792,6 +793,8 @@ class Host:
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
                 view[native_enemy_shells.FRAME_KEY] = frame
+        if drops := native_stock_enemy_drops.published(self.party, self.last_game):
+            view[native_stock_enemy_drops.STATE] = drops
         if pending := pending_cube(self.party):
             cube, itinerary = pending
             view["pending_item_travel"] = {"item": cube, "source": itinerary["source"],
@@ -1854,6 +1857,8 @@ class Host:
                 result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
+            elif action == native_stock_enemy_drops.CLAIM:
+                result = await native_stock_enemy_drops.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_enemy_loot.CLAIM:
                 result = await native_enemy_loot.claim(self, bridge, character, target, request["operation_id"])
             else:
@@ -2513,6 +2518,9 @@ class Host:
                     self.last_seen = time.monotonic()
                 elif action == native_enemy_loot.APPROACH:
                     result = await native_enemy_loot.approach(self, bridge, request.get("target"))
+                elif action == native_stock_enemy_drops.CLAIM:
+                    result = await native_stock_enemy_drops.claim(self, bridge, "host", request.get("target"),
+                                                                  request.get("operation_id") or path.stem)
                 elif action == native_enemy_loot.CLAIM:
                     result = await native_enemy_loot.claim(self, bridge, "host", request.get("target"),
                                                           request.get("operation_id") or path.stem)
@@ -3525,6 +3533,7 @@ class Host:
                 continue
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
+            await native_stock_enemy_drops.observe(self, bridge)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
             world_items = world_version >= 1
             shared_pickups = world_version >= native_world_loot.SHARED_PICKUPS_VERSION
@@ -3610,6 +3619,7 @@ class Host:
                         active=can_project,
                         enemy_frame=native_enemy_loot.shell_frame(self) if world_items else None,
                         enemy_rolls=self.party.get(native_enemy_loot.STATE_KEY),
+                        stock_enemy_drops=native_stock_enemy_drops.published(self.party, self.last_game),
                         player_drops=native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
                         if shared_pickups else None,
                     )
@@ -3627,6 +3637,8 @@ class Host:
                         action, claim = self.world_loot.claim_target(self.last_game, world_loot)
                         if action == native_world_loot.ENEMY_CLAIM:
                             result = await native_enemy_loot.claim(self, bridge, "host", claim, operation_id)
+                        elif action == native_stock_enemy_drops.CLAIM:
+                            result = await native_stock_enemy_drops.claim(self, bridge, "host", claim, operation_id)
                         elif action == native_guest_drop.RECLAIM:
                             async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                                 result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
@@ -5336,6 +5348,7 @@ class Client:
                         and time.monotonic() - self.gameplay_seen < 2,
                         enemy_frame=frame if world_items else None,
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
+                        stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                     )
                 except (OSError, RuntimeError) as error:
