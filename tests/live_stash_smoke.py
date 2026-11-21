@@ -14,7 +14,8 @@ from live_multi_smoke import saved_hashes
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish import control, native_stash
-from tools.silverfish.travel import DEAD_BRIDGE
+from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
 async def verify(work: Path, vanilla_saved: Path):
@@ -24,7 +25,8 @@ async def verify(work: Path, vanilla_saved: Path):
     run.mkdir(parents=True)
     print(run, flush=True)
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
-    host_args = ("host", "--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones")
+    host_args = ("host", "--campaign", name, "--headless", "--fixtures", "--native-events", "--native-guest",
+                 "--native-zones", "--native-expanded-zones")
     original_saves = saved_hashes(vanilla_saved)
     jobs, evidence = [], {}
 
@@ -59,6 +61,22 @@ async def verify(work: Path, vanilla_saved: Path):
 
     async def approach(role, site):
         await ask(run, "native-stash-approach-fixture", target=f"{role}@{site}")
+
+    async def travel(source, destination):
+        route, = (route for route in AUTHORED_ROUTES if
+                  (route.source, route.destination, route.kind) == (source, destination, "overlap"))
+        previous_epoch = control.status(run)["zone_epoch"]
+        endpoint = {"entrance": route.entrance, "exit_actor": route.actor}
+        for role in ("guest", "host"):
+            await ask(run, "native-exit-position", target=role, exit_position="near", **endpoint)
+        await ask(run, "native-exit-position", target="host", exit_position="inside", **endpoint)
+        arrived = await wait(run, lambda state: state.get("state") == "hosting" and state.get("zone_epoch")
+                   and state["zone_epoch"] != previous_epoch
+                   and state.get("game", {}).get("map") == destination
+                   and state["game"].get("native_guest_save", {}).get("state") == "bound", timeout=60)
+        await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
+                   and state.get("game", {}).get("map") == destination
+                   and state.get("zone_epoch") == arrived["zone_epoch"], timeout=60)
 
     async def render(mode, *, after=0):
         await wait(guest_run, lambda state: (page := state.get("game", {}).get(native_stash.VIEW, {})).get("state")
@@ -113,27 +131,39 @@ async def verify(work: Path, vanilla_saved: Path):
         assert denied["error"] in {"native_stash_move_source_or_capacity", "native_stash_move_stored_identity"}
         await approach("guest", second)
         assert await stash_items(guest_run, second) == []
+        await travel(DEAD_BRIDGE, CROSSROADS)
+        await travel(CROSSROADS, OBSERVATORY)
+        arrived = await wait(run, lambda status: status.get("game", {}).get("map") == OBSERVATORY
+                             and status["game"].get(native_stash.SITES))
+        destination_site = next(iter(arrived["game"][native_stash.SITES]))
+        assert destination_site not in sites
+        await approach("guest", destination_site)
+        assert await stash_items(guest_run, destination_site) == []
 
         await ask(run, "native-stash-setting-fixture", target="1")
-        assert await stash_items(guest_run, second) == [item]
+        assert await stash_items(guest_run, destination_site) == [item]
+        await approach("host", destination_site)
+        assert await stash_items(run, destination_site) == []
         await ask(run, "checkpoint")
         await stop(guest, guest_run)
         await stop(host, run)
 
         host = await launch("host-restart", run, *host_args, "--port", str(state["endpoint"]["port"]))
         await wait(run, lambda status: status.get("state") == "hosting" and status["generation"] != state["generation"]
-                   and status.get("game", {}).get(native_stash.SETTING) is True)
+                   and status.get("game", {}).get("map") == OBSERVATORY
+                   and status["game"].get(native_stash.SETTING) is True)
         await join(await ask(run, "refresh-invite", target=invite["guest_id"]), "guest-restart")
-        await approach("guest", second)
-        assert await stash_items(guest_run, second) == [item]
-        withdrawal = await move_by_screen(second, item, "stash", "withdraw")
+        await approach("guest", destination_site)
+        assert await stash_items(guest_run, destination_site) == [item]
+        withdrawal = await move_by_screen(destination_site, item, "stash", "withdraw")
         assert (withdrawal["owner"], withdrawal["combined"], withdrawal["guid"], withdrawal["quantity"]) == (
             invite["character_id"], True, item, 1,
         )
-        assert await stash_items(guest_run, second) == []
+        assert await stash_items(guest_run, destination_site) == []
         weapon = (await ask(guest_run, "native-guest-weapon-inspect", target=item))["native_guest_weapon"]
         assert weapon["stored_ammo"] == 7
         evidence.update(deposit=deposit, withdrawal=withdrawal, magazine=weapon["stored_ammo"],
+                        deposit_map=DEAD_BRIDGE, withdrawal_map=OBSERVATORY, combined_host_empty=True,
                         host_withdraw_refused=denied["error"], per_site_other_empty=True, verified=True)
     finally:
         for process, directory in reversed(jobs):
