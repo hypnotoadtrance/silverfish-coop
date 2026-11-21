@@ -1,14 +1,14 @@
 local form = {}
 local surface = require("native_title_surface")
 local fields = {
-    {key = "campaign", label = "Campaign name", hint = "Default campaign", limit = 64,
-        error = "Use letters, numbers, underscores or hyphens for the campaign name."},
-    {key = "port", label = "UDP port", hint = "Default port", limit = 5,
+    {key = "campaign", label = "Save name", limit = 64,
+        error = "Use letters, numbers, underscores or hyphens for the save name."},
+    {key = "port", label = "UDP port", limit = 5,
         error = "Enter a UDP port from 1 to 65535."},
-    {key = "bind", label = "Listening IP", hint = "Default listening address", limit = 45,
+    {key = "bind", label = "Listening IP", limit = 45,
         error = "Enter a numeric IPv4 or IPv6 listening address."},
-    {key = "password", label = "Password", hint = "Optional", limit = 512, secret = true,
-        error = "Enter a password of up to 128 characters."},
+    {key = "password", label = "Password", limit = 512, secret = true,
+        error = "Enter a password of up to 128 characters, or clear Require password."},
 }
 
 local function ipv4(text)
@@ -56,26 +56,33 @@ local function valid(field, value)
     return #value <= 45 and numeric_address(value)
 end
 
-function form.rows(draft, direct, saved_name)
+function form.rows(draft, direct, show_name)
     local rows = {}
-    for index = saved_name and 2 or 1, direct and #fields or #fields - 1 do
+    for index = show_name and 1 or 2, direct and #fields or #fields - 1 do
         local field = fields[index]
-        rows[#rows + 1] = {field = {key = field.key, label = field.label, hint = field.hint,
+        if field.secret then
+            rows[#rows + 1] = {toggle = {key = "require_password", label = "Require password",
+                target = field.key, checked = draft.require_password == true}}
+        end
+        rows[#rows + 1] = {field = {key = field.key, label = field.label,
             limit = field.limit, secret = field.secret, value = draft[field.key]}}
     end
     return rows
 end
 
-function form.selection(view, draft, direct, saved_name)
+function form.selection(view, draft, direct, saved_name, show_name)
     local invalid
-    for index = saved_name and 2 or 1, direct and #fields or #fields - 1 do
+    draft.require_password = direct and surface.checked(view, "require_password") == true
+    for index = show_name and 1 or 2, direct and #fields or #fields - 1 do
         local field = fields[index]
         local value = surface.read(view, field.key)
+        if field.secret and not draft.require_password then value = "" end
         if value then draft[field.key] = value end
         if not invalid and (not value or not valid(field.key, value)) then invalid = field end
+        if not invalid and field.secret and draft.require_password and value == "" then invalid = field end
     end
     if invalid then return nil, "title_host_form_invalid_" .. invalid.key, invalid.error end
-    return {saved_name or draft.campaign, draft.bind, draft.port, direct and draft.password or nil}
+    return {saved_name or (show_name and draft.campaign) or "", draft.bind, draft.port, direct and draft.password or nil}
 end
 
 return form

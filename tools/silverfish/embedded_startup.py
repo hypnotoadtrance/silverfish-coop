@@ -391,14 +391,35 @@ async def _run_qualified(startup, work, directory, bridge, role, nonce, headless
 
 
 async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    from .title_handoff import HostDefaults
+
     settings = _decode(_read_file(mailbox / RESIDENT_FILE, REQUEST_LIMIT))
     if set(settings) != {"schema", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
         raise ValueError("Invalid resident Host configuration")
-    plan = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
-    await _resident_title(mailbox, saved, campaign, {"host": plan}, host_campaign=campaign)
+    defaults = HostDefaults(campaign.name, settings["bind"], settings["port"])
+    plan = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port)
+    await _resident_title(mailbox, saved, campaign, {"host": plan}, host_campaign=campaign, host_defaults=defaults)
 
 
-def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port):
+def _reserve_campaign(work: Path, campaign_root: Path) -> Path:
+    if campaign_root != work / "campaigns":
+        raise ValueError("The co-op campaign directory is redirected")
+    _exact_existing(work)
+    campaign_root.mkdir(exist_ok=True)
+    _assert_no_reparse(campaign_root.lstat())
+    _exact_existing(campaign_root)
+    for _ in range(8):
+        directory = campaign_root / f"campaign-{uuid.uuid4().hex}"
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        return directory
+    raise RuntimeError("Could not reserve a new co-op campaign directory")
+
+
+def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port, *,
+                        automatic_campaigns=False):
     from . import service
     from .control import select_run
     from .title_host_campaigns import saved_campaign
@@ -415,7 +436,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         mode, area = (("resume", resume_area) if resume_area is not None
                       else service.menu_host_start(selected, profile=saved.parent))
         if creator_requested and mode == "resume":
-            raise ValueError("Choose a new campaign name for stock character creation")
+            raise ValueError("The requested campaign already has a save")
         use_creator = mode != "resume" and (creator_requested or os.environ.get(INSTALLED_ENV) == "1" and not headless)
 
         async def start():
@@ -449,7 +470,9 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             selected, area = saved_campaign(campaign, saved, name)
             return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area)
         selected = campaign
-        if name and name != campaign.name:
+        if not name and claim.stock_creator and automatic_campaigns:
+            selected = _reserve_campaign(work, campaign.parent)
+        elif name and name != campaign.name:
             if saved.parent == campaign / "game-user":
                 raise ValueError("The resident title has a different campaign profile")
             selected = select_run(work, "campaigns", name)
@@ -560,6 +583,7 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
 async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, headless: bool) -> None:
     from . import service
     from .control import select_run
+    from .title_handoff import HostDefaults
 
     settings = _decode(_read_file(mailbox / UNIFIED_FILE, REQUEST_LIMIT))
     if set(settings) != {"schema", "campaign", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
@@ -576,24 +600,26 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
     if _current_startup(tuple(required)).environment != required:
         raise ValueError("The unified title lacks the standard native co-op capabilities")
 
-    host = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
+    defaults = HostDefaults(name, settings["bind"], settings["port"])
+    host = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port,
+                               automatic_campaigns=True)
     join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
     try:
         await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
-                              host_campaign=campaign)
+                              host_campaign=campaign, host_defaults=defaults)
     finally:
         await join_settings.close()
 
 
-async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None):
-    from .title_host_campaigns import campaign_names
+async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None, host_defaults=None):
+    from .title_host_campaigns import campaign_entries
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
-    host_campaign_scan = partial(campaign_names, host_campaign, saved) if host_campaign is not None else None
+    host_campaign_scan = partial(campaign_entries, host_campaign, saved) if host_campaign is not None else None
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None, join_settings=join_settings,
-                       host_campaign_scan=host_campaign_scan).run()
+                       host_campaign_scan=host_campaign_scan, host_defaults=host_defaults).run()
 
 
 def run() -> None:

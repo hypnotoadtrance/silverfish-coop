@@ -2,18 +2,21 @@ local descriptor, request = "bridge/title-handoff-session.tsv", "bridge/title-ha
 local join_request, join_response = "bridge/title-join-request.tsv", "bridge/title-join-response.tsv"
 local join_invite = "bridge/title-join-fixture.invite.json"
 local host_catalog = "bridge/title-host-campaigns.tsv"
-local files, flags, modes, queued = {}, {}, {}, {}
-local now, id, tick, display, writes = 100, 0, nil, nil, 0
+local files, flags, queued = {}, {}, {}
+local now, id, tick, display, solo_back, writes = 100, 0, nil, nil, nil, 0
 local refuse_rename = false
 
 local function object(parent, enabled)
     id = id + 1
     local address = id
     return {
-        parent = parent, enabled = enabled ~= false,
-        IsValid = function() return true end,
+        parent = parent, enabled = enabled ~= false, visibility = 4,
+        IsValid = function(self) return self.valid ~= false end,
         GetAddress = function() return address end,
+        GetOuter = function(self) return self.outer end,
         GetParent = function(self) return self.parent end,
+        GetVisibility = function(self) return self.visibility end,
+        SetVisibility = function(self, value) self.visibility = value end,
         GetIsEnabled = function(self) return self.enabled end,
         SetIsEnabled = function(self, value) self.enabled = value end,
     }
@@ -21,6 +24,8 @@ end
 
 local stock_parent = object()
 local context = {world = object(), viewport = object(), menu = object(), controller = object()}
+local tree, stock_root = object(), object()
+tree.RootWidget, stock_root.outer, context.menu.WidgetTree = stock_root, tree, tree
 for _, name in ipairs({"Button_NewGame", "Button_Load_1", "Button_Load_2", "Button_TestMap",
     "Button_SETTINGS", "Button_QUIT"}) do
     context.menu[name] = object(stock_parent, name ~= "Button_Load_2")
@@ -34,13 +39,15 @@ local function generation(letter) return string.rep(letter, 32) end
 
 local controls = {}
 function controls.create(owner, parent, label, callback)
-    assert(owner == context and parent == stock_parent and (label == "Singleplayer" or label == "Multiplayer"))
+    assert(owner == context and parent == stock_parent and label == "Back to modes")
     local record = {widget = object(parent), callback = callback}
-    modes[label] = record
+    solo_back = record
     return record
 end
 
-function controls.remove(record) record.widget.parent = nil end
+function controls.remove(record)
+    if record then record.widget.parent = nil end
+end
 function controls.press_fixture(record)
     if not record or not record.widget.parent then return false end
     queued[#queued + 1] = record.callback
@@ -50,11 +57,14 @@ end
 local surface = {}
 function surface.mount(owner, spec, dispatch)
     assert(owner == context and not display)
-    local view = {title = spec.title, note = spec.note, fields = {}, buttons = {}}
+    local view = {title = spec.title, note = spec.note, fields = {}, buttons = {}, toggles = {}}
     for _, row in ipairs(spec.rows) do
         if row.field then
             local field = row.field
             view.fields[field.key] = field.value or ""
+        elseif row.toggle then
+            local toggle = row.toggle
+            view.toggles[toggle.key] = {checked = toggle.checked, target = toggle.target}
         else
             for _, button in ipairs(row) do
                 assert(not view.buttons[button.key])
@@ -64,6 +74,7 @@ function surface.mount(owner, spec, dispatch)
         end
     end
     display = view
+    surface.sync(view)
     return view
 end
 
@@ -73,9 +84,32 @@ function surface.remove(view)
     if display == view then display = nil end
 end
 
-function surface.read(view, key) return view == display and view.fields[key] or nil end
+function surface.sync(view)
+    if not view or view ~= display then return false end
+    for _, toggle in pairs(view.toggles) do
+        if not toggle.checked then view.fields[toggle.target] = "" end
+    end
+    return true
+end
+
+function surface.checked(view, key)
+    local toggle = view and view == display and view.toggles[key]
+    if toggle then return toggle.checked end
+end
+
+function surface.set_checked(view, key, checked)
+    local toggle = view and view == display and view.toggles[key]
+    if not toggle then return false end
+    toggle.checked = checked
+    return surface.sync(view)
+end
+
+function surface.read(view, key) return view and view == display and view.fields[key] or nil end
 function surface.write(view, key, value)
     if surface.read(view, key) == nil then return false end
+    for _, toggle in pairs(view.toggles) do
+        if toggle.target == key and not toggle.checked then return value == "" end
+    end
     view.fields[key] = value
     return true
 end
@@ -133,8 +167,10 @@ local panel = start_panel()
 local state = {qualified = true, map = "/Game/Classes/Maps/MainMenu_P"}
 local function sync() panel.sync(state, "ready") end
 local function report() return panel.rows(state, "ready", table.pack)[1] end
-local function offer(choices, until_time, stamp)
-    files[descriptor] = ("1\t%s\t%s\t%d\n"):format(stamp, choices, until_time)
+local function offer(choices, until_time, stamp, defaults)
+    files[descriptor] = defaults
+        and ("2\t%s\t%s\t%d\t%s\n"):format(stamp, choices, until_time, table.concat(defaults, "\t"))
+        or ("1\t%s\t%s\t%d\n"):format(stamp, choices, until_time)
     sync()
 end
 
@@ -159,13 +195,14 @@ local function click(key)
 end
 
 sync()
-assert(not modes.Multiplayer and not report())
+assert(not display and not report() and stock_root.visibility == 4)
 offer("host,join", 111, generation("a"))
-assert(not modes.Multiplayer)
+assert(not display and stock_root.visibility == 4)
 
 offer("host", 108, generation("a"))
 assert(report().n == 6 and report()[3] == "ready" and report()[4] == "host" and report()[5] == 1)
-assert(modes.Multiplayer.widget.parent == stock_parent and modes.Singleplayer.widget.parent == stock_parent)
+assert(display.title == "Project Silverfish" and display.buttons.multiplayer and display.buttons.singleplayer
+    and display.buttons.quit and not solo_back and stock_root.visibility == 2)
 rejected("title_panel_fixture_unavailable", button("multiplayer"))
 flags.SILVERFISH_COOP_HEADLESS = "1"
 rejected("title_panel_fixture_unavailable", button("multiplayer"))
@@ -173,33 +210,36 @@ flags.SILVERFISH_COOP_TITLE_FIXTURES = "1"
 rejected("title_panel_fixture_unavailable", button("multiplayer", "opening"))
 click("multiplayer")
 assert(display.title == "Multiplayer" and display.buttons.host and not display.buttons.join)
-assert(not context.menu.Button_NewGame.enabled and not context.menu.Button_Load_1.enabled
-    and not context.menu.Button_Load_2.enabled and context.menu.Button_SETTINGS.enabled)
+assert(stock_root.visibility == 2 and context.menu.Button_NewGame.enabled and context.menu.Button_Load_1.enabled
+    and not context.menu.Button_Load_2.enabled)
 rejected("title_panel_fixture_button_unavailable", button("join"))
+click("modes")
 click("singleplayer")
-assert(not display and context.menu.Button_NewGame.enabled and context.menu.Button_Load_1.enabled
-    and not context.menu.Button_Load_2.enabled and not files[request])
+assert(not display and stock_root.visibility == 4 and solo_back.widget.parent == stock_parent and not files[request])
+click("modes")
+assert(display.title == "Project Silverfish" and stock_root.visibility == 2 and not solo_back.widget.parent)
 
-local old_mode = modes.Multiplayer
+local old_mode = display.buttons.multiplayer
 assert(button("multiplayer"))
 offer("join", 108, generation("b"))
 drain()
-assert(not old_mode.widget.parent and not display and not files[request])
+assert(not old_mode.widget.parent and display.title == "Project Silverfish" and not files[request])
 now = 109
 rejected("title_panel_fixture_unavailable", button("multiplayer"))
 tick()
-assert(not modes.Multiplayer.widget.parent and not report())
+assert(not display and stock_root.visibility == 4 and not report())
 now = 100
 offer("join", 108, generation("c"))
 assert(button("multiplayer"))
 state.qualified = false
 drain()
 tick()
-assert(not display and not modes.Multiplayer.widget.parent and not files[request] and not report())
+assert(not display and stock_root.visibility == 4 and not files[request] and not report())
 state.qualified = true
 offer("host", 108, generation("d"))
-modes.Multiplayer.widget.parent = nil
+stock_root.valid = false
 rejected("title_panel_fixture_unavailable", button("multiplayer"))
+stock_root.valid = true
 offer("host", 108, generation("e"))
 
 assert(fixture("native-title-panel-press-fixture", "host"))
@@ -212,16 +252,17 @@ click("host")
 click("submit")
 assert(files[request] == pending and writes == 1 and report()[3] == "unavailable"
     and report()[6] == "title_request_write_failed")
-click("singleplayer")
-assert(not display and context.menu.Button_NewGame.enabled)
+click("modes")
+assert(display.title == "Project Silverfish" and stock_root.visibility == 2)
 files[request] = nil
 
 local edited = generation("1")
 offer("host", 108, edited)
 click("multiplayer")
 click("host")
-assert(display.title == "New co-op campaign" and not files[request])
-assert(host("campaign", "title-host-settings-1234abcd") and host("port", "0"))
+assert(display.title == "New Game" and not files[request])
+rejected("title_host_form_fixture_arguments", host("campaign", "title-host-settings-1234abcd"))
+assert(host("port", "0"))
 click("submit")
 assert(not files[request] and display.fields.port == "0" and display.note)
 assert(host("port", "28181"))
@@ -231,7 +272,7 @@ assert(not files[request] and display.fields.bind == "::ffff:500.0.0.1" and disp
 assert(surface.write(display, "bind", "2001:db8::1"))
 click("submit")
 assert(files[request] == "2\t" .. edited .. "\t" .. operation_id()
-    .. "\thost\ttitle-host-settings-1234abcd\t2001:db8::1\t28181\n")
+    .. "\thost\t\t2001:db8::1\t28181\n")
 assert(report()[3] == "pending")
 
 files[request] = nil
@@ -298,19 +339,42 @@ state.qualified = false
 sync()
 state.qualified = true
 panel = start_panel()
+local fresh_generation = generation("6")
+local defaults = {"Configured-Campaign", "127.0.0.1", "7777"}
+offer("host", 108, fresh_generation, defaults)
+click("multiplayer")
+click("host")
+click("new")
+assert(display.title == "New Game" and display.fields.campaign == nil
+    and display.fields.bind == defaults[2] and display.fields.port == defaults[3])
+assert(surface.checked(display, "require_password") == false and surface.read(display, "password") == "")
+rejected("title_host_form_fixture_arguments", host("campaign", "title-host-settings-1234abcd"))
+assert(surface.set_checked(display, "require_password", true))
+click("submit")
+assert(not files[request] and display.note and surface.checked(display, "require_password"))
+assert(host("password") and surface.read(display, "password") == "Fixture co-op pass")
+assert(surface.set_checked(display, "require_password", false) and surface.read(display, "password") == "")
+click("submit")
+assert(files[request] == ("4\t%s\t%s\thost\t\t127.0.0.1\t7777\t\tcreator\n")
+    :format(fresh_generation, operation_id()))
+files[request] = nil
+
 local save_generation = generation("5")
-local catalog = ("1\t%s\t2\nFirst-Campaign\nSecond-Campaign\n"):format(save_generation)
+local catalog = ("2\t%s\t2\nFirst-Campaign\tObservatory\t2026-11-20 18:15:18\n"
+    .. "Second-Campaign\tTutorial Dock\t2026-11-20 19:45:30\n"):format(save_generation)
 files[host_catalog] = catalog:gsub(save_generation, generation("4"), 1)
-offer("host", 108, save_generation)
+offer("host", 108, save_generation, defaults)
 click("multiplayer")
 click("host")
 click("browse")
 rejected("title_panel_fixture_button_unavailable", button("load:Second-Campaign"))
 files[host_catalog] = catalog
 click("browse")
-assert(display.buttons["load:First-Campaign"] and display.buttons["load:Second-Campaign"])
+assert(display.buttons["load:First-Campaign"].label == "Observatory  /  2026-11-20 18:15:18"
+    and display.buttons["load:Second-Campaign"].label == "Tutorial Dock  /  2026-11-20 19:45:30")
 click("load:Second-Campaign")
-assert(display.title == "Second-Campaign" and host("port", "28181"))
+assert(display.title == "Load Game" and display.note == "Tutorial Dock  /  2026-11-20 19:45:30"
+    and host("port", "28181"))
 click("submit")
-assert(files[request] == ("5\t%s\t%s\thost\tSecond-Campaign\t\t28181\t\tresume\n")
+assert(files[request] == ("5\t%s\t%s\thost\tSecond-Campaign\t127.0.0.1\t28181\t\tresume\n")
     :format(save_generation, operation_id()))

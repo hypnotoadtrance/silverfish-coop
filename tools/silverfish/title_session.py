@@ -13,8 +13,8 @@ import uuid
 
 from . import native_session_exit, native_title_entry, runtime
 from .control import Control
-from .title_handoff import ACTIONS, TOKEN, Claim, TitleHandoff, _isolated_stock_title, _stock_title
-from .title_host_campaigns import TitleHostCampaigns
+from .title_handoff import ACTIONS, TOKEN, Claim, HostDefaults, TitleHandoff, _isolated_stock_title, _stock_title
+from .title_host_campaigns import CampaignEntry, TitleHostCampaigns
 
 
 STATUS_FILE = "title-session-status.json"
@@ -121,7 +121,8 @@ class TitleSession:
                  title_saved_directory: Path | None = None, poll_interval: float = .1,
                  startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
                  join_settings=None, resident: bool = False,
-                 host_campaign_scan: Callable[[], tuple[str, ...]] | None = None):
+                 host_campaign_scan: Callable[[], tuple[CampaignEntry, ...]] | None = None,
+                 host_defaults: HostDefaults | None = None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -132,9 +133,10 @@ class TitleSession:
             raise ValueError("The title handoff requires an isolated save directory and readiness callback")
         if resident and (title_saved_directory is None or retire_title is not None):
             raise ValueError("The resident supervisor requires its current title profile")
-        if host_campaign_scan is not None and (not resident or "host" not in self._plans):
-            raise ValueError("Saved campaign discovery requires a resident Host offer")
+        if (host_campaign_scan is not None or host_defaults is not None) and (not resident or "host" not in self._plans):
+            raise ValueError("Saved campaigns and Host defaults require a resident Host offer")
         self._bridge = bridge
+        self._host_defaults = host_defaults
         self._host_campaigns = TitleHostCampaigns(bridge.directory, host_campaign_scan) if host_campaign_scan else None
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)
@@ -259,7 +261,7 @@ class TitleSession:
             while self._bridge.process.poll() is None:
                 snapshot = self._bridge.snapshot()
                 plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
-                offered = self._handoff.refresh(snapshot, plans)
+                offered = self._handoff.refresh(snapshot, plans, host_defaults=self._host_defaults)
                 if self._host_campaigns is not None:
                     self._host_campaigns.poll(self._handoff.generation if offered else None)
                 if self._on_title_ready is not None:

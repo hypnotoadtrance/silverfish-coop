@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime
+import os
 from pathlib import Path
 import threading
 from tempfile import TemporaryDirectory
@@ -8,9 +10,9 @@ import uuid
 
 from tools.silverfish import embedded_startup, native_host_save
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
-from tools.silverfish.title_handoff import TitleHandoff
-from tools.silverfish.title_host_campaigns import FILE, TitleHostCampaigns, campaign_names, saved_campaign
-from tools.silverfish.travel import CROSSROADS
+from tools.silverfish.title_handoff import Claim, TitleHandoff
+from tools.silverfish.title_host_campaigns import FILE, CampaignEntry, TitleHostCampaigns, campaign_entries, saved_campaign
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 from test_title_handoff import ready
 
 
@@ -42,8 +44,11 @@ class SavedCampaignTests(unittest.TestCase):
         return directory, slot
 
     def test_only_current_profile_and_readable_exact_native_checkpoints(self):
-        self.checkpoint("Zulu")
-        first, _ = self.checkpoint("alpha")
+        _, latest = self.checkpoint("Zulu", area=OBSERVATORY)
+        first, older = self.checkpoint("alpha")
+        old_time, new_time = 1_700_000_000, 1_701_000_000
+        os.utime(older, (old_time, old_time))
+        os.utime(latest, (new_time, new_time))
         self.checkpoint("OtherProfile", profile=self.root / "other-profile")
         self.checkpoint("Unscoped", scoped=False)
         self.checkpoint("NoSlot", native=False)
@@ -53,7 +58,12 @@ class SavedCampaignTests(unittest.TestCase):
         bad_name, _ = self.checkpoint("_bad")
         objects = first / "save" / "campaign.json", bad_name / "save" / "campaign.json"
         before = [(path.stat().st_mtime_ns, path.read_bytes()) for path in objects]
-        self.assertEqual(campaign_names(self.campaign, self.saved), ("alpha", "Zulu"))
+        entries = campaign_entries(self.campaign, self.saved)
+        self.assertEqual([(entry.name, entry.map_label) for entry in entries],
+                         [("Zulu", "Observatory"), ("alpha", "Crossroads")])
+        self.assertEqual([entry.saved_at for entry in entries], [
+            datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S") for stamp in (new_time, old_time)
+        ])
         self.assertEqual(saved_campaign(self.campaign, self.saved, "alpha"), (first, CROSSROADS))
         self.assertEqual(before, [(path.stat().st_mtime_ns, path.read_bytes()) for path in objects])
 
@@ -61,7 +71,8 @@ class SavedCampaignTests(unittest.TestCase):
         own_profile = self.campaign / "game-user"
         self.checkpoint("Default", profile=own_profile)
         self.checkpoint("Sibling", profile=own_profile)
-        self.assertEqual(campaign_names(self.campaign, own_profile / "Saved"), ("Default",))
+        self.assertEqual([entry.name for entry in campaign_entries(self.campaign, own_profile / "Saved")],
+                         ["Default"])
         with self.assertRaisesRegex(ValueError, "different campaign profile"):
             saved_campaign(self.campaign, own_profile / "Saved", "Sibling")
 
@@ -93,9 +104,59 @@ class SavedCampaignTests(unittest.TestCase):
     def test_catalogue_caps_the_number_of_displayed_campaigns(self):
         for number in range(65):
             (self.campaign.parent / f"Campaign{number:02}").mkdir()
-        with patch("tools.silverfish.title_host_campaigns.saved_campaign"):
-            names = campaign_names(self.campaign, self.saved)
-        self.assertEqual(names, tuple(f"Campaign{number:02}" for number in range(64)))
+        def entry(_campaign, _saved, name):
+            return CampaignEntry(name, "Crossroads", "2025-01-01 00:00:00", int(name.removeprefix("Campaign")))
+
+        with patch("tools.silverfish.title_host_campaigns._entry", side_effect=entry):
+            entries = campaign_entries(self.campaign, self.saved)
+        self.assertEqual([entry.name for entry in entries], [f"Campaign{number:02}" for number in range(64, 0, -1)])
+
+    def test_unified_blank_creator_reserves_unique_games_and_keeps_explicit_names(self):
+        directory, _ = self.checkpoint("Default")
+        existing = directory / "save" / "campaign.json"
+        before = existing.read_bytes()
+        handoff = TitleHandoff(self.root)
+        self.assertTrue(handoff.refresh(ready(), {"host": object()}))
+        generation = handoff.generation
+        request_id = "e" * 32
+        handoff.request_path.write_bytes(f"4\t{generation}\t{request_id}\thost\t\t\t\t\tcreator\n".encode("ascii"))
+        self.assertIsNone(handoff.poll(ready(2)))
+        claim = handoff.poll(ready(3))
+        self.assertTrue(claim.stock_creator)
+        self.assertEqual(claim.host_settings, ("", "", ""))
+
+        plan = embedded_startup._resident_host_plan(
+            self.root, self.campaign, self.root, self.saved, True, "127.0.0.1", 7777, automatic_campaigns=True,
+        )
+
+        def selected_path(choice):
+            with self.assertRaises(FileNotFoundError) as missing:
+                plan.resolve_claim(choice).read_status()
+            return Path(missing.exception.filename).parents[1]
+
+        first, second = selected_path(claim), selected_path(claim)
+        for selected in (first, second):
+            self.assertRegex(selected.name, r"^campaign-[0-9a-f]{32}$")
+            self.assertEqual(selected.parent, directory.parent)
+            self.assertTrue(selected.is_dir())
+        self.assertNotEqual(first, second)
+        named = Claim("host", request_id, generation, object(), host_settings=("legacy-fixture", "", ""),
+                      stock_creator=True)
+        self.assertEqual(selected_path(named), directory.parent / "legacy-fixture")
+        self.assertEqual(existing.read_bytes(), before)
+        self.assertEqual([entry.name for entry in campaign_entries(self.campaign, self.saved)], ["Default"])
+
+    def test_reservation_retries_a_collision_without_touching_the_existing_run(self):
+        collision, free = uuid.UUID(int=1), uuid.UUID(int=2)
+        existing = self.campaign.parent / f"campaign-{collision.hex}"
+        existing.mkdir()
+        preserved = existing / "sentinel"
+        preserved.write_bytes(b"existing")
+        with patch.object(embedded_startup.uuid, "uuid4", side_effect=[collision, free]):
+            selected = embedded_startup._reserve_campaign(self.root, self.campaign.parent)
+        self.assertEqual(selected, self.campaign.parent / f"campaign-{free.hex}")
+        self.assertTrue(selected.is_dir())
+        self.assertEqual(preserved.read_bytes(), b"existing")
 
     def test_require_existing_does_not_create_a_replacement_at_locked_startup(self):
         directory = self.campaign / "save"
@@ -112,12 +173,15 @@ class PublishedCampaignsTests(unittest.IsolatedAsyncioTestCase):
         blocked = threading.Event()
         self.addCleanup(blocked.set)
         entered = threading.Event()
-        values = iter((("stale",), ("New", "Current")))
+        values = iter(((CampaignEntry("stale", "Observatory", "2025-01-01 00:00:00", 1),), (
+            CampaignEntry("New", "Crossroads", "2025-01-01 00:04:00", 4),
+            CampaignEntry("Current", "Dead Bridge", "2025-01-01 00:03:00", 3),
+        )))
         old, current = "1" * 32, "2" * 32
 
         def scan():
             result = next(values)
-            if result == ("stale",):
+            if result[0].name == "stale":
                 entered.set()
                 blocked.wait(timeout=2)
             return result
@@ -140,7 +204,10 @@ class PublishedCampaignsTests(unittest.IsolatedAsyncioTestCase):
             if catalogue.path.exists():
                 break
             await asyncio.sleep(.005)
-        self.assertEqual(catalogue.path.read_bytes(), f"1\t{current}\t2\nNew\nCurrent\n".encode("ascii"))
+        self.assertEqual(catalogue.path.read_bytes(), (
+            f"2\t{current}\t2\nNew\tCrossroads\t2025-01-01 00:04:00\n"
+            "Current\tDead Bridge\t2025-01-01 00:03:00\n"
+        ).encode("ascii"))
         self.assertTrue(catalogue.contains(current, "Current"))
         self.assertFalse(catalogue.contains(current, "current"))
         self.assertFalse(catalogue.contains(old, "stale"))

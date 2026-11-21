@@ -30,7 +30,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-Choose **Multiplayer** and **Host**. Select **New Game** and name the campaign, or use **Load Game** and choose an existing campaign. Set the UDP port, listening address, and optional password. Blank fields use the configured defaults. Starting a new campaign opens the stock character creator. Up to four guests can join.
+Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. The form starts with the configured UDP port and listening address. Select **Require password** to enable the password field. Up to four guests can join.
 
 ## Create an invitation in the development build
 
@@ -38,7 +38,7 @@ Open the stock **Journal** in the active co-op campaign with **J** or your confi
 
 ## Join from the co-op title
 
-Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP, UDP port, and password if set, then choose **Connect**. Select a saved character or choose **Create Character**. Confirm the selected character to join.
+Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP and UDP port. Select **Use password** if the host gave you one, then choose **Connect**. Select a saved character or choose **Create Character**. Confirm the selected character to join.
 
 ## Host and join from the development CLI
 
@@ -81,7 +81,7 @@ Leave both games running during a brief network interruption. The guest can retr
 
 If the guest game closes unexpectedly, reopen co-op and select the same character. Join can wait about two minutes while the host saves the old pawn and Unreal clears its connection. The replacement then joins close to the host with its saved inventory. Local automation reports `state: waiting_for_host` and `wait_reason: native_runtime_retiring` during that wait.
 
-In the resident trial, reopen the same campaign name and have the guest select the same character. The host resumes in its saved zone. For development CLI sessions, reuse the invitation and native flags, and keep the campaign's `save` directory together with its stock save generations.
+In the resident trial, use **Load Game** to reopen the same save and have the guest select the same character. The host resumes in its saved zone. For development CLI sessions, reuse the invitation and native flags, and keep the campaign's `save` directory together with its stock save generations.
 
 The invitation fingerprint covers the game, the staged Lua scripts, the co-op launcher code, and the native add-on when enabled. After both PCs update to the same mod revision, the host can run `action --campaign expedition refresh-invite --target GUEST_ID` to refresh the existing invitation. The guest and selected character IDs stay the same.
 

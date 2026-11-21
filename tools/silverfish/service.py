@@ -3625,7 +3625,7 @@ def _require_resident_host_checkpoint(profile: Path, checkpoint: dict) -> None:
         raise CampaignFormatError("The selected campaign has invalid or oversized stock saves")
 
 
-def menu_host_start(directory: Path, *, profile: Path | None = None, require_scoped: bool = False) -> tuple[str, str]:
+def menu_host_checkpoint(directory: Path, *, profile: Path | None = None, require_scoped: bool = False) -> dict | None:
     profile = directory / "game-user" if profile is None else profile
 
     def verify(checkpoint):
@@ -3633,10 +3633,14 @@ def menu_host_start(directory: Path, *, profile: Path | None = None, require_sco
             _require_resident_host_checkpoint(profile, checkpoint)
         native_host_save.verify_checkpoint(profile, checkpoint)
 
-    checkpoint = CampaignStore.read_existing(
+    return CampaignStore.read_existing(
         directory / "save", verify_world=verify_travel_checkpoint, verify_checkpoint=verify,
         max_read_bytes=_MENU_CHECKPOINT_BYTES if require_scoped else None,
     )
+
+
+def menu_host_start(directory: Path, *, profile: Path | None = None, require_scoped: bool = False) -> tuple[str, str]:
+    checkpoint = menu_host_checkpoint(directory, profile=profile, require_scoped=require_scoped)
     area = checkpoint["world"].get("map") if checkpoint else None
     return ("resume", area) if area else ("wanderer", OBSERVATORY)
 

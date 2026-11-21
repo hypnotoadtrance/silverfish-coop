@@ -34,15 +34,20 @@ function display.mount(context, text, layout_options)
         error("title_panel_widget_unqualified", 0)
     end
     local ok, failure = pcall(function()
+        local options = layout_options or {}
         widget:SetVisibility(3) -- Keep the overlay outside stock pointer hit testing.
         widget.TextBlock_Notes:SetColorAndOpacity({SpecifiedColor = {R = 0.60, G = 0.90, B = 1.0, A = 1.0}, ColorUseRule = 0})
-        if widget:AddToPlayerScreen(110) ~= true or not widget:IsInViewport() then error("title_panel_mount_unverified", 0) end
+        if options.top_level then
+            widget:AddToViewport(110)
+        elseif widget:AddToPlayerScreen(110) ~= true then
+            error("title_panel_mount_unverified", 0)
+        end
+        if not widget:IsInViewport() then error("title_panel_mount_unverified", 0) end
         local size, scale = layout:GetViewportSize(context.controller), layout:GetViewportScale(context.controller)
         local width = size and tonumber(size.X)
         if not width or width < 1 or width > 16384 or type(scale) ~= "number" or not (scale >= 0.25 and scale <= 8) then
             error("title_panel_viewport_size_unavailable", 0)
         end
-        local options = layout_options or {}
         local panel_width, panel_height = options.width or 344, options.height or 148
         local x = options.center and (width / scale - panel_width) / 2 or width / scale - panel_width - 20
         local y = options.center and (tonumber(size.Y) / scale - panel_height) / 2 or 62

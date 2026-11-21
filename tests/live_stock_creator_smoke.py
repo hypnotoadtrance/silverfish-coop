@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import uuid
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.silverfish import embedded_startup, embedded_title_plan, native_host_save, runtime, service
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.udp_ownership import owns_udp_port, verify_loopback_socket
-from live_ai_smoke import wait
+from live_ai_smoke import status, wait
 from live_multi_smoke import saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
@@ -103,21 +104,50 @@ async def click(seat: Seat, *keys: str) -> None:
         await seat.bridge.wait_for(lambda frame: frame["sequence"] > queued["sequence"], timeout=8)
 
 
-async def enter_creator(seat: Seat, previous_generation=None) -> dict:
-    await click(seat, "multiplayer", "host", "new")
-    await seat.bridge.command(FORM, "campaign", seat.campaign.name)
-    await seat.bridge.command(FORM, "port", str(seat.port))
-    await click(seat, "submit")
+def created_campaigns(title: Seat) -> set[Path]:
+    return {path for path in title.campaign.parent.glob("campaign-*")
+            if re.fullmatch(r"campaign-[0-9a-f]{32}", path.name) and path.is_dir() and not path.is_symlink()}
+
+
+async def enter_creator(title: Seat) -> tuple[Seat, dict]:
+    baseline = created_campaigns(title)
+    await click(title, "multiplayer", "host", "new")
+    try:
+        await title.bridge.command(FORM, "campaign", title.campaign.name)
+    except RuntimeError as exc:
+        assert str(exc) == "title_host_form_fixture_arguments"
+    else:
+        raise AssertionError("The native New Game form accepted a manual campaign name")
+    await title.bridge.command(FORM, "port", str(title.port))
+    await click(title, "submit")
+
+    pid = title.bridge.process.pid
+    deadline = asyncio.get_running_loop().time() + 30
+    observed = {}
+    while asyncio.get_running_loop().time() < deadline:
+        observed = {path: status(path / "run") for path in created_campaigns(title) - baseline}
+        matches = [path for path, frame in observed.items() if frame.get("pid") == pid]
+        if matches:
+            allocated, = matches
+            break
+        if title.bridge.process.poll() is not None:
+            raise RuntimeError(f"Title exited during New Game ({title.bridge.process.returncode})")
+        await asyncio.sleep(.1)
+    else:
+        seen = {path.name: frame.get("state") for path, frame in observed.items()}
+        raise TimeoutError(f"New Game did not allocate an automatic campaign for PID {pid}: {seen}")
+
+    seat = replace(title, campaign=allocated)
     state = await wait(
         seat.campaign / "run",
-        lambda frame: frame.get("generation") != previous_generation and frame.get("state") == "character_creation"
-        and frame.get("game", {}).get("map") == EDITOR and frame["game"]["native_stock_creator"]["state"] == "creating",
+        lambda frame: frame.get("state") == "character_creation" and frame.get("game", {}).get("map") == EDITOR
+        and frame["game"].get("native_stock_creator", {}).get("state") == "creating",
     )
     receipt = state["game"]["native_stock_creator"]
-    assert state["pid"] == seat.bridge.process.pid and not owns_udp_port(state["pid"], seat.port)
+    assert state["pid"] == pid and not owns_udp_port(pid, seat.port)
     assert state["game"]["save_scope"] and receipt["working_slot"].startswith("SFCoopLive_")
     assert await creator_action(seat, "observe") == "page=0"
-    return state
+    return seat, state
 
 
 async def join_created_campaign(host: Seat, guest: Seat) -> dict:
@@ -190,7 +220,7 @@ async def empty_picker(seat: Seat) -> None:
         assert str(exc) == "title_panel_fixture_button_unavailable"
     else:
         raise AssertionError("The empty campaign picker accepted a selection")
-    await click(seat, "back", "back", "singleplayer")
+    await click(seat, "back", "back", "modes")
     await offered(seat)
 
 
@@ -218,11 +248,7 @@ async def finish_veteran(seat: Seat, attempt: dict) -> tuple[dict, dict]:
 
 
 async def choose_saved(seat: Seat, sibling: Seat) -> list[str]:
-    # The name typed into the form is a different valid campaign. Only the picker
-    # selection should determine which saved scope is opened.
-    await click(seat, "multiplayer", "host", "new")
-    await seat.bridge.command(FORM, "campaign", sibling.campaign.name)
-    await click(seat, "back", "browse")
+    await click(seat, "multiplayer", "host", "browse")
     first = await picker_state(seat, 2)
     assert first in {seat.campaign.name, sibling.campaign.name}, first
     await click(seat, "load:" + sibling.campaign.name)
@@ -236,26 +262,31 @@ async def choose_saved(seat: Seat, sibling: Seat) -> list[str]:
     return [first, other]
 
 
-async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
-    run = seat.campaign / "run"
-    before = await enter_creator(seat)
-    assert await creator_action(seat, "cancel") == "stock_back_invoked"
-    cancelled = await wait(run, lambda frame: frame.get("state") == "stopped")
+async def drive_creator(title: Seat, guest: Seat, evidence: dict) -> None:
+    await click(title, "singleplayer", "modes")
+    baseline = created_campaigns(title)
+    cancelled_seat, before = await enter_creator(title)
+    assert await creator_action(cancelled_seat, "cancel") == "stock_back_invoked"
+    cancelled = await wait(cancelled_seat.campaign / "run", lambda frame: frame.get("state") == "stopped")
     assert cancelled["stop_reason"] == "creator_cancelled" and cancelled["generation"] == before["generation"]
-    await offered(seat)
-    assert not owns_udp_port(cancelled["pid"], seat.port)
-    assert campaign(seat)["world"] == {}
-    scoped = seat.profile / "Saved/SaveGames/SilverfishCoop" / before["game"]["save_scope"]
+    await offered(title)
+    assert not owns_udp_port(cancelled["pid"], title.port)
+    assert created_campaigns(title) - baseline <= {cancelled_seat.campaign}
+    if (cancelled_seat.campaign / "save/campaign.json").exists():
+        assert campaign(cancelled_seat)["world"] == {}
+    scoped = native_host_save.directory(native_host_save.SaveScope(title.profile, before["game"]["save_scope"]))
     slot = before["game"]["native_stock_creator"]["working_slot"]
-    assert not (scoped / f"{slot}.sav").exists(), "Cancelling created a working stock save"
-    evidence["cancelled_without_checkpoint"] = True
+    assert not any(scoped.glob("*.sav")), "Cancelling created a scoped stock save"
+    evidence.update(cancelled_without_checkpoint=True, cancelled_auto_campaign=cancelled_seat.campaign.name)
     print("Stock creator cancelled back to the same standalone title", flush=True)
 
-    await empty_picker(seat)
+    await empty_picker(cancelled_seat)
     evidence["empty_picker_excluded_solo_and_cancelled_saves"] = True
     print("Saved campaign picker excludes solo saves and the cancelled campaign", flush=True)
 
-    attempt = await enter_creator(seat, cancelled["generation"])
+    seat, attempt = await enter_creator(title)
+    assert seat.campaign != cancelled_seat.campaign and attempt["generation"] != cancelled["generation"]
+    run = seat.campaign / "run"
     scope = attempt["game"]["save_scope"]
     assert attempt["game"]["native_stock_creator"]["working_slot"] != slot
     hosted, controls = await finish_veteran(seat, attempt)
@@ -265,6 +296,7 @@ async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     assert checkpoint["world"].get("native_observation", {}).get("native_rules", {}).get("replenish_loot") == 0
     evidence.update(pid=hosted["pid"], map=TUTORIAL, native_creator=hosted["game"]["native_stock_creator"],
                     creator_controls=controls, starting_wallet=350,
+                    automatic_campaign=seat.campaign.name,
                     campaign_revision=checkpoint["revision"], live_replenish_loot=0, checkpoint_replenish_loot=0)
     print("Stock Veteran and Custom settings committed to the authoritative tutorial host", flush=True)
 
@@ -281,8 +313,8 @@ async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     assert saved["characters"][joined["character_id"]]["state"]["native_guest_save"]
     evidence["stock_pause_returned_both_titles"] = True
 
-    sibling = replace(seat, campaign=seat.campaign.with_name("title-host-settings-" + uuid.uuid4().hex[:8]))
-    sibling_attempt = await enter_creator(sibling)
+    sibling, sibling_attempt = await enter_creator(title)
+    assert sibling.campaign not in {seat.campaign, cancelled_seat.campaign}
     sibling_hosted, _ = await finish_veteran(sibling, sibling_attempt)
     await leave_tutorial(sibling)
     sibling_saved = campaign(sibling)

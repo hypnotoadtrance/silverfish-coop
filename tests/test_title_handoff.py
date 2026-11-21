@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.silverfish import native_title_entry
-from tools.silverfish.title_handoff import Claim, TitleHandoff
+from tools.silverfish.title_handoff import Claim, HostDefaults, TitleHandoff
 
 
 def ready(sequence=1):
@@ -54,6 +54,47 @@ class TitleHandoffTests(unittest.TestCase):
         self.assertFalse(self.handoff.refresh(ready(2), {}))
         self.assertFalse(self.handoff.descriptor_path.exists())
         self.assertNotIn("supervisor-only", repr(Claim("join", "a" * 32, generation, binding)))
+
+    def test_resident_host_offer_publishes_canonical_defaults_on_each_renewal(self):
+        bindings = {"host": self.host, "join": self.join}
+        defaults = HostDefaults("Campaign_One", "2001:DB8:0:0::10", 27890)
+        self.assertTrue(self.handoff.refresh(ready(), bindings, host_defaults=defaults))
+        generation = self.handoff.generation
+        self.assertEqual(self.descriptor(),
+                         ["2", generation, "host,join", str(self.now + 10), "Campaign_One", "2001:db8::10", "27890"])
+        self.now += 7
+        self.assertTrue(self.handoff.refresh(ready(2), bindings, host_defaults=defaults))
+        self.assertEqual(self.descriptor(),
+                         ["2", generation, "host,join", str(self.now + 10), "Campaign_One", "2001:db8::10", "27890"])
+        self.submit(generation)
+        self.assertIsNone(self.handoff.poll(ready(3)))
+        self.assertEqual(self.handoff.poll(ready(4)), Claim("host", "a" * 32, generation, self.host))
+
+    def test_changed_defaults_retire_the_old_host_offer_and_join_only_stays_v1(self):
+        defaults = HostDefaults("Original", "0.0.0.0", 7777)
+        self.assertTrue(self.handoff.refresh(ready(), {"host": self.host}, host_defaults=defaults))
+        original = self.handoff.generation
+        updated = HostDefaults("Updated", "127.0.0.1", 27890)
+        self.assertTrue(self.handoff.refresh(ready(2), {"host": self.host}, host_defaults=updated))
+        replacement = self.handoff.generation
+        self.assertNotEqual(original, replacement)
+        self.assertEqual(self.descriptor(),
+                         ["2", replacement, "host", str(self.now + 10), "Updated", "127.0.0.1", "27890"])
+        self.submit(original)
+        self.assert_refused("stale_generation", ready(3))
+        self.assertTrue(self.handoff.refresh(ready(4), {"join": self.join}, host_defaults=updated))
+        self.assertEqual(self.descriptor(), ["1", self.handoff.generation, "join", str(self.now + 10)])
+
+    def test_host_defaults_refuse_invalid_fields(self):
+        invalid = [
+            ("", "0.0.0.0", 7777), ("name with space", "127.0.0.1", 7777),
+            ("Default", "localhost", 7777), ("Default", "fe80::1%3", 7777),
+            ("Default", "0.0.0.0", False), ("Default", "0.0.0.0", 0),
+            ("Default", "0.0.0.0", 65536),
+        ]
+        for fields in invalid:
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                HostDefaults(*fields)
 
     def test_claim_requires_later_exact_ready_frame_and_is_one_use(self):
         generation = self.publish({"join": self.join, "host": self.host})

@@ -46,7 +46,7 @@ local function register_pressed()
     hooked = true
 end
 
-function controls.create(context, parent, label, callback)
+function controls.create(context, parent, label, callback, font_size)
     local controller = context and context.controller
     local world = valid(controller) and controller:GetWorld()
     if not valid(world) or not controller:IsLocalController() or not valid(parent)
@@ -81,11 +81,18 @@ function controls.create(context, parent, label, callback)
     }
     local mounted, failure = pcall(function()
         register_pressed()
+        if font_size then widget.Font_Size = font_size end
         widget:UpdateText(FText(label))
         if widget:GetText():ToString() ~= label then reject("text_unverified") end
         record.slot = parent[attachment.attach](parent, widget)
         if not exact(record.slot, attachment.slot) or not same(record.slot:GetOuter(), parent)
             or not same(widget:GetParent(), parent) then reject("slot_unverified") end
+        if font_size then
+            local font = widget.TextBlock_0.Font
+            font.Size = font_size
+            widget.TextBlock_0:SetFont(font)
+            widget:SetToolTipText(FText(label))
+        end
         widget:SetVisibility(0)
         active[record.address] = record
     end)

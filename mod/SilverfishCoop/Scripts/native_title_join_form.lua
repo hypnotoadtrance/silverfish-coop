@@ -126,8 +126,9 @@ local function render_surface(draft, screen, hint, initial)
     if endpoint_screens[screen] then
         rows = {
             field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address),
-            field("port", "UDP port", "7777", 5, draft.port),
-            field("password", "Password", "Optional", 512, nil, true),
+            field("port", "UDP port", "", 5, draft.port),
+            {toggle = {key = "use_password", label = "Use password", target = "password", checked = draft.use_password}},
+            field("password", "Password", "", 512, nil, true),
             {button("connect", "Connect"), back},
         }
     elseif screen == "invite" then
@@ -191,10 +192,10 @@ local function render(draft, state, phase, next_screen, hint, initial)
     end
 end
 
-function form.open(state, phase, context, bridge, generation, new_id, direct, on_action)
+function form.open(state, phase, context, bridge, generation, new_id, direct, on_action, defaults)
     local surface = on_action and require("native_title_surface")
     local draft = {context = context, generation = generation, new_id = new_id, direct = direct,
-        surface = surface, on_action = on_action, port = surface and direct and "7777" or nil,
+        surface = surface, on_action = on_action, port = surface and direct and (defaults and defaults.port or "7777") or nil,
         request = bridge .. "/title-join-request.tsv", response = bridge .. "/title-join-response.tsv",
         fixture = bridge .. "/title-join-fixture.invite.json"}
     local ok, failure = pcall(render, draft, state, phase, direct and "address" or "invite")
@@ -260,6 +261,9 @@ function form.poll(draft, state, phase)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
         if draft.direct then
+            if draft.failure == "direct_password_required" or draft.failure == "direct_wrong_password" then
+                draft.use_password = true
+            end
             local edit_endpoint = pending.kind ~= "direct" or draft.failure == "invalid_endpoint"
             render(draft, state, phase, edit_endpoint and "address" or "password", messages[draft.failure],
                 edit_endpoint and draft.address or nil)
@@ -287,6 +291,7 @@ local function connect(draft, state, phase)
     local address = draft.surface.read(draft.view, "address")
     local port = draft.surface.read(draft.view, "port")
     local password = draft.surface.read(draft.view, "password")
+    draft.use_password = draft.surface.checked(draft.view, "use_password") == true
     draft.address, draft.port = address or draft.address, port or draft.port
     if not address_valid(address) or not port_valid(port) or not password or utf8.len(password) > 128 then
         local hint = not address_valid(address) and "Enter a numeric IPv4 or IPv6 address."
@@ -294,6 +299,10 @@ local function connect(draft, state, phase)
             or "Enter a password of up to 128 characters."
         render(draft, state, phase, draft.screen, hint)
         return false, "title_join_form_invalid_endpoint"
+    end
+    if draft.use_password and password == "" then
+        render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.")
+        return false, "title_join_form_password_required"
     end
     return queue(draft, state, phase, "direct", password)
 end
@@ -431,6 +440,7 @@ function form.fixture(draft, operation, value, state, phase)
     if draft.direct and draft.screen == "password" then
         local passwords = {password = "Fixture co-op pass", wrong_password = "Wrong fixture", no_password = ""}
         if passwords[operation] then
+            if draft.view then draft.surface.set_checked(draft.view, "use_password", operation ~= "no_password") end
             write_field(draft, "password", passwords[operation], state, phase)
             return form.press(draft, draft.view and "connect" or "host", state, phase)
         end
@@ -459,6 +469,10 @@ end
 
 function form.click_fixture(draft, key)
     return draft.view and draft.surface.press_fixture(draft.view, key)
+end
+
+function form.sync(draft)
+    if draft.view then draft.surface.sync(draft.view) end
 end
 
 return form

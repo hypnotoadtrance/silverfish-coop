@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 import os
 from pathlib import Path
 import re
@@ -30,6 +31,19 @@ _CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 _JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
                            rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
 _MAX_REQUEST_BYTES = 768
+
+
+@dataclass(frozen=True)
+class HostDefaults:
+    campaign: str
+    bind: str
+    port: int
+
+    def __post_init__(self):
+        if (type(self.campaign) is not str or not NAME.fullmatch(self.campaign) or type(self.bind) is not str
+                or "%" in self.bind or type(self.port) is not int or not 1 <= self.port <= 65535):
+            raise ValueError("Invalid default Host settings")
+        object.__setattr__(self, "bind", str(ip_address(self.bind)))
 
 
 @dataclass(frozen=True)
@@ -126,16 +140,19 @@ class TitleHandoff:
         self._generation = None
         self._expires = 0
         self._bindings = {}
+        self._host_defaults = None
         self._title = None
         self._publish_sequence = 0
         self._pending = None
         _unlink(self.descriptor_path)
 
-    def refresh(self, snapshot: dict | None, bindings: Mapping[str, object]) -> bool:
+    def refresh(self, snapshot: dict | None, bindings: Mapping[str, object], *,
+                host_defaults: HostDefaults | None = None) -> bool:
         """Publish or renew usable actions on the current exact stock title screen."""
         choices = dict(bindings)
-        if any(type(action) is not str or action not in ACTIONS or binding is None
-               for action, binding in choices.items()):
+        if (any(type(action) is not str or action not in ACTIONS or binding is None
+                for action, binding in choices.items()) or
+                (host_defaults is not None and type(host_defaults) is not HostDefaults)):
             self.close()
             raise ValueError("Unsupported title handoff binding")
         if self._claim is not None or not choices:
@@ -151,7 +168,8 @@ class TitleHandoff:
             self.close()
             return False
         sequence, title = frame
-        if (title != self._title or choices != self._bindings) and self._generation:
+        defaults = host_defaults if "host" in choices else None
+        if self._generation and (title != self._title or choices != self._bindings or defaults != self._host_defaults):
             self.close()
         generation = self._generation
         if generation and (sequence <= self._publish_sequence or self._expires - now > LEASE_SECONDS // 2):
@@ -160,7 +178,11 @@ class TitleHandoff:
         generation = generation or secrets.token_hex(16)
         advertised = ",".join(action for action in ACTIONS if action in choices)
         expires = now + LEASE_SECONDS
-        row = f"1\t{generation}\t{advertised}\t{expires}\n".encode("ascii")
+        if defaults is None:
+            row = f"1\t{generation}\t{advertised}\t{expires}\n".encode("ascii")
+        else:
+            row = (f"2\t{generation}\t{advertised}\t{expires}"
+                   f"\t{defaults.campaign}\t{defaults.bind}\t{defaults.port}\n").encode("ascii")
         with NamedTemporaryFile(dir=self.descriptor_path.parent, prefix=".title-handoff-", delete=False) as stream:
             temporary = Path(stream.name)
             try:
@@ -173,6 +195,7 @@ class TitleHandoff:
                 _unlink(temporary)
         self._generation = generation
         self._bindings = choices
+        self._host_defaults = defaults
         self._title = title
         self._expires = expires
         self._publish_sequence = sequence
