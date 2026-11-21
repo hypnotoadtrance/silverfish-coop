@@ -127,7 +127,9 @@ In the supported stock wipe picker, Page Up and Page Down move the selection, Sp
 
 The current stage has qualified stock paths for selected rest points, exits, transport items, qualified stock small crates, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
 
-At a qualified stock container, press Interact to open it. The shared loot panel appears while a player stands within reach. Use Page Up or Page Down to select an item, Home twice to take it, and End to cancel or close. At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
+At a qualified stock container, press Interact to open it. Look at an item inside and press Interact to take it. The same item disappears for everyone when the host commits the pickup. Supported player drops appear on the ground and use the same Interact control. Nearby physical pickups appear in `game.native_world_loot_items`. Older saves may still show the shared loot panel for container rolls that predate saved item positions.
+
+At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
 
 At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.
 

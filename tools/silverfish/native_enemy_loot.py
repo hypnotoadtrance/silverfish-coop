@@ -380,7 +380,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         try:
             mode = "stock-exact"
             if focus:
-                mode = "stock-world-focus" if host.last_game.get(native_world_loot.CAPABILITY) == 1 else "stock-focus"
+                mode = "stock-world-focus" if host.last_game.get(native_world_loot.CAPABILITY, 0) >= 1 else "stock-focus"
             check = (mode, roll["actor"]) if _ordinary(host, area) else ()
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)

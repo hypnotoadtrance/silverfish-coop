@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
-from tools.silverfish import native_guest_drop_projection as projection, native_host_save
+from tools.silverfish import native_host_save, native_world_loot as projection
 from tools.silverfish import native_host_stack_drop as host_drop_input
 from tools.silverfish.native_guest_weapon import FIRE_CLASSES
 
@@ -133,11 +133,13 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         return checkpoint["world"]["party"].get(record.STATE, {})
 
     async def projected(viewer, viewer_id, drop_id, dropper):
+        identity = projection.player_drop_identity(drop_id)
+
         def predicate(frame):
             game = frame.get("game", {})
-            proof = game.get(projection.KEY, {})
-            if (proof.get("map"), proof.get("drop_id"), proof.get("pawn")) != (
-                    record.OBSERVATORY, drop_id, game.get("pawns", {}).get("local", {}).get("name")):
+            proof = game.get(projection.KEY, {}).get(identity, {})
+            if (proof.get("map"), proof.get("id"), proof.get("pawn")) != (
+                    record.OBSERVATORY, identity, game.get("pawns", {}).get("local", {}).get("name")):
                 return False
             if viewer == host:
                 return frame.get("state") == "hosting"
@@ -146,7 +148,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                 "connected", viewer_id, True, dropper)
 
         frame = await wait(run if viewer == host else clients[viewer], predicate)
-        proof = frame["game"][projection.KEY]
+        proof = frame["game"][projection.KEY][identity]
         assert proof["pawn"] and proof["actor"].startswith(actor_class + " "), proof
         return proof
 
@@ -231,17 +233,18 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
     async def collect(recipient, recipient_id, role, before, dropped, committed, typed, preferred_lane):
         drop_id = dropped["drop_id"]
+        identity = projection.player_drop_identity(drop_id)
         near = await place(recipient_id, "near", dropped["location"], preferred_lane=preferred_lane, role=role)
         unclaimed = await projected(recipient, recipient_id, drop_id, dropped["owner"])
         if recipient == host:
             assert unclaimed["pawn"] == near["pawn"], unclaimed
-        press = (await action(recipient, projection.FIXTURE, "--target", drop_id))[projection.KEY]
-        assert press == {**unclaimed, "sequence": unclaimed["sequence"] + 1}, (unclaimed, press)
+        press = (await action(recipient, projection.FIXTURE, "--target", identity))[projection.KEY][identity]
+        assert press["sequence"] > unclaimed["sequence"] and press == {**unclaimed, "sequence": press["sequence"]}
         for target in clients:
             await wait(clients[target], lambda state: state.get("gameplay_fresh")
                        and drop_id not in state.get("gameplay", {}).get(record.STATE, {})
-                       and projection.KEY not in state.get("game", {}))
-        await wait(run, lambda state: projection.KEY not in state.get("game", {}))
+                       and identity not in state.get("game", {}).get(projection.KEY, {}))
+        await wait(run, lambda state: identity not in state.get("game", {}).get(projection.KEY, {}))
         events = (await command("events", *recipient, "--tail", "50"))["events"]
         event, = [item for item in events if item["event"] == "local_interaction"
                   and item.get(drop.RESULT, {}).get("drop_id") == drop_id]
@@ -424,8 +427,8 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert (await action(owner, "drop-link"))["link_connected"] is False
             await wait(clients[owner], lambda state: state.get("link_connected") is False
                        and state.get("reconnect_suspended") is True and projection.KEY not in state.get("game", {}))
-            refused = await action(owner, projection.FIXTURE, "--target", attempt, success=False)
-            assert refused["error"] == "stock_drop_projection_fixture_scope_unavailable", refused
+            refused = await action(owner, projection.FIXTURE, "--target", projection.player_drop_identity(attempt), success=False)
+            assert refused["error"] == "native_world_loot_fixture_scope_unavailable", refused
             assert (await action(owner, "reconnect"))["resumed"] is True
             await bound(1)
             after_reconnect = await projected(owner, owner_id, attempt, owner_id)
@@ -437,8 +440,9 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         if visible_projection:
             unclaimed = await projected(owner, owner_id, attempt, owner_id)
             assert (await inventory(owner, owner_id)) == [item for item in initial_items if item["guid"] != source]
-            press = (await action(owner, projection.FIXTURE, "--target", attempt))[projection.KEY]
-            assert press == {**unclaimed, "sequence": unclaimed["sequence"] + 1}, (unclaimed, press)
+            identity = projection.player_drop_identity(attempt)
+            press = (await action(owner, projection.FIXTURE, "--target", identity))[projection.KEY][identity]
+            assert press["sequence"] > unclaimed["sequence"] and press == {**unclaimed, "sequence": press["sequence"]}
             evidence["stock_projection_interact"] = press
             await wait(clients[owner], lambda state: state.get("gameplay_fresh")
                        and state.get("gameplay", {}).get(record.STATE) == {} and projection.KEY not in state.get("game", {}))

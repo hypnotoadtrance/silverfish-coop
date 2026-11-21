@@ -13,7 +13,7 @@ from .native_gold import valid_guid
 
 
 DROP = "native-guest-stack-drop"
-RECLAIM = "native-guest-stack-reclaim"
+RECLAIM = record.PICKUP_ACTION
 HOST_DROP = "native-host-stack-drop"
 HOST_RECLAIM = "native-host-stack-reclaim"
 ACTIONS = (DROP, RECLAIM)
@@ -174,6 +174,8 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
 
 
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
+    from .native_world_loot import CAPABILITY, PLAYER_DROPS_VERSION
+
     if action not in ACTIONS or not record.valid_id(operation):
         raise party.RuleError("invalid_operation_id")
     pawn = _participant(host, character)
@@ -225,8 +227,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if operation in drops:
         raise party.RuleError("operation_id_conflict")
     active = [row for row in drops.values() if row["claim_id"] is None]
+    multiple = host.last_game.get(CAPABILITY) == PLAYER_DROPS_VERSION
     if (len(drops) >= record.MAX_DROPS or len(active) >= record.MAX_ACTIVE
-            or any(row["owner"] == character or row["guid"] == guid for row in active)):
+            or any(row["guid"] == guid or (not multiple and row["owner"] == character) for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")
     birth = (await probe.perform(host, bridge, character, guid, count, fixture=False))[probe.KEY]
     location, item = birth.get("location"), birth.get("class_path")

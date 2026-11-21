@@ -17,7 +17,7 @@ from tools.silverfish.guest_weapon_profiles import FIREARMS, NINE_MM_BALL, STOCK
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_guest_stack_drop as stack_drop
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
-from tools.silverfish import native_guest_drop_projection as drop_projection
+from tools.silverfish import native_world_loot as drop_projection
 
 
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
@@ -27,15 +27,15 @@ DROP_FOOD = (pickup.BOROUGH_MRE, pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.
 
 async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False,
                  manual_drop: bool = False, *, crossroads_drop: bool = False, drop_map=None, ammo=NINE_MM_BALL,
-                 food_source=None):
+                 food_source=None, multiple_drops=False):
     item_class = ammo.item_path
     expected_quantity = ammo.fixture_units
     if food_source:
         drop_map, source_actor, item_class = pickup.SOURCES[food_source]
         expected_quantity = 1
     area = drop_map or (drop_record.CROSSROADS if crossroads_drop else OBSERVATORY)
-    manual_drop = manual_drop or crossroads_drop or drop_map is not None
-    mode = ("campaign-stack-drop" if drop_map else "crossroads-stack-drop" if crossroads_drop
+    manual_drop = manual_drop or crossroads_drop or drop_map is not None or multiple_drops
+    mode = ("multiple-stock-drops" if multiple_drops else "campaign-stack-drop" if drop_map else "crossroads-stack-drop" if crossroads_drop
             else "inventory-manual-drop" if manual_drop
             else "stock-stack-drop" if stock_drop_probe else "inventory-sort" if sort_backpack else "inventory-split")
     name = mode + "-" + uuid.uuid4().hex[:8]
@@ -151,6 +151,14 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             assert denied["error"] == "native_guest_stack_drop_fixture_unavailable", denied
             evidence["diagnostic_probe_refused_without_fixture_scope"] = True
 
+            if multiple_drops:
+                split = (await ask("action", *guest, "native-inventory-split", "--target",
+                                   f"{source}|4|{expected_quantity}"))["native_inventory_split"]
+                second_source = split["new_guid"]
+                expected_quantity = split["remaining"]
+                rows = await page(guest, character)
+                quantities(rows, {source: expected_quantity, second_source: 4})
+
             await ask("action", *guest, "native-inventory-view-fixture")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
             key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
@@ -186,24 +194,45 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             assert (escrow["guid"], escrow["quantity"], escrow["map"], escrow["claim_id"]) == (
                 source, expected_quantity, area, None)
             assert escrow["escrow"]["map"] == area
-            assert await page(guest, character) == [row for row in rows if row["guid"] != source]
+            remaining = [row for row in rows if row["guid"] != source]
+            actual = await page(guest, character)
+            assert [{k: v for k, v in row.items() if k != "index"} for row in actual] == [
+                {k: v for k, v in row.items() if k != "index"} for row in remaining], (actual, remaining)
             replay = (await ask("action", *guest, drop.DROP, "--target", f"{source}|{expected_quantity}",
                                 "--operation-id", operation))[drop.RESULT]
             assert replay == {key: committed[key] for key in replay}, replay
             assert await page(host, "host") == host_before
+            if multiple_drops:
+                await ask(*key, "back")
+                second = (await ask("action", *guest, drop.DROP, "--target", f"{second_source}|4"))[drop.RESULT]
+                identities = {drop_projection.player_drop_identity(key) for key in (operation, second["drop_id"])}
+                for role, local_run in (("host", run), ("guest", guest_run)):
+                    observed = await wait(local_run, lambda state: identities <= set(
+                        state.get("game", {}).get(drop_projection.KEY, {})))
+                    actors = {item["actor"] for identity, item in observed["game"][drop_projection.KEY].items()
+                              if identity in identities and item["class_path"] == item_class}
+                    assert len(actors) == 2, observed["game"][drop_projection.KEY]
+                    evidence[f"{role}_sees_both_drops"] = sorted(actors)
+                checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+                native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
+                held = checkpoint["world"]["party"][drop_record.STATE]
+                assert {row["guid"] for row in held.values() if row["owner"] == character and not row["claim_id"]} == {
+                    source, second_source}
+                assert {source, second_source}.isdisjoint(row["guid"] for row in await page(guest, character))
+                evidence["second_inventory_drop"] = second
             if drop_map:
                 await stop(*jobs[-1])
                 await stop(*jobs[-2])
                 await launch(host, "host-reclaim", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)
                 await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != normal["generation"])
-                frame = await wait(run, lambda state: state.get("game", {}).get(drop_projection.KEY, {}).get("drop_id")
-                                   == operation)
-                before = frame["game"][drop_projection.KEY]
+                identity = drop_projection.player_drop_identity(operation)
+                frame = await wait(run, lambda state: identity in state.get("game", {}).get(drop_projection.KEY, {}))
+                before = frame["game"][drop_projection.KEY][identity]
                 assert drop_record.actor_class_path(area, before["actor"]) == item_class, before
                 if food_source:
-                    await ask("action", *host, "native-world-loot-approach", "--target", f"host@{operation}")
-                press = (await ask("action", *host, drop_projection.FIXTURE, "--target", operation))[drop_projection.KEY]
-                assert press == {**before, "sequence": before["sequence"] + 1}, (before, press)
+                    await ask("action", *host, "native-world-loot-approach", "--target", f"host@{identity}")
+                press = (await ask("action", *host, drop_projection.FIXTURE, "--target", identity))[drop_projection.KEY][identity]
+                assert press["sequence"] > before["sequence"] and press == {**before, "sequence": press["sequence"]}
                 settled = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
                                      .get(drop_record.STATE, {}).get(operation, {}).get("claim_id") is not None)
                 tombstone = settled["campaign"]["world"]["party"][drop_record.STATE][operation]
@@ -218,17 +247,18 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 evidence["host_stock_interaction_after_restart"] = press
                 evidence["reclaimed"] = tombstone
             if crossroads_drop:
+                identity = drop_projection.player_drop_identity(operation)
                 await ask(*key, "back")
                 observed = await wait(guest_run, lambda state: state.get("gameplay_fresh")
-                                      and state.get("game", {}).get(drop_projection.KEY, {}).get("drop_id") == operation)
-                before = observed["game"][drop_projection.KEY]
+                                      and identity in state.get("game", {}).get(drop_projection.KEY, {}))
+                before = observed["game"][drop_projection.KEY][identity]
                 assert before["map"] == area and drop_record.actor_matches(area, before["actor"]), before
-                press = (await ask("action", *guest, drop_projection.FIXTURE, "--target", operation))[drop_projection.KEY]
-                assert press == {**before, "sequence": before["sequence"] + 1}, (before, press)
+                press = (await ask("action", *guest, drop_projection.FIXTURE, "--target", identity))[drop_projection.KEY][identity]
+                assert press["sequence"] > before["sequence"] and press == {**before, "sequence": press["sequence"]}
                 evidence["crossroads_stock_interaction"] = press
                 await wait(guest_run, lambda state: state.get("gameplay_fresh")
                            and state.get("gameplay", {}).get(drop_record.STATE) == {}
-                           and drop_projection.KEY not in state.get("game", {}))
+                           and identity not in state.get("game", {}).get(drop_projection.KEY, {}))
                 events = (await ask("events", *guest, "--tail", "100"))["events"]
                 claims = [event for event in events if event["event"] == "local_interaction"
                           and event.get(drop.RESULT, {}).get("drop_id") == operation]
@@ -372,6 +402,7 @@ if __name__ == "__main__":
     modes.add_argument("--stock-drop-probe", action="store_true", help="verify one stock 9mm actor born and retired in the same tick")
     modes.add_argument("--manual-drop", action="store_true", help="qualify regular co-op inventory Drop after isolated seeding")
     modes.add_argument("--crossroads-drop", action="store_true", help="qualify normal 9mm Drop and stock reclaim in CrossRoads")
+    modes.add_argument("--multiple-drops", action="store_true", help="verify both peers see two drops from the same player")
     modes.add_argument("--campaign-drop-map", help="verify a guest drop and host pickup after restart on this campaign map")
     modes.add_argument("--campaign-food-source", choices=DROP_FOOD, help="verify sharing an authored food pickup")
     parser.add_argument("--ammo", choices=DROP_AMMO, default=NINE_MM_BALL.symbol)
@@ -382,4 +413,4 @@ if __name__ == "__main__":
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack,
                        settings.stock_drop_probe, settings.manual_drop, crossroads_drop=settings.crossroads_drop,
                        drop_map=settings.campaign_drop_map, ammo=DROP_AMMO[settings.ammo],
-                       food_source=settings.campaign_food_source))
+                       food_source=settings.campaign_food_source, multiple_drops=settings.multiple_drops))

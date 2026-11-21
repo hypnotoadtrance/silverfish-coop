@@ -404,6 +404,8 @@ City, Cistern, and the Gunsmith shop passed separate guest-to-host transfers of 
 
 The same inventory-drop test used a Canned Peaches pickup from City and a Brown Mushroom from CrossRoads. Each guest collected the original placed item through Interact, dropped it from their inventory, and stayed disconnected while the host restarted and collected the dropped instance. Each host received the original GUID and quantity. The returning guest's inventory omitted the dropped item, a competing pickup was refused, and the original single-player save hashes matched.
 
+The common physical loot view also showed two separate 9mm stacks dropped by a single guest in the Observatory. Both game instances showed the two stock item actors simultaneously. The host checkpoint kept distinct item GUIDs and quantities of five and four, and the original single-player save hashes matched. [Multiple-drop trial](../tests/live_inventory_split_smoke.py)
+
 Two guests collected separate authored ammunition stacks through stock Interact. The first carried 14 buckshot shells from Slums. The second collected 10 .45 Ball rounds in CrossRoads. The host refused a stale visit, a wrong-map source, an out-of-range claim, and a second claim on the same source. Each guest retained their own exact stack through Rail Yard travel, a same-port restart, and a revisit to Slums. The host inventory and original save hashes matched.
 
 A separate three-instance run collected the same .45 placement into a guest's existing 10-round backpack stack. The stock calculation increased it to 20 rounds under the original stack GUID. The pickup kept a distinct source receipt, other inventories matched, and the owner kept the 20-round stack after same-port restart.

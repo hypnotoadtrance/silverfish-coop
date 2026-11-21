@@ -3438,7 +3438,9 @@ class Host:
                 continue
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
-            world_items = self.last_game.get(native_world_loot.CAPABILITY) == 1
+            world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
+            world_items = world_version >= 1
+            player_drops = world_version >= native_world_loot.PLAYER_DROPS_VERSION
             if self.enemy_shell_view:
                 with contextlib.suppress(OSError, RuntimeError):
                     snapshot = await self.enemy_shell_view.sync(
@@ -3488,22 +3490,27 @@ class Host:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
             try:
-                await self.stack_drop_projection.sync_host(self, bridge)
+                if not player_drops:
+                    await self.stack_drop_projection.sync_host(self, bridge)
             except (OSError, RuntimeError) as error:
                 reason = str(error)
                 if self.stack_drop_projection.last_error != reason:
                     self.stack_drop_projection.last_error = reason
                     self.control.event("stock_drop_projection_unavailable", reason=reason)
-            if self.native_loot_input or self.enemy_shell_view and world_items:
+            if self.native_loot_input or world_items:
                 rolls = self.party.get(native_loot.STATE_KEY, {})
                 try:
-                    self.last_game = await self.world_loot.sync(
+                    snapshot = await self.world_loot.sync(
                         bridge, self.last_game, rolls, self.control.generation, self.zone_epoch,
                         active=not (self.stopping or self.transitioning or self.party.get("wipe")
                                     or self.native_checkpoint_unsafe),
                         enemy_frame=native_enemy_loot.shell_frame(self) if world_items else None,
                         enemy_rolls=self.party.get(native_enemy_loot.STATE_KEY),
+                        player_drops=native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
+                        if player_drops else None,
                     )
+                    if snapshot is not self.last_game:
+                        self.last_game, self.last_seen = snapshot, time.monotonic()
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):
                         self.world_loot.last_error = str(error)
@@ -3516,6 +3523,9 @@ class Host:
                         action, claim = self.world_loot.claim_target(self.last_game, world_loot)
                         if action == native_world_loot.ENEMY_CLAIM:
                             result = await native_enemy_loot.claim(self, bridge, "host", claim, operation_id)
+                        elif action == native_guest_drop.RECLAIM:
+                            async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                                result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
                         else:
                             result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
@@ -5150,8 +5160,12 @@ class Client:
             await self.service_inventory_use(active)
             await native_inventory.service_split_view(self, active)
             await native_guest_drop.service_view(self, active)
+            world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
+            world_items = world_version >= 1
+            player_drops = world_version >= native_world_loot.PLAYER_DROPS_VERSION
             try:
-                await self.stack_drop_projection.sync(self, active)
+                if not player_drops:
+                    await self.stack_drop_projection.sync(self, active)
             except (OSError, RuntimeError) as error:
                 reason = str(error)
                 if self.stack_drop_projection.last_error != reason:
@@ -5161,7 +5175,6 @@ class Client:
                 await self.shop_view.sync(self, active)
             frame = (self.gameplay.get(native_enemy_shells.FRAME_KEY) if active and self.transport.game_access
                      and self.expected_zone in native_enemy_loot.BY_MAP and time.monotonic() - self.gameplay_seen < 2 else None)
-            world_items = self.last_game.get(native_world_loot.CAPABILITY) == 1
             with contextlib.suppress(OSError, RuntimeError):
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame, present=not world_items,
@@ -5171,11 +5184,12 @@ class Client:
                 try:
                     self.last_game = await self.world_loot.sync(
                         self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}),
-                        self.host_session, self.zone_epoch,
+                        f"{self.host_session}:{self.stack_drop_projection.admission}", self.zone_epoch,
                         active=active and self.transport.game_access and not self.stopping
                         and time.monotonic() - self.gameplay_seen < 2,
                         enemy_frame=frame if world_items else None,
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
+                        player_drops=self.gameplay.get(native_guest_drop_record.STATE) if player_drops else None,
                     )
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):

@@ -462,6 +462,16 @@ local function press_stock(state, pawn, box, precise_aim, label, dispatch)
     return reason
 end
 
+function input.press_world_loot(state, pawn, actor, box, dispatch)
+    if not headless or not same(pawn, state.local_pawn and state.local_pawn.pawn)
+        or not same(pawn:GetWorld(), state.world) or not same(actor:GetWorld(), state.world)
+        or not owned(pawn.Camera, pawn, "CameraComponent") or not same(actor.Box, box)
+        or not owned(box, actor, "BoxComponent") then
+        error("world_loot_fixture_scope_unavailable", 0)
+    end
+    return press_stock(state, pawn, box, true, "world_loot_fixture", dispatch)
+end
+
 function input.open_cabinet(state, phase, pawn, actor, box, source, dispatch)
     local press = SilverfishProbeNativeInteractInput
     local label = cabinet_labels[source]

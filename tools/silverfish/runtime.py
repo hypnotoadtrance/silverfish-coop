@@ -2010,8 +2010,8 @@ class Bridge:
                         "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
                         "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
                     }
-                elif fields == ["native-world-loot-capability", "1"]:
-                    data[native_world_loot.CAPABILITY] = 1
+                elif fields[0] == "native-world-loot-capability" and len(fields) == 2 and fields[1] in {"1", "2"}:
+                    data[native_world_loot.CAPABILITY] = int(fields[1])
                 elif fields[0] == native_world_loot.ROW:
                     item = native_world_loot.parse(fields, data.get("state"), data.get("map"))
                     projected = data.setdefault(native_world_loot.KEY, {})

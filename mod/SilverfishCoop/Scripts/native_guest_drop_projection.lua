@@ -91,7 +91,7 @@ end
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
     if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then
-        rows[#rows + 1] = row("native-world-loot-capability", 1)
+        rows[#rows + 1] = row("native-world-loot-capability", 2)
     end
     if current and (current.map ~= state.map or not same(pawn, current.pawn) or not same(state.world, current.world)) then
         current = nil
@@ -127,15 +127,16 @@ local function item_frame(fields, state, phase)
         local values = {}
         for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
         local id, class = values[1], values[2]
-        if #values ~= 11 or not identifier(id) or incoming[id] or #class > 256
+        local snap = #values == 12 and values[3] == "ground"
+        if (#values ~= 11 and not snap) or not identifier(id) or incoming[id] or #class > 256
             or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
         local transform = {}
-        for axis = 3, 11 do
+        for axis = snap and 4 or 3, #values do
             local value = tonumber(values[axis])
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform }
+        incoming[id] = { class = class, transform = transform, snap = snap }
     end
     for id, entry in pairs(world_items) do
         if not incoming[id] or entry.epoch ~= epoch or not same(entry.pawn, pawn) then
@@ -156,9 +157,12 @@ local function item_frame(fields, state, phase)
             occupied[slot] = true
             if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
             local t = item.transform
+            local visual_z = previous and previous.visual_z
+            if not visual_z then visual_z = item.snap and floor_z(state, t) or t[3] end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
-                t[1], t[2], t[3], t[3], item.class, t[4], t[5], t[6], t[7], t[8], t[9], slot)
-            world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world, class = item.class, slot = slot }
+                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], slot)
+            world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
+                class = item.class, slot = slot, visual_z = visual_z }
             if not ok then errors[#errors + 1] = reason end
         end
     end
@@ -254,9 +258,21 @@ function projection.command(fields, state, phase)
         if #fields ~= 3 or not item or not same(pawn, item.pawn) or not same(state.world, item.world) then
             error("world_loot_fixture_scope_unavailable", 0)
         end
-        return fixture(pawn, function()
-            local active, epoch, exact, actor, press = SilverfishReadNativeGuestDropProjection(item.slot)
-            if active and epoch == item.epoch and exact == id then return actor, press end
+        local active, epoch, exact, name, before = SilverfishReadNativeGuestDropProjection(item.slot)
+        local path = active and epoch == item.epoch and exact == id and name:match("^%S+ (/Game/[%w_./:%-]+)$")
+        local actor = path and StaticFindObject(path)
+        if not valid(actor) or actor:GetFullName() ~= name or type(before) ~= "number"
+            or type(SilverfishProbeNativeInteractInput) ~= "function" then
+            error("world_loot_fixture_scope_unavailable", 0)
+        end
+        return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()
+            local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            local present, current_epoch, current_id, current_actor, after = SilverfishReadNativeGuestDropProjection(item.slot)
+            if not ok or status ~= "stock_started_consumed" or not present or current_epoch ~= epoch
+                or current_id ~= exact or current_actor ~= name or type(after) ~= "number" or after <= before then
+                error("world_loot_fixture_interaction_unverified:" .. tostring(status), 0)
+            end
+            return "stock world loot interaction intercepted"
         end)
     elseif command == "native-guest-drop-projection-clear" then
         if #fields ~= 2 then error("stock_drop_projection_clear_arguments", 0) end

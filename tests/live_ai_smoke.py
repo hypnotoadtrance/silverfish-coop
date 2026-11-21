@@ -454,13 +454,20 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 winner = stock_shell_input or "host"
                 recipient = invitation["character_id"] if winner == "guest" else "host"
                 winner_run, loser_run = (guest_run, run) if winner == "guest" else (run, guest_run)
-                accepted("place the claimant within stock pickup range", await combat_action(
-                    run, "native-enemy-loot-approach", f"{winner}|{guid}"))
+
+                async def approach_drop(role):
+                    deadline = time.monotonic() + 5
+                    while True:
+                        placed = await combat_action(run, "native-enemy-loot-approach", f"{role}|{guid}")
+                        if placed.get("error") != "native_enemy_loot_claimant_unavailable" or time.monotonic() >= deadline:
+                            return accepted(f"place the {role} near the stock drop", placed)
+                        await asyncio.sleep(.25)
+
                 selection, operation = guid, uuid.uuid4().hex
                 if stock_shell_input:
                     observer = "host" if winner == "guest" else "guest"
-                    accepted("bring the observer into the same loot area", await combat_action(
-                        run, "native-enemy-loot-approach", f"{observer}|{guid}"))
+                    await approach_drop(observer)
+                    await approach_drop(winner)
                     identity = uuid.uuid5(uuid.NAMESPACE_OID, f"enemy-loot:{guid}").hex
 
                     def projected_item(state):
@@ -470,11 +477,13 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         visible = await wait(local_run, lambda state: projected_item(state).get("class_path") == SHELLS, timeout=10)
                         assert not visible["game"].get("native_enemy_shell_view"), visible["game"].get("native_enemy_shell_view")
                     selection = f"enemy-shell:{interaction_epoch}:{guid}"
-                    accepted("place the claimant in sight of the stock actor", await combat_action(
-                        run, "native-world-loot-approach", f"{winner}@{identity}"))
-                    press = accepted("exercise the claimant's stock Interact", await combat_action(
-                        winner_run, "native-world-loot-fixture", identity,
-                    ))["native_world_loot_items"][identity]
+                    pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
+                    if pressed.get("error", "").startswith(("world_loot_fixture_focus_unavailable",
+                                                            "world_loot_fixture_outside_verified_reach")):
+                        accepted("place the claimant in sight of the stock actor", await combat_action(
+                            run, "native-world-loot-approach", f"{winner}@{identity}"))
+                        pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
+                    press = accepted("exercise the claimant's stock Interact", pressed)["native_world_loot_items"][identity]
                     assert press["map"] == area and press["sequence"] > 0, press
                     settled = await wait(run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
@@ -488,6 +497,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         await wait(local_run, lambda state: state.get("active") and not projected_item(state), timeout=10)
                     proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_actors_cleared": True}
                 else:
+                    await approach_drop(winner)
                     claimed = accepted("claim the stock shells for the host", await combat_action(
                         run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
                 assert claimed == dict(roll, claimed_by=recipient), claimed

@@ -12,6 +12,7 @@ from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
 
 
 STATE = "native_guest_stack_drops"
+PICKUP_ACTION = "native-guest-stack-reclaim"
 CAPABILITY = "native_guest_stack_drop_capability"
 VIEW = "native_guest_inventory_drop_view"
 VIEW_ROW = "native-guest-inventory-drop-view"
@@ -95,7 +96,7 @@ def active_frames(data: dict, members) -> list[dict]:
     drops = data.get(STATE, {})
     if type(drops) is not dict or len(drops) > MAX_DROPS:
         raise ValueError("Invalid stock stack drop ledger")
-    slots, operations, active_guids, active_owners = set(), set(), set(), set()
+    slots, operations, active_guids = set(), set(), set()
     frames = []
     for drop_id, row in drops.items():
         if (not valid_id(drop_id) or type(row) is not dict or not isinstance(row.get("owner"), str)
@@ -122,11 +123,10 @@ def active_frames(data: dict, members) -> list[dict]:
         frame = row["escrow"]
         if (len(frames) >= MAX_ACTIVE or type(frame) is not dict or frame.get("map") != row["map"]
                 or not isinstance(frame.get("slot"), str) or frame["slot"] in slots
-                or owner in active_owners or row["guid"] in active_guids):
+                or row["guid"] in active_guids):
             raise ValueError("Invalid or duplicate stock stack drop escrow")
         slots.add(frame["slot"])
         active_guids.add(row["guid"])
-        active_owners.add(owner)
         frames.append(frame)
     return frames
 

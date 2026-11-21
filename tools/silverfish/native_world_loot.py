@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from itertools import chain
 
-from . import native_enemy_shells, native_loot, party
+from . import native_enemy_shells, native_guest_drop_record, native_loot, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
@@ -19,6 +19,7 @@ FRAME = "native-world-loot-frame"
 FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
 CAPABILITY = "native_world_loot_version"
+PLAYER_DROPS_VERSION = 2
 CRATE_CLAIM = "native-loot-claim"
 ENEMY_CLAIM = "native-enemy-loot-claim"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})\Z")
@@ -65,6 +66,7 @@ class Item:
     transform: dict
     claim_action: str
     claim_target: str
+    ground_snap: bool = False
 
 
 def _crate_items(rolls, area):
@@ -98,14 +100,33 @@ def _enemy_items(frame, rolls, area, zone):
         yield Item(identity, row.get("class_path"), transform, ENEMY_CLAIM, f"{native_enemy_shells.PREFIX}{zone}:{guid}")
 
 
-def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None):
+def player_drop_identity(drop_id):
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"player-drop:{drop_id}").hex
+
+
+def _player_items(drops, area):
+    if not isinstance(drops, dict):
+        return
+    for drop_id, row in drops.items():
+        if (not native_guest_drop_record.valid_id(drop_id) or not isinstance(row, dict)
+                or (row.get("drop_id"), row.get("map")) != (drop_id, area)
+                or row.get("claimed_by") or not valid_guid(row.get("guid"))
+                or not native_guest_drop_record.valid_quantity(row.get("class_path"), row.get("quantity"))):
+            continue
+        transform = {"position": row.get("location"), "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+        yield Item(player_drop_identity(drop_id), row["class_path"], transform,
+                   native_guest_drop_record.PICKUP_ACTION, drop_id, True)
+
+
+def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
     if not pawn_matches(area, pawn.get("name")) or not valid_position(origin):
         return {}
     visible = []
-    for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone)):
+    for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
+                      _player_items(player_drops or {}, area)):
         if (not isinstance(item.class_path, str) or len(item.class_path) > 256
                 or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
             continue
@@ -124,7 +145,8 @@ class Projection:
         self.last_error = None
         self.items = {}
 
-    async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None):
+    async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
+                   player_drops=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -132,8 +154,9 @@ class Projection:
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
-        self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls) if active else {}
-        args = tuple("|".join((identity, item.class_path, *(str(axis)
+        self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
+                            player_drops=player_drops) if active else {}
+        args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
             for field in ("position", "rotation", "scale") for axis in item.transform[field])))
             for identity, item in sorted(self.items.items()))
         signature = (epoch, args)
@@ -154,6 +177,8 @@ class Projection:
         projected = game.get(KEY, {}).get(identity, {})
         item = self.items.get(identity)
         if (epoch != self.epoch or not item or projected.get("epoch") != epoch
+                or projected.get("map") != game.get("map")
+                or projected.get("pawn") != game.get("pawns", {}).get("local", {}).get("name")
                 or projected.get("sequence", 0) <= 0 or projected.get("class_path") != item.class_path):
             raise party.RuleError("native_world_loot_intent_stale")
         return item.claim_action, item.claim_target

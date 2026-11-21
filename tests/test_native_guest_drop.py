@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record
-from tools.silverfish import native_guest_stack_drop as probe, native_host_save, party
+from tools.silverfish import native_guest_stack_drop as probe, native_host_save, native_world_loot, party
 
 
 MAP = record.OBSERVATORY
@@ -247,3 +247,32 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         newer["escrow"] = native_host_save.record(host.native_profile, escrow["slot"], record.CROSSROADS)
         with self.assertRaisesRegex(RuntimeError, "Invalid or duplicate stock stack drop escrow"):
             native_host_save.verify_checkpoint(host.native_profile, checkpoint)
+
+    async def test_two_drops_from_same_owner_have_independent_physical_claims(self):
+        host, _, escrow, replacement, _, row = self.make_world()
+        other_id = "d" * 32
+        host.party[record.STATE] = {
+            DROP: row,
+            other_id: dict(row, guid="B" * 32, location=[11, 20, 30], escrow=replacement),
+        }
+        self.assertEqual(record.active_frames(host.party, {OWNER, OTHER}), [escrow, replacement])
+        game = host.last_game
+        game["pawns"]["local"]["location"] = POS
+        projection = native_world_loot.Projection()
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        visible = drop.visible_drops(host.party, MAP)
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
+        self.assertEqual(len(projection.items), 2)
+        args = bridge.command.await_args.args[3:]
+        self.assertTrue(all(f"|{record.ITEM}|ground|" in line for line in args))
+        first = native_world_loot.player_drop_identity(DROP)
+        second = native_world_loot.player_drop_identity(other_id)
+        proof = dict(epoch=projection.epoch, sequence=1, class_path=record.ITEM, map=MAP,
+                     pawn=game["pawns"]["local"]["name"])
+        game[native_world_loot.KEY] = {first: proof, second: proof}
+        self.assertEqual(projection.claim_target(game, (projection.epoch, second)), (drop.RECLAIM, other_id))
+        del visible[other_id]
+        await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
+        self.assertEqual(projection.claim_target(game, (projection.epoch, first)), (drop.RECLAIM, DROP))
+        with self.assertRaisesRegex(party.RuleError, "intent_stale"):
+            projection.claim_target(game, (projection.epoch, second))
