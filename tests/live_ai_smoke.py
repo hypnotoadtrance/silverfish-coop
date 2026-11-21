@@ -2,10 +2,12 @@
 
 import argparse
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
 import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -75,12 +77,55 @@ async def wait(directory: Path, predicate, *, timeout=42) -> dict:
     raise RuntimeError(f"{directory.parent.name} did not reach the expected fixture state: {current}")
 
 
+@asynccontextmanager
+async def resident_enemy_guest(game: Path, work: Path, port: int, original_save: Path):
+    from tools.silverfish import native_title_entry, runtime
+    from live_portable_title_smoke import discover_mailbox, launch_portable, qualify_release
+    from live_stock_creator_smoke import installed_probe
+
+    if any(part.casefold() == "steamapps" for part in game.parts) or work.is_relative_to(game):
+        raise ValueError("Use a separate private portable game copy for the enemy loot test")
+    release = qualify_release(game, None)
+    title = work / release.title_directory
+    profile = title / "game-user"
+    saves = profile / "Saved" / "SaveGames"
+    saves.mkdir(parents=True)
+    for source in (original_save / "SaveGames").glob("*.sav"):
+        shutil.copy2(source, saves / source.name)
+    with installed_probe(game):
+        process = launch_portable(game, profile)
+        try:
+            bridge = runtime.Bridge(await discover_mailbox(title / "run" / "game-bridge", process), process)
+            await bridge.wait_for(lambda frame: frame.get(native_title_entry.PANEL_KEY, {}).get("state") == "ready")
+            async def join(*args):
+                return await bridge.command("native-title-join-form-fixture", *args)
+
+            async def screen(expected):
+                async with asyncio.timeout(24):
+                    while (await join("observe"))["ack"]["message"] != "title_join_form_state=" + expected:
+                        await asyncio.sleep(.1)
+
+            await join("open")
+            await join("address", "127.0.0.1")
+            await join("port", str(port))
+            await join("no_password")
+            await screen("trust_host")
+            await bridge.command("native-title-button-fixture", "trust")
+            await screen("catalog;count=0")
+            await join("create", "Enemy observer")
+            await screen("catalog;count=1")
+            yield bridge
+        finally:
+            await runtime.stop_game(process)
+
+
 async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: bool, require_movement: bool,
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
                    restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
-                   stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False) -> dict:
+                   stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False,
+                   resident_game: Path | None = None) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -104,6 +149,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         from tools.silverfish.control import submit
     original = saved_hashes(original_save) if original_save else None
     processes = []
+    resident = AsyncExitStack()
+    guest_bridge = None
     print(run, flush=True)
 
     async def command(*arguments):
@@ -125,6 +172,41 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise RuntimeError(f"{action}: {reply.get('error', 'control request failed')}")
         return reply
 
+    async def pick_nearby(identity, position, count=1):
+        from tools.silverfish import native_loose_pickup, native_world_loot
+
+        accepted("approach the projected stock loot", await combat_action(
+            run, native_world_loot.APPROACH, f"guest@{identity}"))
+        authority = await wait(run, lambda state: state.get("game", {}).get("pawns", {}).get("guest", {}).get("location"))
+        expected_position = authority["game"]["pawns"]["guest"]["location"]
+        assert math.dist(expected_position, position) < 225, expected_position
+
+        def arrived(state):
+            game = state.get("game", {})
+            local_position = game.get("pawns", {}).get("local", {}).get("location")
+            return (identity in game.get(native_world_loot.KEY, {}) and local_position
+                    and math.dist(local_position, expected_position) <= 20)
+
+        await wait(guest_run, arrived)
+        accepted("open the stock backpack", await combat_action(guest_run, "native-inventory-view-fixture"))
+        mounted = await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock"
+                             and identity in state.get("game", {}).get(native_world_loot.KEY, {}))
+        actor = mounted["game"][native_world_loot.KEY][identity]["actor"].split(" ", 1)[1]
+        pressed = accepted("select the stock Nearby Items card", await combat_action(
+            guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, actor))
+        expected = "stock Nearby Items card requested" + (f" x{count}" if count > 1 else "")
+        assert pressed["proof"] == expected, pressed
+        return pressed
+
+    async def verify_nearby_delivery(pressed, guid):
+        from tools.silverfish import native_loose_pickup
+
+        verified = accepted("inspect the transferred item in the open backpack", await combat_action(
+            guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, f"{pressed['actor']}@{guid}"))
+        assert verified["proof"] == "verified stock Nearby Items transfer", verified
+        accepted("close the stock backpack", await combat_action(guest_run, "native-inventory-view-fixture"))
+        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+
 
     async def start(log_name, controller, *arguments):
         run.mkdir(parents=True, exist_ok=True)
@@ -143,13 +225,27 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             route_options += ("--native-dead-bridge-enemy-loot",)
             evidence["automatic_cqc_loot"] = True
         host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", *route_options)
+        if resident_game:
+            host_flags += ("--direct",)
         await start("host.txt", host, "host", *host, "--port", "0", *host_flags, "--start-zone", area)
         await wait(run, lambda state: state.get("state") == "hosting"
                    and state.get("game", {}).get("map") == area
                    and (placed_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
-        invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
-        client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
-        await start("client.txt", client, "join", *client, *client_flags)
+        if resident_game:
+            resident_work = work / "resident" / profile
+            active = await wait(run, lambda frame: "port" in frame.get("endpoint", {}))
+            guest_bridge = await resident.enter_async_context(
+                resident_enemy_guest(resident_game, resident_work, active["endpoint"]["port"], original_save))
+            checkpoint = json.loads((run.parent / "save" / "campaign.json").read_text(encoding="utf-8"))
+            character, = checkpoint["characters"]
+            invitation = {"character_id": character}
+            await guest_bridge.command("native-title-join-form-fixture", "select", character)
+            await guest_bridge.command("native-title-join-form-fixture", "submit")
+            guest_run = resident_work / "clients" / "local" / "run"
+        else:
+            invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
+            client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
+            await start("client.txt", client, "join", *client, *client_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected"
                    and state.get("game", {}).get("map") == area
                    and (placed_cqc or bandit(state).get("status") == "waiting_for_stock_bandit"))
@@ -158,9 +254,13 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                                  if placed_cqc else bandit(state).get("watched_pawn")))
         if placed_cqc:
             exact_pawn = paired["game"]["native_guest_save"]["pawn"]
-            visible = await wait(guest_run, lambda state: cqc_counterpart(guest_run, first_target, area) is not None
+            visible = await wait(guest_run, lambda state: (resident_game or cqc_counterpart(guest_run, first_target, area))
                                  and state.get("game", {}).get("native_enemy_loot_death_view", {}).get("state") == "present")
-            evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run, first_target, area)
+            if resident_game:
+                assert visible["game"].get("save_scope") == uuid.UUID(invitation["character_id"]).hex
+                evidence["resident_guest"] = {"scope": visible["game"]["save_scope"], "map": area}
+            else:
+                evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run, first_target, area)
             before = visible["game"]["native_enemy_loot_death_view"]
             assert (before["actor"], before["hidden"], before["collision"]) == (first_target, False, True), before
             if not automatic_cqc_loot:
@@ -474,10 +574,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         ) == (target, "projected", roll["epoch"], guid, True, False)
 
                     defeat = await wait(guest_run, projected, timeout=12)
-                    counterpart = cqc_counterpart(guest_run, target, area)
-                    assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
-                    assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
-                    proof_log["client_cqc_after_combat"] = counterpart
+                    if not resident_game:
+                        counterpart = cqc_counterpart(guest_run, target, area)
+                        assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
+                        assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
+                        proof_log["client_cqc_after_combat"] = counterpart
                     proof_log["client_cqc_death_view"] = actor_proof(defeat, "native_enemy_loot_death_view", target)
                 published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                     "native_enemy_loot_rolls", {}).get(guid) == roll)
@@ -513,14 +614,17 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         visible = await wait(local_run, lambda state: projected_item(state).get("class_path") == SHELLS, timeout=10)
                         assert not visible["game"].get("native_enemy_shell_view"), visible["game"].get("native_enemy_shell_view")
                     selection = f"enemy-shell:{interaction_epoch}:{guid}"
-                    pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
-                    if pressed.get("error", "").startswith(("world_loot_fixture_focus_unavailable",
-                                                            "world_loot_fixture_outside_verified_reach")):
-                        accepted("place the claimant in sight of the stock actor", await combat_action(
-                            run, "native-world-loot-approach", f"{winner}@{identity}"))
+                    if resident_game:
+                        press = await pick_nearby(identity, roll["position"], roll["quantity"])
+                    else:
                         pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
-                    press = accepted("exercise the claimant's stock Interact", pressed)["native_world_loot_items"][identity]
-                    assert press["map"] == area and press["sequence"] > 0, press
+                        if pressed.get("error", "").startswith(("world_loot_fixture_focus_unavailable",
+                                                                "world_loot_fixture_outside_verified_reach")):
+                            accepted("place the claimant in sight of the stock actor", await combat_action(
+                                run, "native-world-loot-approach", f"{winner}@{identity}"))
+                            pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
+                        press = accepted("exercise the claimant's stock Interact", pressed)["native_world_loot_items"][identity]
+                        assert press["map"] == area and press["sequence"] > 0, press
                     settled = await wait(run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
                     claimed = settled["gameplay"]["native_enemy_loot_rolls"][guid]
@@ -531,6 +635,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     operation = event["operation_id"]
                     for local_run in (run, guest_run):
                         await wait(local_run, lambda state: state.get("active") and not projected_item(state), timeout=10)
+                    if resident_game:
+                        await verify_nearby_delivery(press, guid)
                     proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_actors_cleared": True}
                 else:
                     await approach_drop(winner)
@@ -561,10 +667,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert saved["world"]["map"] == area, saved["world"]
                     if defer_until_restart:
                         return
-                    await command("action", *client, "drop-link")
+                    accepted("suspend the guest link", await combat_action(guest_run, "drop-link"))
                     await wait(guest_run, lambda state: state.get("reconnect_suspended") and not state.get("link_connected"))
                     await wait(run, lambda state: not state.get("link_connected"))
-                    await command("action", *client, "reconnect")
+                    accepted("recover the guest link", await combat_action(guest_run, "reconnect"))
                     rejoined = await wait(guest_run, lambda state: state.get("link_connected")
                                           and state.get("gameplay_fresh") and projected(state))
                     same_visit = status(run)
@@ -622,9 +728,12 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert result["effect"] == "revive", result
                 await wait(run, lambda state: state["gameplay"]["players"]["guest"]["downed"] is False
                            and state["game"].get("player_effects", {}).get("guest", {}).get("state") == "standing")
-            pressed = accepted("pick up the weapon with stock Interact", await combat_action(
-                guest_run, native_world_loot.FIXTURE, identity))[native_world_loot.KEY][identity]
-            assert pressed["map"] == area and pressed["sequence"] > 0, pressed
+            if resident_game:
+                pressed = await pick_nearby(identity, payload["transform"]["position"])
+            else:
+                pressed = accepted("pick up the weapon with stock Interact", await combat_action(
+                    guest_run, native_world_loot.FIXTURE, identity))[native_world_loot.KEY][identity]
+                assert pressed["map"] == area and pressed["sequence"] > 0, pressed
 
             def claim_event(_):
                 events = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -635,6 +744,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert (commit["claimed_by"], commit["ammo"]) == (invitation["character_id"], payload["ammo"]), commit
             for directory in (run, guest_run):
                 await wait(directory, lambda state: state.get("active") and not projection(state))
+            if resident_game:
+                await verify_nearby_delivery(pressed, guid)
             replay = accepted("replay the stock weapon claim", await combat_action(
                 guest_run, native_stock_enemy_drops.CLAIM, guid, operation_id=commit["operation_id"]))
             assert replay[native_stock_enemy_drops.CLAIM_KEY]["guid"] == guid, replay
@@ -682,6 +793,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             if not stock_drop_census or stock_shell_input:
                 await share(target, evidence, observed)
     finally:
+        await resident.aclose()
         for process, controller in reversed(processes):
             if process.returncode is None:
                 try:
@@ -710,7 +822,8 @@ async def main(args) -> None:
                        automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc,
                        stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells,
                        refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census,
-                       stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon)
+                       stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon,
+                       resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None)
 
 
 if __name__ == "__main__":
@@ -736,6 +849,7 @@ if __name__ == "__main__":
                         help="verify observed ammunition and weapon payloads; add --stock-shell-input to test shell pickup too")
     parser.add_argument("--stock-weapon-input", action="store_true", help="claim the stock dropped weapon through Interact")
     parser.add_argument("--restart-unclaimed-weapon", action="store_true", help="restart before the stock weapon pickup")
+    parser.add_argument("--resident-game", type=Path, help="use a separate portable guest replica and collect through stock Nearby Items")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
     if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
@@ -751,6 +865,9 @@ if __name__ == "__main__":
         parser.error("--both-cqc requires --automatic-cqc-loot")
     if args.stock_shell_input and not args.automatic_cqc_loot:
         parser.error("--stock-shell-input requires --automatic-cqc-loot")
+    if args.resident_game and (args.stock_shell_input != "guest" or not args.vanilla_saved
+                               or args.restart_unclaimed_shells or args.restart_unclaimed_weapon):
+        parser.error("--resident-game requires guest stock pickup, copied stock saves, and a single host run")
     if args.restart_unclaimed_shells and (not args.both_cqc or args.stock_shell_input != "host"):
         parser.error("--restart-unclaimed-shells requires --both-cqc and --stock-shell-input host")
     if args.automatic_cqc_loot and (not placed_cqc or args.enemy_bounty):

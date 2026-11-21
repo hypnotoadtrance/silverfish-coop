@@ -1222,6 +1222,16 @@ namespace
             return left && right && left->GetPropertyValueInContainer(value) == right->GetPropertyValueInContainer(actor);
         }
 
+        template<class T>
+        bool copy_actor_field(void* row_value, U::UObject* actor, const U::TCHAR* row_name, const U::TCHAR* actor_name) const
+        {
+            auto* target = field<T>(type, row_name);
+            auto* source = field<T>(actor, actor_name);
+            if (!target || !source) return false;
+            target->SetPropertyValueInContainer(row_value, source->GetPropertyValueInContainer(actor));
+            return true;
+        }
+
         bool matches_actor(const void* value, U::UObject* actor, std::optional<int> display_count = {}) const
         {
             auto* actor_payload = field<U::FStructProperty>(actor, STR("DataStruct"));
@@ -1262,7 +1272,32 @@ namespace
 
     constexpr auto inventory_screen = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
 
-    void fill_nearby_stack_counts(U::UObject* screen, U::UFunction* function)
+    bool make_projected_floor_row(const RowSchema& rows, void* item, U::UObject* actor, std::optional<int> count)
+    {
+        auto* library = find<U::UObject>(STR("/Script/Engine.Default__KismetGuidLibrary"));
+        auto* fn = find<U::UFunction>(STR("/Script/Engine.KismetGuidLibrary:NewGuid"));
+        auto* guid_output = fn ? U::CastField<U::FStructProperty>(fn->GetReturnProperty()) : nullptr;
+        auto* payload = field<U::FStructProperty>(actor, STR("DataStruct"));
+        if (!library || !guid_output || !payload || fn->GetOuterPrivate() != library->GetClassPrivate() ||
+            !fn->HasAnyFunctionFlags(U::FUNC_Native) || fn->GetNumParms() != 1 || fn->GetParmsSize() != sizeof(Guid) ||
+            guid_output->GetOffset_Internal() != 0 || guid_output->GetStruct().Get() != rows.guid->GetStruct().Get() ||
+            payload->GetStruct().Get() != rows.payload->GetStruct().Get()) return false;
+        Guid key{};
+        library->ProcessEvent(fn, key.data());
+        if (key == Guid{}) return false;
+
+        rows.set_identity(item, key);
+        rows.klass->SetObjectPropertyValue(rows.klass->ContainerPtrToValuePtr<void>(item), actor->GetClassPrivate());
+        rows.ammo->SetPropertyValueInContainer(item, count.value_or(0));
+        rows.payload->CopyCompleteValue(rows.payload->ContainerPtrToValuePtr<void>(item), payload->ContainerPtrToValuePtr<void>(actor));
+        return rows.copy_actor_field<U::FDoubleProperty>(item, actor, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"), STR("Weight")) &&
+            rows.copy_actor_field<U::FIntProperty>(item, actor, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"), STR("Value")) &&
+            rows.copy_actor_field<U::FNameProperty>(item, actor, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"), STR("DataTag")) &&
+            rows.copy_actor_field<U::FBoolProperty>(item, actor, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"), STR("NeverDrop")) &&
+            rows.matches_actor(item, actor, count);
+    }
+
+    void complete_floor_projection(U::UObject* screen, U::UFunction* function)
     {
         static const U::FName find_items{STR("FindFloorItems")};
         if (!function || function->GetFName() != find_items || !ready() || !live(screen) ||
@@ -1278,16 +1313,31 @@ namespace
         if (!item_property || !actor_property) return;
         U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
         U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
-        if (!items.Num() || items.Num() != actors.Num() || items.Num() > 2048) return;
+        if (items.Num() != actors.Num() || items.Num() > 2048) return;
         RowSchema rows;
         if (item_property->GetStruct().Get() != rows.type || !rows.ammo || !rows.bind()) return;
+        std::vector<U::UObject*> shown;
+        shown.reserve(actors.Num());
         for (int i = 0; i < items.Num(); ++i)
         {
             auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
+            shown.push_back(actor);
             const auto count = silverfish::native_guest_drop_projection::nearby_stack_count(actor, pawn);
             auto* item = items.GetRawPtr(i);
             if (count && rows.matches_actor(item, actor))
                 rows.ammo->SetPropertyValueInContainer(item, *count);
+        }
+        // Some projected weapons do not enter stock FindFloorItems because their display
+        // mesh has no collision. Add only in-reach projections with clear stock visibility.
+        for (auto* actor : silverfish::native_guest_drop_projection::visible_nearby_actors(pawn, shown))
+        {
+            if (items.Num() >= 2048) break;
+            const auto count = silverfish::native_guest_drop_projection::nearby_stack_count(actor, pawn);
+            const auto index = items.AddValue();
+            if (make_projected_floor_row(rows, items.GetRawPtr(index), actor, count))
+                actor_property->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), actor);
+            else
+                items.RemoveValues(index, 1);
         }
     }
 
@@ -2571,11 +2621,11 @@ namespace silverfish::native_authored_pickup
             }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup script")});
         callbacks[2] = Hook::RegisterProcessEventPostCallback(
             [](Iteration& call, U::UObject* context, U::UFunction* fn, void*) {
-                if (!call.OriginalFunctionCallPrevented()) fill_nearby_stack_counts(context, fn);
+                if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, fn);
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock inventory")});
         callbacks[3] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
-                if (!call.OriginalFunctionCallPrevented()) fill_nearby_stack_counts(context, frame.Node());
+                if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, frame.Node());
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock floor query")});
         const bool ok = std::ranges::all_of(callbacks, [](auto id) { return id != Hook::ERROR_ID; });
         if (!ok) uninstall_hooks();

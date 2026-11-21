@@ -461,7 +461,9 @@ local function stock_cards(screen, save, guid, remaining, ordered)
             card_count = math.max(1, card.Item[item_ammo])
         end
     end
-    if displayed == expected and (not guid or (saved_count == remaining and card_count == remaining)) then
+    local item_matches = not guid or (saved_count == card_count and
+        (remaining == nil and saved_count > 0 or saved_count == remaining))
+    if displayed == expected and item_matches then
         return displayed, order and table.concat(order, "|") or nil
     end
 end
@@ -802,7 +804,7 @@ function inventory_view.command(fields, state, phase)
         end
         if #fields == 4 then
             local probe = stock_session.floor_probe
-            local displayed = probe and stock_cards(screen, stock_session.save, fields[4], probe.count)
+            local displayed = probe and stock_cards(screen, stock_session.save, fields[4])
             local removed = probe and probe.path == fields[3]
             for index = 1, removed and screen.FloorPanel.Cards:GetArrayNum() or 0 do
                 if stock_card_guid(widget_at(screen.FloorPanel.Cards, index)) == probe.guid then removed = false; break end
@@ -823,13 +825,15 @@ function inventory_view.command(fields, state, phase)
                 screen.ItemManager:OpenContextMenu(card)
                 screen.ItemManager:ActionPickup()
                 if valid(actor) and actor.bHidden == false then
-                    stock_session.floor_probe = {path = fields[3], guid = guid, count = count}
+                    stock_session.floor_probe = {path = fields[3], guid = guid}
                     return "stock Nearby Items card requested" .. (label and " " .. label or "")
                 end
                 break
             end
         end
-        error("The chosen loose actor was not on the stock Nearby Items panel", 0)
+        local object_type = valid(actor) and valid(actor.Box) and actor.Box:GetCollisionObjectType() or "-"
+        error(("The actor did not produce a selectable Nearby Items card. Floor match %s, object type %s"):
+            format(guid or "-", tostring(object_type)), 0)
     end
     if operation == "native-inventory-stock-use-click-fixture" and #fields == 3 and headless and stock_session and not stock_drop
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then

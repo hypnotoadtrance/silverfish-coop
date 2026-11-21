@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <string>
@@ -572,7 +573,7 @@ namespace
                 byte_call(component, set_enabled, 0);
             }
             channel(box, set_channel, interactable, block);
-            byte_call(box, set_enabled, 1); // QueryOnly, solely the stock interaction trace.
+            byte_call(box, set_enabled, 1); // QueryOnly.
             actor->SetActorEnableCollision(true);
             if (!stock_ammo)
             {
@@ -927,6 +928,91 @@ namespace
         clear(*entry);
         return report(lua, !mutable_actor(entry->actor.object.Get()), "stock_drop_projection_cleared");
     }
+
+    std::optional<Position> scene_vector(U::UObject* component, const U::TCHAR* function_name)
+    {
+        auto* function = find<U::UFunction>(function_name);
+        auto* value = function ? U::CastField<U::FStructProperty>(function->GetReturnProperty()) : nullptr;
+        if (!live(component) || !value || value->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector")) ||
+            value->GetOffset_Internal() != 0 || function->GetParmsSize() != sizeof(Position) ||
+            function->GetNumParms() != 1 || !function->HasAnyFunctionFlags(U::FUNC_Native)) return {};
+        Position result{};
+        component->ProcessEvent(function, result.data());
+        return std::ranges::all_of(result, coordinate) ? std::optional{result} : std::nullopt;
+    }
+
+    bool clear_floor_sight(U::UObject* pawn, U::UObject* actor, const Position& eye, const Position& item)
+    {
+        auto* library = find<U::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
+        auto* fn = find<U::UFunction>(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
+        if (!library || !fn || fn->GetOuterPrivate() != library->GetClassPrivate() ||
+            !fn->HasAnyFunctionFlags(U::FUNC_Native) || fn->GetNumParms() != 13 || fn->GetParmsSize() > 512)
+            return false;
+        auto* context = parameter<U::FObjectProperty>(fn, STR("WorldContextObject"), 0, sizeof(void*));
+        auto* start = parameter<U::FStructProperty>(fn, STR("Start"), 8, sizeof(Position));
+        auto* end = parameter<U::FStructProperty>(fn, STR("End"), 0x20, sizeof(Position));
+        auto* vec = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+        auto* channel = parameter<U::FByteProperty>(fn, STR("TraceChannel"), 0x38, 1);
+        auto* complex = parameter<U::FBoolProperty>(fn, STR("bTraceComplex"), 0x39, 1);
+        auto* ignore = field<U::FArrayProperty>(fn, STR("ActorsToIgnore"));
+        auto* ignored = ignore ? U::CastField<U::FObjectProperty>(ignore->GetInner()) : nullptr;
+        auto* hit = field<U::FStructProperty>(fn, STR("OutHit"));
+        auto* self = field<U::FBoolProperty>(fn, STR("bIgnoreSelf"));
+        auto* hit_found = U::CastField<U::FBoolProperty>(fn->GetReturnProperty());
+        if (!context || !start || !end || !vec || start->GetStruct().Get() != vec || end->GetStruct().Get() != vec ||
+            !channel || !complex || !ignored || !hit || hit->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/Engine.HitResult")) ||
+            !self || !hit_found) return false;
+        struct Parameters
+        {
+            alignas(16) std::array<std::byte, 512> storage{};
+            U::FArrayProperty* ignore;
+            U::FStructProperty* hit;
+            ~Parameters()
+            {
+                hit->DestroyValue_InContainer(storage.data());
+                ignore->DestroyValue_InContainer(storage.data());
+            }
+        } args{{}, ignore, hit};
+        auto* data = args.storage.data();
+        ignore->InitializeValue_InContainer(data);
+        hit->InitializeValue_InContainer(data);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), pawn);
+        std::memcpy(start->ContainerPtrToValuePtr<void>(data), eye.data(), sizeof(eye));
+        std::memcpy(end->ContainerPtrToValuePtr<void>(data), item.data(), sizeof(item));
+        channel->SetPropertyValueInContainer(data, 1); // Stock Visibility trace
+        complex->SetPropertyValueInContainer(data, true);
+        self->SetPropertyValueInContainer(data, true);
+        U::FScriptArrayHelper ignored_actors(ignore, ignore->ContainerPtrToValuePtr<void>(data));
+        ignored->SetObjectPropertyValue(ignored_actors.GetRawPtr(ignored_actors.AddValue()), actor);
+        if (auto* held = object(pawn, STR("EquipedItem")); live(held))
+            ignored->SetObjectPropertyValue(ignored_actors.GetRawPtr(ignored_actors.AddValue()), held);
+        library->ProcessEvent(fn, data);
+        return !hit_found->GetPropertyValueInContainer(data);
+    }
+
+    bool floor_box_visible(U::UObject* pawn, U::UObject* actor, U::UObject* box, const Position& eye)
+    {
+        const auto center = scene_vector(box, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
+        if (!center) return false;
+        if (clear_floor_sight(pawn, actor, eye, *center)) return true;
+        const auto extent = scene_vector(box, STR("/Script/Engine.BoxComponent:GetScaledBoxExtent"));
+        if (!extent) return false;
+        for (const auto& [size, path] : {
+            std::pair{(*extent)[2], STR("/Script/Engine.SceneComponent:GetUpVector")},
+            std::pair{(*extent)[1], STR("/Script/Engine.SceneComponent:GetRightVector")}})
+        {
+            if (size <= 0 || size > 100) continue;
+            const auto axis = scene_vector(box, path);
+            if (!axis) continue;
+            for (const auto sign : {-0.6, 0.6})
+            {
+                auto point = *center;
+                for (std::size_t i = 0; i < point.size(); ++i) point[i] += (*axis)[i] * size * sign;
+                if (clear_floor_sight(pawn, actor, eye, point)) return true;
+            }
+        }
+        return false;
+    }
 }
 
 namespace silverfish::native_guest_drop_projection
@@ -934,6 +1020,27 @@ namespace silverfish::native_guest_drop_projection
     bool owns_actor(U::UObject* actor)
     {
         return projection_for(actor) != nullptr;
+    }
+
+    std::vector<U::UObject*> visible_nearby_actors(U::UObject* pawn, std::span<U::UObject* const> shown)
+    {
+        if (!ready() || !live(pawn) || !active_projection_slots ||
+            input::current_local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn) return {};
+        auto* camera = object(pawn, STR("Camera"));
+        if (!live(camera) || camera->GetOuterPrivate() != pawn) return {};
+        const auto eye = scene_vector(camera, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
+        if (!eye) return {};
+        std::vector<U::UObject*> visible;
+        for (const auto& [projection, lease] : std::span{projections}.first(active_projection_slots))
+        {
+            auto* actor = projection.object.Get();
+            auto* box = projection.box.Get();
+            if (!lease.visible || lease.pawn.Get() != pawn || std::ranges::find(shown, actor) != shown.end() ||
+                !scope_current(lease) || !live(actor) || !inert(actor) ||
+                !near_source(lease, pawn) || !input::local_interaction_in_reach(pawn, actor, box)) continue;
+            if (floor_box_visible(pawn, actor, box, *eye)) visible.push_back(actor);
+        }
+        return visible;
     }
 
     std::optional<int> nearby_stack_count(U::UObject* actor, U::UObject* pawn)
