@@ -51,6 +51,9 @@ namespace
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
     constexpr auto stash_screen_path = STR("/Game/Classes/GUI/New/StashScreen.StashScreen_C");
     constexpr auto stash_actor_path = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
+    constexpr auto shop_screen_path = STR("/Game/Classes/GUI/New/ShopScreen.ShopScreen_C");
+    constexpr auto shop_panel_path = STR("/Game/Classes/GUI/New/Components/ShopPanel.ShopPanel_C");
+    constexpr auto shop_actor_path = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -148,9 +151,11 @@ namespace
         Unreal::FName final_split{STR("FinalSplitStack")};
         Unreal::FName position_split{STR("PositionSplitStackPopup")};
         Unreal::FName action_pickup{STR("ActionPickup")};
+        Unreal::FName action_split{STR("ActionSplitStack")};
         Unreal::FName action_quick_move{STR("ActionQuickMove")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName save_stash{STR("Save_StashToGI")};
+        Unreal::FName save_shop{STR("SaveInventory")};
         Unreal::FName begin_take{STR("InitiateItemTake")};
         Unreal::FName finish_take{STR("FinalTakeItem")};
         Unreal::FName cancel_take{STR("CancelTakeItem")};
@@ -261,6 +266,9 @@ namespace
         Unreal::FWeakObjectPtr drag_source;
         Guid drag_item{};
         Guid taking_item{};
+        bool merchant{};
+        int value{};
+        std::array<Unreal::FWeakObjectPtr, 3> shop_backups;
     };
 
     std::optional<Entries> entries;
@@ -886,24 +894,32 @@ namespace
         return structure && structure->GetPathName() == item_path ? array : nullptr;
     }
 
+    constexpr std::array shop_arrays{STR("StockInventory"), STR("FiniteInventory"), STR("BuyBackInventory")};
+
+    void restore_preview(Unreal::UObject* actor, const Unreal::TCHAR* name, Unreal::UObject* backup)
+    {
+        if (!backup) return;
+        auto* from = stash_rows(backup, STR("PlayerBackpack"));
+        auto* to = stash_rows(actor, name);
+        if (from && to)
+            to->CopyCompleteValue(to->ContainerPtrToValuePtr<void>(actor), from->ContainerPtrToValuePtr<void>(backup));
+        backup->ClearRootSet();
+    }
+
     void clear_stash_screen()
     {
-        if (auto* backup = stash_screen.backup.Get())
-        {
-            auto* actor = stash_screen.actor.Get();
-            auto* from = stash_rows(backup, STR("PlayerBackpack"));
-            auto* to = stash_rows(actor, STR("Inventory"));
-            if (from && to)
-                to->CopyCompleteValue(to->ContainerPtrToValuePtr<void>(actor), from->ContainerPtrToValuePtr<void>(backup));
-            backup->ClearRootSet();
-        }
+        auto* actor = stash_screen.actor.Get();
+        restore_preview(actor, STR("Inventory"), stash_screen.backup.Get());
+        for (std::size_t i = 0; i < shop_arrays.size(); ++i)
+            restore_preview(actor, shop_arrays[i], stash_screen.shop_backups[i].Get());
         stash_screen = {};
     }
 
-    bool enroll_stash_screen(std::uintptr_t address, bool ready)
+    bool enroll_stash_screen(std::uintptr_t address, bool ready, bool merchant)
     {
         auto* screen = top_stock_menu();
-        if (reinterpret_cast<std::uintptr_t>(screen) != address || !exact_class(screen, stash_screen_path) ||
+        if (reinterpret_cast<std::uintptr_t>(screen) != address ||
+            !exact_class(screen, merchant ? shop_screen_path : stash_screen_path) ||
             !stash_seat() || !same_widget_player(screen)) return false;
         const auto current = scope.generation;
         if (stash_screen.screen.Get() == screen && stash_screen.generation == current)
@@ -914,20 +930,25 @@ namespace
 
         auto* manager = object_field(screen, STR("ItemManager"));
         auto* backpack = object_field(screen, STR("BackpackPanel"));
-        auto* storage = object_field(screen, STR("StashPanel"));
-        auto* actor = object_field(screen, STR("Stash"));
-        auto* actor_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, stash_actor_path);
+        auto* storage = object_field(screen, merchant ? STR("ShopPanel") : STR("StashPanel"));
+        auto* actor = object_field(screen, merchant ? STR("Shop") : STR("Stash"));
+        auto* actor_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr,
+                                                                                   merchant ? shop_actor_path : stash_actor_path);
         auto* stash_index = exact_class(storage, panel_path) ? field<Unreal::FIntProperty>(storage, STR("InventoryIndex")) : nullptr;
+        const bool stock_panel = merchant ? exact_class(storage, shop_panel_path)
+                                          : stash_index && stash_index->GetPropertyValueInContainer(storage) == 0;
         if (!live(actor) || !actor_class || !actor->IsA(actor_class) || static_cast<Unreal::AActor*>(actor)->GetWorld() != scope.world.Get() ||
             !exact_class(manager, manager_path) || !same_widget_player(manager) || !exact_backpack_panel(backpack, manager) ||
-            !stash_index || stash_index->GetPropertyValueInContainer(storage) != 0 ||
+            !stock_panel ||
             object_field(storage, STR("Target")) != actor || object_field(storage, STR("ItemManager")) != manager ||
             object_field(manager, STR("ParentScreen")) != screen) return false;
         clear_stash_screen();
         stash_screen = {screen, actor, manager, backpack, storage, current, ready};
+        stash_screen.merchant = merchant;
         return true;
     }
 
+    template<bool Merchant>
     int lua_set_stash_screen(const Lua& lua)
     {
         bool accepted = false;
@@ -936,7 +957,7 @@ namespace
         {
             const auto address = lua.get_integer();
             const auto ready = lua.get_bool();
-            accepted = address > 0 && enroll_stash_screen(static_cast<std::uintptr_t>(address), ready);
+            accepted = address > 0 && enroll_stash_screen(static_cast<std::uintptr_t>(address), ready, Merchant);
         }
         lua.set_bool(accepted);
         return 1;
@@ -954,15 +975,22 @@ namespace
         const auto guid = format_guid(stash_screen.item);
         lua.set_string(std::string_view{guid.data(), guid.size()});
         lua.set_bool(stash_screen.deposit);
+        lua.set_integer(stash_screen.value);
         stash_screen.item = {};
-        return 2;
+        return 3;
+    }
+
+    bool local_preview(Unreal::UObject* candidate)
+    {
+        auto* outer = candidate ? candidate->GetOuterPrivate() : nullptr;
+        return outer && outer->GetPathName() == STR("/Engine/Transient") && candidate != canonical_host_save();
     }
 
     int lua_replace_stash_preview(const Lua& lua)
     {
         const auto refuse = [&] { lua.set_bool(false); return 1; };
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
-            !lua.is_integer(2) || !lua.is_integer(3) || !stash_seat()) return refuse();
+            !lua.is_integer(2) || !lua.is_integer(3) || stash_screen.merchant || !stash_seat()) return refuse();
         const auto screen = lua.get_integer();
         const auto rows = lua.get_integer();
         const auto original = lua.get_integer();
@@ -972,10 +1000,6 @@ namespace
         auto* actor = stash_screen.actor.Get();
         auto* source = find_object(static_cast<std::uintptr_t>(rows), save_path);
         auto* backup = original > 0 ? find_object(static_cast<std::uintptr_t>(original), save_path) : stash_screen.backup.Get();
-        const auto local_preview = [&](Unreal::UObject* candidate) {
-            auto* outer = candidate ? candidate->GetOuterPrivate() : nullptr;
-            return outer && outer->GetPathName() == STR("/Engine/Transient") && candidate != canonical_host_save();
-        };
         if (!local_preview(source) || !local_preview(backup) || source == backup ||
             (original > 0 && (stash_screen.backup.Get() || backup->IsRootSet()))) return refuse();
         auto* inventory = stash_rows(actor, STR("Inventory"));
@@ -994,6 +1018,82 @@ namespace
             stash_screen.backup = backup;
         }
         inventory->CopyCompleteValue(destination, available);
+        lua.set_bool(true);
+        return 1;
+    }
+
+    int lua_replace_shop_preview(const Lua& lua)
+    {
+        const auto refuse = [&] { lua.set_bool(false); return 1; };
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 7 || !lua.is_integer(1) ||
+            !stash_screen.merchant || !stash_seat()) return refuse();
+        const auto screen = lua.get_integer();
+        if (screen <= 0 || reinterpret_cast<std::uintptr_t>(stash_screen.screen.Get()) != static_cast<std::uintptr_t>(screen) ||
+            stash_screen.generation != scope.generation || top_stock_menu() != stash_screen.screen.Get()) return refuse();
+        auto* actor = stash_screen.actor.Get();
+        std::array<std::uintptr_t, shop_arrays.size() * 2> addresses{};
+        std::array<Unreal::UObject*, addresses.size()> objects{};
+        std::size_t remaining{};
+        for (std::size_t i = 0; i < addresses.size(); ++i)
+        {
+            if (!lua.is_integer(1)) return refuse();
+            const auto address = lua.get_integer();
+            if (address < 0 || (address == 0 && i % 2 == 0)) return refuse();
+            if (!address) continue;
+            const auto key = static_cast<std::uintptr_t>(address);
+            if (std::ranges::find(addresses, key) != addresses.end()) return refuse();
+            addresses[i] = key;
+            ++remaining;
+        }
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
+            const auto found = std::ranges::find(addresses, reinterpret_cast<std::uintptr_t>(object));
+            if (found != addresses.end() && live(object) && exact_class(object, save_path))
+            {
+                objects[static_cast<std::size_t>(found - addresses.begin())] = object;
+                if (--remaining == 0) return RC::LoopAction::Break;
+            }
+            return RC::LoopAction::Continue;
+        });
+        if (remaining) return refuse();
+        struct Projection
+        {
+            Unreal::UObject* backup{};
+            Unreal::FArrayProperty* target{};
+            Unreal::FArrayProperty* copy{};
+            const void* contents{};
+            bool fresh{};
+        };
+        std::array<Projection, shop_arrays.size()> projections;
+        for (std::size_t i = 0; i < projections.size(); ++i)
+        {
+            auto* source = objects[i * 2];
+            const bool fresh = addresses[i * 2 + 1] != 0;
+            auto* backup = fresh ? objects[i * 2 + 1] : stash_screen.shop_backups[i].Get();
+            if (!local_preview(source) || !local_preview(backup) || source == backup ||
+                (fresh && (stash_screen.shop_backups[i].Get() || backup->IsRootSet())) ||
+                std::ranges::any_of(projections, [&](const Projection& existing) { return existing.backup == backup; }))
+                return refuse();
+            auto* source_rows = stash_rows(source, STR("PlayerBackpack"));
+            auto* target_rows = stash_rows(actor, shop_arrays[i]);
+            auto* backup_rows = stash_rows(backup, STR("PlayerBackpack"));
+            if (!source_rows || !target_rows || !backup_rows) return refuse();
+            const auto* contents = source_rows->ContainerPtrToValuePtr<void>(source);
+            Unreal::FScriptArrayHelper count(source_rows, contents);
+            if (count.Num() < 0 || count.Num() > inventory_limit) return refuse();
+            projections[i] = {backup, target_rows, backup_rows, contents, fresh};
+        }
+        for (std::size_t i = 0; i < projections.size(); ++i)
+        {
+            const auto& row = projections[i];
+            auto* destination = row.target->ContainerPtrToValuePtr<void>(actor);
+            if (row.fresh)
+            {
+                row.copy->CopyCompleteValue(row.copy->ContainerPtrToValuePtr<void>(row.backup), destination);
+                row.backup->SetRootSet();
+                stash_screen.shop_backups[i] = row.backup;
+            }
+            row.target->CopyCompleteValue(destination, row.contents);
+        }
         lua.set_bool(true);
         return 1;
     }
@@ -1539,17 +1639,26 @@ namespace
             object_field(card, STR("ItemManager")) != manager) return {};
         const auto item = card_item(card);
         const GuidFields fields(item.structure);
-        if (!stash_panel(item.panel) || !array_has_widget(item.panel, STR("Cards"), card, false) || !fields.valid() ||
+        if (!stash_panel(item.panel) || !fields.valid() ||
             !live(object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value))) return {};
+        const bool present = stash_screen.merchant && item.panel == stash_screen.storage.Get()
+            ? array_has_widget(item.panel, STR("Cards_Infinite"), card, false) ||
+              array_has_widget(item.panel, STR("Cards_Limited"), card, false) ||
+              array_has_widget(item.panel, STR("Cards_BuyBack"), card, false)
+            : array_has_widget(item.panel, STR("Cards"), card, false);
+        if (!present) return {};
         const auto guid = fields.read(item.value);
         return guid == Guid{} ? std::nullopt : std::optional{StashCard{item, guid}};
     }
 
-    void queue_stash_move(const Guid& guid, Unreal::UObject* origin)
+    void queue_stash_move(const Guid& guid, Unreal::UObject* origin, const ItemView& item)
     {
+        auto* value = field<Unreal::FIntProperty>(item.structure, item_value_name);
+        if (!value) return;
         stash_screen.accepting = false;
         stash_screen.item = guid;
         stash_screen.deposit = origin == stash_screen.backpack.Get();
+        stash_screen.value = value->GetPropertyValueInContainer(item.value);
     }
 
     bool qualified_stash_action(Unreal::UObject* screen, Unreal::UObject* object, Unreal::UFunction* function, int parameters)
@@ -1598,7 +1707,7 @@ namespace
         if (!holding || !holding->GetPropertyValueInContainer(manager) ||
             !stash_panel(origin) || stash_screen.drag_item == Guid{} || !fields.valid() ||
             fields.read(held.value) != stash_screen.drag_item) return;
-        if (target != origin) queue_stash_move(stash_screen.drag_item, origin);
+        if (target != origin) queue_stash_move(stash_screen.drag_item, origin, held);
         clear_stash_cursor(manager);
     }
 
@@ -1608,12 +1717,13 @@ namespace
         if (!screen) return false;
         // The widget reads the projected rows through the regular stash actor.
         // Keep its stock save callback from persisting that temporary inventory.
-        if (name == entries->save_stash && context == stash_screen.actor.Get())
+        if (name == (stash_screen.merchant ? entries->save_shop : entries->save_stash) && context == stash_screen.actor.Get())
         {
             call.PreventOriginalFunctionCall();
             return true;
         }
-        const bool quick = name == entries->quick_move || name == entries->action_quick_move;
+        const bool shop_buy = stash_screen.merchant && (name == entries->action_pickup || name == entries->action_split);
+        const bool quick = name == entries->quick_move || name == entries->action_quick_move || shop_buy;
         const bool mutation = std::ranges::find(entries->stash_mutations, name) != entries->stash_mutations.end();
         auto* manager = stash_screen.manager.Get();
         if (context != manager)
@@ -1676,7 +1786,7 @@ namespace
         if ((!quick && !finish_take) || stash_screen.drag_item != Guid{} ||
             !qualified_stash_action(screen, manager, function, 0)) return true;
 
-        const bool from_menu = name == entries->action_quick_move;
+        const bool from_menu = name == entries->action_quick_move || shop_buy;
         auto* menu = from_menu ? object_field(manager, STR("ItemContextMenu")) : nullptr;
         if (from_menu && (!exact_class(menu, context_menu_path) || !same_widget_player(menu) ||
                           object_field(menu, STR("ItemManager")) != manager)) return true;
@@ -1695,8 +1805,8 @@ namespace
             }
             return true;
         }
-        if (!selected) return true;
-        queue_stash_move(selected->guid, selected->item.panel);
+        if (!selected || (shop_buy && selected->item.panel != stash_screen.storage.Get())) return true;
+        queue_stash_move(selected->guid, selected->item.panel, selected->item);
         if (from_menu)
         {
             if (auto* close = stock_no_args(manager, Unreal::FName(STR("CloseContextMenu"))))
@@ -3127,9 +3237,11 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishSetNativeTransportScope", lua_enroll);
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
-        lua.register_function("SilverfishSetNativeStashScreen", lua_set_stash_screen);
+        lua.register_function("SilverfishSetNativeStashScreen", lua_set_stash_screen<false>);
+        lua.register_function("SilverfishSetNativeShopScreen", lua_set_stash_screen<true>);
         lua.register_function("SilverfishTakeNativeStashMove", lua_take_stash_move);
         lua.register_function("SilverfishReplaceNativeStashPreview", lua_replace_stash_preview);
+        lua.register_function("SilverfishReplaceNativeShopPreview", lua_replace_shop_preview);
         lua.register_function("SilverfishClearNativeStashScreen", lua_clear_stash);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
         lua.register_function("SilverfishSetNativeHostDropScope", lua_set_drop<true>);

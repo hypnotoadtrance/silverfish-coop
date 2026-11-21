@@ -203,12 +203,17 @@ local function offer_rows(encoded)
     if type(encoded) ~= "string" or #encoded > max_offers * 640 then return nil end
     local rows, seen = {}, {}
     for line in encoded:gmatch("[^\n]+") do
-        local key, class, quantity, value, price = line:match("^([0-9A-F]+)\t(/Game/[%w_./%-]+)\t(%d+)\t(%d+)\t(%d+)$")
+        local key, class, quantity, value, price, source, ammo, weight, never_drop, stacks = line:match(
+            "^([0-9A-F]+)\t(/Game/[%w_./%-]+)\t(%d+)\t(%d+)\t(%d+)\t(%l+)\t(-?%d+)\t(%S+)\t([01])\t([01])$")
+        local units, kilograms = math.tointeger(tonumber(ammo)), tonumber(weight)
         if not guid(key) or seen[key] or #class > 512 or not integer(quantity, 1, max_money)
             or not integer(value, 0, max_money) or not integer(price, 0, max_money)
+            or (source ~= "limited" and source ~= "shelf" and source ~= "buyback" and source ~= "backpack")
+            or not units or units < -2147483648 or units > max_money
+            or not finite(kilograms) or kilograms < 0 or kilograms > 100000
             or #rows >= max_offers then return nil end
         seen[key] = true
-        rows[#rows + 1] = {key, class, quantity, value, price}
+        rows[#rows + 1] = {key, class, quantity, value, price, source, ammo, weight, never_drop, stacks}
     end
     if #rows == 0 and encoded ~= "" then return nil end
     return rows

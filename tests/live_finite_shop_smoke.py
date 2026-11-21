@@ -28,7 +28,7 @@ SCIENTIST_ACTOR = f"Shop_BP_C {MAPS['scientist']}.Shop_Scientist_01:PersistentLe
 
 
 async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool, merchant: str, *,
-                 shop_pages=False, scientist_blank=False) -> None:
+                 shop_pages=False, scientist_blank=False, stock_screen=False) -> None:
     name = "finite-shop-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     host_run = campaign / "run"
@@ -83,6 +83,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 break
             await asyncio.sleep(.2)
         raise RuntimeError(f"{directory} did not reach the expected finite merchant state: {status.get('state')}")
+
+    async def stock_ready(wallet):
+        result = await wait(guest_run, lambda state: (panel := state.get("game", {}).get("native_shop_view", {})).get("state") == "ready"
+                            and panel.get("stock") is True and panel.get("wallet") == wallet)
+        return result["game"]["native_shop_view"]
 
     async def saved_balances(character):
         await act(host_target, "checkpoint")
@@ -139,8 +144,9 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                              and state.get("game", {}).get("map") == MAPS[merchant])
         port = str(initial["endpoint"]["port"])
         invite = await command("invite", *host_target, "--name", "Merchant guest", "--character", "Merchant character")
+        guest_flags = ("--native-guest-inventory-view",) if stock_screen else ()
         await spawn(guest_run, "guest.txt", guest_target, "join", *guest_target, "--headless", "--native-zones",
-                    "--invite", invite["invite_file"])
+                    "--invite", invite["invite_file"], *guest_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected")
         paired = await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         generation = paired["generation"]
@@ -172,24 +178,37 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         if shop_view:
             opened = (await act(guest_target, "native-shop-view-fixture", "--target", "open"))["native_shop_view"]
             assert (opened["state"], opened["map"], opened["actor"]) == ("pending", MAPS[merchant], listing["actor"]), opened
-            if shop_pages:
+            if stock_screen:
+                view = await stock_ready(100_000)
+                assert view["total"] == view["visible"] == listing["count"], view
+                await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "0")
+                assert (await stock_ready(0))["sequence"] == opened["sequence"]
+                await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "100000")
+                assert (await stock_ready(100_000))["sequence"] == opened["sequence"]
+                submit = (await act(guest_target, "native-shop-view-fixture", "--target",
+                                    f"stock:{offer['source']}:{guid}"))["native_shop_view"]
+                assert (submit["guid"], submit["price"]) == (guid, price), submit
+            elif shop_pages:
                 page_scope, current_page, page_proof = await check_shop_pages(opened, listing, offer)
                 view = current_page["view"]
             else:
                 visible = await wait(guest_run, lambda state: state.get("game", {}).get("native_shop_view", {}).get("state") == "ready")
                 view = visible["game"]["native_shop_view"]
-            offer_index = listing["offers"].index(offer)
-            assert offer_index < view["visible"], (offer, view)
-            for _ in range(offer_index):
-                view = (await act(guest_target, "native-shop-view-fixture", "--target", "down"))["native_shop_view"]
-            assert (view["map"], view["actor"], view["sequence"], view["guid"], view["price"]) == (
-                MAPS[merchant], listing["actor"], opened["sequence"], guid, price), view
-            confirm = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
-            assert confirm["state"] == "confirming", confirm
-            submit = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
+            if not stock_screen:
+                offer_index = listing["offers"].index(offer)
+                assert offer_index < view["visible"], (offer, view)
+                for _ in range(offer_index):
+                    view = (await act(guest_target, "native-shop-view-fixture", "--target", "down"))["native_shop_view"]
+                assert (view["map"], view["actor"], view["sequence"], view["guid"], view["price"]) == (
+                    MAPS[merchant], listing["actor"], opened["sequence"], guid, price), view
+                confirm = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
+                assert confirm["state"] == "confirming", confirm
+                submit = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
             assert submit["state"] == "buying", submit
             if shop_pages:
                 page_proof["after_purchase"] = await rendered_page(page_scope, listing, 0, current_page["page"]["render_event"], 100_000 - price)
+            elif stock_screen:
+                await stock_ready(100_000 - price)
             else:
                 await wait(guest_run, lambda state: (panel := state.get("game", {}).get("native_shop_view", {})).get("state") == "ready"
                            and panel.get("total") == listing["count"] - (0 if reusable else 1))
@@ -243,11 +262,21 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             quote = (await act(guest_target, "native-finite-shop-sale-quote", "--target", guid))["native_finite_sale_quote"]
             quote_row, = quote["offers"]
             sale_price = quote_row["price"]
-            assert quote_row == dict(offer, price=offer["value"]) and quote["wallet_before"] == expected_wallet, quote
+            assert quote_row == dict(offer, source="backpack", price=offer["value"]) and quote["wallet_before"] == expected_wallet, quote
             wrong_price = await act(guest_target, "native-finite-shop-sell", "--target", f"{guid}@{sale_price + 1}", expected=False)
             assert wrong_price["error"] == "native_finite_shop_quote_changed", wrong_price
-            sale_command = ("native-finite-shop-sell", "--target", f"{guid}@{sale_price}", "--operation-id", uuid.uuid4().hex)
-            sale = (await act(guest_target, *sale_command))["native_finite_sale"]
+            sale_id = uuid.uuid4().hex
+            if stock_screen:
+                submitted_sale = (await act(guest_target, "native-shop-view-fixture", "--target",
+                                            f"stock:backpack:{guid}"))["native_shop_view"]
+                assert (submitted_sale["state"], submitted_sale["price"]) == ("selling", sale_price), submitted_sale
+                await stock_ready(expected_wallet + sale_price)
+                events = (await command("events", *guest_target, "--tail", "50"))["events"]
+                sold, = [row for row in events if row["event"] == "native_shop_view_sold"]
+                sale_id, sale = sold["operation_id"], sold["native_finite_sale"]
+            sale_command = ("native-finite-shop-sell", "--target", f"{guid}@{sale_price}", "--operation-id", sale_id)
+            if not stock_screen:
+                sale = (await act(guest_target, *sale_command))["native_finite_sale"]
             expected_wallet += sale_price
             assert sale["offers"] == [quote_row] and sale["wallet_after"] == expected_wallet, sale
             assert sale["merchant_cash_after"] == quote["merchant_cash_before"] - sale_price, sale
@@ -280,13 +309,13 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             assert (restarted_offer["quantity"], restarted_offer["value"]) == (200, 600), restarted_offer
             assert restarted_offer["guid"] != acquire_guid, restarted_offer
             assert after["merchant_cash_before"] == purchase["merchant_cash_after"], after
-        else:
+        elif not sell:
             assert guid not in {row["guid"] for row in after["offers"]}, after
         assert (await act(guest_target, *operation))["native_finite_purchase"] == purchase
         persisted = (await act(guest_target, "native-inventory-list"))["native_inventory"]
         assert [row for row in persisted["items"] if row["guid"] == acquire_guid] == ([] if sell else [acquired]), persisted
         proof = {"purchase": purchase, "inventory_row": acquired, "after_restart_offer_count": after["count"],
-                 "stock_merchant_input": shop_view}
+                 "stock_merchant_input": shop_view, "stock_shop_screen": stock_screen}
         if verify_balances:
             assert rebound["game"]["map"] == MAPS[merchant] and persisted["owner"] == invite["character_id"], (rebound, persisted)
             restored_balances = await saved_balances(invite["character_id"])
@@ -318,7 +347,28 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             assert after["merchant_cash_before"] == sale["merchant_cash_after"], after
             denied = await act(guest_target, "native-finite-shop-sale-quote", "--target", guid, expected=False)
             assert denied["error"].startswith("finite_shop_refused_"), denied
-            proof.update(sale=sale, sale_quote=quote)
+            buyback, = [row for row in after["offers"] if row["guid"] == guid]
+            assert buyback == dict(quote_row, source="buyback"), buyback
+            reclaim_id = uuid.uuid4().hex
+            if stock_screen:
+                await act(guest_target, "native-shop-view-fixture", "--target", "open")
+                await stock_ready(expected_wallet)
+                await act(guest_target, "native-shop-view-fixture", "--target", f"stock:buyback:{guid}")
+                await stock_ready(expected_wallet - sale_price)
+                events = (await command("events", *guest_target, "--tail", "50"))["events"]
+                receipt = next(row for row in reversed(events) if row["event"] == "native_shop_view_purchased")
+                reclaim_id, reclaimed = receipt["operation_id"], receipt["native_finite_purchase"]
+            buyback_command = ("native-finite-shop-buy", "--target", f"{guid}@{sale_price}", "--operation-id", reclaim_id)
+            if not stock_screen:
+                reclaimed = (await act(guest_target, *buyback_command))["native_finite_purchase"]
+            assert reclaimed["offers"] == [buyback] and reclaimed["wallet_after"] == expected_wallet - sale_price, reclaimed
+            assert reclaimed["merchant_cash_after"] == purchase["merchant_cash_after"], reclaimed
+            assert (await act(guest_target, *buyback_command))["native_finite_purchase"] == reclaimed
+            new_stock = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
+            assert not any(row["guid"] == guid for row in new_stock["offers"]), new_stock
+            restored = (await act(guest_target, "native-inventory-list"))["native_inventory"]
+            assert [row for row in restored["items"] if row["guid"] == guid] == [acquired], restored
+            proof.update(sale=sale, sale_quote=quote, buyback_after_restart=reclaimed)
     finally:
         for process, owner in reversed(processes):
             if process.returncode is None:
@@ -344,6 +394,7 @@ if __name__ == "__main__":
     options.add_argument("--work", required=True, type=Path)
     options.add_argument("--vanilla-saved", type=Path)
     options.add_argument("--shop-view", "--shop-input", action="store_true")
+    options.add_argument("--stock-screen", action="store_true", help="trade using the stock ShopScreen")
     options.add_argument("--shop-pages", action="store_true", help="verify authenticated Gunsmith overlay page navigation when stock spans two pages")
     options.add_argument("--scientist-blank", action="store_true", help="purchase the Scientist's exact guest Blank Data Tape shelf offer")
     options.add_argument("--sell", action="store_true")
@@ -357,5 +408,8 @@ if __name__ == "__main__":
         options.error("The Gunsmith smoke checks 9mm retention through restart")
     if args.shop_pages and args.merchant != "gunsmith":
         options.error("--shop-pages checks the Gunsmith stock profile")
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view or args.shop_pages, args.sell, args.merchant,
-                       shop_pages=args.shop_pages, scientist_blank=args.scientist_blank))
+    if args.shop_pages and args.stock_screen:
+        options.error("Overlay page navigation and the stock screen use separate fixture paths")
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view or args.shop_pages or args.stock_screen,
+                       args.sell, args.merchant, shop_pages=args.shop_pages, scientist_blank=args.scientist_blank,
+                       stock_screen=args.stock_screen))

@@ -879,7 +879,7 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "page")
+            if (len(fields) == 9 and fields[0] == "shop-view" and fields[3] in ("open", "close", "buy", "sell", "page")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
                             for value in fields[1:3])
                     and all(len(value) <= 512 for value in fields[4:])):
@@ -2087,15 +2087,19 @@ class Bridge:
                                                                  "sequence": int(fields[4]), "entry": fields[5]}
                 elif fields[0] == "native-finite-shop" and len(fields) == 10:
                     data["native_finite_shop"] = parse_finite_shop_summary(fields)
-                elif fields[0] == "native-finite-shop-item" and len(fields) == 6 and "native_finite_shop" in data:
+                elif fields[0] == "native-finite-shop-item" and len(fields) in {6, 11} and "native_finite_shop" in data:
                     data["native_finite_shop"]["offers"].append(parse_finite_shop_item(fields))
-                elif fields[0] == "native-shop-view" and len(fields) == 12:
+                elif fields[0] == "native-shop-view" and len(fields) in {12, 13}:
                     data["native_shop_view"] = {
                         "state": fields[1], "sequence": int(fields[2]), "map": fields[3], "pawn": fields[4], "actor": fields[5],
                         "wallet": None if fields[6] == "-" else int(fields[6]), "total": int(fields[7]),
                         "visible": int(fields[8]), "selection": int(fields[9]),
                         "guid": None if fields[10] == "-" else fields[10], "price": None if fields[11] == "-" else int(fields[11]),
                     }
+                    if len(fields) == 13:
+                        if fields[12] not in {"stock", "list"}:
+                            raise ValueError("Invalid merchant screen type")
+                        data["native_shop_view"]["stock"] = fields[12] == "stock"
                 elif fields[0] == "native-shop-view-page" and len(fields) == 9:
                     data["native_shop_view_page"] = {
                         "sequence": int(fields[1]), "map": fields[2], "pawn": fields[3], "actor": fields[4],

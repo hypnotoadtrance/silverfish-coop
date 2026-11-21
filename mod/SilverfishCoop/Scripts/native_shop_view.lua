@@ -1,6 +1,7 @@
 local view = {}
 local shopkeep = require("native_dialogue_shopkeep")
 local focus_fixture = require("native_shop_focus_fixture")
+local stock = require("native_shop_stock")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -38,7 +39,7 @@ local keys = {up = "Up", down = "Down", enter = "Enter", back = "BackSpace",
 local ordinary_keys = {"back", "up", "down", "enter"}
 local paged_keys = {"back", "page-up", "page-down", "up", "down", "enter"}
 local page_size, max_offers, max_money, max_sequence = 8, 128, 2147483647, 9007199254740991
-local events_path, heartbeat_path, is_downed, binding, session, widget
+local events_path, heartbeat_path, mailbox, is_downed, binding, session, widget
 local event_sequence = 0
 local lease_through = 0
 local held = {}
@@ -115,10 +116,19 @@ local function qualified_actor(current)
     return actor
 end
 
+local function standing(current)
+    return not current.host and current.controller.Loading == false
+        and type(is_downed) == "function" and is_downed(current.pawn) == false and os.time() <= lease_through
+end
+
 local function can_open(current)
     local menu = current.controller.MenuStack
-    return not current.host and current.controller.Loading == false and menu and menu:GetArrayNum() == 0
-        and type(is_downed) == "function" and is_downed(current.pawn) == false and os.time() <= lease_through
+    return standing(current) and menu and menu:GetArrayNum() == 0
+end
+
+local function can_use(current)
+    if session and session.screen then return standing(current) and stock.present(session) end
+    return can_open(current)
 end
 
 local function in_reach(current)
@@ -139,6 +149,7 @@ local function in_reach(current)
 end
 
 local function remove_widget()
+    if session and session.screen then stock.close(session) end
     local previous = widget
     widget = nil
     if valid(previous) then previous:RemoveFromParent() end
@@ -188,7 +199,8 @@ local function read_press(current)
     if active() or session and session.state == "error" then
         close()
     else
-        session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0}
+        session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0,
+            stock = stock.available()}
         held = {}
         request("open", "pending", 0)
     end
@@ -201,7 +213,7 @@ function view.reception_pending(state, phase, sequence)
         or not in_reach(current) or not math.tointeger(sequence) or sequence < 1 or sequence > max_sequence then return false end
     if active() then close() end
     session = {context = current, sequence = sequence, offset = 0, total = 0, offers = {}, selection = 0,
-        expires = os.time() + 29}
+        stock = stock.available(), expires = os.time() + 29}
     held = {}
     request("open", "pending", 0)
     return session.state == "pending"
@@ -211,6 +223,24 @@ function view.reception_open(pawn)
     return active() and session.context.profile.reception and same(session.context.pawn, pawn)
 end
 
+local function stock_action()
+    if not session or not session.screen or session.state ~= "ready" or not stock.present(session, true) then return end
+    local guid, sell, value = stock.take(session)
+    if not guid then return end
+    local quote = session.stock_offers[guid]
+    local price = sell and value or quote and quote.price
+    if math.type(price) ~= "integer" or price < 0 or price > max_money then
+        close()
+        return
+    end
+    if not sell and price > session.wallet then
+        if not SilverfishSetNativeShopScreen(session.screen:GetAddress(), true) then close() end
+        return
+    end
+    session.stock_selection = {guid = guid, price = price}
+    request(sell and "sell" or "buy", sell and "selling" or "buying", 0, guid, price)
+end
+
 function view.sync(state, phase)
     local current = context(state, phase)
     if current and current.profile.reception then
@@ -218,7 +248,8 @@ function view.sync(state, phase)
         if not same_context(current, binding) then view.clear() end
         renew_lease()
         binding = current
-        if active() and (not can_open(current) or not in_reach(current) or os.time() > session.expires) then close() end
+        if active() and (not can_use(current) or not in_reach(current) or os.time() > session.expires) then close() end
+        stock_action()
         return
     end
     if not current or type(SilverfishSetNativeShopViewScope) ~= "function"
@@ -235,7 +266,8 @@ function view.sync(state, phase)
     end
     binding = current
     if current.host then return end
-    if session and session.state ~= "closed" and (not accepting or not in_reach(current)) then close() end
+    if session and session.state ~= "closed" and (not can_use(current) or not in_reach(current)) then close() end
+    stock_action()
     read_press(current)
 end
 
@@ -352,7 +384,7 @@ local function offers(fields, first, offset, total)
 end
 
 local function fixture(current, action)
-    if not headless or not can_open(current) or not in_reach(current) then error("The staged merchant view fixture is unavailable", 0) end
+    if not headless or not can_use(current) or not in_reach(current) then error("The staged merchant view fixture is unavailable", 0) end
     if action == "open" then
         if current.profile.reception then error("Use the exact ShopKeep dialogue response to open this view", 0) end
         local actor = qualified_actor(current)
@@ -371,6 +403,18 @@ local function fixture(current, action)
         if not ok and current.profile.prove_focus then error(reason, 0) end
         if not invoked or not ok or reason ~= "stock_started_consumed" or current.controller.MenuStack:GetArrayNum() ~= 0
             or not read_press(current) then error("The stock merchant key did not publish one isolated shop press", 0) end
+    elseif session and session.screen and session.state == "ready" then
+        if action == "back" then
+            close()
+        else
+            local source, guid = action:match("^stock:(%l+):([0-9A-F]+)$")
+            if not source or #guid ~= 32 then error("The stock merchant fixture needs an exact card", 0) end
+            stock.move_fixture(session, source, guid)
+            stock_action()
+            if session.state ~= "buying" and session.state ~= "selling" then
+                error("The stock merchant did not publish one trade", 0)
+            end
+        end
     elseif keys[action] and session and valid(widget) and (session.paging or (action ~= "page-up" and action ~= "page-down")) then
         choose(action)
     else
@@ -382,24 +426,54 @@ end
 function view.command(fields, state, phase)
     local operation = fields[2]
     local page_render = operation == "native-shop-view-render-page"
+    local stock_render = operation == "native-shop-view-render-stock"
+    local stock_refresh = operation == "native-shop-view-refresh-stock"
     local unavailable = operation == "native-shop-view-unavailable"
-    if operation ~= "native-shop-view-render" and not page_render and not unavailable
+    if operation ~= "native-shop-view-render" and not page_render and not stock_render and not stock_refresh and not unavailable
         and operation ~= "native-shop-view-fixture" then return end
     local current = context(state, phase)
-    if not current or not same_context(current, binding) or not can_open(current) or not in_reach(current) then
+    if not current or not same_context(current, binding) or not can_use(current) or not in_reach(current) then
         error("The exact standing merchant guest is unavailable", 0)
     end
     if operation == "native-shop-view-fixture" and #fields == 3 then return fixture(current, fields[3]) end
     local sequence = integer(fields[3], max_sequence)
-    local tokened = page_render or (unavailable and #fields == 5)
-    local event = tokened and integer(fields[page_render and 4 or 5], max_sequence)
-    local map = fields[page_render and 5 or 4]
+    if stock_refresh then
+        if #fields ~= 4 or not same_context(current, session and session.context) or sequence ~= session.sequence
+            or fields[4] ~= current.profile.map or not session.screen or session.state ~= "ready" then
+            error("The stock shop refresh does not match the active screen", 0)
+        end
+        local manager = session.screen.ItemManager
+        local menu = manager.ItemContextMenu
+        if stock.present(session, true) and manager.HoldingItem == false and manager.IsTakingItem == false
+            and (not valid(menu) or not menu:IsVisible()) then
+            SilverfishSetNativeShopScreen(session.screen:GetAddress(), false)
+            request("open", "pending", 0)
+        end
+        return "stock shop refresh checked"
+    end
+    local render_with_event = page_render or stock_render
+    local tokened = render_with_event or (unavailable and #fields == 5)
+    local event = tokened and integer(fields[render_with_event and 4 or 5], max_sequence)
+    local map = fields[render_with_event and 5 or 4]
     if not same_context(current, session and session.context) or sequence ~= session.sequence or map ~= current.profile.map
-        or (session.state ~= "pending" and session.state ~= "buying" and session.state ~= "paging")
+        or (session.state ~= "pending" and session.state ~= "buying" and session.state ~= "selling" and session.state ~= "paging")
         or (tokened and (not event or event ~= session.pending_event)) or (session.paging and not tokened) then
         error("The authenticated merchant view has expired", 0)
     end
+    if stock_render then
+        local balance, total, nonce = integer(fields[7], max_money), integer(fields[8], max_offers), fields[9]
+        if not session.stock or #fields ~= 9 or fields[6] ~= current.profile.actor_name or not balance or not total
+            or #nonce ~= 32 or not nonce:match("^[0-9a-f]+$") then error("The native merchant catalog is unavailable", 0) end
+        local ok, rows = pcall(stock.render, session, qualified_actor(current), state, phase, balance,
+            mailbox .. "/native-shop-stock-" .. nonce .. ".tsv", total)
+        if not ok then close(); error(rows, 0) end
+        session.wallet, session.total, session.stock_offers, session.state = balance, total, rows, "ready"
+        session.stock_selection, session.render_event = nil, event
+        session.pending_event, session.wanted_offset = nil, nil
+        return "verified stock shop screen"
+    end
     if unavailable and (#fields == 4 or #fields == 5) then
+        if session.stock then close(); return "stock shop closed after rejected trade" end
         session.state, session.offers, session.total, session.selection, session.offset = "error", {}, 0, 0, 0
         session.wallet, session.render_event = nil, nil
     else
@@ -437,9 +511,11 @@ function view.rows(state, phase, status_row)
     local current = session and session.context
     if not current or phase ~= "connected" or state.map ~= current.profile.map
         or not same(state.world, current.world) then return {} end
-    local offer = session.offers[session.selection]
+    local offer = session.stock_selection or session.offers[session.selection]
+    local visible = session.stock and session.screen and session.total or #session.offers
     return {status_row("native-shop-view", session.state, session.sequence, current.profile.map, current.name, current.profile.actor_name,
-        session.wallet or "-", session.total, #session.offers, session.selection, offer and offer.guid or "-", offer and offer.price or "-"),
+        session.wallet or "-", session.total, visible, session.selection, offer and offer.guid or "-", offer and offer.price or "-",
+        session.stock and "stock" or "list"),
         status_row("native-shop-view-page", session.sequence, current.profile.map, current.name, current.profile.actor_name,
             session.offset, session.pending_event or 0, session.wanted_offset or session.offset, session.render_event or 0)}
 end
@@ -447,6 +523,7 @@ end
 function view.start(bridge, downed)
     if not enabled or not bridge or bridge == "" then return end
     events_path, heartbeat_path = bridge .. "/native-shop-view-events", bridge .. "/native-shop-view-heartbeat"
+    mailbox = bridge
     is_downed = downed
     LoopInGameThreadWithDelay(16, function()
         local ok, failure = pcall(poll_keys)

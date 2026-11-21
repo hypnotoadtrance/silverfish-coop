@@ -119,7 +119,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-guest-held-fire` | Enables experimental hold and release for the standard SMG on a current matched native stage. The invitation enables the matching guest control. |
 | `--native-authored-enemy-loot` | Enables shared stock shotgun-shell loot for the qualified CQC encounters. Look at the shell stack and press Interact. Automation can inspect nearby item actors in `game.native_world_loot_items` and use `native-enemy-loot-claim --target GUID` with the GUID shown in `gameplay.native_enemy_loot_rolls`. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |
-| `--native-shop-view` | Enables the guest's purchase overlay at configured finite merchants. Use the stock interact key to open it, Up or Down to choose, Enter to review and confirm, and Backspace to close. |
+| `--native-shop-view` | Enables guest trading at qualified cash merchants. Staged guests can use `--native-guest-inventory-view` with Join to open the stock shop. Other staged guests can use Up and Down to choose an overlay offer, Enter to confirm, and Backspace to close. |
 | Guest `--native-guest-inventory-view` | Enables the inventory overlay explicitly. The stock inventory key opens the first page. Page Up and Page Down move the selection and continue to the next page at the end of the list, or the previous page at the beginning. Press Home to preview a supported equip, use, or ammo split and again to confirm. The overlay splits half the selected ammo stack, rounded down. Select a shareable item in the backpack, press Delete to preview the drop, and press Home to confirm. End cancels a confirmation or closes the overlay. Reopen it to refresh the inventory. |
 | Guest `--native-guest-primary-input --native-guest-reload-input` | Enables qualified stock primary and reload controls explicitly. The standard firearm path handles one shot per press. Dead Bridge also has a scoped Old Pipe equip and primary path. |
 
@@ -133,7 +133,7 @@ When the host enables stock loot replenishment, the game can expire temporary co
 
 Use Interact at the existing rest-site box to open your private stash. As a guest, select an item under **Stash** to withdraw it or under **Backpack** to deposit it. The item moves as a whole stack. The host's combined-stash setting determines whether your own items follow you between rest sites.
 
-At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
+At a supported cash merchant, use Interact to open the stock shop. Buy offers or sell backpack items through the stock controls. The displayed price covers the whole item or stack. Items sold to the merchant appear under Buy Back.
 
 At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.
 

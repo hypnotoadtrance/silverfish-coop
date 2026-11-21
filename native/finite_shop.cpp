@@ -440,6 +440,8 @@ namespace
         Unreal::FClassProperty* type{};
         Unreal::FIntProperty* ammo{};
         Unreal::FIntProperty* value{};
+        Unreal::FDoubleProperty* weight{};
+        Unreal::FBoolProperty* never_drop{};
         Unreal::FIntProperty* merchant_cash{};
         Unreal::FIntProperty* shop_index{};
         Unreal::FTextProperty* shop_name{};
@@ -481,6 +483,8 @@ namespace
             type = field<Unreal::FClassProperty>(item, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
             ammo = field<Unreal::FIntProperty>(item, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
             value = field<Unreal::FIntProperty>(item, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
+            weight = field<Unreal::FDoubleProperty>(item, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"));
+            never_drop = field<Unreal::FBoolProperty>(item, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
             merchant_cash = field<Unreal::FIntProperty>(context.shop, STR("Cash"));
             shop_index = field<Unreal::FIntProperty>(context.shop, STR("ShopSave_Index"));
             shop_name = field<Unreal::FTextProperty>(context.shop, STR("ShopName"));
@@ -502,7 +506,8 @@ namespace
                 !is_array(saved_finite) || !is_array(saved_buyback) || !saved_row ||
                 saved_row->GetStruct().Get() != saved_type || !saved_name || !saved_cash || !flags ||
                 !guid || guid->GetStruct().Get() != item_guid || !payload || payload->GetStruct().Get() != instanced ||
-                !type || type->GetMetaClass().Get() != item_base || !ammo || !value || !merchant_cash || !shop_index || !shop_name ||
+                !type || type->GetMetaClass().Get() != item_base || !ammo || !value || !weight || !never_drop ||
+                !merchant_cash || !shop_index || !shop_name ||
                 !save || save->GetOuterPrivate() != context.shop->GetClassPrivate() || save->GetNumParms() != 0 ||
                 !quote_refresh || quote_refresh->GetOuterPrivate() != context.panel->GetClassPrivate() ||
                 !changed || changed->GetOffset_Internal() != 0 || !changed->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
@@ -602,7 +607,11 @@ namespace
         int quantity{};
         int value{};
         int price{};
+        int ammo{};
+        double weight{};
+        bool never_drop{};
         bool stackable{};
+        std::string_view source{"backpack"};
     };
 
     Guid new_stock_guid(const Layout& layout)
@@ -714,15 +723,25 @@ namespace
             return "shop_offer_defaults_invalid";
         result.klass = klass;
         result.stackable = stacks->GetPropertyValueInContainer(cdo);
-        result.quantity = result.stackable ? layout.ammo->GetPropertyValueInContainer(row) : 1;
+        result.ammo = layout.ammo->GetPropertyValueInContainer(row);
+        result.quantity = result.stackable ? result.ammo : 1;
         result.value = layout.value->GetPropertyValueInContainer(row);
+        result.weight = layout.weight->GetPropertyValueInContainer(row);
+        result.never_drop = layout.never_drop->GetPropertyValueInContainer(row);
         if (result.quantity < 1 || result.value < 0) return "shop_offer_amount_invalid";
+        if (!std::isfinite(result.weight) || result.weight < 0 || result.weight > 100000) return "shop_offer_weight_invalid";
         return {};
     }
 
     std::string_view offer(const Context& context, const Layout& layout, const void* row, Offer& result)
     {
         if (const auto failure = item_offer(layout, row, result); !failure.empty()) return failure;
+        // Stock ShopPanel.MakeItemCard applies a markup of one to its Buy Back panel.
+        if (result.source == "buyback")
+        {
+            result.price = result.value;
+            return {};
+        }
         alignas(16) std::array<std::byte, 88> parameters{};
         layout.quote_item->InitializeValue(parameters.data());
         layout.quote_item->CopyCompleteValue(parameters.data(), row);
@@ -738,8 +757,9 @@ namespace
 
     std::string encode(const Offer& row)
     {
-        return std::format("{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\n",
-                           row.guid[0], row.guid[1], row.guid[2], row.guid[3], row.path, row.quantity, row.value, row.price);
+        return std::format("{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\n",
+                           row.guid[0], row.guid[1], row.guid[2], row.guid[3], row.path, row.quantity, row.value, row.price,
+                           row.source, row.ammo, row.weight, row.never_drop, row.stackable);
     }
 
     Guid parse_guid(std::string_view text)
@@ -843,7 +863,8 @@ namespace
         std::string rows;
         Offer selected;
         int index = -1, listed = 0, supply_shelf_count = 0, blank_tape_count = 0;
-        for (auto* inventory : {shelf, finite})
+        auto* buyback = context.camera_only ? nullptr : layout.buyback;
+        for (auto* inventory : {shelf, finite, buyback})
         {
             if (!inventory) continue;
             const bool supply_shelf = reusable_supply && inventory == shelf;
@@ -868,6 +889,7 @@ namespace
                     if (key != chosen) continue;
                 if (++listed > max_offers) return response(lua, false, "shop_offer_count_unavailable");
                 Offer row;
+                row.source = inventory == shelf ? "shelf" : inventory == buyback ? "buyback" : "limited";
                 if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
                 if (tape_offer && (row.stackable || row.quantity != 1 || row.value != 30 || row.price > 75 ||
                                   layout.ammo->GetPropertyValueInContainer(item) != 0))

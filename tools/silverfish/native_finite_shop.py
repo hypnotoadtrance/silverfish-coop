@@ -1,5 +1,6 @@
 """Settle the exact authored finite merchant against the shared stock wallet."""
 
+import math
 import time
 
 from . import party
@@ -37,8 +38,17 @@ def parse_summary(fields: list[str]) -> dict:
 
 
 def parse_item(fields: list[str]) -> dict:
-    return {"guid": fields[1], "class_path": fields[2], "quantity": int(fields[3]),
+    item = {"guid": fields[1], "class_path": fields[2], "quantity": int(fields[3]),
             "value": int(fields[4]), "price": int(fields[5])}
+    if len(fields) == 11:
+        source, raw_ammo, raw_weight, never_drop, stacks = fields[6:]
+        ammo, weight = int(raw_ammo), float(raw_weight)
+        if (source not in {"shelf", "limited", "buyback", "backpack"} or not -2**31 <= ammo <= MAX_PRICE
+                or not math.isfinite(weight) or not 0 <= weight <= 100000 or never_drop not in {"0", "1"}
+                or stacks not in {"0", "1"} or item["quantity"] != (ammo if stacks == "1" else 1)):
+            raise ValueError("The merchant returned an invalid stock inventory row")
+        item.update(source=source, ammo=ammo, weight=weight, never_drop=never_drop == "1", stackable=stacks == "1")
+    return item
 
 
 def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *, guest: bool) -> dict:
@@ -54,9 +64,13 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *
     blank_seen = False
     for offer in offers:
         guid, path = offer.get("guid"), offer.get("class_path")
+        source = offer.get("source")
+        from_backpack = expected_state in {"sale-quote", "sold"}
         if (not valid_guid(guid) or guid in guids or type(path) is not str or not path.startswith("/Game/")
                 or len(path) > 512 or not 1 <= offer["quantity"] <= MAX_PRICE
-                or not 0 <= offer["price"] <= MAX_PRICE or type(offer.get("value")) is not int):
+                or not 0 <= offer["price"] <= MAX_PRICE or type(offer.get("value")) is not int
+                or source is not None and (source == "backpack") != from_backpack
+                or source == "buyback" and offer["price"] != offer["value"]):
             raise RuntimeError("The finite merchant returned an invalid stock offer")
         if area == SCIENTIST_SHOP:
             item = (path, offer["quantity"], offer["value"])

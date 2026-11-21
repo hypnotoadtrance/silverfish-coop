@@ -5420,7 +5420,7 @@ class Client:
                     )}
                 elif action == "native-shop-view-fixture" and self.invite.get("native_shop_view"):
                     choice = request.get("target")
-                    if choice not in ("open", "up", "down", "enter", "back", "page-up", "page-down"):
+                    if not native_shop_view.valid_fixture(choice):
                         raise ValueError("Select a qualified merchant fixture input")
                     self.last_game = await self.bridge.command(action, choice, timeout=5)
                     result = {"native_shop_view": self.last_game.get("native_shop_view", {})}
@@ -5610,7 +5610,7 @@ class Client:
                 try:
                     await self.recover()
                 except (OSError, RuntimeError) as error:
-                    self.control.event("reconnect_retry", error_type=type(error).__name__)
+                    self.control.event("reconnect_retry", error_type=type(error).__name__, reason=str(error)[:200])
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
