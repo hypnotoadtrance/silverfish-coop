@@ -99,6 +99,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
     async def stop_host(port, *, pause_exit=False, owner=campaign):
         run = owner / "run"
         if pause_exit:
+            await bridge.wait_for(lambda frame: frame.get("stock_pause_exit", {}).get("state") == "armed")
             await stock_pause(bridge, "open")
             await stock_pause(bridge, "save_and_quit")
         else:
@@ -272,7 +273,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
                                    and value.get("generation") != joined_again["generation"])
             assert open_join["character_id"] == character and open_join["pid"] == guest_process.pid
             evidence["direct_title"]["passwordless_rejoin_on_edited_port"] = True
-        final = await stop_host(edited_port)
+        final = await stop_host(edited_port, pause_exit=direct and title_profiles)
         assert final["revision"] > checkpoint["revision"] and final["world"][native_host_save.SCOPE_FIELD] == scope
         evidence["sessions"].append({"pid": second["pid"], "port": edited_port, "revision": final["revision"],
                                      "restored_slot": save["slot"], "scope_released": True})
