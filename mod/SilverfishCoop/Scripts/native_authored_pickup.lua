@@ -2,6 +2,7 @@ local pickup = {}
 local guest_save = require("guest_save")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local drill_head = require("native_prototype_drill_pickup")
+local loot_projection = require("native_guest_drop_projection")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -396,17 +397,6 @@ local function owner(state, phase, name)
     return pawn, save, statics
 end
 
-local function refresh_loose_inventory(state, backpack)
-    local controller = state.controller
-    local stack = valid(controller) and controller.MenuStack
-    local screen = stack and stack:GetArrayNum() == 1 and stack[1]
-    local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
-    if valid(screen) and same(screen:GetClass(), class) and same(screen:GetOwningPlayer(), controller) then
-        if backpack then screen.BackpackPanel:FullRefresh() end
-        screen.FloorPanel:FullRefresh()
-    end
-end
-
 local function claim(fields, state, phase, profile)
     local name, slot = fields[3], fields[4]
     if phase ~= "hosting" or not exact_slot(slot) then
@@ -520,7 +510,7 @@ local function claim(fields, state, phase, profile)
         if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
             error("mutation_unverified_loose_pickup_retirement", 0)
         end
-        pcall(refresh_loose_inventory, state, pawn:IsLocallyControlled())
+        pcall(loot_projection.refresh_stock_inventory, state, pawn:IsLocallyControlled())
     end
     if report.ok and profile.callback then
         local delivered, effect = SilverfishStockAuthoredPickupCallback(pawn:GetAddress(), save:GetAddress(), true, profile.source)
@@ -680,7 +670,7 @@ function pickup.command(fields, state, phase)
                 changed = true
             end
         end
-        if changed then pcall(refresh_loose_inventory, state, false) end
+        if changed then pcall(loot_projection.refresh_stock_inventory, state, false) end
         return "shared level item visibility synchronized"
     end
     if action == "native-loose-pickup-nearby-fixture" then

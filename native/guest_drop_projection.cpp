@@ -52,6 +52,7 @@ namespace
     constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
     constexpr auto convert_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto add_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory");
+    constexpr auto floor_query_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C:FindFloorItems");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto pawn_script_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:ExecuteUbergraph_Player_FP");
     constexpr auto maximum_sequence = (std::int64_t{1} << 53) - 1;
@@ -276,6 +277,22 @@ namespace
         return distance <= range;
     }
 
+    Projection* projection_for(U::UObject* actor)
+    {
+        if (!actor || !ready()) return nullptr;
+        const auto active = std::span{projections}.first(active_projection_slots);
+        const auto entry = std::ranges::find_if(active, [actor](const Projection& projection) {
+            return projection.actor.object.Get() == actor;
+        });
+        return entry == active.end() ? nullptr : &*entry;
+    }
+
+    void enqueue_pickup(Lease& lease)
+    {
+        lease.intent = lease.last_press = ++sequence;
+        lease.intent_expiry = Clock::now() + heartbeat;
+    }
+
     bool inert(U::UObject* actor)
     {
         const auto zero = [actor](const U::TCHAR* name) {
@@ -362,7 +379,15 @@ namespace
             // Blueprint conversion can invent a GUID even when the display actor has no item row.
             if (function == projection.converter.Get() &&
                 read(parameter<U::FObjectProperty>(function, STR("ItemActor"), 0, 8), args) == actor)
-                call.PreventOriginalFunctionCall();
+            {
+                // The exact stock floor query may make a display row. The co-op floor handler
+                // still owns every claim for this actor.
+                auto* caller = frame ? frame->PreviousFrame() : nullptr;
+                if (!caller || caller->Node() != find<U::UFunction>(floor_query_path) ||
+                    object(caller->Object(), STR("PlayerFP")) != lease.pawn.Get() ||
+                    !lease.visible || !scope_current(lease) || !inert(actor))
+                    call.PreventOriginalFunctionCall();
+            }
             else if (function == projection.add_inventory.Get() &&
                      receiver == object(static_cast<U::AActor*>(actor)->GetWorld(), STR("OwningGameInstance")) &&
                      read(parameter<U::FObjectProperty>(function, STR("Item"), 0, 8), args) == actor)
@@ -386,8 +411,7 @@ namespace
             !boolean(pawn, STR("Holding_Interact"), true) || !near_source(lease, pawn) ||
             !input::local_interaction_in_reach(pawn, actor, box) || sequence >= maximum_sequence ||
             !input::consume_current_press(pawn)) return;
-        lease.intent = lease.last_press = ++sequence;
-        lease.intent_expiry = Clock::now() + heartbeat;
+        enqueue_pickup(lease);
     }
 
     bool object_parameter(U::UFunction* call, const U::TCHAR* name, int offset, U::UClass* type, bool result = false)
@@ -896,6 +920,24 @@ namespace
 
 namespace silverfish::native_guest_drop_projection
 {
+    bool owns_actor(U::UObject* actor)
+    {
+        return projection_for(actor) != nullptr;
+    }
+
+    bool queue_nearby_pickup(U::UObject* actor, U::UObject* pawn)
+    {
+        auto* entry = projection_for(actor);
+        if (!entry) return false;
+        auto& [projection, lease] = *entry;
+        auto* box = projection.box.Get();
+        if (!pawn || pawn != lease.pawn.Get() || !lease.visible || !scope_current(lease) ||
+            !inert(actor) || !near_source(lease, pawn) || sequence >= maximum_sequence ||
+            !input::local_interaction_in_reach(pawn, actor, box)) return false;
+        enqueue_pickup(lease);
+        return true;
+    }
+
     void install_hooks()
     {
         if (!enabled() || installed.load(std::memory_order_acquire)) return;

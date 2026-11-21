@@ -3761,6 +3761,10 @@ class Host:
                         else:
                             result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
+                        try:
+                            self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
+                        except (OSError, RuntimeError) as error:
+                            self.control.event("native_world_loot_retirement_deferred", reason=str(error))
                     elif stack_drop := native_guest_drop_projection.target_parts(target):
                         async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                             result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
@@ -5357,8 +5361,9 @@ class Client:
                     result = {"stock_action": self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})}
                 elif action == native_loose_pickup.STOCK_CARD_FIXTURE:
                     target, separator, guid = (request.get("target") or "").partition("@")
-                    actor = native_loose_pickup.target_path(target)
+                    actor = target.removeprefix("loose:")
                     if (not actor or (separator and not native_gold.valid_guid(guid))
+                            or native_loose_pickup.actor_map(actor) != self.last_game.get("map")
                             or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an actor on the mounted stock Nearby Items panel")
                     self.last_game = await self.bridge.command(action, actor, *((guid,) if separator else ()), timeout=5)
@@ -5609,6 +5614,11 @@ class Client:
                             action, claim = self.world_loot.claim_target(self.last_game, world_loot)
                             result = await self.gameplay_action(action, operation_id, claim)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
+                            try:
+                                self.last_game = await self.world_loot.retire_claim(self.bridge, self.last_game, world_loot)
+                            except (OSError, RuntimeError) as error:
+                                self.control.event("native_world_loot_retirement_deferred", reason=str(error))
+                            await self.guest_ui.refresh_stock_inventory(self)
                             continue
                         stack_drop = native_guest_drop_projection.target_parts(target)
                         if stack_drop:

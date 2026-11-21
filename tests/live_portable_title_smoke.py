@@ -129,7 +129,8 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
 
 
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
-                          stock_split: bool = False, stock_equip: bool = False, stock_nearby: bool = False) -> dict:
+                          stock_split: bool = False, stock_equip: bool = False, stock_nearby: bool = False,
+                          projected_nearby: bool = False) -> dict:
     def qualified(game):
         return (game.get("native_enemy_loot_cqc_version") == 3
                 and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
@@ -271,6 +272,14 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         for run in (host_run, guest_run):
             await wait(run, bolt_in_reach)
         host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    dropped_actor = None
+    if projected_nearby:
+        identity = native_world_loot.player_drop_identity(stock_drop_proof["drop_id"])
+        approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+        assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+        frame = await guest.bridge.wait_for(lambda state: identity in state.get(native_world_loot.KEY, {})
+            and math.dist(state["pawns"]["local"]["location"], stock_drop_proof["location"]) < 225)
+        dropped_actor = frame[native_world_loot.KEY][identity]["actor"].split(" ", 1)[1]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
@@ -293,6 +302,24 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
         duplicate = await submit(host_run, native_loose_pickup.CLAIM, target=target)
         assert duplicate.get("error") == "loose_pickup_already_claimed", duplicate
+    drop_reclaim_proof = None
+    if projected_nearby:
+        clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=dropped_actor)
+        assert clicked["ok"] and clicked["proof"] == "stock Nearby Items card requested", clicked
+        for run in (host_run, guest_run):
+            await wait(run, lambda state: identity not in state.get("game", {}).get(native_world_loot.KEY, {})
+                and stock_drop_proof["drop_id"] not in state.get("gameplay", {}).get("native_guest_stack_drops", {}))
+        events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        drop_reclaim_proof, = [row for event in events if (row := event.get(native_guest_drop.RESULT))
+                               and row.get("state") == "reclaimed" and row.get("drop_id") == stock_drop_proof["drop_id"]]
+        assert drop_reclaim_proof["guid"] == stock_drop_proof["guid"]
+        display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE,
+                               target=f"{dropped_actor}@{drop_reclaim_proof['guid']}")
+        assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
+        guest_inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        assert drop_reclaim_proof["claimed_by"] == guest_inventory["owner"]
+        assert sum(row["guid"] == drop_reclaim_proof["guid"] for row in guest_inventory["items"]) == 1
+        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     normal_tab_proof = None
     if stock_drop:
         before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
@@ -314,6 +341,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
             **({"guest_stock_nearby_pickup": nearby_proof} if nearby_proof else {}),
+            **({"guest_stock_nearby_drop_reclaim": drop_reclaim_proof} if drop_reclaim_proof else {}),
             **({"normal_tab_use": normal_tab_proof} if normal_tab_proof else {}),
             **({"guest_stock_menu_split": split_proof} if split_proof else {}),
             **({"guest_stock_menu_equip": equip_proof} if equip_proof else {}),
@@ -343,7 +371,7 @@ async def create_stock_split_character(guest, join, name):
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
-                 stock_equip: bool = False, stock_nearby: bool = False) -> None:
+                 stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -412,7 +440,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         first, second = seats
         async def check_gameplay(host, guest, pawn):
             return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
-                                         stock_equip=stock_equip, stock_nearby=stock_nearby)
+                                         stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
         create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                   create_character=create))
@@ -459,11 +487,14 @@ if __name__ == "__main__":
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-nearby", action="store_true", help="pick up a loose actor from the guest's stock Nearby Items panel")
+    parser.add_argument("--projected-nearby", action="store_true", help="reclaim a player drop through stock Nearby Items")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.projected_nearby and (not args.stock_drop or args.stock_nearby):
+        parser.error("Use --projected-nearby with --stock-drop and without --stock-nearby")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
-                       stock_nearby=args.stock_nearby))
+                       stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby))

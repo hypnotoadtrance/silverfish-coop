@@ -18,6 +18,7 @@ ROW = "native-world-loot-item"
 ERROR_KEY = "native_world_loot_projection_errors"
 ERROR_ROW = "native-world-loot-projection-error"
 FRAME = "native-world-loot-frame"
+RETIRE = "native-world-loot-retire"
 FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
 CAPABILITY = "native_world_loot_version"
@@ -169,6 +170,7 @@ class Projection:
         self.next_sync = 0.0
         self.last_error = None
         self.items = {}
+        self.retired = set()
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
                    player_drops=None, stock_enemy_drops=None):
@@ -179,8 +181,12 @@ class Projection:
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
+        if epoch != self.epoch:
+            self.retired.clear()
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops) if active else {}
+        for identity in self.retired:
+            self.items.pop(identity, None)
         args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
             for field in ("position", "rotation", "scale") for axis in item.transform[field])))
             for identity, item in sorted(self.items.items()))
@@ -207,6 +213,17 @@ class Projection:
                 or projected.get("sequence", 0) <= 0 or projected.get("class_path") != item.class_path):
             raise party.RuleError("native_world_loot_intent_stale")
         return item.claim_action, item.claim_target
+
+    async def retire_claim(self, bridge, game, target):
+        epoch, identity = target
+        if epoch != self.epoch:
+            return game
+        self.retired.add(identity)
+        self.items.pop(identity, None)
+        snapshot = await bridge.command(RETIRE, epoch, identity, timeout=3)
+        if identity in snapshot.get(KEY, {}):
+            raise RuntimeError("The claimed stock world item did not retire")
+        return snapshot
 
     async def fixture(self, bridge, game, identity):
         shown = game.get(KEY, {}).get(identity, {})

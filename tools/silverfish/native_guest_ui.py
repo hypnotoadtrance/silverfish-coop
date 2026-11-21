@@ -126,6 +126,15 @@ class GuestView:
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
 
+    async def refresh_stock_inventory(self, client):
+        if client.last_game.get("native_inventory_view", {}).get("state") != "stock":
+            return
+        try:
+            await self.refresh(client)
+            client.last_game = await client.bridge.command("native-inventory-stock-refresh", client.zone_epoch, timeout=4)
+        except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
+            client.control.event("native_stock_inventory_refresh_unavailable", reason=str(error))
+
     async def project(self, client, character, contents):
         nonce = uuid.uuid4().hex
         path = client.bridge.directory / f"native-guest-ui-{nonce}.tsv"

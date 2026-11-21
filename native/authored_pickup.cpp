@@ -1,4 +1,5 @@
 #include "authored_pickup.hpp"
+#include "guest_drop_projection.hpp"
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
@@ -1251,36 +1252,50 @@ namespace
         return attached ? nullptr : save;
     }
 
-    Scope* nearby_pickup(U::UObject* screen, const RowSchema& rows, const Guid& wanted, bool& matching_row)
+    struct FloorSelection
     {
-        if (wanted == Guid{}) return nullptr;
+        U::UObject* actor{};
+        bool matching_row{};
+    };
+
+    FloorSelection nearby_selection(U::UObject* screen, const RowSchema& rows, const Guid& wanted)
+    {
+        if (wanted == Guid{}) return {};
 
         auto* items_property = field<U::FArrayProperty>(screen, STR("FloorItems"));
         auto* actors_property = field<U::FArrayProperty>(screen, STR("FloorActors"));
         auto* item_property = items_property ? U::CastField<U::FStructProperty>(items_property->GetInner()) : nullptr;
         auto* actor_property = actors_property ? U::CastField<U::FObjectProperty>(actors_property->GetInner()) : nullptr;
-        if (!item_property || item_property->GetStruct().Get() != rows.type || !actor_property) return nullptr;
+        if (!item_property || item_property->GetStruct().Get() != rows.type || !actor_property) return {};
         U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
         U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
-        if (items.Num() != actors.Num() || items.Num() > 2048) return nullptr;
+        if (items.Num() != actors.Num() || items.Num() > 2048) return {};
 
         for (int i = 0; i < items.Num(); ++i)
         {
             if (rows.identity(items.GetRawPtr(i)) != wanted) continue;
             auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
-            auto* scope = actor_scope(actor);
-            if (!scope || !scope->profile->discovered || scope->profile->stock_cash) return nullptr;
-            auto* controller = scope->controller.Get();
-            auto* stack_property = field<U::FArrayProperty>(controller, STR("MenuStack"));
-            auto* widget_property = stack_property ? U::CastField<U::FObjectProperty>(stack_property->GetInner()) : nullptr;
-            if (!widget_property) return nullptr;
-            U::FScriptArrayHelper stack(stack_property, stack_property->ContainerPtrToValuePtr<void>(controller));
-            if (!stack.Num() || widget_property->GetObjectPropertyValue(stack.GetRawPtr(stack.Num() - 1)) != screen)
-                return nullptr;
-            matching_row = rows.matches_actor(items.GetRawPtr(i), actor);
-            return scope;
+            return {actor, live(actor) && rows.matches_actor(items.GetRawPtr(i), actor)};
         }
-        return nullptr;
+        return {};
+    }
+
+    U::UObject* nearby_viewer(U::UObject* screen)
+    {
+        auto* pawn = object(screen, STR("PlayerFP"));
+        auto* controller = object(pawn, STR("Controller"));
+        auto* property = field<U::FArrayProperty>(controller, STR("MenuStack"));
+        auto* element = property ? U::CastField<U::FObjectProperty>(property->GetInner()) : nullptr;
+        if (!element) return nullptr;
+        U::FScriptArrayHelper stack(property, property->ContainerPtrToValuePtr<void>(controller));
+        return stack.Num() && element->GetObjectPropertyValue(stack.GetRawPtr(stack.Num() - 1)) == screen ? pawn : nullptr;
+    }
+
+    Scope* loose_floor_scope(U::UObject* actor, U::UObject* pawn)
+    {
+        auto* scope = actor_scope(actor);
+        return scope && scope->pawn.Get() == pawn && scope->profile->discovered && !scope->profile->stock_cash
+            ? scope : nullptr;
     }
 
     bool enqueue_nearby(Scope& scope, U::UObject* pawn)
@@ -1305,11 +1320,15 @@ namespace
 
         RowSchema rows;
         if (!rows.bind()) return;
-        bool matching_row{};
-        auto* scope = nearby_pickup(screen, rows, rows.read_guid(key->ContainerPtrToValuePtr<void>(args)), matching_row);
-        if (!scope) return;
+        const auto selected = nearby_selection(screen, rows, rows.read_guid(key->ContainerPtrToValuePtr<void>(args)));
+        const bool projected = silverfish::native_guest_drop_projection::owns_actor(selected.actor);
+        auto* pawn = nearby_viewer(screen);
+        auto* scope = !projected && pawn ? loose_floor_scope(selected.actor, pawn) : nullptr;
+        if (!projected && !scope) return;
         call.PreventOriginalFunctionCall();
-        if (call.OriginalFunctionCallPrevented() && matching_row) enqueue_nearby(*scope, scope->pawn.Get());
+        if (!call.OriginalFunctionCallPrevented() || !selected.matching_row || !pawn) return;
+        if (projected) silverfish::native_guest_drop_projection::queue_nearby_pickup(selected.actor, pawn);
+        else enqueue_nearby(*scope, pawn);
     }
 
     const char* convert(const RowSchema& rows, U::UObject* pawn, U::UObject* actor, U::UObject* scratch, Guid& guid)
@@ -2471,9 +2490,12 @@ namespace silverfish::native_authored_pickup
             !exact(screen, STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"))) return false;
         RowSchema rows;
         if (!rows.bind()) return false;
-        bool matching_row{};
-        auto* scope = nearby_pickup(screen, rows, guid, matching_row);
-        return scope && matching_row && !scope->host && enqueue_nearby(*scope, pawn);
+        const auto selected = nearby_selection(screen, rows, guid);
+        if (!selected.matching_row || nearby_viewer(screen) != pawn) return false;
+        if (silverfish::native_guest_drop_projection::owns_actor(selected.actor))
+            return silverfish::native_guest_drop_projection::queue_nearby_pickup(selected.actor, pawn);
+        auto* scope = loose_floor_scope(selected.actor, pawn);
+        return scope && !scope->host && enqueue_nearby(*scope, pawn);
     }
 
     U::UWorld* qualify_mindcore_results(std::uintptr_t pawn, std::uintptr_t detached, std::uintptr_t canonical,

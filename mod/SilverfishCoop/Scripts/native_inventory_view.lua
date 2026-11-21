@@ -802,7 +802,14 @@ function inventory_view.command(fields, state, phase)
         end
         if #fields == 4 then
             local displayed = stock_cards(screen, stock_session.save, fields[4], 1)
-            if not guid and displayed and valid(actor) and actor.bHidden then return "verified stock Nearby Items transfer" end
+            local probe = stock_session.floor_probe
+            local removed = probe and probe.path == fields[3]
+            for index = 1, removed and screen.FloorPanel.Cards:GetArrayNum() or 0 do
+                if stock_card_guid(widget_at(screen.FloorPanel.Cards, index)) == probe.guid then removed = false; break end
+            end
+            if not guid and displayed and removed and (not valid(actor) or actor.bHidden) then
+                return "verified stock Nearby Items transfer"
+            end
             error("The stock Nearby Items transfer is not visible in the open backpack", 0)
         end
         for index = 1, guid and screen.FloorPanel.Cards:GetArrayNum() or 0 do
@@ -810,7 +817,10 @@ function inventory_view.command(fields, state, phase)
             if stock_card_guid(card) == guid then
                 screen.ItemManager:OpenContextMenu(card)
                 screen.ItemManager:ActionPickup()
-                if valid(actor) and actor.bHidden == false then return "stock Nearby Items card requested" end
+                if valid(actor) and actor.bHidden == false then
+                    stock_session.floor_probe = {path = fields[3], guid = guid}
+                    return "stock Nearby Items card requested"
+                end
                 break
             end
         end

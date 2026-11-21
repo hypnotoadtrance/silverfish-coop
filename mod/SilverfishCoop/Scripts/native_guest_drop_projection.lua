@@ -5,6 +5,7 @@ local pickup_fixture = require("native_authored_pickup_input_fixture")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local color = { R = 0, G = 0, B = 0, A = 1 }
 local current
 local world_items, slot_count = {}, 64
@@ -15,6 +16,17 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+function projection.refresh_stock_inventory(state, backpack)
+    local controller = state.controller
+    local stack = valid(controller) and controller.MenuStack
+    local screen = stack and stack:GetArrayNum() == 1 and stack[1] or nil
+    local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
+    if valid(screen) and same(screen:GetClass(), class) and same(screen:GetOwningPlayer(), controller) then
+        if backpack then screen.BackpackPanel:FullRefresh() end
+        screen.FloorPanel:FullRefresh()
+    end
 end
 
 local function identifier(value)
@@ -158,9 +170,13 @@ local function item_frame(fields, state, phase)
         end
         incoming[id] = { class = class, transform = transform, snap = snap }
     end
+    local changed = false
     for id, entry in pairs(world_items) do
         if not incoming[id] or entry.epoch ~= epoch or not same(entry.pawn, pawn) then
-            if SilverfishClearNativeGuestDropProjection(entry.slot) then world_items[id] = nil end
+            if SilverfishClearNativeGuestDropProjection(entry.slot) then
+                world_items[id] = nil
+                changed = changed or not entry.error
+            end
         end
         if world_items[id] then occupied[entry.slot] = true end
     end
@@ -184,9 +200,11 @@ local function item_frame(fields, state, phase)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
                 class = item.class, slot = slot, visual_z = visual_z,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
+            changed = changed or (ok and (not previous or previous.error ~= nil))
             if not ok then errors = errors + 1 end
         end
     end
+    if changed then pcall(projection.refresh_stock_inventory, state, false) end
     if errors > 0 then return "stock world loot synchronized with projection errors" end
     return "stock world loot synchronized"
 end
@@ -248,6 +266,19 @@ function projection.command(fields, state, phase)
     local command = fields[2]
     if command == "native-world-loot-frame" then
         return item_frame(fields, state, phase)
+    elseif command == "native-world-loot-retire" then
+        local epoch, id = fields[3], fields[4]
+        local pawn, entry = local_pawn(state, phase), world_items[id]
+        if #fields ~= 4 or not pawn or not identifier(epoch) or not identifier(id)
+            or (entry and (entry.epoch ~= epoch or not same(entry.pawn, pawn) or not same(entry.world, state.world))) then
+            error("world_loot_retirement_scope_unavailable", 0)
+        end
+        if entry then
+            if not SilverfishClearNativeGuestDropProjection(entry.slot) then error("world_loot_retirement_pending", 0) end
+            world_items[id] = nil
+            pcall(projection.refresh_stock_inventory, state, phase == "hosting")
+        end
+        return "stock world loot retired"
     elseif command == "native-world-loot-approach" then
         local id, pawn_name = fields[3], fields[4]
         local item, pawn = world_items[id]
@@ -271,7 +302,7 @@ function projection.command(fields, state, phase)
         if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= name then
             error("world_loot_fixture_scope_unavailable", 0)
         end
-        pickup_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box)
+        pickup_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box, title_fixtures)
         return "stock loot height and line of sight verified"
     elseif command == "native-world-loot-fixture" then
         local pawn, id = local_pawn(state, phase), fields[3]
