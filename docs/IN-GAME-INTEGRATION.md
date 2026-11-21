@@ -125,7 +125,9 @@ The stock damage actor used to apply its screen effects and camera shake on the 
 
 A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.
 
-The packaged title test used the normal Inventory action to open and close the stock Inventory screen with the guest's isolated backpack on both seats. Using a bandage from the native context menu updated the guest's host-owned save and refreshed the open screen. The focused stock-menu checks also cover sorting, dropping, bandages, MREs, ammo splits, and storing supported weapons in a compatible quick slot. Nearby Items pickup, general drag and drop, quick-slot hotkeys, and unequip still require host-authoritative handling in this screen.
+The packaged title test used the normal Inventory action to open and close the stock Inventory screen with the guest's isolated backpack on both seats. Using a bandage from the native context menu updated the guest's host-owned save and refreshed the open screen. The focused stock-menu checks also cover sorting, dropping, bandages, MREs, ammo splits, and storing supported weapons in a compatible quick slot.
+
+Stock Nearby Items can claim ordinary loose items placed in the level through the same host transaction as Interact. The Observatory bolt check used the stock context menu on both seats, verified the removal on both peers, checked that the open guest backpack displayed the item, and confirmed that the host could not claim it a second time. Nearby Items for runtime-spawned loot, general drag and drop, quick-slot hotkeys, and unequip still require host-authoritative handling in this screen.
 
 In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.
 

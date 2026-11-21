@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from itertools import combinations
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -262,9 +263,13 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         for participant in (host_pawn, pawn):
             approached = await host.bridge.command(native_loose_pickup.APPROACH, DEFAULT_ACTOR, participant, timeout=5)
             assert approached.get("ack", {}).get("message") == "shared level pickup approach verified", approached["ack"]
+        def bolt_in_reach(state):
+            game = state.get("game", {})
+            item = game.get(native_loose_pickup.KEY, {}).get(DEFAULT_ACTOR, {})
+            origin = game.get("pawns", {}).get("local", {}).get("location")
+            return item.get("state") == "available" and origin and math.dist(item["location"], origin) <= 250
         for run in (host_run, guest_run):
-            await wait(run, lambda state: state.get("game", {}).get(native_loose_pickup.KEY, {})
-                       .get(DEFAULT_ACTOR, {}).get("state") == "available")
+            await wait(run, bolt_in_reach)
         host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
