@@ -319,7 +319,6 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            embedded_startup: str | None = None) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
-    env.pop("SILVERFISH_COOP_RUNTIME_LISTEN_PORT", None)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)
@@ -510,11 +509,9 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     env["SILVERFISH_COOP_BRIDGE"] = str(bridge)
     arguments = subprocess.list2cmdline([str(game)])
     arguments += f' -userdir="{profile}" -unattended -NoSplash -windowed'
-    if runtime_listener:
-        if type(port) is not int or not 1 <= port <= 65535:
-            raise ValueError("The runtime listener requires a private UDP port")
-        env["SILVERFISH_COOP_RUNTIME_LISTEN_PORT"] = str(port)
-    else:
+    if runtime_listener and (type(port) is not int or not 1 <= port <= 65535):
+        raise ValueError("The runtime listener requires a private UDP port")
+    if not runtime_listener:
         arguments += " -MULTIHOME=127.0.0.1"
         if port is not None:
             arguments += f" -port={port}"

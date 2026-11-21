@@ -85,13 +85,13 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         (profile / "Saved").mkdir(parents=True)
         mailbox = directory / "run" / "game-bridge" / ("b" * 32)
         mailbox.mkdir(parents=True)
-        argv = [str(self.stage_exe), f"-userdir={profile}", "-MULTIHOME=127.0.0.1"]
+        argv = [str(self.stage_exe), f"-userdir={profile}"]
+        if not host:
+            argv.append("-MULTIHOME=127.0.0.1")
         flags = runtime.game_environment(self.work, True, self.raw_port if host else None,
                                          native_events=host, native_guest=host, native_zones=True, embedded_engine=True)
         env = {key: value for key, value in flags.items() if key.startswith("SILVERFISH_COOP_")}
         env[embedded.BRIDGE_ENV] = str(mailbox)
-        if host:
-            argv.append(f"-port={self.raw_port}")
         startup = embedded._Startup(os.getpid(), self.stage_exe, tuple(argv), env)
         self.enterContext(patch.object(embedded, "_current_startup", return_value=startup))
         self.enterContext(patch.object(runtime, "Bridge", side_effect=lambda path, engine: self.create_bridge(
@@ -176,7 +176,8 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
               patch.object(service.Host, "checkpoint_native", new=checkpoint)):
             await self.host()
         self.assertEqual(self.events, [
-            ("host", OBSERVATORY), ("verify-raw", self.raw_port), ("quic", self.quic_port), ("run",),
+            ("host", OBSERVATORY, f"listener={self.raw_port}"), ("verify-raw", self.raw_port),
+            ("quic", self.quic_port), ("run",),
             ("checkpoint",), ("native-guest-clear",), ("transport-closed", self.quic_port), ("leave",),
         ])
         self.assertEqual(self.bridge.process.returncode, 0)

@@ -136,7 +136,7 @@ def assert_private_saved_tree(profile: Path) -> None:
 
 
 def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
-             internal_port: int | None, required_env: Mapping[str, str | None]) -> tuple[Path, Path]:
+             required_env: Mapping[str, str | None]) -> tuple[Path, Path]:
     executable = _exact_existing(work / "stage" / runtime.SHIPPING, directory=False)
     if (startup.pid != os.getpid() or not startup.argv
             or startup.image.resolve(strict=True) != executable
@@ -166,10 +166,8 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     requested_directory = Path(options.get("userdir", ""))
     if not requested_directory.is_absolute() or requested_directory.resolve(strict=True) != profile:
         raise ValueError("The engine was not started with its isolated user directory")
-    if options.get("multihome") != "127.0.0.1":
-        raise ValueError("The engine was not started with loopback MULTIHOME")
-    if options.get("port") != (str(internal_port) if internal_port is not None else None):
-        raise ValueError("The engine startup port does not match its staged role")
+    if "port" in options or options.get("multihome") != ("127.0.0.1" if role == "client" else None):
+        raise ValueError("The engine startup network options do not match its staged role")
     assert_private_saved_tree(profile)
     return profile / "Saved", bridge
 
@@ -203,7 +201,7 @@ class EmbeddedEngine:
         if (role not in _ROLE_ROOTS
                 or role == "host" and (type(internal_port) is not int or not 1 <= internal_port <= 65535)
                 or role == "client" and internal_port is not None):
-            raise ValueError("Invalid staged engine role or startup port")
+            raise ValueError("Invalid staged engine role or private co-op port")
         if not 0 < timeout <= _MAX_TIMEOUT:
             raise ValueError("Expected a bounded engine startup timeout")
         conditions = dict(required_env or {})
@@ -212,8 +210,7 @@ class EmbeddedEngine:
             raise ValueError("Invalid staged engine environment condition")
 
         startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, *conditions))
-        saved_directory, mailbox = _qualify(startup, work.resolve(strict=True), directory, role,
-                                            internal_port, conditions)
+        saved_directory, mailbox = _qualify(startup, work.resolve(strict=True), directory, role, conditions)
         with cls._lock:
             if cls._used:
                 raise RuntimeError("The staged engine lease was already used in this process")

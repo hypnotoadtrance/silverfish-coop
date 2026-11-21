@@ -1,6 +1,5 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if not bridge or bridge == "" then return end
-local runtime_listen_port = math.tointeger(tonumber(os.getenv("SILVERFISH_COOP_RUNTIME_LISTEN_PORT")))
 
 local guest_save = require("guest_save")
 local loot = require("loot")
@@ -128,6 +127,7 @@ local connection_timeout_seconds = 110
 local restore_position_tolerance = 0.25
 
 local role = "idle"
+local host_listen_port
 local expected_map
 local leaving = false
 local was_connected = false
@@ -295,6 +295,7 @@ local function phase(state)
     if leaving then
         if state.controller and state.map == main_menu and not state.listening then
             role = "idle"
+            host_listen_port = nil
             leaving = false
             was_connected = false
         else
@@ -318,7 +319,7 @@ local function phase(state)
     return valid(state.controller) and "ready" or "opening"
 end
 
-local function open_level(context, level, options)
+local function open_level(context, level, options, listen_port)
     if not valid(context) then
         error("No current local player controller", 0)
     end
@@ -328,11 +329,11 @@ local function open_level(context, level, options)
         error("GameplayStatics is unavailable", 0)
     end
 
-    if options == "listen" and runtime_listen_port then
+    if listen_port then
         local world = context:GetWorld()
         local source = valid(world) and world:GetFullName():match("^World (.+)$")
         if not source or type(SilverfishArmNativeListenPort) ~= "function"
-            or SilverfishArmNativeListenPort(runtime_listen_port, world:GetAddress(), source, level) ~= true then
+            or SilverfishArmNativeListenPort(listen_port, world:GetAddress(), source, level) ~= true then
             error("The game could not reserve the requested private co-op listener", 0)
         end
     end
@@ -520,6 +521,15 @@ local function run_command(fields, state, current_phase)
         return native_host_save.prepare_extraction(state, current_phase, fields[3], fields[4], fields[5])
     elseif command == "host" then
         local carry, dream_kind
+        local listen_port
+        local listener = fields[#fields]:match("^listener=(.*)$")
+        if listener then
+            listen_port = #listener <= 5 and listener:match("^%d+$") and tonumber(listener)
+            if not listen_port or listen_port < 1 or listen_port > 65535 then
+                error("Expected a private co-op listener port", 0)
+            end
+            table.remove(fields)
+        end
         local load_save = #fields >= 5 and #fields <= 7 and fields[4] == "native-save"
         if load_save then
             for index = 6, #fields do
@@ -546,7 +556,8 @@ local function run_command(fields, state, current_phase)
         end
         if dream_kind then native_dream.prepare_duration(state.controller, dream_kind) end
         if expanded_routes then native_authored_arrival.prepare_time(state, current_phase, 0) end
-        open_level(state.controller, argument, "listen")
+        open_level(state.controller, argument, "listen", listen_port)
+        host_listen_port = listen_port
         role = "host"
         expected_map = argument
         return "listen travel requested"
@@ -605,7 +616,7 @@ local function run_command(fields, state, current_phase)
         if expanded_routes then
             native_authored_arrival.prepare_time(state, current_phase, authored and tonumber(fields[5]) or 0)
         end
-        open_level(state.controller, argument, "listen")
+        open_level(state.controller, argument, "listen", host_listen_port)
         expected_map = argument
         return "zone travel requested"
     elseif command == "native-blue-route" or command == "native-blue-rest-fixture" or command == "native-blue-rest-restore" then
@@ -855,6 +866,7 @@ local function run_command(fields, state, current_phase)
             leaving = true
         else
             role = "idle"
+            host_listen_port = nil
         end
         return "leaving session"
     elseif command == "restore" or command == "restore-exact" then

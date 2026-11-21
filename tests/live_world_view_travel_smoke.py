@@ -42,7 +42,7 @@ async def validate(work: Path, vanilla_saved: Path | None, forest: bool, runtime
     host_cli = cli
     if runtime_listener:
         source = ("import runpy; from functools import partial; from tools.silverfish import service; "
-                  "service.launch = partial(service.launch, runtime_listener=True); "
+                  "service.host_game = partial(service.host_game, runtime_listener=True); "
                   "runpy.run_module('tools.silverfish', run_name='__main__')")
         host_cli = [sys.executable, "-B", "-u", "-c", source, "--work", str(work)]
 

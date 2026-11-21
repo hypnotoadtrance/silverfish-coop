@@ -51,7 +51,8 @@ class _RoleGame:
         port = selection.private_port if isinstance(selection, startup.HostSelection) else None
         game_build = runtime.staged_build(self.work)
         self.process = runtime.launch(self.work, self.directory / "game-user", self.bridge, self.headless, port,
-                                      embedded_engine=True, embedded_startup=bridge_id, pause_fixture=self.pause_fixture,
+                                      runtime_listener=port is not None, embedded_engine=True,
+                                      embedded_startup=bridge_id, pause_fixture=self.pause_fixture,
                                       **options)
         game_bridge = runtime.Bridge(self.bridge, self.process)
         self.request = startup.StartupRequest(self.role, claim.generation, claim.request_id, bridge_id, self.process.pid,

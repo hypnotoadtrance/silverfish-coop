@@ -327,8 +327,7 @@ async def _run(*, timeout: float = 15) -> None:
     if not runtime.qualified_authored_routes(work) or request.game_build != runtime.staged_build(work):
         raise ValueError("The startup request does not match the qualified staged build")
     selection = request.selection
-    private_port = selection.private_port if isinstance(selection, HostSelection) else None
-    _qualify(startup, work, directory, role, private_port, {STARTUP_ENV: nonce})
+    _qualify(startup, work, directory, role, {STARTUP_ENV: nonce})
 
     def accept():
         _publish_once(bridge / ACCEPTED_FILE, _record(_receipt(request)))

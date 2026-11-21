@@ -3608,7 +3608,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     difficulty: str | None = None,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
-                    embedded_port: int | None = None) -> None:
+                    embedded_port: int | None = None, runtime_listener: bool = False) -> None:
     if embedded_port is not None and (type(embedded_port) is not int or not 1 <= embedded_port <= 65535
                                       or port == embedded_port or not (native_events and native_guest and native_zones)):
         raise ValueError("Embedded hosting requires a staged native campaign and a distinct private game port")
@@ -3733,7 +3733,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 process, bridge = embedded, embedded.bridge
             else:
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
-                process = launch(work, profile, bridge_directory, headless, internal_port, **game_options)
+                process = launch(work, profile, bridge_directory, headless, internal_port,
+                                 runtime_listener=runtime_listener, **game_options)
                 bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
             if host_dig_live and not ready.get("native_host_dig_live_capability"):
@@ -3767,6 +3768,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     arguments += (f"eather={native_record['eather_remainder']:.17g}",)
                 if dream and (dream["phase"] != "departing" or entry_map in native_dream.PROFILES):
                     arguments += (dream["kind"],)
+            if runtime_listener or embedded_port is not None:
+                arguments += (f"listener={internal_port}",)
             await bridge.command("host", entry_map, *arguments)
             initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
             if extraction_rules:

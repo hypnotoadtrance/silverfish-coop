@@ -66,10 +66,10 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
         return self.request(self.client, startup.JoinSelection(digest, self.character))
 
-    def process(self, directory, *, port=None, **extra):
-        argv = [str(self.shipping), f"-userdir={directory / 'game-user'}", "-MULTIHOME=127.0.0.1"]
-        if port is not None:
-            argv.append(f"-port={port}")
+    def process(self, directory, **extra):
+        argv = [str(self.shipping), f"-userdir={directory / 'game-user'}"]
+        if directory == self.client:
+            argv.append("-MULTIHOME=127.0.0.1")
         env = {embedded_engine.OPT_IN_ENV: "1", embedded_engine.BRIDGE_ENV: str(self.path(directory)),
                startup.STARTUP_ENV: BRIDGE_ID}
         self.boot.return_value = embedded_engine._Startup(os.getpid(), self.shipping, tuple(argv), env | extra)
@@ -101,7 +101,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_host_uses_real_call_contract_and_one_use_claim(self):
         request = self.request(self.host, HOST)
         bridge = self.path(self.host)
-        self.process(self.host, port=PRIVATE_PORT)
+        self.process(self.host)
         startup.publish(bridge, request)
         self.assertFalse(startup.accepted(bridge, request))
         await startup._run()
@@ -127,7 +127,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         request = self.request(self.host, replace(HOST, start="resume"))
         with CampaignStore(self.host / "save") as store:
             store.checkpoint({"map": OBSERVATORY}, {})
-        self.process(self.host, port=PRIVATE_PORT)
+        self.process(self.host)
         startup.publish(self.path(self.host), request)
         await startup._run()
         self.host_game.assert_awaited_once()
@@ -139,13 +139,13 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.host / "save").exists())
         with CampaignStore(self.host / "save") as store:
             self.assertEqual(store.status()["world"], {})
-        self.process(self.host, port=PRIVATE_PORT)
+        self.process(self.host)
         startup.publish(self.path(self.host), self.request(self.host, HOST))
         await startup._run()
         self.assertEqual(self.host_game.await_args.kwargs["start_preset"], "wanderer")
 
     async def test_passes_the_verified_offscreen_launch_to_the_real_service(self):
-        boot = self.process(self.host, port=PRIVATE_PORT, SILVERFISH_COOP_HEADLESS="1")
+        boot = self.process(self.host, SILVERFISH_COOP_HEADLESS="1")
         self.boot.return_value = replace(boot, argv=(*boot.argv, "-nullrhi", "-RenderOffScreen"))
         startup.publish(self.path(self.host), self.request(self.host, HOST))
         await startup._run()
@@ -179,7 +179,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_role_pid_nonce_profile_and_build_never_dispatch(self):
         request = self.request(self.host, HOST)
         bridge = self.path(self.host)
-        self.process(self.host, port=PRIVATE_PORT)
+        self.process(self.host)
         for wrong in (
             replace(request, role="client", selection=self.join_request().selection),
             replace(request, pid=request.pid + 1), replace(request, bridge_id="e" * 32),
@@ -194,24 +194,24 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.host_game.assert_not_awaited()
         self.join_game.assert_not_awaited()
 
-    async def test_opt_in_image_private_port_and_start_condition_fail_closed(self):
+    async def test_opt_in_image_startup_network_flags_and_start_condition_fail_closed(self):
         bridge = self.path(self.host)
         request = self.request(self.host, HOST)
         startup.publish(bridge, request)
-        self.process(self.host, port=PRIVATE_PORT, **{startup.STARTUP_ENV: "0" * 32})
+        self.process(self.host, **{startup.STARTUP_ENV: "0" * 32})
         with self.assertRaisesRegex(ValueError, "not opted"):
             await startup._run()
-        process = self.process(self.host, port=PRIVATE_PORT)
+        process = self.process(self.host)
         self.boot.return_value = replace(process, image=self.shipping.with_name("SilverFish.exe"))
         with self.assertRaisesRegex(ValueError, "exact staged executable"):
             await startup._run()
         self.assertTrue((bridge / startup.REQUEST_FILE).is_file())
-        self.process(self.host, port=PRIVATE_PORT + 1)
-        with self.assertRaisesRegex(ValueError, "startup port"):
+        self.boot.return_value = replace(process, argv=(*process.argv, f"-port={PRIVATE_PORT}"))
+        with self.assertRaisesRegex(ValueError, "startup network options"):
             await startup._run()
         self.assertFalse(startup.accepted(bridge, request))
         (bridge / startup.CLAIM_FILE).unlink()
-        self.process(self.host, port=PRIVATE_PORT)
+        self.process(self.host)
         with CampaignStore(self.host / "save") as store:
             store.checkpoint({"map": OBSERVATORY}, {})
         startup.publish(bridge, request)

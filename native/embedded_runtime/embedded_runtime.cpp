@@ -135,10 +135,10 @@ namespace
         ~CommandArguments() { if (values) LocalFree(values); }
     };
 
-    bool matches_command_line(const fs::path& image, const fs::path& profile)
+    bool matches_command_line(const fs::path& image, const fs::path& profile, bool guest)
     {
         const CommandArguments arguments;
-        if (!arguments.values || arguments.count < 3 ||
+        if (!arguments.values || arguments.count < 2 ||
             !windows_path_equal(arguments.values[0], image)) return false;
         bool userdir = false, loopback = false;
         for (int index = 1; index < arguments.count; ++index)
@@ -158,8 +158,9 @@ namespace
                 if (loopback || value != L"127.0.0.1") return false;
                 loopback = true;
             }
+            if (windows_equal(name, L"-port")) return false;
         }
-        return userdir && loopback;
+        return userdir && (loopback == guest);
     }
 
     fs::path qualify_startup(HMODULE module, std::wstring_view nonce, const wchar_t*& state)
@@ -186,16 +187,16 @@ namespace
         const auto run_profile = run.parent_path();
         const auto role_root = run_profile.parent_path();
         const auto profile = run_profile / L"game-user";
+        const bool guest = windows_path_equal(role_root, work / L"clients");
         state = L"startup_scope_bridge_refused";
         if (bridge.filename() != nonce || bridge_folder.filename() != L"game-bridge" || run.filename() != L"run" ||
             !profile_name(run_profile.filename().native()) ||
-            (!windows_path_equal(role_root, work / L"campaigns") &&
-             !windows_path_equal(role_root, work / L"clients"))) return {};
+            (!guest && !windows_path_equal(role_root, work / L"campaigns"))) return {};
         for (const auto& path : {role_root, run_profile, run, bridge_folder, bridge})
             if (!exact_path(path, true)) return {};
 
         state = L"startup_scope_arguments_refused";
-        if (!matches_command_line(image, profile)) return {};
+        if (!matches_command_line(image, profile, guest)) return {};
         return mod / L"runtime";
     }
 

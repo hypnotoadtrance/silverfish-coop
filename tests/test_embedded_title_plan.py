@@ -21,6 +21,7 @@ class EmbeddedTitlePlanTests(unittest.IsolatedAsyncioTestCase):
         def launch(_work, profile, bridge, headless, port, **options):
             self.assertEqual((profile, headless, port), (campaign / "game-user", True, 28101))
             self.assertTrue(options["embedded_engine"])
+            self.assertTrue(options["runtime_listener"])
             self.assertEqual(options["embedded_startup"], bridge.name)
             profile.mkdir(parents=True)
             bridge.mkdir(parents=True)

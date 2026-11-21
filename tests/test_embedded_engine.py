@@ -59,9 +59,9 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
         return directory / "run" / "game-bridge" / ("b" * 32)
 
     def process_spec(self, directory, *, host=True):
-        argv = [str(self.executable), f"-userdir={directory / 'game-user'}", "-MULTIHOME=127.0.0.1"]
-        if host:
-            argv.append("-port=28016")
+        argv = [str(self.executable), f"-userdir={directory / 'game-user'}"]
+        if not host:
+            argv.append("-MULTIHOME=127.0.0.1")
         return embedded._Startup(os.getpid(), self.executable, tuple(argv), {
             embedded.BRIDGE_ENV: str(self.bridge_path(directory)),
             embedded.OPT_IN_ENV: "1", "SILVERFISH_COOP_NATIVE_ZONE": "1",
@@ -107,10 +107,11 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
             await self.host()
 
     async def test_client_requires_its_own_role_and_no_startup_port(self):
-        self.startup.return_value = self.process_spec(self.client, host=True)
-        with self.assertRaisesRegex(ValueError, "startup port"):
+        client = self.process_spec(self.client, host=False)
+        self.startup.return_value = replace(client, argv=(*client.argv, "-port=28016"))
+        with self.assertRaisesRegex(ValueError, "startup network options"):
             await embedded.EmbeddedEngine.acquire(self.work, self.client, role="client")
-        self.startup.return_value = self.process_spec(self.client, host=False)
+        self.startup.return_value = client
         self.frames = [self.frame(1, self.client), self.frame(2, self.client)]
         engine = await embedded.EmbeddedEngine.acquire(self.work, self.client, role="client")
         self.assertEqual(engine.bridge.directory, self.bridge_path(self.client))
@@ -134,8 +135,8 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
                 await self.host()
         self.bridge_type.assert_not_called()
         self.startup.return_value = original
-        with self.assertRaisesRegex(ValueError, "startup port"):
-            await self.host(28017)
+        with self.assertRaisesRegex(ValueError, "private co-op port"):
+            await self.host(0)
 
     async def test_refuses_ambiguous_or_unbound_network_and_profile_flags(self):
         original = self.startup.return_value
@@ -144,7 +145,8 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
             (*original.argv, "/port=28016"),
             (*original.argv, '-ini:Something:"Port=28016"'),
             (original.argv[0], f"-userdir={self.client / 'game-user'}", *original.argv[2:]),
-            (*original.argv[:2], "-MULTIHOME=0.0.0.0", original.argv[3]),
+            (*original.argv, "-MULTIHOME=0.0.0.0"),
+            (*original.argv, "-port=28016"),
             original.argv[:-1],
         )
         for args in invalid:
