@@ -4988,6 +4988,14 @@ class Client:
                         raise ValueError("Connect the staged inventory viewer first")
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
+                elif action in native_stash.VIEW_FIXTURES:
+                    target = request.get("target")
+                    if (self.last_game.get("state") != "connected" or not isinstance(target, str)
+                            or not (native_gold.valid_guid(target) or action == "native-stash-view-click-fixture"
+                                    and target in {"stash", "backpack", "previous", "next", "close"})):
+                        raise ValueError("Select a stock stash fixture target")
+                    self.last_game = await self.bridge.command(action, target, timeout=5)
+                    result = {native_stash.VIEW: self.last_game.get(native_stash.VIEW)}
                 elif action == "native-inventory-view-key-fixture":
                     view = self.last_game.get("native_inventory_view", {})
                     key = request.get("target")
@@ -5219,6 +5227,7 @@ class Client:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
+            await native_stash.service_view(self, active)
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)
             await native_inventory.service_split_view(self, active)

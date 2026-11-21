@@ -1842,6 +1842,8 @@ class Bridge:
                     data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
                                                     "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
                                                     "total": int(fields[6]), "count": int(fields[7])}
+                elif fields[0] == "native-stash-view" and len(fields) == 9:
+                    data[native_stash.VIEW] = native_stash.parse_view(fields, data.get("map"), data.get("state"))
                 elif fields == ["native-inventory-sort-capability", "1"]:
                     data["native_inventory_sort_capability"] = 1
                 elif fields[0] == native_guest_drop_projection.ROW:

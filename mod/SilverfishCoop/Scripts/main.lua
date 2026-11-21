@@ -58,6 +58,7 @@ local native_kill_volume = require("native_kill_volume")
 local native_world_view = require("native_world_view")
 local native_inventory = require("native_inventory")
 local native_stash = require("native_stash")
+local native_stash_view = require("native_stash_view")
 local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_guest_stack_drop = require("native_guest_stack_drop")
@@ -531,6 +532,7 @@ local function run_command(fields, state, current_phase)
     if command == "join" or command == "leave" then
         native_world_view.clear()
         native_inventory_view.clear()
+        native_stash_view.clear()
         native_bag_projection.clear()
         native_authored_pickup.clear()
         native_flood_jammer_projection.clear()
@@ -947,6 +949,7 @@ local function run_command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
         or native_stash.command(fields, state, current_phase)
+        or native_stash_view.command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
         or native_bag_projection.command(fields, state, current_phase)
         or native_authored_pickup.command(fields, state, current_phase)
@@ -1122,6 +1125,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stash.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stash_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_bag_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_authored_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1417,6 +1421,7 @@ local function tick()
         vitals.sync(state, current_phase)
         native_enemy_shell_view.sync(state, current_phase)
         players.sync(state, current_phase)
+        native_stash_view.sync(state, current_phase)
         native_player_avatar.sync(state, current_phase)
         native_avatar_capture_fixture.sync(state, current_phase, native_player_avatar)
         native_host_invite.sync(state, current_phase)
@@ -1444,6 +1449,7 @@ end
 players.start(bridge)
 native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
+native_stash_view.start(players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
 native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)

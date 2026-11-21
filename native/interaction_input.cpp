@@ -51,6 +51,7 @@ namespace
     constexpr auto subway_valve = STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P:PersistentLevel.ValveSwitch_BP_C_1");
     constexpr auto valve_class = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C");
     constexpr auto valve_interaction = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C:SendInteractionToActor");
+    constexpr auto stash_class = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
     constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
@@ -226,12 +227,13 @@ namespace
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
-    ScopedInteraction wire_board, dialogue_input, valve_input;
+    ScopedInteraction wire_board, dialogue_input, valve_input, stash_input;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
     std::uint64_t wire_sequence{};
-    std::uint64_t dialogue_sequence{}, valve_sequence{};
+    std::uint64_t dialogue_sequence{}, valve_sequence{}, stash_sequence{};
+    Clock::time_point stash_lease{};
     bool dispatching_valve = false;
     bool event_source_matches{}, event_consumed{};
 
@@ -581,11 +583,53 @@ namespace
         valve_input.pending = {++valve_sequence, valve_input.expires};
     }
 
+    bool stock_stash(Unreal::UObject* actor)
+    {
+        auto* base = find<Unreal::UClass>(stash_class);
+        auto* dying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        return live(actor) && base && actor->GetClassPrivate()->IsChildOf(base) && dying &&
+            !dying->GetPropertyValueInContainer(actor) && static_cast<Unreal::AActor*>(actor)->GetWorld() == scope.world.Get();
+    }
+
+    void intercept_stash(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        static const Unreal::FName interact{STR("SendInteractionToActor")};
+        const auto now = Clock::now();
+        if (scope.host || !function || function->GetFName() != interact || !parameters ||
+            call.OriginalFunctionCallPrevented() || now >= stash_lease || now >= scope.expires ||
+            !live_scope(scope) || !stock_stash(actor)) return;
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        auto* hit = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        auto* pawn_type = find<Unreal::UClass>(pawn_path);
+        auto* component_type = find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"));
+        if (!player || !hit || player->GetPropertyClass().Get() != pawn_type || hit->GetPropertyClass().Get() != component_type ||
+            function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
+        if (pawn != scope.pawn.Get()) return;
+
+        // The original stash screen mutates the process-wide save reference.
+        call.PreventOriginalFunctionCall();
+        auto* component = hit->GetObjectPropertyValue(hit->ContainerPtrToValuePtr<void>(parameters));
+        if (!call.OriginalFunctionCallPrevented() || stash_sequence == max_sequence || !live(component) ||
+            component->GetOuterPrivate() != actor || !component->GetClassPrivate()->IsChildOf(component_type) ||
+            object_field(pawn, STR("InteractionTarget_Component")) != component ||
+            !interaction_in_reach(pawn, actor, component) ||
+            !silverfish::native_interaction_input::consume_current_press(pawn)) return;
+        stash_input.actor = actor;
+        stash_input.component = component;
+        stash_input.pawn = pawn;
+        stash_input.accepting = true;
+        stash_input.expires = now + receipt_lifetime;
+        stash_input.pending = {++stash_sequence, stash_input.expires};
+    }
+
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
+        intercept_stash(iteration, actor, function, parameters);
         silverfish::mosby_station_input::route(iteration, actor, function, parameters);
         silverfish::mindcore_input::route(iteration, actor, function, parameters);
     }
@@ -731,17 +775,24 @@ namespace
         return report(lua, true, "ready");
     }
 
-    int take_interaction_press(const Lua& lua, ScopedInteraction& target)
+    std::uint64_t take_interaction_sequence(Address requested, ScopedInteraction& target)
     {
-        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
-        const auto requested = lua.get_integer();
         auto* pawn = target.pawn.Get();
         const auto now = Clock::now();
         if (!pawn || address(pawn) != requested || pawn != scope.pawn.Get() || !target.accepting ||
             now >= target.expires || !target.pending.sequence || now >= target.pending.expires ||
             !live_scope(scope) || !standing(pawn)) return 0;
-        lua.set_integer(static_cast<std::int64_t>(target.pending.sequence));
+        const auto accepted = target.pending.sequence;
         target.pending = {};
+        return accepted;
+    }
+
+    int take_interaction_press(const Lua& lua, ScopedInteraction& target)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto accepted = take_interaction_sequence(lua.get_integer(), target);
+        if (!accepted) return 0;
+        lua.set_integer(static_cast<std::int64_t>(accepted));
         return 1;
     }
 
@@ -775,6 +826,21 @@ namespace
 
     int take_dialogue_press(const Lua& lua) { return take_interaction_press(lua, dialogue_input); }
     int take_valve_press(const Lua& lua) { return take_interaction_press(lua, valve_input); }
+
+    int take_stash_press(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto requested = lua.get_integer(1);
+        if (requested <= 0 || !silverfish::native_interaction_input::current_guest_pawn(requested)) return 0;
+        stash_lease = Clock::now() + lease;
+        auto* actor = stash_input.actor.Get();
+        if (!stock_stash(actor)) return 0;
+        const auto accepted = take_interaction_sequence(requested, stash_input);
+        if (!accepted) return 0;
+        lua.set_integer(static_cast<std::int64_t>(accepted));
+        lua.set_string(RC::to_string(actor->GetPathName()));
+        return 2;
+    }
 
     int dispatch_valve(const Lua& lua)
     {
@@ -1020,6 +1086,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
+        lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
         mindcore_input::register_lua(lua);
@@ -1034,6 +1101,8 @@ namespace silverfish::native_interaction_input
         wire_board = {};
         dialogue_input = {};
         valve_input = {};
+        stash_input = {};
+        stash_lease = {};
         mosby_station_input::clear_scope();
         mindcore_input::clear_scope();
         first = count = event_depth = 0;
