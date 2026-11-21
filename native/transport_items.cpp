@@ -1552,6 +1552,16 @@ namespace
         auto* refresh = stock_no_args(panel, refresh_name);
         if (!refresh) return probe_result(lua, false, "refresh_unavailable");
         panel->ProcessEvent(refresh, nullptr);
+        // A co-op drop changes both the source panel and the stock floor list.
+        // Rebuild the floor cards from the live actors instead of keeping their old entries.
+        auto* screen = completed.screen.Get();
+        if (exact_drop_screen(manager, screen, panel))
+        {
+            auto* floor = object_field(screen, STR("FloorPanel"));
+            auto* refresh_floor = stock_no_args(floor, refresh_name);
+            if (!refresh_floor) return probe_result(lua, false, "refresh_unavailable");
+            floor->ProcessEvent(refresh_floor, nullptr);
+        }
         return probe_result(lua, true, "refreshed");
     }
 

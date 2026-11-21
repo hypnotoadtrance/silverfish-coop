@@ -2475,7 +2475,7 @@ class Host:
                     self.last_game = await bridge.command(action, actor, pawn, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"actor": actor, "pawn": pawn}
-                elif action == native_loose_pickup.FIXTURE and self.fixtures:
+                elif action in (native_loose_pickup.FIXTURE, native_loose_pickup.NEARBY_FIXTURE) and self.fixtures:
                     actor = native_loose_pickup.target_path(request.get("target"))
                     if not actor:
                         raise party.RuleError("loose_pickup_fixture_scope_unavailable")
@@ -3852,7 +3852,7 @@ class Host:
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_host_checkpoint_error", reason=str(error))
             self.publish_host_status(transport)
-            await asyncio.sleep(0.25)
+            await bridge.wait_for_interaction(.25)
 
     def publish_host_status(self, transport):
         self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
@@ -5604,7 +5604,7 @@ class Client:
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
                                 zone_epoch=self.zone_epoch)
-            await asyncio.sleep(0.25)
+            await self.bridge.wait_for_interaction(.25)
 
 
 def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,

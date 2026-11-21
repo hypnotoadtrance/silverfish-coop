@@ -202,7 +202,7 @@ function input.stock_item_sight(pawn, actor)
     if not origin or not eye or not center or not finite(limit) or limit <= 0 or limit > 1000
         or square(eye, origin) > 150^2 or square(origin, center) > 250^2 then return false end
     local ignored, held = {pawn}, pawn.EquipedItem
-    if valid(held) and same(held:GetOwner(), pawn) and same(held:GetWorld(), state.world) then
+    if valid(held) and same(held:GetOwner(), pawn) and same(held:GetWorld(), pawn:GetWorld()) then
         ignored[#ignored + 1] = held
     end
     for _, point in ipairs(points(box, center, true)) do

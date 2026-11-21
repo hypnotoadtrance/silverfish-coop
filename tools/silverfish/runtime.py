@@ -693,6 +693,18 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
 
+    async def wait_for_interaction(self, timeout: float) -> None:
+        """Wake the session promptly for input without increasing idle snapshot traffic."""
+        deadline = time.monotonic() + timeout
+        path = self.directory / "input.tsv"
+        while (remaining := deadline - time.monotonic()) > 0:
+            await asyncio.sleep(min(.025, remaining))
+            try:
+                if path.stat().st_size > self.input_offset:
+                    return
+            except OSError:
+                pass
+
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
         try:
@@ -2024,6 +2036,9 @@ class Bridge:
                     )
                 elif fields == ["native-inventory-split-view-capability", "1"]:
                     data["native_inventory_split_view_capability"] = True
+                elif (fields[0] == "native-inventory-view-binding" and len(fields) == 2
+                      and fields[1] in {"ready", "blocked", "hooks_unavailable", "class_unavailable", "scope_unavailable"}):
+                    data["native_inventory_view_binding"] = fields[1]
                 elif (fields[0] == "native-guest-inventory-split-view" and len(fields) == 8
                       and fields[1].isascii() and fields[1].isdigit() and len(fields[1]) <= 16
                       and 0 < (sequence := int(fields[1])) < 2**53

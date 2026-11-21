@@ -23,7 +23,7 @@ from tools.silverfish.travel import OBSERVATORY
 DEFAULT_ACTOR = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Eqp_Bolt_C_1"
 
 
-async def verify(work, original, actor, restart=False):
+async def verify(work, original, actor, restart=False, held_pistol=False, nearby=False):
     area = loose.actor_map(actor)
     assert area and all(actor != row[1].partition(" ")[2] for row in native_authored_pickup.SOURCES.values())
     target = f"loose:{actor}"
@@ -90,19 +90,28 @@ async def verify(work, original, actor, restart=False):
             await action(hrun, loose.APPROACH, target=f"{role}@{target}")
         if out_of_reach:
             assert out_of_reach.get("error") == "authored_pickup_exact_authority_sight_required", out_of_reach
+        if held_pistol:
+            weapon = uuid.uuid4().hex.upper()
+            await command("action", *host, "native-guest-weapon-seed", "--target", "guest",
+                          "--kind", "1911", "--item-guid", weapon)
+            await command("action", *guest, "native-guest-weapon-equip", "--target", weapon)
+            await wait(hrun, lambda state: any(
+                entry.get("weapon_meshes") for entry in state.get("game", {}).get("native_player_avatars", {}).values()))
         visible = [item(await wait(run, lambda state: item(state).get("state") == "available")) for run in (hrun, grun)]
         assert visible[0]["class_path"] == visible[1]["class_path"]
-        await action(grun, loose.FIXTURE, target=target)
+        claimant, other = (hrun, grun) if nearby else (grun, hrun)
+        owner = "host" if nearby else invitation["character_id"]
+        await action(claimant, loose.NEARBY_FIXTURE if nearby else loose.FIXTURE, target=target)
         await wait(hrun, lambda state: item(state).get("state") == "claimed", timeout=10)
         await wait(grun, lambda state: item(state).get("state") == "claimed", timeout=10)
         events = [json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines()]
         applied, = [event for event in events if event["event"] == "native_loose_pickup_claimed" and event["actor"] == actor]
-        assert applied["owner"] == invitation["character_id"]
-        replay = await action(grun, loose.CLAIM, target=target, operation_id=applied["operation_id"])
+        assert applied["owner"] == owner
+        replay = await action(claimant, loose.CLAIM, target=target, operation_id=applied["operation_id"])
         assert replay[loose.PROOF]["guid"] == applied["guid"]
-        second = await submit(hrun, loose.CLAIM, target=target)
+        second = await submit(other, loose.CLAIM, target=target)
         assert second.get("error") == "loose_pickup_already_claimed", second
-        inventory = await action(grun, "native-inventory-list")
+        inventory = await action(claimant, "native-inventory-list")
         row, = [item for item in inventory["native_inventory"]["items"] if item["guid"] == applied["guid"]]
         assert row["class_path"] == visible[0]["class_path"], row
         campaign = hrun.parent
@@ -111,7 +120,8 @@ async def verify(work, original, actor, restart=False):
         assert saved["world"]["party"][loose.STATE][actor] == replay[loose.PROOF]
         assert saved_hashes(original) == originals
         proof = dict(visible=visible, ownership=replay[loose.PROOF], duplicate=second["error"], backpack=row,
-                     original_files_verified=len(originals), out_of_reach=out_of_reach)
+                     original_files_verified=len(originals), out_of_reach=out_of_reach, held_pistol=held_pistol,
+                     nearby=nearby)
         if restart:
             assert applied["mode"] in (1, 2)
             old = status(hrun)
@@ -148,5 +158,10 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--actor", default=DEFAULT_ACTOR)
     parser.add_argument("--restart", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--held-pistol", action="store_true", help="claim the loose item while holding a stock pistol")
+    modes.add_argument("--nearby", action="store_true", help="claim the item through the host's stock Nearby Items menu")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.actor, args.restart))
+    if args.nearby and args.restart:
+        parser.error("The restart check follows the guest claim")
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.actor, args.restart, args.held_pistol, args.nearby))

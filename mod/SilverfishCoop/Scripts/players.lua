@@ -77,22 +77,11 @@ local function write_interaction(pawn, pickup_source)
     if written and closed then return target end
 end
 
-local function sync_native_interact(phase)
-    if type(SilverfishSetNativeInteractScope) ~= "function" or type(SilverfishTakeNativeInteractPress) ~= "function" then
-        return
-    end
+local function drain_native_interact()
+    local address = native_interact_address
     local pawn = local_player and local_player.pawn
-    if not active(phase) or not valid(pawn) then
-        if native_interact_address then SilverfishClearNativeInteractScope() end
-        native_interact_address = nil
-        return
-    end
-    local address = pawn:GetAddress()
-    if not SilverfishSetNativeInteractScope(address, phase == "hosting") then
-        native_interact_address = nil
-        return
-    end
-    native_interact_address = address
+    if not address or not valid(pawn) or pawn:GetAddress() ~= address
+        or pawn:IsActorBeingDestroyed() or not pawn:IsLocallyControlled() then return end
     for _ = 1, 8 do
         local source = native_authored_pickup.take_press(pawn)
         if not source then break end
@@ -109,6 +98,21 @@ local function sync_native_interact(phase)
         target = write_interaction(pawn)
     end
     return target
+end
+
+local function sync_native_interact(phase)
+    if type(SilverfishSetNativeInteractScope) ~= "function" or type(SilverfishTakeNativeInteractPress) ~= "function" then
+        return
+    end
+    local pawn = local_player and local_player.pawn
+    if not active(phase) or not valid(pawn) then
+        if native_interact_address then SilverfishClearNativeInteractScope() end
+        native_interact_address = nil
+        return
+    end
+    local address = pawn:GetAddress()
+    native_interact_address = SilverfishSetNativeInteractScope(address, phase == "hosting") and address or nil
+    return drain_native_interact()
 end
 
 local function roster(state, phase)
@@ -884,6 +888,14 @@ function players.start(bridge)
     input_file = bridge .. "/input.tsv"
     LoopInGameThreadWithDelay(250, function()
         if not interact_hook_checked then ensure_hooks() end
+    end)
+    LoopInGameThreadWithDelay(33, function()
+        if not native_interact_address then return end
+        local ok, failure = pcall(drain_native_interact)
+        if not ok then
+            native_interact_address = nil
+            print("[SilverfishCoop] Interact input unavailable: " .. tostring(failure) .. "\n")
+        end
     end)
     LoopInGameThreadWithDelay(20, function()
         if not (walking and not walk_frame_action) and not next(applied) then return end

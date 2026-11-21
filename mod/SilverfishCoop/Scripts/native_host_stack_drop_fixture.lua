@@ -194,6 +194,15 @@ function fixture.command(fields, state, phase)
         if select_row(instance.SaveSlot_Ref.PlayerBackpack, guid, row_item) or select_row(panel.Cards, guid, card_item) then
             error("host_stack_drop_menu_fixture_card_not_refreshed", 0)
         end
+        for _, inventory_panel in ipairs({panel, menu.FloorPanel}) do
+            local cards = inventory_panel.Cards
+            for index = 1, cards:GetArrayNum() do
+                local item = card_item(cards[index])
+                if not item or not valid(item[item_class]) then
+                    error("host_stack_drop_menu_fixture_invalid_card", 0)
+                end
+            end
+        end
         if valid(manager.ItemContextMenu) then manager:CloseContextMenu() end
         local result = {}
         controller:CloseMenu(result)

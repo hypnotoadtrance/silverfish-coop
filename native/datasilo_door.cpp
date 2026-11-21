@@ -107,8 +107,7 @@ namespace
     {
         auto* type = door->GetClassPrivate();
         auto* base = find<U::UClass>(base_type);
-        auto* pry = field<U::FBoolProperty>(door, STR("Can_PryOpen"));
-        if (!type || !base || !type->IsChildOf(base) || !pry || !pry->GetPropertyValueInContainer(door)) return false;
+        if (!type || !base || !type->IsChildOf(base)) return false;
         auto* root = object(door, STR("RootComponent"));
         auto* arrow = object(door, STR("Arrow"));
         auto* panel = object(door, STR("DoorMesh"));
@@ -192,9 +191,11 @@ namespace
             return RC::LoopAction::Break;
         });
         if (!live(door) || !ordinary_door(door) || seat(door, true) != Seat::host) return fail();
+        auto* pryable = field<U::FBoolProperty>(door, STR("Can_PryOpen"));
         auto* locked = field<U::FBoolProperty>(door, STR("Locked"));
         auto* broken = field<U::FBoolProperty>(door, STR("LockBroken"));
-        if (!locked || !broken || !locked->GetPropertyValueInContainer(door) || broken->GetPropertyValueInContainer(door))
+        if (!pryable || !pryable->GetPropertyValueInContainer(door) || !locked || !broken ||
+            !locked->GetPropertyValueInContainer(door) || broken->GetPropertyValueInContainer(door))
             return fail();
         auto* world = static_cast<U::AActor*>(door)->GetWorld();
         auto* stock = object(object(world, STR("OwningGameInstance")), STR("SaveSlot_Ref"));

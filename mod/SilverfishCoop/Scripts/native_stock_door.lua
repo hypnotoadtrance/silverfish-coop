@@ -23,7 +23,7 @@ end
 
 local function identity(actor, world)
     local base = StaticFindObject(base_path)
-    if not valid(base) or not valid(actor) or not actor:IsA(base) or actor.Can_PryOpen ~= true
+    if not valid(base) or not valid(actor) or not actor:IsA(base)
         or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world)
         or not same(actor:GetOuter(), world.PersistentLevel) then return end
     local name = actor:GetFullName()
@@ -160,7 +160,9 @@ function doors.pry_target(pawn, kind)
     if not available() or not valid(pawn) or (kind == "crowbar" and pawn.CanInteract ~= true) then return end
     local actor, world = pawn.ActorBeingLookedAt, pawn:GetWorld()
     local name = valid(world) and identity(actor, world)
-    if name and actor.Locked == true and actor.LockBroken == false and components(actor) then return name end
+    if name and actor.Can_PryOpen == true and actor.Locked == true and actor.LockBroken == false and components(actor) then
+        return name
+    end
 end
 
 function doors.input_fixture(state, phase, target, pawn, dispatch)

@@ -3,6 +3,7 @@ local guest_save = require("guest_save")
 local scope = require("native_save_scope")
 local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
+local native_world = require("native_world")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -122,6 +123,15 @@ local function capture(state, phase, pawn_name, path)
         end
     end)
     if checked and character_row then rows[#rows + 1] = character_row end
+    local reputation_available, reputation = pcall(native_world.reputation_flags, canonical)
+    if reputation_available then
+        local row = {"reputation"}
+        for _, flag in ipairs(reputation) do
+            row[#row + 1] = flag[1]
+            row[#row + 1] = flag[2]
+        end
+        rows[#rows + 1] = table.concat(row, "\t")
+    end
     for _, key in ipairs({"backpack", "equipment", "armor", "helmet"}) do
         local source = save[slots[key]]
         local array = key == "backpack" or key == "equipment"
@@ -193,7 +203,7 @@ local function project(state, phase, character, path)
     local view = api:CreateSaveGameObject(class)
     if not exact(view, save_class) then error("The stock co-op view could not be allocated", 0) end
     local processed, items, note_count, quest_count = 0, 0, 0, 0
-    local completed, attachments = 0, 0
+    local completed, attachments, reputation = 0, 0, nil
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
         if processed > max_rows then error("The co-op view contains too many rows", 0) end
@@ -205,6 +215,15 @@ local function project(state, phase, character, path)
             local name = decode(row[2]):ToString()
             creator.install(view, row[4], name)
             if row[3] ~= "-" then appearance.install(view.Character, row[3]) end
+        elseif row[1] == "reputation" and not reputation and #row <= 65 and #row % 2 == 1 then
+            reputation = {}
+            for index = 2, #row, 2 do
+                local key = row[index]
+                if #key > 96 or not key:match("^Rep_[A-Za-z0-9_%-]+$") or reputation[key] ~= nil then
+                    error("Invalid co-op reputation flag", 0)
+                end
+                reputation[key] = integer(row[index + 1], min_int32, max_int32)
+            end
         elseif row[1] == "item" then
             local entry = item_row(row)
             local name = slots[row[2]]
@@ -261,6 +280,21 @@ local function project(state, phase, character, path)
     end
     old.JournalEntries = view.JournalEntries
     old.ActiveQuests = view.ActiveQuests
+    if reputation then
+        local flags, previous = old.Flags, {}
+        flags:ForEach(function(raw)
+            local key = raw:get():ToString()
+            if key:match("^Rep_[A-Za-z0-9_%-]+$") then previous[#previous + 1] = key end
+        end)
+        for _, key in ipairs(previous) do flags:Remove(FName(key)) end
+        for key, points in pairs(reputation) do
+            local flag = FName(key)
+            flags:Add(flag, points)
+            if not flags:Contains(flag) or flags:Find(flag):get() ~= points then
+                error("The attached co-op reputation failed readback", 0)
+            end
+        end
+    end
     if count(old.JournalEntries) ~= note_count or #old.ActiveQuests ~= quest_count then
         error("The attached co-op Journal view failed readback", 0)
     end

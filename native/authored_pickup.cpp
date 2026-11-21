@@ -1045,6 +1045,8 @@ namespace
         return nullptr;
     }
 
+    void intercept_floor_pickup(Iteration& call, U::UObject* screen, U::UFunction* function, const void* args);
+
     void intercept(Iteration& call, U::UObject* context, U::UFunction* function, const void* args, U::FFrame* frame)
     {
         if (!ready() || !context || !function || call.OriginalFunctionCallPrevented()) return;
@@ -1053,7 +1055,13 @@ namespace
         static const U::FName put_name{STR("PutInInventory")};
         static const U::FName pickup_name{STR("PickUp_Object")};
         static const U::FName add_name{STR("AddItemToInventory")};
+        static const U::FName remove_name{STR("RemoveItem")};
         const auto name = function->GetFName();
+        if (name == remove_name)
+        {
+            intercept_floor_pickup(call, context, function, args);
+            return;
+        }
         if (name != interact_name && name != put_name && name != pickup_name && name != add_name) return;
         if (name == interact_name)
         {
@@ -1178,13 +1186,17 @@ namespace
             return row->Identical(first, second) && same(payload, first, second);
         }
 
-        Guid identity(const void* value) const
+        Guid read_guid(const void* data) const
         {
-            const auto* data = guid->ContainerPtrToValuePtr<void>(value);
             Guid result{};
             for (std::size_t index = 0; index < words.size(); ++index)
                 result[index] = static_cast<std::uint32_t>(words[index]->GetPropertyValueInContainer(data));
             return result;
+        }
+
+        Guid identity(const void* value) const
+        {
+            return read_guid(guid->ContainerPtrToValuePtr<void>(value));
         }
 
         void set_identity(void* value, const Guid& identity) const
@@ -1236,6 +1248,53 @@ namespace
             return attached ? RC::LoopAction::Break : RC::LoopAction::Continue;
         });
         return attached ? nullptr : save;
+    }
+
+    void intercept_floor_pickup(Iteration& call, U::UObject* screen, U::UFunction* function, const void* args)
+    {
+        constexpr auto screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
+        constexpr auto remove_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C:RemoveItem");
+        if (!args || !live(screen) || !exact(screen, screen_path) || function != find<U::UFunction>(remove_path) ||
+            function->GetOuterPrivate() != screen->GetClassPrivate() || function->GetNumParms() != 4 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
+
+        auto* key = parameter<U::FStructProperty>(function, STR("ItemGuid"), 0);
+        auto* inventory = parameter<U::FIntProperty>(function, STR("Inventory"), 0x10);
+        if (!key || key->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid")) ||
+            !inventory || inventory->GetPropertyValueInContainer(args) != 0) return;
+
+        RowSchema rows;
+        if (!rows.bind()) return;
+        const auto wanted = rows.read_guid(key->ContainerPtrToValuePtr<void>(args));
+        if (wanted == Guid{}) return;
+
+        auto* items_property = field<U::FArrayProperty>(screen, STR("FloorItems"));
+        auto* actors_property = field<U::FArrayProperty>(screen, STR("FloorActors"));
+        auto* item_property = items_property ? U::CastField<U::FStructProperty>(items_property->GetInner()) : nullptr;
+        auto* actor_property = actors_property ? U::CastField<U::FObjectProperty>(actors_property->GetInner()) : nullptr;
+        if (!item_property || item_property->GetStruct().Get() != rows.type || !actor_property) return;
+        U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
+        U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
+        if (items.Num() != actors.Num() || items.Num() > 2048) return;
+
+        for (int i = 0; i < items.Num(); ++i)
+        {
+            if (rows.identity(items.GetRawPtr(i)) != wanted) continue;
+            auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
+            auto* scope = actor_scope(actor);
+            if (!scope || !scope->profile->discovered || scope->profile->stock_cash) return;
+            auto* controller = scope->controller.Get();
+            auto* stack_property = field<U::FArrayProperty>(controller, STR("MenuStack"));
+            auto* widget_property = stack_property ? U::CastField<U::FObjectProperty>(stack_property->GetInner()) : nullptr;
+            if (!widget_property || !local_scope(*scope)) return;
+            U::FScriptArrayHelper stack(stack_property, stack_property->ContainerPtrToValuePtr<void>(controller));
+            if (!stack.Num() || widget_property->GetObjectPropertyValue(stack.GetRawPtr(stack.Num() - 1)) != screen) return;
+            call.PreventOriginalFunctionCall();
+            if (call.OriginalFunctionCallPrevented() && admit_input(*scope, scope->pawn.Get(), scope->box.Get()) &&
+                rows.matches_actor(items.GetRawPtr(i), actor))
+                scope->observed = {Clock::now() + std::chrono::seconds(4), ++sequence, false, true};
+            return;
+        }
     }
 
     const char* convert(const RowSchema& rows, U::UObject* pawn, U::UObject* actor, U::UObject* scratch, Guid& guid)

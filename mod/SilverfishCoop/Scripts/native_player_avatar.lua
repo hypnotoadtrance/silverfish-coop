@@ -6,6 +6,7 @@ local avatar = {}
 local body_path = "/Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.Player_NoArmor"
 local head_path = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/SM_Head_UV_01.SM_Head_UV_01"
 local head_class = "/Script/Engine.StaticMeshComponent"
+local scene_class = "/Script/Engine.SceneComponent"
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -92,15 +93,16 @@ local function observe(state, phase)
     observed_weapons = weapons
 end
 
-local function visual_component(entry, field, parent, socket_name, skeletal)
-    local class = skeletal and "/Script/Engine.SkeletalMeshComponent" or head_class
+local function attach_component(entry, field, parent, socket_name, class)
+    local socket = FName(socket_name or "None", EFindName.FNAME_Find)
     local component = entry.pawn:AddComponentByClass(StaticFindObject(class), true, identity, true)
     if not valid(component) then error("Remote avatar component could not be created") end
-    component:SetCollisionEnabled(0)
-    component:SetGenerateOverlapEvents(false)
+    if class ~= scene_class then
+        component:SetCollisionEnabled(0)
+        component:SetGenerateOverlapEvents(false)
+    end
     component:SetMobility(2)
     entry.pawn:FinishAddComponent(component, true, identity)
-    local socket = FName(socket_name or "None", EFindName.FNAME_Find)
     if not component:K2_AttachToComponent(parent, socket, 2, 2, 0, false) then
         component:K2_DestroyComponent(entry.pawn)
         error("Remote avatar component could not attach to its stock socket")
@@ -109,12 +111,24 @@ local function visual_component(entry, field, parent, socket_name, skeletal)
     return component
 end
 
-local function head_component(entry, field)
-    local component = visual_component(entry, field, entry.body, "HelmetSocket")
-    -- Player_AnimBP rotates the stock head bone for the first-person camera.
-    -- Keep its animated socket position and use the replicated aim for the displayed rotation.
-    component:SetAbsolute(false, true, false)
-    return component
+local function visual_component(entry, field, parent, socket_name, skeletal)
+    local class = skeletal and "/Script/Engine.SkeletalMeshComponent" or head_class
+    return attach_component(entry, field, parent, socket_name, class)
+end
+
+local function position_head(entry)
+    -- The stock head meshes have an offset origin. Preserve the stock mesh offset
+    -- from HeadSocket to HelmetSocket so aim rotates the face around the neck.
+    local head_socket = FName("HeadSocket", EFindName.FNAME_Find)
+    local helmet_socket = FName("HelmetSocket", EFindName.FNAME_Find)
+    if not entry.body:DoesSocketExist(head_socket) or not entry.body:DoesSocketExist(helmet_socket) then
+        error("Remote avatar head sockets were unavailable")
+    end
+    local math_library = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local anchor = entry.body:GetSocketTransform(head_socket, 0)
+    local origin = entry.body:GetSocketLocation(helmet_socket)
+    local offset = math_library:InverseTransformLocation(anchor, origin)
+    entry.head:K2_SetRelativeLocation(offset, false, {}, true)
 end
 
 local function remove(entry)
@@ -125,6 +139,9 @@ local function remove(entry)
     end
     if valid(entry.head) and valid(entry.pawn) then
         entry.head:K2_DestroyComponent(entry.pawn)
+    end
+    if valid(entry.head_pivot) and valid(entry.pawn) then
+        entry.head_pivot:K2_DestroyComponent(entry.pawn)
     end
     if entry.installed_body and valid(entry.body) then
         character_view.clear_body(entry)
@@ -144,9 +161,8 @@ local function aim_head(entry)
     pitch = math.max(-45, math.min(45, pitch))
     if entry.aim_pitch == pitch and entry.aim_yaw == yaw then return end
     local facing = {Pitch = pitch, Yaw = yaw, Roll = 0}
-    entry.head:K2_SetWorldRotation(facing, false, {}, true)
-    if valid(entry.helmet) then entry.helmet:K2_SetWorldRotation(facing, false, {}, true) end
-    local shown = entry.head:K2_GetComponentRotation()
+    entry.head_pivot:K2_SetWorldRotation(facing, false, {}, true)
+    local shown = entry.head_pivot:K2_GetComponentRotation()
     entry.aim_pitch, entry.aim_yaw = pitch, yaw
     entry.aim_roll = shown.Roll
 end
@@ -175,7 +191,11 @@ local function create(entry)
     body:SetHiddenInGame(false, false)
     body:SetVisibility(true, false)
 
-    local head = head_component(entry, "head")
+    local pivot = attach_component(entry, "head_pivot", body, "HeadSocket", scene_class)
+    -- The first-person animation still drives the neck position.
+    pivot:SetAbsolute(false, true, false)
+    local head = visual_component(entry, "head", pivot)
+    position_head(entry)
     head:SetStaticMesh(head_asset)
     if not valid(body.SkinnedAsset) or not valid(head.StaticMesh) or not body:IsVisible() then
         error("Stock avatar did not pass mesh readback")
@@ -214,19 +234,19 @@ local function apply_outfit(entry, outfit, cosmetics)
         if not valid(entry.body.SkinnedAsset) or entry.body.SkinnedAsset:GetAddress() ~= target:GetAddress() then
             error("Stock armor mesh did not pass readback")
         end
+        position_head(entry)
         entry.body_worn = mesh and body_path or "-"
         entry.request_body, entry.request_nude = body_path, cosmetics.assets[3]
     end
     if entry.request_head ~= head_path then
         local mesh, defaults = outfit_mesh(head_path, "Item_HelmetMaster_BP", "HelmMesh", "/Script/Engine.StaticMesh")
         if mesh then
-            local component = valid(entry.helmet) and entry.helmet or head_component(entry, "helmet")
+            local component = valid(entry.helmet) and entry.helmet or visual_component(entry, "helmet", entry.head)
             component:SetStaticMesh(mesh)
             component:SetVisibility(true, false)
             if not valid(component.StaticMesh) or component.StaticMesh:GetAddress() ~= mesh:GetAddress() then
                 error("Stock helmet mesh did not pass readback")
             end
-            entry.aim_pitch = nil
         elseif valid(entry.helmet) then
             entry.helmet:SetVisibility(false, false)
         end

@@ -508,6 +508,18 @@ local function claim(fields, state, phase, profile)
         if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
             error("mutation_unverified_loose_pickup_retirement", 0)
         end
+        if pawn:IsLocallyControlled() then
+            pcall(function()
+                local controller = pawn.Controller
+                local stack = controller.MenuStack
+                local screen = stack:GetArrayNum() == 1 and stack[1]
+                local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
+                if screen and same(screen:GetClass(), class) and same(screen:GetOwningPlayer(), controller) then
+                    screen.BackpackPanel:FullRefresh()
+                    screen.FloorPanel:FullRefresh()
+                end
+            end)
+        end
     end
     if report.ok and profile.callback then
         local delivered, effect = SilverfishStockAuthoredPickupCallback(pawn:GetAddress(), save:GetAddress(), true, profile.source)
@@ -664,6 +676,34 @@ function pickup.command(fields, state, phase)
             end
         end
         return "shared level item visibility synchronized"
+    end
+    if action == "native-loose-pickup-nearby-fixture" then
+        pickup.update(state, phase)
+        local profile = #fields == 3 and loose_profile(fields[3], state)
+        local controller = state.controller
+        local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
+        if not host_fixtures or phase ~= "hosting" or not profile or profile.claimed
+            or not valid(controller) or not valid(class) or controller.MenuStack:GetArrayNum() ~= 0 then
+            error("loose_pickup_nearby_fixture_unavailable", 0)
+        end
+        local created = {}
+        controller:OpenMenu(class, created)
+        local screen = created.CreatedMenu
+        if not valid(screen) or not same(screen:GetClass(), class) then error("loose_pickup_nearby_menu_unavailable", 0) end
+        local target = StaticFindObject(profile.path)
+        screen:FindFloorItems()
+        for index = 1, screen.FloorActors:GetArrayNum() do
+            if same(screen.FloorActors[index], target) then
+                local guid = screen.FloorItems[index].GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A
+                local result = {}
+                screen:RemoveItem({A = guid.A, B = guid.B, C = guid.C, D = guid.D}, 0, {}, result)
+                if result.Success == true or not valid(target) or target.bHidden then
+                    error("loose_pickup_nearby_bypassed_authority", 0)
+                end
+                return "stock Nearby Items pickup requested"
+            end
+        end
+        error("loose_pickup_nearby_card_unavailable", 0)
     end
     if action == "native-loose-pickup-approach" or action == "native-loose-pickup-fixture" then
         pickup.update(state, phase)

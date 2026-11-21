@@ -16,9 +16,10 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import embedded_startup, runtime
-from tools.silverfish.control import NAME
+from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
+from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
@@ -132,8 +133,17 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
         while not heartbeat.is_file():
             await asyncio.sleep(.1)
     assert 0 <= int(time.time()) - int(heartbeat.read_text(encoding="ascii")) <= 5
+    await guest.bridge.wait_for(lambda frame: frame.get("native_inventory_view_binding") == "ready")
+    guest_run = guest.client / "run"
+    requested = await submit(guest_run, "native-inventory-view-fixture")
+    assert requested["ok"], requested
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+    requested = await submit(guest_run, "native-inventory-view-fixture")
+    assert requested["ok"], requested
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
-            "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True}
+            "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
+            "guest_inventory_action_verified": True}
 
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,

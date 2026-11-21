@@ -97,3 +97,21 @@ The official UE4SS v4.0.0 release DLL loaded the matched co-op add-on in an isol
 The Windows coordinator build embeds its Python dependencies and the exact normalized source files used for invitation compatibility. The bootstrap archive pairs that executable with the native title adapter pinned to its SHA-256. The packager refuses a mismatched executable. Separate inherited pipes carry the one-use startup request and the acknowledgment tied to that request. The title supervisor waits for two advancing frames from the isolated stock title, its mounted co-op panel, and its effective save directory before sending the acknowledgment. It verified both seats in the staged Direct IP trial. The user-facing F7 and original title retirement still require a live foreground run. [Coordinator build](../bootstrap/README.md)
 
 Keep a local, versioned JSON interface alongside the menu. It should expose session and map state, the active and reserved roster, checkpoint revision and recovery status, and supported player actions. Commands carry request IDs and the current session generation so an AI can distinguish an accepted request from an applied or durably committed result. Keep control files local to the Windows account and redact invite credentials and private keys from normal status and events. Use the same host validation for a menu action and its documented JSON equivalent. [Current local control](../tools/silverfish/control.py)
+
+## Observatory two-PC playtest follow-up
+
+- Verify that guests can open their own backpack from the bound Inventory action after joining from the stock character creator. Exercise the same binding in the packaged build.
+- Use the game's `StashScreen` and `ShopScreen` for guests. Stash transfers go through the selected character's host-owned stash, including the host's shared-rest-site setting. Merchant and NPC trades read the host's inventory for the exact trader and settle against the shared wallet and the requesting character's inventory.
+- Route both Interact and Nearby Items pickup to the host claim for the same world actor. Recheck the Observatory bolt, the host's Backpack and Nearby Items cards after a drop, and input-to-pickup time on both peers.
+- Sync a guest's harvest of a wild mushroom so its collected state is visible to the host and other guests.
+- Check opening and closing the same door from both sides. The guest's panel and collision should follow the host's current hinge state through repeated toggles and a reconnect.
+- Accept a quest directly from Simmi as a guest and verify it appears in the host's Journal. Confirm both players see the host's faction dispositions.
+- Verify avatar head position from both seats with the Hunter Jacket and distinct faces. Check that the bat grip, crouch, aiming down sights, melee swings, and ranged firing are visible to the other peer.
+- Replicate the Observatory lantern's light state, carry, and release using the stock physics-object interaction. The player holding it drives its position while the host validates ownership.
+- Replicate loose physics props spawned by containers, including bottles and rusty cans, with the same world identity and carry rules.
+- Preserve the Crossroads frog's hop animation on peers and let guests pick it up through the same host-authoritative action as the host.
+- Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
+- Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
+- Propagate the host's explosive-canister destruction and explosion to connected guests. Exercise it with stock ranged fire so the receiving view shows the shot and the resulting world change.
+- Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
+- Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.

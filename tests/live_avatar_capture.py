@@ -131,6 +131,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                 if (appearance.get("face", "").endswith("." + expected_face)
                         and appearance.get("plumage", "").endswith("." + expected_plumage)
                         and appearance.get("skin_color") == expected_skin
+                        and remote.get("body", "").endswith(".Armor_HunterJacket_C")
                         and expected_weapon <= {path.rsplit(".", 1)[-1] for path in remote.get("weapon_meshes", ())}):
                     return remote
 

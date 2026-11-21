@@ -54,6 +54,12 @@ local function style(pawn, face, plumage, tint)
     selection[face_field] = asset(mesh_root .. face .. "." .. face)
     selection[plumage_field] = asset(mesh_root .. plumage .. "." .. plumage)
     selection[skin_field] = tint
+    local jacket = asset("/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C")
+    local out = {}
+    asset(inventory):MakeDefaultItem(jacket, pawn, out)
+    local row = out.Item or out
+    assert(same(row[item_class], jacket), "avatar_probe_hunter_jacket_factory_unavailable")
+    pawn.Save.PlayerArmor = row
 end
 
 local function equip(pawn, blueprint)

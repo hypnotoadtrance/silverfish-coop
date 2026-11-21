@@ -226,7 +226,7 @@ local function scene_field(notes, id, object, field, convert)
     return "-"
 end
 
-local function reputation_flags(save)
+function native_world.reputation_flags(save)
     local flags = save.Flags
     local count = scene_count(flags)
     if not count or count > 1024 then error("Native flags exceed the telemetry bound", 0) end
@@ -272,7 +272,7 @@ local function append_scene(rows, state_row, map, instance)
         rows[#rows + 1] = state_row("native-rule", key, scene_field(notes, key, rules, field, convert))
     end
 
-    local rep_available, reputation = pcall(reputation_flags, save)
+    local rep_available, reputation = pcall(native_world.reputation_flags, save)
     if rep_available then
         for _, flag in ipairs(reputation) do
             rows[#rows + 1] = state_row("native-reputation", flag[1], flag[2])

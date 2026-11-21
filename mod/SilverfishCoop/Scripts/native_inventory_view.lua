@@ -10,6 +10,8 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+local inventory_action_path = "/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory"
+local inventory_action_event = "InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0"
 local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
@@ -33,6 +35,7 @@ local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", 
 local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
 local event_path, equip_path, is_downed, binding, observation, display
+local binding_state
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -90,6 +93,7 @@ function inventory_view.clear()
         SilverfishClearNativeInventoryViewScope()
     end
     binding, observation = nil, nil
+    binding_state = nil
 end
 
 local function can_view(current)
@@ -128,18 +132,24 @@ function inventory_view.sync(state, phase)
     if not current or type(SilverfishSetNativeInventoryViewScope) ~= "function"
         or type(SilverfishTakeNativeInventoryViewRequest) ~= "function" then
         inventory_view.clear()
+        if current then binding_state = "hooks_unavailable" end
         return
     end
     if not same_context(current, binding) then
         inventory_view.clear()
-        if not load_class(inventory_path) then return end
+        if not load_class(inventory_path) then
+            binding_state = "class_unavailable"
+            return
+        end
     end
     local allowed = can_view(current)
     if not SilverfishSetNativeInventoryViewScope(current.pawn:GetAddress(), allowed) then
         inventory_view.clear()
+        binding_state = "scope_unavailable"
         return
     end
     binding = current
+    binding_state = allowed and "ready" or "blocked"
     if observation and observation.state ~= "closed" and not allowed then
         remove_display()
         observation.state = "closed"
@@ -390,15 +400,14 @@ local function fixture(current)
     if not headless or not can_view(current) or not same_context(current, binding) then
         error("The fixture requires an enrolled headless stock inventory viewer", 0)
     end
-    local class, stack = load_class(inventory_path), current.controller.MenuStack
-    if not class or not stack or stack:GetArrayNum() ~= 0 then
+    local action, stack = load_class(inventory_action_path), current.controller.MenuStack
+    if not action or not stack or stack:GetArrayNum() ~= 0 then
         error("The exact stock inventory menu fixture is unavailable", 0)
     end
-    local created = {}
-    current.controller:OpenMenu(class, created)
-    if stack:GetArrayNum() ~= 0 or valid(created.CreatedMenu) or not take(current)
+    current.controller[inventory_action_event](current.controller, {}, 0, 0, action)
+    if stack:GetArrayNum() ~= 0 or not take(current)
         or not observation or observation.state == "error" then
-        error("The exact stock inventory menu did not publish the isolated key request", 0)
+        error("The stock inventory action did not publish the isolated key request", 0)
     end
     return "verified exact stock inventory key path"
 end
@@ -494,6 +503,7 @@ function inventory_view.rows(state, phase, status_row)
     local current = context(state, phase)
     if not current then return {} end
     local rows = {status_row("native-inventory-split-view-capability", 1)}
+    if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
     if not observation or not same_context(current, observation.context) then return rows end
     rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
         observation.offset or 0, observation.total or 0, observation.count or 0)
