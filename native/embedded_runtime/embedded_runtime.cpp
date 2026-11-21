@@ -291,7 +291,7 @@ namespace
     {
         int schema{}, port{};
         bool isolated{};
-        std::string work, seat, campaign, bind;
+        std::string work, seat, campaign, bind, shipping_sha256;
         std::map<std::string, std::string> features;
 
         struct glaze
@@ -299,7 +299,8 @@ namespace
             static constexpr auto value = glz::object(
                 "schema", &InstalledBoot::schema, "work", &InstalledBoot::work, "seat", &InstalledBoot::seat,
                 "campaign", &InstalledBoot::campaign, "bind", &InstalledBoot::bind, "port", &InstalledBoot::port,
-                "isolated", &InstalledBoot::isolated, "features", &InstalledBoot::features);
+                "isolated", &InstalledBoot::isolated, "features", &InstalledBoot::features,
+                "shipping_sha256", &InstalledBoot::shipping_sha256);
         };
     };
 
@@ -322,6 +323,14 @@ namespace
         std::wstring result;
         for (auto byte : bytes) { result += digits[byte >> 4]; result += digits[byte & 15]; }
         return result;
+    }
+
+    bool matches_shipping_image(const fs::path& image, std::string_view digest)
+    {
+        constexpr std::size_t max_image = 256 * 1024 * 1024;
+        const auto file = open_pinned(image);
+        const auto body = file ? read(file.get(), max_image) : std::nullopt;
+        return body && Sha256{}.matches(*body, digest);
     }
 
     std::optional<Handle> boot_installed_title(HMODULE module)
@@ -353,14 +362,15 @@ namespace
         const std::wstring seat(config.seat.begin(), config.seat.end());
         const std::wstring campaign(config.campaign.begin(), config.campaign.end());
         if (!profile_name(seat) || !profile_name(campaign)) return std::nullopt;
-        const auto work = fs::u8path(config.work);
+        const auto work = fs::path(std::u8string(config.work.begin(), config.work.end()));
         const auto title = work / L"titles" / seat;
         const auto run = title / L"run";
         const auto mailbox = run / L"game-bridge";
         for (const auto& path : {work, title.parent_path(), title, run, mailbox})
             if (!exact_path(path, true)) return std::nullopt;
         if (under(work, game) || under(game, work) ||
-            !matches_command_line(image, title / L"game-user", work, false, false, !config.isolated))
+            !matches_command_line(image, title / L"game-user", work, false, false, !config.isolated) ||
+            !matches_shipping_image(image, config.shipping_sha256))
             return std::nullopt;
 
         std::map<std::wstring, std::wstring> updates;

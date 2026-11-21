@@ -22,15 +22,18 @@ def _name(value: str) -> bool:
     return isinstance(value, str) and NAME.fullmatch(value) is not None and _DEVICE.fullmatch(value) is None
 
 
-def _verify_game(game: Path, work: Path) -> None:
+def _verify_game(game: Path, work: Path) -> str:
     marker = game / "silverfish-coop-stage.json"
     install_stock._ordinary(marker)
     metadata = runtime.read_json(marker)
     if type(metadata.get("schema")) is not int or metadata["schema"] != 1:
         raise ValueError("The installed game has no supported co-op content manifest")
-    digest = sha256()
-    for relative in (runtime.SHIPPING, *(runtime.PAKS / name for name in runtime.STOCK_PACKAGES)):
-        path = game / relative
+    shipping = game / runtime.SHIPPING
+    install_stock._ordinary(shipping)
+    shipping_sha256 = runtime._file_sha256(shipping)
+    digest = sha256(bytes.fromhex(shipping_sha256))
+    for name in runtime.STOCK_PACKAGES:
+        path = game / runtime.PAKS / name
         install_stock._ordinary(path)
         digest.update(bytes.fromhex(runtime._file_sha256(path)))
     if digest.hexdigest() != metadata.get("game_build"):
@@ -61,6 +64,7 @@ def _verify_game(game: Path, work: Path) -> None:
         raise ValueError("The installed co-op gameplay files do not match this installer")
     embedded = mods / install_stage.MOD
     install_stage._verify(embedded / "runtime", embedded / "dlls" / "main.dll")
+    return shipping_sha256
 
 
 def configure(game: Path, work: Path, *, seat: str = "local", campaign: str = "default",
@@ -85,7 +89,7 @@ def configure(game: Path, work: Path, *, seat: str = "local", campaign: str = "d
         raise ValueError("Use a numeric host IP address") from None
 
     with runtime.installed_content(work, game):
-        _verify_game(game, work)
+        shipping_sha256 = _verify_game(game, work)
         environment = runtime.game_environment(
             work, headless=isolated, embedded_engine=True, embedded_startup="1" * 32,
             resident_title=True, resident_direct_join=True, unified_title=True,
@@ -96,7 +100,7 @@ def configure(game: Path, work: Path, *, seat: str = "local", campaign: str = "d
                 if key.startswith("SILVERFISH_COOP_") and key not in {
                     "SILVERFISH_COOP_EMBEDDED_STARTUP", "SILVERFISH_COOP_BRIDGE",
                 }}
-    plan = {"schema": 1, "work": str(work), "seat": seat, "campaign": campaign,
+    plan = {"schema": 1, "work": str(work), "seat": seat, "campaign": campaign, "shipping_sha256": shipping_sha256,
             "bind": address, "port": port, "isolated": isolated, "features": features}
     encoded = (json.dumps(plan, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
     if len(encoded) > DESCRIPTOR_LIMIT:

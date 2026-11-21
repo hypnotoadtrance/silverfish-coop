@@ -55,6 +55,7 @@ class ResidentBootConfigTests(unittest.TestCase):
         settings = json.loads(destination.read_bytes())
         self.assertEqual({key: value for key, value in settings.items() if key != "features"}, {
             "schema": 1, "work": str(self.work), "seat": "test-seat", "campaign": "default",
+            "shipping_sha256": sha256((self.game / runtime.SHIPPING).read_bytes()).hexdigest(),
             "bind": "::1", "port": 7777, "isolated": True,
         })
         features = settings["features"]

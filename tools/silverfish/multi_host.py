@@ -413,7 +413,12 @@ class MultiHost(Host):
         for member in self.members.members:
             observation = participants.get(member.role)
             if observation and not member.ready:
-                await self._attach_member(bridge, member, observation)
+                try:
+                    await self._attach_member(bridge, member, observation)
+                except RuntimeError as error:
+                    self.control.event("native_guest_attachment_failed", character_id=member.character_id,
+                                       reason=str(error)[:256])
+                    raise
         self._reserve_next_return()
 
     async def _retire_expired_guests(self, bridge, transport) -> None:
