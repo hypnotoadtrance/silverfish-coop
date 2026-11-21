@@ -59,3 +59,26 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             requests.put_nowait("guest interaction")
             await asyncio.wait_for(wait, .5)
             self.assertEqual(requests.get_nowait(), "guest interaction")
+
+    async def test_guest_idle_wait_wakes_for_new_primary_and_inventory_events(self):
+        streams = (
+            ("native-guest-primary-events", "primary_input_offset"),
+            ("native-inventory-view-events", "inventory_view_offset"),
+        )
+        for filename, offset in streams:
+            with self.subTest(filename=filename), TemporaryDirectory() as temporary:
+                bridge = runtime.Bridge(Path(temporary), Mock())
+                path = bridge.directory / filename
+                path.write_bytes(b"consumed\n")
+                setattr(bridge, offset, path.stat().st_size)
+                waiting = asyncio.create_task(bridge.wait_for_interaction(5, guest=True))
+                self.addAsyncCleanup(self.cancel_wait, waiting)
+                await asyncio.sleep(.05)
+                self.assertFalse(waiting.done())
+                with path.open("ab") as stream:
+                    stream.write(b"new press\n")
+                await asyncio.wait_for(waiting, .20)
+
+    async def cancel_wait(self, task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

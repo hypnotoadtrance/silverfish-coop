@@ -122,7 +122,17 @@ async def verify(work: Path, originals_path: Path):
 
     async def reload_stock(index, guid, before, after):
         await action(run, "native-guest-weapon-seed-ammo", target=roles[index], item_guid=uuid.uuid4().hex.upper())
-        input_proof = (await action(client_runs[index], "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
+        # The headless fixture refuses to overwrite a still-live native reload receipt.
+        # Wait for that receipt to expire before staging a second synthetic tap.
+        async with asyncio.timeout(5):
+            while True:
+                reply = await submit(client_runs[index], "native-guest-reload-input-fixture")
+                if reply.get("ok"):
+                    input_proof = reply["native_guest_reload_fixture"]
+                    break
+                if reply.get("error") != "The stock reload fixture did not verify (native_guest_reload_fixture_input_busy)":
+                    raise RuntimeError(f"Stock reload fixture failed: {reply}")
+                await asyncio.sleep(.25)
         receipt = await wait_event(client_runs[index], "native_guest_reload_input",
                                    lambda row: row.get("sequence") == input_proof["sequence"])
         loaded = receipt[EQUIPPED]

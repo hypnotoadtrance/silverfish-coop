@@ -889,7 +889,7 @@ namespace
 
     int take(const Lua& lua)
     {
-        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        if (!available() || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
         const auto now = Clock::now();
         if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now) || !can_act(scope.seat)) return 0;

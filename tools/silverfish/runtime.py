@@ -693,19 +693,25 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
 
-    async def wait_for_interaction(self, timeout: float, *, wake_if=None) -> None:
+    async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input or pending network work between idle ticks."""
         deadline = time.monotonic() + timeout
-        path = self.directory / "input.tsv"
+        streams = [(self.directory / "input.tsv", self.input_offset)]
+        if guest:
+            streams.extend((
+                (self.directory / "native-guest-primary-events", self.primary_input_offset),
+                (self.directory / "native-inventory-view-events", self.inventory_view_offset),
+            ))
         while (remaining := deadline - time.monotonic()) > 0:
             if wake_if is not None and wake_if():
                 return
             await asyncio.sleep(min(.025, remaining))
-            try:
-                if path.stat().st_size > self.input_offset:
-                    return
-            except OSError:
-                pass
+            for path, offset in streams:
+                try:
+                    if path.stat().st_size > offset:
+                        return
+                except OSError:
+                    pass
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""

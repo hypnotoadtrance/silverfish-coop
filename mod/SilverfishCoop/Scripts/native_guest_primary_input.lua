@@ -97,23 +97,15 @@ function primary.reset()
     binding, fixture_proof, held_fixture_proof = nil, nil, nil
 end
 
-function primary.sync(state, phase)
-    if not binding then return end
-    local current = context(state, phase)
-    if not same_context(current, binding) then
-        primary.reset()
-        return
-    end
-    local address = current.pawn:GetAddress()
-    local held_emitted, held_last = drain_held(current, address)
-    if not standing(current) then
-        primary.reset()
-        return 0, held_emitted, held_last
-    end
+local function drain_taps(current, address)
     local emitted = 0
     for _ = 1, 8 do
         local sequence, owner, guid, kind = SilverfishTakeNativeGuestPrimaryIntent(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
+        if emitted == 0 and not standing(current) then
+            primary.reset()
+            break
+        end
         if kind == "blowtorch" or kind == "crowbar" then
             local actor = current.pawn.ActorBeingLookedAt
             local name = valid(actor) and actor:GetFullName()
@@ -134,7 +126,22 @@ function primary.sync(state, phase)
         elseif not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
     end
-    return emitted, held_emitted, held_last
+    return emitted
+end
+
+function primary.sync(state, phase)
+    if not binding then return end
+    local current = context(state, phase)
+    if not same_context(current, binding) then
+        primary.reset()
+        return
+    end
+    local address = current.pawn:GetAddress()
+    local held_emitted, held_last = drain_held(current, address)
+    if not standing(current) then
+        primary.reset()
+    end
+    return held_emitted, held_last
 end
 
 local function fixture_edge(state, phase, current, edge)
@@ -142,8 +149,8 @@ local function fixture_edge(state, phase, current, edge)
     if ok ~= true or status ~= "stock_" .. edge or not valid_sequence(sequence) or not valid_sequence(stroke) then
         error("The stock SMG fixture edge was unverified (" .. tostring(status) .. ")", 0)
     end
-    local taps, held, last = primary.sync(state, phase)
-    if taps ~= 0 or held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
+    local held, last = primary.sync(state, phase)
+    if held ~= 1 or last ~= sequence then error("The stock SMG fixture edge could not be published", 0) end
     held_fixture_proof = {context = current, guid = binding.guid, sequence = sequence, stroke = stroke, edge = edge}
     return held_fixture_proof
 end
@@ -196,7 +203,11 @@ function primary.command(fields, state, phase)
                 or wrappers ~= (binding.kind == "crowbar" and 1 or 2) then
                 error("The stock primary input fixture did not verify (" .. tostring(status) .. ")", 0)
             end
-            if primary.sync(state, phase) ~= 1 then error("The stock primary fixture intent could not be published", 0) end
+            -- A forced pry trace only exists inside the scoped fixture callback.
+            -- Ordinary taps use the same drain as a real input.
+            if pry_tool and drain_taps(current, current.pawn:GetAddress()) ~= 1 then
+                error("The stock primary fixture intent could not be published", 0)
+            end
             fixture_proof = {context = current, guid = binding.guid, sequence = sequence, wrappers = wrappers}
         end
         if pry_tool then
@@ -276,6 +287,16 @@ function primary.start(bridge, downed)
     event_path = enabled and bridge and bridge ~= "" and bridge .. "/native-guest-primary-events" or nil
     held_event_path = event_path and held_enabled and bridge .. "/native-guest-held-fire-events" or nil
     is_downed = downed
+    if not event_path then return end
+    LoopInGameThreadWithDelay(20, function()
+        local current = binding
+        if not current or not valid(current.pawn) then return end
+        local ok, failure = pcall(drain_taps, current, current.pawn:GetAddress())
+        if not ok then
+            primary.reset()
+            print("[SilverfishCoop] Stock primary input unavailable: " .. tostring(failure) .. "\n")
+        end
+    end)
 end
 
 return primary

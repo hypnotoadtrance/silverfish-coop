@@ -5728,7 +5728,7 @@ class Client:
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
                                 zone_epoch=self.zone_epoch)
-            await self.bridge.wait_for_interaction(.25, wake_if=self.gameplay_snapshot_ready)
+            await self.bridge.wait_for_interaction(.25, wake_if=self.gameplay_snapshot_ready, guest=True)
 
 
 def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,
