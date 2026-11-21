@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -83,6 +84,15 @@ class PauseExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.finish.await_count, 2)
         self.assertNotEqual(*[call.args[0] for call in self.finish.await_args_list])
         self.assertTrue(response.read_bytes().endswith(b"\tok\tstopping\n"))
+
+    async def test_press_made_before_expiry_survives_a_checkpoint_delay(self):
+        await self.mailbox.poll(self.scope, self.finish)
+        token, expiry = self.offer()
+        self.request(token)
+        os.utime(self.bridge / pause.REQUEST, (expiry - 1, expiry - 1))
+        self.now = expiry + 3
+        await self.mailbox.poll(self.scope, self.finish)
+        self.finish.assert_awaited_once()
 
 
 if __name__ == "__main__":

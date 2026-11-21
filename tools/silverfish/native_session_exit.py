@@ -56,8 +56,10 @@ class PauseExit:
         if self._same_bridge():
             self._disarm()
 
-    def _take(self):
+    def _take(self, *, before=None):
         try:
+            if before is not None and self._request.stat().st_mtime >= before:
+                return None
             raw = _read_file(self._request, 128)
             self._request.unlink()
         except FileNotFoundError:
@@ -84,17 +86,23 @@ class PauseExit:
             self._disarm()
             return
         now = int(self._clock())
-        if self._scope != scope or self._expires <= now:
-            self._disarm()
-            self._scope, self._token = scope, uuid.uuid4().hex
-        if now + 2 >= self._expires:
-            expires = now + OFFER_SECONDS
-            try:
-                write_text(self._session, f"1\t{self._token}\t{self._role}\t{expires}\n", newline="\n")
-            except OSError:
-                return
-            self._expires = expires
-        request = self._take()
+        request = None
+        if self._scope == scope and self._expires <= now < self._expires + 2 * OFFER_SECONDS:
+            # A checkpoint can occupy the role worker while the stock menu
+            # confirms its exit. Accept only a press made during that offer.
+            request = self._take(before=self._expires)
+        if request is None:
+            if self._scope != scope or self._expires <= now:
+                self._disarm()
+                self._scope, self._token = scope, uuid.uuid4().hex
+            if now + 2 >= self._expires:
+                expires = now + OFFER_SECONDS
+                try:
+                    write_text(self._session, f"1\t{self._token}\t{self._role}\t{expires}\n", newline="\n")
+                except OSError:
+                    return
+                self._expires = expires
+            request = self._take()
         if request is None:
             return
         serial, reason = request

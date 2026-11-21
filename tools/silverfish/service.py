@@ -3655,6 +3655,15 @@ class Host:
                 self.publish_host_status(transport)
                 await asyncio.sleep(.25)
                 continue
+            if pause_exit is not None:
+                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                can_end = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe
+                               or self.party.get("wipe")) and self.last_game.get("state") == "hosting"
+                           and pawn and time.monotonic() - self.last_seen <= 1.5)
+                scope = (self.control.generation, self.zone_epoch, pawn) if can_end else None
+                await pause_exit.poll(scope, end_session)
+                if self.stopping:
+                    break
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             await native_stock_enemy_drops.observe(self, bridge)
@@ -3815,13 +3824,6 @@ class Host:
                 except (ValueError, OSError, RuntimeError) as error:
                     self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             await self.service_requests(bridge, transport)
-            if pause_exit is not None:
-                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
-                can_end = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe
-                               or self.party.get("wipe")) and self.last_game.get("state") == "hosting"
-                           and pawn and time.monotonic() - self.last_seen <= 1.5)
-                scope = (self.control.generation, self.zone_epoch, pawn) if can_end else None
-                await pause_exit.poll(scope, end_session)
             if invites is not None:
                 active = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.party.get("wipe"))
                           and time.monotonic() - self.last_seen <= 1.5

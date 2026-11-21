@@ -198,10 +198,20 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
             for outfit in frame.get("native_avatar_outfits", {}).values()))
     pawn = authoritative["native_guest_save"]["pawn"]
     await host.bridge.wait_for(lambda frame: frame.get("native_player_avatars", {}).get(pawn, {}).get("head_roll") == 0)
-    nonce = uuid.uuid4().hex
-    await host.bridge.command("native-guest-ui-read", pawn, nonce)
-    host_view = host.bridge.directory / f"native-guest-ui-{nonce}.tsv"
-    rows = host_view.read_text(encoding="ascii").splitlines()
+    rows = None
+    for _ in range(4):
+        nonce = uuid.uuid4().hex
+        host_view = host.bridge.directory / f"native-guest-ui-{nonce}.tsv"
+        try:
+            await host.bridge.command("native-guest-ui-read", pawn, nonce, timeout=2)
+        except TimeoutError:
+            # The resident guest can read its view concurrently. The exact
+            # response file still proves our read if the bridge ack advanced.
+            pass
+        if host_view.exists():
+            rows = host_view.read_text(encoding="ascii").splitlines()
+            break
+    assert rows and rows[0] == f"{TUTORIAL}\t{character}"
     assert any(row.startswith("item\tbackpack\t") and "Random_GearBag_Starter_C" in row for row in rows)
     assert any(row.startswith("character\t") and "WeirdLuck" in row for row in rows)
     return joined, appearance, profile
