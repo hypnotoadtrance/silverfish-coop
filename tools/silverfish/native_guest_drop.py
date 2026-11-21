@@ -8,6 +8,7 @@ import time
 import uuid
 
 from . import native_guest_drop_record as record
+from . import native_guest_consumable
 from . import native_guest_stack_drop as probe, native_host_save, native_inventory, native_inventory_death, native_pickup_audio, party
 from .native_gold import valid_guid
 
@@ -19,6 +20,7 @@ HOST_RECLAIM = "native-host-stack-reclaim"
 ACTIONS = (DROP, RECLAIM)
 RESULT = "native_guest_stack_drop"
 STOCK_DROP_FIXTURE = "native-inventory-stock-drop-fixture"
+STOCK_USE_FIXTURE = "native-inventory-stock-use-fixture"
 _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
@@ -74,7 +76,7 @@ def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
     return client.host_session, client.zone_epoch, client.stack_drop_projection.admission, sequence, area, pawn
 
 
-async def stock_menu_fixture(client, guid, operation: str) -> dict:
+async def stock_menu_fixture(client, guid, operation: str, *, use: bool = False) -> dict:
     game = client.last_game
     area, epoch = game.get("map"), client.zone_epoch
     pawn = game.get("pawns", {}).get("local", {}).get("name")
@@ -83,25 +85,46 @@ async def stock_menu_fixture(client, guid, operation: str) -> dict:
             or client.gameplay.get(record.CAPABILITY) != 1 or not valid_guid(guid)
             or not record.supported_map(area) or not record.valid_id(epoch)):
         raise ValueError("Select an item in a connected guest's stock backpack")
-    snapshot = await client.bridge.command("native-inventory-view-fixture", "stock-drop", epoch, guid, timeout=5)
-    match = re.fullmatch(r"stock guest drop ([0-9A-F]{32}) ([1-9][0-9]{0,2}) ([1-9][0-9]{0,15})",
+    mode = "stock-use" if use else "stock-drop"
+    snapshot = await client.bridge.command("native-inventory-view-fixture", mode, epoch, guid, timeout=5)
+    match = re.fullmatch(r"stock guest (context_menu|use-[a-z-]+) ([0-9A-F]{32}) ([1-9][0-9]{0,2}) ([1-9][0-9]{0,15})",
                          snapshot.get("ack", {}).get("message", ""))
-    if (not match or match[1] != guid or int(match[2]) > record.MAX_QUANTITY
+    if (not match or match[2] != guid or int(match[3]) > record.MAX_QUANTITY
             or (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"))
             != ("connected", area, pawn) or client.zone_epoch != epoch):
-        raise RuntimeError("The stock screen did not verify the selected backpack drop")
+        raise RuntimeError("The stock screen did not verify the selected backpack action")
     client.last_game = snapshot
-    quantity, sequence = int(match[2]), match[3]
+    entry, _, count, sequence = match.groups()
+    quantity = int(count)
     accepted = False
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
-        receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(RESULT)
-        if (not isinstance(receipt, dict)
-                or tuple(receipt.get(key) for key in ("state", "drop_id", "owner", "guid", "quantity", "map"))
-                != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
-                or not record.valid_quantity(receipt.get("class_path"), quantity)
-                or not record.valid_position(receipt.get("location"))):
-            raise RuntimeError("The host did not settle the stock guest backpack drop")
+        if use:
+            action = f"native-guest-{entry.removeprefix('use-')}"
+            meal = native_guest_consumable.MEALS.get(action)
+            if (not entry.startswith("use-") or quantity != 1 or action not in native_guest_consumable.RESULT
+                    or meal is not None and not client.invite.get("native_guest_mre")):
+                raise ValueError("The selected stock item has no host-authoritative Use action")
+            key = native_guest_consumable.RESULT[action]
+            receipt = (await client.gameplay_action(action, operation, guid)).get(key)
+            if not isinstance(receipt, dict):
+                raise RuntimeError("The host did not return a stock consumable receipt")
+            remaining, before = receipt.get("quantity_after"), receipt.get("quantity_before")
+            if (tuple(receipt.get(field) for field in ("state", "map", "guid")) != ("used", area, guid)
+                    or type(remaining) is not int or type(before) is not int or remaining < 0 or remaining != before - 1
+                    or meal is not None and receipt.get("class_path") != meal.class_path):
+                raise RuntimeError("The host did not verify consumption of the selected stock item")
+        else:
+            if entry != "context_menu":
+                raise ValueError("The native action did not select a backpack drop")
+            key, remaining = RESULT, 0
+            receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)
+            if (not isinstance(receipt, dict)
+                    or tuple(receipt.get(field) for field in ("state", "drop_id", "owner", "guid", "quantity", "map"))
+                    != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
+                    or not record.valid_quantity(receipt.get("class_path"), quantity)
+                    or not record.valid_position(receipt.get("location"))):
+                raise RuntimeError("The host did not settle the stock guest backpack drop")
         await client.guest_ui.refresh(client)
         accepted = True
     except (KeyError, TypeError, ValueError) as error:
@@ -110,8 +133,8 @@ async def stock_menu_fixture(client, guid, operation: str) -> dict:
         if not accepted:
             with suppress(OSError, RuntimeError, ValueError):
                 await client.bridge.command(*finish, "refused", timeout=3)
-    client.last_game = await client.bridge.command(*finish, "dropped", timeout=5)
-    return {RESULT: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
+    client.last_game = await client.bridge.command(*finish, str(remaining), timeout=5)
+    return {key: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
 
 
 async def service_view(client, active: bool) -> None:

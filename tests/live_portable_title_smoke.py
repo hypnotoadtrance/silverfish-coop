@@ -17,7 +17,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
-from tools.silverfish import embedded_startup, native_guest_drop, native_world_loot, runtime
+from tools.silverfish import embedded_startup, native_guest_consumable, native_guest_drop, native_world_loot, runtime
 from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
@@ -150,7 +150,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     preview = await submit(guest_run, "native-inventory-view-fixture", target="stock")
     assert preview["ok"] and re.fullmatch(r"verified stock guest inventory with \d+ backpack cards",
                                           preview.get("stock_inventory_proof", "")), preview
-    stock_drop_proof = None
+    stock_drop_proof, stock_use_proofs = None, {}
     if stock_drop:
         contents = await submit(guest_run, "native-inventory-list")
         assert contents["ok"], contents
@@ -172,6 +172,24 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert contents["ok"] and selected["guid"] not in {
             row["guid"] for row in contents["native_inventory"]["items"]
         }, contents
+        for class_path in (native_guest_consumable.BANDAGE_CLASS, native_guest_consumable.MRE_CLASS):
+            selected = next((row for row in contents["native_inventory"]["items"]
+                             if row["class_path"] == class_path and row["source"] == "backpack"), None)
+            assert selected is not None, contents
+            used = await submit(guest_run, native_guest_drop.STOCK_USE_FIXTURE, target=selected["guid"])
+            assert used["ok"], used
+            assert re.fullmatch(r"verified open stock backpack refresh with \d+ cards",
+                                used.get("stock_inventory_proof", "")), used
+            key = native_guest_consumable.RESULT[native_guest_consumable.COMMANDS[class_path]]
+            proof = stock_use_proofs[key] = used[key]
+            assert (proof["guid"], proof["state"], proof["quantity_before"], proof["quantity_after"]) == (
+                selected["guid"], "used", selected["quantity"], selected["quantity"] - 1,
+            ), used
+            contents = await submit(guest_run, "native-inventory-list")
+            assert contents["ok"], contents
+            remaining = [row["quantity"] for row in contents["native_inventory"]["items"]
+                         if row["guid"] == selected["guid"]]
+            assert remaining == ([proof["quantity_after"]] if proof["quantity_after"] else []), contents
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -181,7 +199,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
-            **({"guest_stock_menu_drop": stock_drop_proof} if stock_drop_proof else {})}
+            **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs}
+               if stock_drop_proof else {})}
 
 
 async def create_stock_drop_character(guest, join, name):
@@ -305,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True, help="Clean replica with the release ZIP applied and no mods.txt")
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--stock-drop", action="store_true", help="test the stock guest backpack context-menu drop")
+    parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Drop and Use actions")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()

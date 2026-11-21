@@ -994,7 +994,20 @@ namespace
                                            now + request_lease, manager, screen, panel, "drag_to_floor"};
     }
 
-    void intercept_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function, bool from_menu)
+    [[nodiscard]] std::string_view stock_backpack_use(Unreal::UObject* item_class)
+    {
+        if (!item_class) return {};
+        const auto path = item_class->GetPathName();
+        if (path == STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C")) return "use-bandage";
+        if (path == STR("/Game/Classes/Items/Item_MRE.Item_MRE_C")) return "use-mre";
+        if (path == STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C")) return "use-canned-peaches";
+        if (path == STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C")) return "use-canned-beans";
+        if (path == STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C")) return "use-brown-mushroom";
+        return {};
+    }
+
+    void intercept_backpack_action(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
+                                   bool from_menu, std::string_view use = {})
     {
         if (function->GetNumParms() != 0 || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
@@ -1030,7 +1043,8 @@ namespace
         const auto equipped_index = drop_equipment_index(manager, candidate.panel);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if ((candidate.panel != panel && !equipped_index) || !item_class) return;
-        const auto stacks = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class));
+        const auto stacks = use.empty() ? silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class))
+                                        : std::optional<bool>{false};
         if (!stacks) return;
         const bool stack = *stacks;
 
@@ -1043,11 +1057,14 @@ namespace
 
         auto* allow = field<Unreal::FBoolProperty>(manager, STR("CanDropItems"));
         auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
+        auto* underwater = use.empty() ? nullptr : field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("HeadUnderWater"));
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
         if (!bound || (!scope.host && equipped_index) ||
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
-            !allow || !allow->GetPropertyValueInContainer(manager) || !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
+            (use.empty() ? !allow || !allow->GetPropertyValueInContainer(manager)
+                         : !underwater || underwater->GetPropertyValueInContainer(scope.pawn.Get())) ||
+            !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
             (from_menu && (object_field(menu, STR("ItemManager")) != manager || !same_widget_player(menu))) ||
             !held_class || object_value(held_class, held.value) ||
             !live(card) || !same_widget_player(card) || object_field(card, STR("ItemManager")) != manager ||
@@ -1075,8 +1092,9 @@ namespace
                 !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
         }
         const auto count = stack ? saved_ammo : 1;
-        const auto entry = equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
-                                            (from_menu ? "context_menu" : "ctrl_click");
+        const auto entry = !use.empty() ? use :
+            equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
+                             (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
                                             screen, panel, entry};
     }
@@ -1224,7 +1242,7 @@ namespace
         }
         if (name == entries->drop_item || name == entries->action_drop)
         {
-            intercept_drop(iteration, context, function, name == entries->action_drop);
+            intercept_backpack_action(iteration, context, function, name == entries->action_drop);
             return;
         }
         const bool manager = name == entries->action_use || name == entries->quick_move ||
@@ -1253,6 +1271,15 @@ namespace
             }
             candidate = manager_item(context, name);
             artifact = candidate.artifact;
+            if (!artifact && !scope.host && name == entries->action_use)
+            {
+                auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
+                if (const auto use = stock_backpack_use(item_class); !use.empty())
+                {
+                    intercept_backpack_action(iteration, context, function, true, use);
+                    return;
+                }
+            }
             entry = name == entries->action_use ? "action_use" : name == entries->quick_move ? "quick_move" :
                 name == entries->use_held ? "use_held_item" : "confirm_use_item";
         }
@@ -1560,7 +1587,8 @@ namespace
         auto* panel = completed.panel.Get();
         if (!exact_drop_screen(manager, completed.screen.Get(), panel))
             return probe_result(lua, true, "screen_closed");
-        if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu")
+        if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" ||
+            completed.entry.starts_with("use-"))
         {
             const Unreal::FName close_name{STR("CloseContextMenu")};
             auto* close = stock_no_args(manager, close_name);
