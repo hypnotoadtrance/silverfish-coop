@@ -308,8 +308,8 @@ class MultiHost(Host):
             changes[member.lease_id] = state
         return changes
 
-    async def capture_guest_records(self, bridge) -> dict[str, dict]:
-        records = {}
+    def guest_capture_targets(self) -> dict[str, str]:
+        targets = {}
         participants = self.members.match_pawns(self.last_game)
         for member in self.members.members:
             observation = participants.get(member.role)
@@ -319,8 +319,8 @@ class MultiHost(Host):
             scope = self.last_game.get("native_guest_save_members", {}).get(pawn)
             if not scope or scope["state"] != "bound":
                 raise RuntimeError("An enrolled native guest has no independent save scope")
-            records[member.character_id] = await self.capture_guest_generation(bridge, pawn, member.character_id)
-        return records
+            targets[member.character_id] = pawn
+        return targets
 
     async def _place_member(self, bridge, member, observation, *, near_host: bool):
         area = self.last_game["map"]

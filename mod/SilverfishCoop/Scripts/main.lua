@@ -857,11 +857,28 @@ local function run_command(fields, state, current_phase)
         last_broker_quest = { world = state.world, operation = command, target = argument, result = result }
         return "stock Broker quest state verified"
     elseif command == "native-host-save-capture" then
-        if (#fields ~= 3 and #fields ~= 4) or role ~= "host" then error("Expected an isolated host save generation", 0) end
-        if not native_host_dig_live.capture_allowed(state, current_phase, fields[4]) then
+        local paired = #fields >= 6 and #fields <= 12 and #fields % 2 == 0
+        if (#fields ~= 3 and #fields ~= 4 and not paired) or role ~= "host" then
+            error("Expected isolated co-op save generations", 0)
+        end
+        local dig_token = fields[4]
+        if paired and dig_token == "-" then dig_token = nil end
+        if not native_host_dig_live.capture_allowed(state, current_phase, dig_token) then
             error("stock_live_dig_checkpoint_pending", 0)
         end
-        return native_host_save.capture(state, current_phase, argument)
+        if paired then
+            local slots, pawns = {[argument] = true}, {}
+            for index = 5, #fields, 2 do
+                local pawn, slot = fields[index], fields[index + 1]
+                if slots[slot] or pawns[pawn] then error("Repeated co-op save generation or pawn", 0) end
+                slots[slot], pawns[pawn] = true, true
+            end
+        end
+        local receipt = native_host_save.capture(state, current_phase, argument)
+        for index = 5, #fields, 2 do
+            guest_save.capture(state, current_phase, fields[index], fields[index + 1])
+        end
+        return receipt
     elseif command == "native-guest-quest-xp" then
         if #fields ~= 4 or role ~= "host" or current_phase ~= "hosting" or type(guest_save.quest_xp) ~= "function" then
             error("Quest XP requires the exact enrolled native guest", 0)
@@ -1131,6 +1148,9 @@ local function write_status(state, current_phase, failure, fields)
     for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
         rows[#rows + 1] = status_row("native-zone-party-guard", 1)
+    end
+    if role == "host" and current_phase == "hosting" and type(guest_save.capture) == "function" then
+        rows[#rows + 1] = status_row("native-paired-save-capture", 1)
     end
     if world_view_enabled and current_phase == "hosting" then
         if not same_object(state.world, host_world_view_world) or host_world_view_check ~= os.time() then

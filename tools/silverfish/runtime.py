@@ -1139,6 +1139,8 @@ class Bridge:
                         data["stock_pause_exit"] = {"role": role, "state": state, "press": int(serial)}
                 elif fields == ["native-zone-party-guard", "1"]:
                     data["native_zone_party_guard"] = True
+                elif fields == ["native-paired-save-capture", "1"] and data.get("state") == "hosting":
+                    data["native_paired_save_capture"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
                                     "native-guest-melee-aim-fixture", "native-guest-melee-contact-fixture"):
                     parsed = parse_guest_melee(fields)

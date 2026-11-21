@@ -442,7 +442,8 @@ local function bind(state, phase, name, raw_health, slot, proof)
     return "native guest save bound"
 end
 
-local function capture(state, phase, name, slot)
+function guest_save.capture(state, phase, name, slot)
+    if not enabled then error("Native guest saves are disabled", 0) end
     if not generation_slot(slot) then error("An exact co-op guest save generation is required", 0) end
     local _, guest = exact_guest(state, phase, name)
     local binding = bindings[name]
@@ -495,7 +496,7 @@ function guest_save.command(fields, state, phase)
     end
     if command == "native-guest-save-capture" then
         if #fields ~= 4 then error("Expected the exact guest pawn name and generation slot", 0) end
-        return capture(state, phase, fields[3], fields[4])
+        return guest_save.capture(state, phase, fields[3], fields[4])
     end
     if command == "native-guest-bind-exact" then
         if #fields < 7 or (#fields > 8 and ((#fields ~= 18 and #fields ~= 20) or fields[8] ~= "-")) then

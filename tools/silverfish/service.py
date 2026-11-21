@@ -521,21 +521,25 @@ class Host:
         return next((entry["state"].get("native_guest_save") for entry in self.store.status()["characters"]
                      if entry["character_id"] == self.guest["character_id"]), None)
 
-    async def capture_native_guest(self, bridge: Bridge) -> dict | None:
+    def guest_capture_targets(self) -> dict[str, str]:
         if (not self.persist_native_guest or not self.native_profile or not self.guest or not self.guest_pawn
                 or self.last_game.get("native_guest_save", {}).get("pawn") != self.guest_pawn
                 or self.last_game.get("pawns", {}).get("guest", {}).get("name") != self.guest_pawn):
-            return None
-        return await self.capture_guest_generation(bridge, self.guest_pawn, self.guest["character_id"])
+            return {}
+        return {self.guest["character_id"]: self.guest_pawn}
+
+    @staticmethod
+    def verify_guest_capture(snapshot: dict, source: str, pawn: str, slot: str) -> None:
+        proof = snapshot.get("native_guest_save_member_frames", {}).get(pawn) or snapshot.get("native_guest_save_frame", {})
+        if (proof.get("state") != "captured" or proof.get("slot") != slot or proof.get("map") != source
+                or proof.get("pawn") != pawn or snapshot.get("state") != "hosting" or snapshot.get("map") != source):
+            raise RuntimeError("The game did not verify the exact detached guest save generation")
 
     async def capture_guest_generation(self, bridge: Bridge, pawn: str, character: str) -> dict:
         slot = native_host_save.new_slot()
         source = self.last_game["map"]
         snapshot = await bridge.command("native-guest-save-capture", pawn, slot, timeout=7)
-        proof = snapshot.get("native_guest_save_member_frames", {}).get(pawn) or snapshot.get("native_guest_save_frame", {})
-        if (proof.get("state") != "captured" or proof.get("slot") != slot or proof.get("map") != source
-                or proof.get("pawn") != pawn or snapshot.get("state") != "hosting" or snapshot.get("map") != source):
-            raise RuntimeError("The game did not verify the exact detached guest save generation")
+        self.verify_guest_capture(snapshot, source, pawn, slot)
         frame = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, source, flush=True)
         self.last_game = snapshot
         self.last_seen = time.monotonic()
@@ -578,8 +582,8 @@ class Host:
         return committed
 
     async def capture_guest_records(self, bridge: Bridge) -> dict[str, dict]:
-        frame = await self.capture_native_guest(bridge)
-        return {frame["character_id"]: frame} if frame else {}
+        return {character: await self.capture_guest_generation(bridge, pawn, character)
+                for character, pawn in self.guest_capture_targets().items()}
 
     async def flush_native_world(self, bridge: Bridge) -> None:
         source = self.last_game.get("map")
@@ -602,13 +606,33 @@ class Host:
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
             raise RuntimeError("The canonical native host is unavailable for checkpointing")
         slot = native_host_save.new_slot()
-        dig_arguments = (dig_token,) if dig_token else ()
-        snapshot = await bridge.command("native-host-save-capture", slot, *dig_arguments, timeout=7)
+        guests = {}
+        if self.last_game.get("native_paired_save_capture") is True:
+            guests = {character: (target, native_host_save.new_slot())
+                      for character, target in self.guest_capture_targets().items()}
+        arguments = [slot]
+        if guests:
+            arguments.append(dig_token or "-")
+            for target, generation in guests.values():
+                arguments.extend((target, generation))
+        elif dig_token:
+            arguments.append(dig_token)
+        snapshot = await bridge.command("native-host-save-capture", *arguments, timeout=7)
         observed = snapshot.get("native_host_save", {})
         if (observed.get("state") != "captured" or observed.get("slot") != slot or observed.get("map") != source
                 or observed.get("pawn") != pawn or snapshot.get("map") != source or snapshot.get("state") != "hosting"):
             raise RuntimeError("The game did not verify the exact canonical host save generation")
-        record = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, source, flush=True)
+        for target, generation in guests.values():
+            self.verify_guest_capture(snapshot, source, target, generation)
+
+        def flush_generations():
+            host_record = native_host_save.record(self.native_profile, slot, source, flush=True)
+            guest_records = {character: dict(native_host_save.record(self.native_profile, generation, source, flush=True),
+                                             character_id=character)
+                             for character, (_, generation) in guests.items()}
+            return host_record, guest_records
+
+        record, guest_records = await asyncio.to_thread(flush_generations)
         if "eather_remainder" in observed:
             carry = observed["eather_remainder"]
             if type(carry) not in (int, float) or not 0 <= carry < 1:
@@ -616,7 +640,8 @@ class Host:
             record["eather_remainder"] = carry
         self.last_game = snapshot
         self.last_seen = time.monotonic()
-        guest_records = await self.capture_guest_records(bridge)
+        if not guests:
+            guest_records = await self.capture_guest_records(bridge)
         revision = self.checkpoint(proposed_party, native_record=record, guest_records=guest_records,
                                    unleased_states=unleased_states, require_guest_frames=require_guest_frames)
         try:

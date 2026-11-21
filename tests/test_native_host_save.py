@@ -1,9 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
+from tools.silverfish.service import Host
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -59,3 +62,58 @@ class NativeHostSaveTests(unittest.TestCase):
         state["native_guest_save"] = dict(guest, character_id="different")
         with self.assertRaisesRegex(CampaignFormatError, "does not belong"):
             native_host_save.verify_checkpoint(self.profile, checkpoint)
+
+
+class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.host = object.__new__(Host)
+        self.host.native_profile = root / "game-user"
+        native_host_save.directory(self.host.native_profile).mkdir(parents=True)
+        self.host.allowed_maps = {CROSSROADS}
+        self.host.last_game = {"state": "hosting", "map": CROSSROADS,
+                               "pawns": {"local": {"name": "host-pawn"}}, "native_paired_save_capture": True}
+        self.host.guest_capture_targets = Mock(return_value={"first": "first-pawn", "second": "second-pawn"})
+        self.host.checkpoint = Mock(return_value=19)
+        self.host.control = Mock()
+        self.host.store = SimpleNamespace(path=root / "campaign.json", previous_path=root / "previous.json")
+        self.missing_proof = self.missing_file = False
+        self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.capture))
+
+    async def capture(self, action, host_slot, dig_token, first, first_slot, second, second_slot, *, timeout):
+        self.assertEqual(action, "native-host-save-capture")
+        self.assertIn(dig_token, ("-", "dig-token"))
+        self.assertEqual((first, second), ("first-pawn", "second-pawn"))
+        self.assertEqual(len({host_slot, first_slot, second_slot}), 3)
+
+        def frame(pawn, slot):
+            if not self.missing_file or pawn != second:
+                native_host_save.slot_path(self.host.native_profile, slot).write_bytes(b"GVAS" + bytes(32))
+            return {"state": "captured", "map": CROSSROADS, "pawn": pawn, "slot": slot}
+
+        members = {first: frame(first, first_slot), second: frame(second, second_slot)}
+        return {**self.host.last_game, "native_host_save": frame("host-pawn", host_slot) | {"eather_remainder": .25},
+                "native_guest_save_member_frames": members if not self.missing_proof else {first: members[first]}}
+
+    async def test_checkpoints_exact_members_in_one_bridge_command(self):
+        result = await self.host.checkpoint_native(self.bridge, require_guest_frames=frozenset({"second"}), dig_token="dig-token")
+        self.assertEqual(result, 19)
+        self.bridge.command.assert_awaited_once()
+        self.assertEqual(self.bridge.command.await_args.args[2], "dig-token")
+        recorded = self.host.checkpoint.call_args.kwargs
+        self.assertEqual(recorded["native_record"]["eather_remainder"], .25)
+        self.assertEqual(recorded["require_guest_frames"], {"second"})
+        self.assertEqual({key: frame["character_id"] for key, frame in recorded["guest_records"].items()},
+                         {"first": "first", "second": "second"})
+
+    async def test_partial_capture_never_publishes_campaign(self):
+        self.missing_proof = True
+        with self.assertRaisesRegex(RuntimeError, "exact detached guest save"):
+            await self.host.checkpoint_native(self.bridge)
+        self.host.checkpoint.assert_not_called()
+
+    async def test_missing_generation_never_publishes_campaign(self):
+        self.missing_file = True
+        with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save"):
+            await self.host.checkpoint_native(self.bridge)
+        self.host.checkpoint.assert_not_called()
