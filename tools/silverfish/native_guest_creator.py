@@ -13,10 +13,10 @@ def valid_profile(value):
     if not isinstance(value, str) or len(value) > 1000:
         return False
     fields = value.split("|")
-    if len(fields) != 7:
+    if len(fields) not in (7, 8):
         return False
-    recipe, voice, pitch, stance, armor, patch, traits = fields
+    recipe, voice, pitch, stance, armor, patch, traits, *material = fields
     traits = traits.split(",") if traits else ()
     return bool(_RECIPE.fullmatch(recipe) and _PITCH.fullmatch(pitch) and float(pitch) <= 3
-                and all(_CHOICE.fullmatch(part) for part in (voice, stance, armor, patch))
+                and all(_CHOICE.fullmatch(part) for part in (voice, stance, armor, patch, *material))
                 and len(traits) <= 16 and all(_TRAIT.fullmatch(trait) for trait in traits))

@@ -4,7 +4,9 @@ local inv = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inven
 local editor = "/Game/Classes/GUI/Character_Editor_Widget.Character_Editor_Widget_C"
 local armor_root = "/Game/Classes/Armor_Items/"
 local idle_root = "/Game/Classes/NPCs/NPC_Assets/Animations/Anim_Idle/"
+local animations = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local patch_root = "/Game/Classes/NPCs/NPC_Assets/NPC_Materials/NPC_Textures/"
+local materials = "/Game/Classes/NPCs/NPC_Assets/NPC_Materials/"
 local starting_items = "Starting_Items_30_E5CF623041C2520E535C948426AB9126"
 local starting_armor = "Starting_Armor_26_62DBA26E4A5E2A9843D8FB9F8A3D9B76"
 local permanent = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
@@ -15,6 +17,7 @@ local stance = "Display_Animation_86_3A0001A64AF07499EF01E2A856E38CDC"
 local voice = "VoxRef_97_E223354141E070B2E1F41F9E2CB7BD58"
 local pitch = "Vox_Pitch_100_3439A01A4F568098E2FC93ADB75FE9D7"
 local badge = "Patch_71_0B651F4541683455D3912BAACCB36DF7"
+local material = "Mat_Chr_Default_68_FA9429A2499A3E568FEA90A638511357"
 profile.name_field = "Character_Name_5_326F50964910FDA86FAFF78BCA9DB92F"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 
@@ -58,9 +61,12 @@ end
 function profile.observe(character, recipe)
     local pitch_value = character[pitch]
     local traits = array_names(character[permanent])
+    local idle = character[stance]
+    local material_ok, model_material = pcall(leaf, character[material], materials)
     return table.concat({recipe or "-", text(character[voice]), string.format("%.4f", pitch_value),
-        leaf(character[stance], idle_root), leaf(character[starting_armor], armor_root, "_C"),
-        leaf(character[badge], patch_root), table.concat(traits, ",")}, "|")
+        valid(idle) and idle:GetFName():ToString() == "Idle_Unarmed" and leaf(idle, animations) or leaf(idle, idle_root),
+        leaf(character[starting_armor], armor_root, "_C"), leaf(character[badge], patch_root), table.concat(traits, ","),
+        material_ok and model_material or "-"}, "|")
 end
 
 function profile.voice(character)
@@ -74,10 +80,11 @@ end
 local function parse(model)
     local fields = {}
     for field in (model .. "|"):gmatch("([^|]*)|") do fields[#fields + 1] = field end
-    need(#fields == 7 and #model <= 1000, "invalid profile length")
+    need((#fields == 7 or #fields == 8) and #model <= 1000, "invalid profile length")
+    fields[8] = fields[8] or "-"
     local recipe = fields[1]
     need(recipe == "-" or recipe:match("^kit[0-4]$") or recipe:match("^preset_[A-Za-z0-9_]+$"), "invalid starting kit")
-    for _, index in ipairs({2, 4, 5, 6}) do
+    for _, index in ipairs({2, 4, 5, 6, 8}) do
         need(fields[index] == "-" or (#fields[index] <= 80 and fields[index]:match("^[A-Za-z0-9_]+$")),
             "invalid stock option")
     end
@@ -126,7 +133,8 @@ local function character_fields(character, fields, traits, name, validate_creati
     end
     character[pitch] = tonumber(raw_pitch)
     if idle ~= "-" then
-        local animation = asset(idle_root .. idle .. "." .. idle)
+        local root = idle == "Idle_Unarmed" and animations or idle_root
+        local animation = asset(root .. idle .. "." .. idle)
         need(animation:IsA(StaticFindObject("/Script/Engine.AnimationAsset")), "invalid stance")
         character[stance] = animation
     end
@@ -134,6 +142,12 @@ local function character_fields(character, fields, traits, name, validate_creati
         local texture = asset(patch_root .. patch .. "." .. patch)
         need(patch:match("^Patch_") and texture:IsA(StaticFindObject("/Script/Engine.Texture2D")), "invalid patch")
         character[badge] = texture
+    end
+    if fields[8] ~= "-" then
+        local name = fields[8]
+        local skin = asset(materials .. name .. "." .. name)
+        need(skin:IsA(StaticFindObject("/Script/Engine.MaterialInterface")), "invalid outfit material")
+        character[material] = skin
     end
     if armor ~= "-" then
         local class = asset(armor_root .. armor .. "." .. armor .. "_C")

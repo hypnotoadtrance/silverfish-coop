@@ -246,8 +246,16 @@ async def leave_tutorial(seat: Seat) -> dict:
     await seat.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
     # The stock tutorial offers Exit to Menu here. Its confirmed exit checkpoints
     # the co-op campaign before returning both resident titles.
-    for action in ("open", "running", "prompt", "confirm"):
-        await stock_pause(seat.bridge, action)
+    for attempt in range(2):
+        for action in ("open", "running", "prompt", "confirm"):
+            await stock_pause(seat.bridge, action)
+        try:
+            await seat.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "requested"
+                                       or game.get("state") != "hosting", timeout=4)
+            break
+        except TimeoutError:
+            if attempt:
+                raise
     stopped = await wait(seat.campaign / "run", lambda frame: frame.get("state") == "stopped")
     assert stopped["stop_reason"] == "host_session_ended"
     finished, = events(seat.campaign / "run", stopped["generation"], "stock_pause_exit")

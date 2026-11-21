@@ -119,6 +119,8 @@ local function guest_departure(target, absolute, options)
                     if name and utf8.len(name) and utf8.len(name) > 0 and utf8.len(name) <= 64 and not name:find("%c") then
                         record.name = name
                     end
+                elseif not ok then
+                    print("[SilverfishCoop] Guest creator could not capture the stock selection: " .. tostring(model))
                 end
             end
         end
