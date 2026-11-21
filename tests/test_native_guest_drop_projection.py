@@ -59,6 +59,7 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)
         epoch = view.epoch
         self.assertIn(identity, view.items)
+        self.assertEqual(bridge.command.await_args.args[3].rsplit("|", 1)[1], "9")
         await view.retire_claim(bridge, game, (epoch, identity))
         bridge.command.assert_awaited_with(native_world_loot.RETIRE, epoch, identity, timeout=3)
         await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)

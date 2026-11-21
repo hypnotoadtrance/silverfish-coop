@@ -362,16 +362,21 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertNotIn("native_loot", proof or {})
 
-    def test_stock_loot_preserves_actor_transform(self):
+    def test_stock_loot_preserves_actor_transform_and_optional_ammo(self):
         slot = "SFCoop_" + "a" * 32
         heading = f"native-loot\topen\t{CROSSROADS}\t{OTHER_CRATE}\t{PAWN}\t1\topened\t1\t1\tcanonical\t1\t100\t1\t1\t{slot}\n"
         item = f"native-loot-item\tstock actor\t{ITEM['class_path']}\t{ITEM['guid']}"
         status = self.root / "status.tsv"
         base = f"schema\t1\nsession\thost\thosting\t{CROSSROADS}\t0\t1\n" + heading + item
         status.write_text(base + "\t100\t200\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
-        proof = runtime.Bridge(self.root, None).snapshot()
-        self.assertEqual(proof["native_loot"]["items"][0]["transform"],
-                         {"position": [100, 200, -32.5], "rotation": [0, -90, 5], "scale": [1, 1, 0.7]})
+        old = runtime.Bridge(self.root, None).snapshot()["native_loot"]["items"][0]
+        self.assertEqual(old["transform"], {"position": [100, 200, -32.5], "rotation": [0, -90, 5], "scale": [1, 1, 0.7]})
+        self.assertNotIn("ammo", old)
+        status.write_text(base + "\t17\t100\t200\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
+        updated = runtime.Bridge(self.root, None).snapshot()["native_loot"]["items"][0]
+        self.assertEqual(updated, {**old, "ammo": 17})
+        status.write_text(base + "\t2147483648\t100\t200\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
+        self.assertNotIn("native_loot", runtime.Bridge(self.root, None).snapshot() or {})
         status.write_text(base + "\t100\tnan\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
         self.assertNotIn("native_loot", runtime.Bridge(self.root, None).snapshot() or {})
 
