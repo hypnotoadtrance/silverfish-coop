@@ -1,10 +1,11 @@
-"""Verify two private listen sessions from one stock Windows title process."""
+"""Verify authenticated Direct IP joins and two listen sessions in the same game processes."""
 
 import argparse
 import asyncio
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from live_multi_smoke import saved_hashes
-from tools.silverfish import runtime, udp_ownership
+from tools.silverfish import link, runtime, udp_ownership
 from tools.silverfish.win_job import GameProcess
 
 
@@ -58,10 +59,96 @@ async def observe(case: Path, process: GameProcess, expected: str) -> list[str]:
                 rows = []
             if any(row.startswith("arm_refused") for row in rows):
                 raise RuntimeError("The native listener refused the stock title's request")
-            if expected in rows:
+            if any(row == expected or row.startswith(expected + "\t") for row in rows):
                 return rows
             await asyncio.sleep(.05)
     raise RuntimeError(f"The stock game exited before reporting {expected!r} ({process.returncode})")
+
+
+def launch(game: Path, case: Path, *, ports: tuple[int, int], guest: bool) -> GameProcess:
+    profile = case / "game-user"
+    profile.mkdir(parents=True)
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith(("SILVERFISH_COOP_", "UE4SS_", "SF_LISTEN_"))}
+    env.update(SILVERFISH_COOP_HEADLESS="1", SF_LISTEN_NATIVE_PROBE="1", SF_LISTEN_PROOF_DIRECTORY=str(case))
+    env.update(SF_LISTEN_PORT_1=str(ports[0]), SF_LISTEN_PORT_2=str(ports[1]), SF_LISTEN_GUEST=str(int(guest)))
+    arguments = subprocess.list2cmdline([str(game)])
+    arguments += (f' -userdir="{profile}" -unattended -NoSplash -windowed'
+                  ' -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480'
+                  ' -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,'
+                  '[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock')
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return GameProcess(arguments, executable=game, cwd=game.parent, env=env, startupinfo=startup)
+
+
+def command(case: Path, action: str) -> None:
+    runtime.write_text(case / "command.txt", action + "\n", newline="\n")
+
+
+async def verify_session(case: Path, guest_case: Path, host_process: GameProcess, guest_process: GameProcess,
+                         port: int, other_port: int, round_number: int, identity: link.ServerIdentity) -> dict:
+    disconnected = asyncio.Queue()
+    request = {"guest_id": "test-guest", "credential": secrets.token_urlsafe(32),
+               "character_id": "test-character", "protocol_version": 1, "game_build": "same-process-listener"}
+
+    def admit(candidate):
+        if candidate == request:
+            return {"accepted": True, "character_id": request["character_id"]}
+        return {"accepted": False, "reason": "invalid_fixture_credential"}
+
+    async with AsyncExitStack() as resources:
+        host = await link.start_host("127.0.0.1", PUBLIC_PORT, "127.0.0.1", port, identity, admit,
+                                     disconnected.put_nowait)
+        resources.push_async_callback(host.close)
+        command(case, f"host{round_number}")
+        await observe(case, host_process, f"host\t{round_number}\t1\t1\t1")
+        udp_ownership.verify_loopback_socket(host_process.pid, port)
+        assert not udp_ownership.owns_udp_port(host_process.pid, PUBLIC_PORT)
+        assert not udp_ownership.owns_udp_port(host_process.pid, other_port)
+
+        client = await link.start_client()
+        resources.push_async_callback(client.close)
+        request["runtime_id"] = client.runtime_id
+        denied = await client.connect(*host.address, identity.certificate_pem, dict(request, credential="wrong"))
+        assert denied == {"accepted": False, "reason": "invalid_fixture_credential"}
+        assert not client.game_access and host.guest_endpoint(request["guest_id"]) is None
+        accepted = await client.connect(*host.address, identity.certificate_pem, request)
+        assert accepted.get("character_id") == request["character_id"] and client.game_access
+        guest_route, local_route = host.guest_endpoint(request["guest_id"]), client.address
+        assert guest_route is not None
+        command(guest_case, f"join{round_number} {local_route[1]}")
+        joined = await observe(guest_case, guest_process, f"joined\t{round_number}")
+        live_pawn = joined[-1].split("\t")[2:]
+        assert len(live_pawn) == 2 and all(int(value, 16) > 0 for value in live_pawn)
+        paired = await observe(case, host_process, f"peer\t{round_number}")
+        server_connection = paired[-1].split("\t")[2]
+        assert int(server_connection, 16) > 0
+        sent, received = client.game_packets_sent, client.game_packets_received
+        assert sent > 0 and received > 0
+        async with asyncio.timeout(15):
+            await client.disconnect()
+            assert await disconnected.get() == request["guest_id"]
+            accepted = await client.connect(*host.address, identity.certificate_pem, request)
+            assert accepted.get("character_id") == request["character_id"] and client.game_access
+            assert host.guest_endpoint(request["guest_id"]) == guest_route and client.address == local_route
+            while client.game_packets_sent <= sent or client.game_packets_received <= received:
+                await asyncio.sleep(.05)
+        command(guest_case, f"sample{round_number}")
+        command(case, f"sample{round_number}")
+        resumed = await observe(guest_case, guest_process, f"sampled\t{round_number}")
+        assert resumed[-1].split("\t")[2:] == live_pawn, "The guest's stock pawn or connection changed"
+        observed = await observe(case, host_process, f"sampled_peer\t{round_number}")
+        assert observed[-1].split("\t")[2] == server_connection, "The host's stock guest connection changed"
+        command(guest_case, f"leave{round_number}")
+        await observe(guest_case, guest_process, f"title\t{round_number + 1}")
+        command(case, f"leave{round_number}")
+        events = await observe(case, host_process, f"title\t{round_number + 1}")
+        assert not udp_ownership.owns_udp_port(host_process.pid, port), "The retired listener is still bound"
+        return {"port": port, "loopback_only": True, "closed_at_title": True, "stock_bind_restored": True,
+                "wrong_credential_denied": True, "real_unreal_packets": {"sent": sent, "received": received},
+                "reconnected_same_pawn": True, "reconnected_same_host_connection": True, "host_events": events}
 
 
 async def verify(work: Path, addon: Path, original: Path) -> None:
@@ -76,48 +163,28 @@ async def verify(work: Path, addon: Path, original: Path) -> None:
         raise ValueError("Supply the original single-player Saved directory for hash comparison")
     install_fixture(game, addon)
     case = work / "title-probes" / f"same-listen-{uuid.uuid4().hex[:12]}"
-    profile = case / "game-user"
-    profile.mkdir(parents=True)
+    guest_case = case / f"same-listen-{uuid.uuid4().hex[:12]}"
     print(case, flush=True)
-    command = case / "command.txt"
-    env = {name: value for name, value in os.environ.items()
-           if not name.startswith(("SILVERFISH_COOP_", "UE4SS_", "SF_LISTEN_"))}
-    env.update(SILVERFISH_COOP_HEADLESS="1", SF_LISTEN_NATIVE_PROBE="1", SF_LISTEN_PROOF_DIRECTORY=str(case))
-    arguments = subprocess.list2cmdline([str(game)])
-    arguments += (f' -userdir="{profile}" -unattended -NoSplash -windowed'
-                  ' -nullrhi -RenderOffScreen -nosound -ResX=640 -ResY=480'
-                  ' -ini:Input:[/Script/Engine.InputSettings]:DefaultViewportMouseCaptureMode=NoCapture,'
-                  '[/Script/Engine.InputSettings]:DefaultViewportMouseLockMode=DoNotLock')
-    startup = subprocess.STARTUPINFO()
-    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startup.wShowWindow = subprocess.SW_HIDE
     evidence = {"verified": False, "public_test_port": PUBLIC_PORT, "sessions": []}
-    process = None
+    processes = []
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as public:
-            public.bind(("127.0.0.1", PUBLIC_PORT))
-            ports = choose_ports()
-            env.update(SF_LISTEN_PORT_1=str(ports[0]), SF_LISTEN_PORT_2=str(ports[1]))
-            process = GameProcess(arguments, executable=game, cwd=game.parent, env=env, startupinfo=startup)
-            evidence["pid"] = process.pid
-            await observe(case, process, "title\t1")
-            for index, port in enumerate(ports, 1):
-                runtime.write_text(command, f"host{index}\n", newline="\n")
-                await observe(case, process, f"host\t{index}\t1\t1\t1")
-                udp_ownership.verify_loopback_socket(process.pid, port)
-                assert not udp_ownership.owns_udp_port(process.pid, PUBLIC_PORT)
-                assert not udp_ownership.owns_udp_port(process.pid, ports[2 - index])
-                runtime.write_text(command, f"leave{index}\n", newline="\n")
-                evidence["events"] = await observe(case, process, f"title\t{index + 1}")
-                assert not udp_ownership.owns_udp_port(process.pid, port), "The retired listener is still bound"
-                evidence["sessions"].append({"port": port, "loopback_only": True, "closed_at_title": True,
-                                             "stock_bind_restored": True})
-            evidence["verified"] = True
+        ports = choose_ports()
+        host = launch(game, case, ports=ports, guest=False)
+        processes.append(host)
+        guest = launch(game, guest_case, ports=ports, guest=True)
+        processes.append(guest)
+        evidence.update(host_pid=host.pid, guest_pid=guest.pid)
+        await asyncio.gather(observe(case, host, "title\t1"), observe(guest_case, guest, "title\t1"))
+        identity = link.make_server_identity()
+        for index, port in enumerate(ports, 1):
+            session = await verify_session(case, guest_case, host, guest, port, ports[2 - index], index, identity)
+            evidence["sessions"].append(session)
+        evidence["verified"] = True
     except (OSError, RuntimeError, ValueError, TimeoutError, AssertionError) as error:
         evidence["failure"] = repr(error)
         raise
     finally:
-        if process is not None:
+        for process in reversed(processes):
             await runtime.stop_game(process)
         evidence["original_saves_verified"] = saved_hashes(original) == originals
         evidence["verified"] = evidence["verified"] and evidence["original_saves_verified"]
