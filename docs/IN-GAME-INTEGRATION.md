@@ -128,3 +128,5 @@ A host's stock red flare produces a lit replica on the guest, and expiration of 
 The packaged title test opened the stock Inventory screen with the guest's isolated backpack and verified the item cards from both seats. The ordinary co-op inventory binding still opens its existing item-action view while stock menu actions are integrated.
 
 In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.
+
+The bat's stock first-person mesh carries an offset that put the replica beside the player's shin. The remote weapon view now aligns the bat handle to the hand socket. The rendered Observatory check used an actual equipped bat and verified the grip from the guest's view.

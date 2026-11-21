@@ -5,6 +5,10 @@ local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local static_type = "/Script/Engine.StaticMeshComponent"
 local skeletal_type = "/Script/Engine.SkeletalMeshComponent"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
+local bat_mesh = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_Models/SM_Wep_Bat_01.SM_Wep_Bat_01"
+-- The bat mesh starts at the knob and extends along local Z. Put the handle
+-- inside the hand socket and keep the orientation chosen by the stock rig.
+local bat_grip = {X = 0, Y = 0, Z = 12}
 local kinds = { s = {static_type, "StaticMesh", "/Script/Engine.StaticMesh"},
     k = {skeletal_type, "SkinnedAsset", "/Script/Engine.SkeletalMesh"} }
 local maximum_parts = 12
@@ -117,6 +121,20 @@ function view.clear(entry)
     entry.weapon_parts, entry.weapon_model = nil, nil
 end
 
+local function align_bat_grip(component, body, socket)
+    local math_api = StaticFindObject(math_library)
+    if not valid(math_api) then error("Stock bat grip transform is unavailable") end
+    local target = body:GetSocketLocation(socket)
+    local origin = component:K2_GetComponentLocation()
+    local grip = math_api:TransformLocation(component:K2_GetComponentToWorld(), bat_grip)
+    component:K2_SetWorldLocation({X = origin.X + target.X - grip.X, Y = origin.Y + target.Y - grip.Y,
+        Z = origin.Z + target.Z - grip.Z}, false, {}, true)
+    local attached = math_api:TransformLocation(component:K2_GetComponentToWorld(), bat_grip)
+    if (attached.X - target.X)^2 + (attached.Y - target.Y)^2 + (attached.Z - target.Z)^2 > .25 then
+        error("Stock bat grip could not align with the hand")
+    end
+end
+
 local function attach(entry, parts)
     local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
     if not entry.body:DoesSocketExist(socket) then error("Stock weapon hand socket was unavailable") end
@@ -145,6 +163,7 @@ local function attach(entry, parts)
             {Pitch = p[4], Yaw = p[5], Roll = p[6]}, false, {}, true)
         component:SetRelativeScale3D({X = p[7], Y = p[8], Z = p[9]})
         if part.kind == "s" then component:SetStaticMesh(asset) else component:SetSkeletalMeshAsset(asset) end
+        if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
         component:SetHiddenInGame(false, false)
         component:SetVisibility(true, false)
         if not same(component[profile[2]], asset) or not component:IsVisible() then
