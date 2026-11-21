@@ -13,12 +13,15 @@ from tempfile import NamedTemporaryFile
 import time
 import uuid
 
+from cryptography.hazmat.primitives import serialization
+
 from . import link
 from .campaign import CampaignError, CampaignStore
-from .runtime import read_json
+from .runtime import read_json, write_json
 
 
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
+_PIN = re.compile(r"[0-9a-f]{64}")
 _REFUSALS = {
     "direct_join_disabled": "The host requires an invitation",
     "direct_wrong_password": "The Direct IP password is incorrect",
@@ -27,6 +30,8 @@ _REFUSALS = {
     "direct_enrollment_required": "Connect by address and authenticate to this host first",
     "direct_campaign_changed": "The host changed campaigns during connection",
     "incompatible_game_or_protocol": "The host has an incompatible game or mod build",
+    "direct_host_identity_changed": "This address now presents a different host identity",
+    "direct_identity_verification_failed": "The supplied fingerprint does not match the host identity",
 }
 
 
@@ -146,6 +151,47 @@ def _record(path: Path, default: dict | None = None) -> dict | None:
             temporary.unlink(missing_ok=True)
 
 
+def _new_identity_record() -> dict:
+    identity = link.make_server_identity()
+    key = identity.private_key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+    )
+    return {"certificate": identity.certificate_pem, "private_key": key.decode("ascii")}
+
+
+def resident_host_identity(work: Path, campaign: Path, guest_count: int) -> link.ServerIdentity:
+    """Reuse one host identity across all campaigns in this resident workspace."""
+    path = work / "direct-ip-host-identity.json"
+    shared = _record(path)
+    if shared is None:
+        legacy = _record(campaign / "save/host-identity.json")
+        seed = legacy
+        if not (guest_count and legacy):
+            # If there is one legacy identity already used by guests, retain it.
+            prior = {}
+            for sibling in campaign.parent.iterdir():
+                if sibling == campaign or not sibling.is_dir() or sibling.resolve() != sibling:
+                    continue
+                try:
+                    record = _record(sibling / "save/host-identity.json")
+                    if record is None:
+                        continue
+                    checkpoint = CampaignStore.read_existing(sibling / "save", max_read_bytes=8 * 1024**2)
+                    if checkpoint and checkpoint["guests"]:
+                        identity = link.load_server_identity(record["certificate"], record["private_key"])
+                        prior[identity.certificate_pem] = record
+                except (OSError, CampaignError, KeyError, ValueError):
+                    continue
+                if len(prior) > 1:
+                    break
+            if len(prior) == 1:
+                seed = next(iter(prior.values()))
+        if seed is not None:
+            link.load_server_identity(seed["certificate"], seed["private_key"])
+        shared = _record(path, seed or _new_identity_record())
+    return link.load_server_identity(shared["certificate"], shared["private_key"])
+
+
 @dataclass(frozen=True)
 class Connection:
     details: dict = field(repr=False)
@@ -156,7 +202,8 @@ class Connection:
         return dict(self.details) if character_id is None else dict(self.details, character_id=character_id)
 
 
-async def connect(profile: Path, host: str, port: int, password: str, game_build: str, protocol: int) -> Connection:
+async def connect(profile: Path, host: str, port: int, password: str, game_build: str, protocol: int, *,
+                  verified_fingerprint: str | None = None) -> Connection:
     """Discover the host, then enroll over a second TLS connection pinned to that certificate."""
     if type(host) is not str or "%" in host or type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("Enter a numeric host address and a UDP port from 1 to 65535")
@@ -165,11 +212,15 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
     except ValueError:
         raise ValueError("Enter a numeric host IP address") from None
     _password_bytes(password)
+    if verified_fingerprint is not None and not _PIN.fullmatch(verified_fingerprint):
+        raise ValueError("Expected a SHA-256 host fingerprint")
     discovery = _accepted(await link.direct_request(host, port, {"direct": "discover"}, certificate=None))
     certificate, campaign = discovery.get("certificate"), discovery.get("campaign")
     if type(certificate) is not str or not _uuid(campaign) or type(discovery.get("password_required")) is not bool:
         raise link.LinkError("The host returned an invalid Direct IP identity")
     pin = sha256(certificate.encode("utf-8")).hexdigest()
+    if verified_fingerprint is not None and not hmac.compare_digest(verified_fingerprint, pin):
+        raise Refused("direct_identity_verification_failed")
     root = profile.resolve() / "direct-ip"
     if root.resolve() != root:
         raise ValueError("The local Direct IP directory is redirected")
@@ -178,8 +229,9 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
     host_record = root / f"host-{endpoint}.json"
     saved_pin = {"schema": 1, "certificate_sha256": pin}
     remembered = _record(host_record)
-    if remembered is not None and remembered != saved_pin:
-        raise link.LinkError("This address now presents a different host identity")
+    changing_pin = remembered is not None and remembered != saved_pin
+    if changing_pin and verified_fingerprint is None:
+        raise Refused("direct_host_identity_changed")
     if discovery["password_required"] and not password:
         raise Refused("direct_password_required")
     participant = _record(root / f"guest-{pin}-{uuid.UUID(campaign).hex}.json", {
@@ -190,16 +242,21 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
             or type(participant["credential"]) is not str or not _SECRET.fullmatch(participant["credential"])):
         raise ValueError("The local Direct IP guest record is invalid")
     credentials = {name: participant[name] for name in ("guest_id", "credential")}
-    reply = _accepted(await link.direct_request(host, port, {
+    reply = await link.direct_request(host, port, {
         "direct": "enroll", "campaign": campaign, **credentials, "password": password,
         "game_build": game_build, "protocol_version": protocol,
-    }, certificate=certificate))
+    }, certificate=certificate)
+    if changing_pin:
+        if _record(host_record) != remembered:
+            raise Refused("direct_host_identity_changed")
+        write_json(host_record, saved_pin)
+    reply = _accepted(reply)
     features = reply.get("features")
     if (type(features) is not dict
             or any((not key.startswith("native_") and key != "expanded_zones") or type(value) is not bool
                    for key, value in features.items())):
         raise link.LinkError("The host returned invalid Direct IP game features")
     if _record(host_record, saved_pin) != saved_pin:
-        raise link.LinkError("This address now presents a different host identity")
+        raise Refused("direct_host_identity_changed")
     return Connection(dict(features, schema=1, host=host, port=port, certificate=certificate,
                            game_build=game_build, protocol_version=protocol, **credentials))

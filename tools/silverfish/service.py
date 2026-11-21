@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from functools import partial
+from hashlib import sha256
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -4119,7 +4120,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         stop_reason = None
         try:
             control.status(active=True, role="host", state="starting")
-            identity = _identity(directory / "save")
+            identity = (direct_ip.resident_host_identity(work, directory, campaign["guest_count"])
+                        if resident_engine is not None and direct_password is not None else _identity(directory / "save"))
             internal_port = embedded_port if embedded_port is not None else spare_udp_port()
             game_options = dict(native_events=native_events, native_guest=native_guest, native_zones=native_zones,
                                 native_zone_walls=native_zone_walls, native_fixtures=fixtures, expanded_zones=expanded_zones,
@@ -4309,6 +4311,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                               on_request=controller.guest_request, max_game_guests=max_guests,
                                               **({"enroll": enrollment} if enrollment is not None else {}))
             controller.port = transport.address[1]
+            if resident_engine is not None and direct_password is not None:
+                write_text(work / "host-fingerprint.txt",
+                           sha256(identity.certificate_pem.encode("ascii")).hexdigest() + "\n")
             control.event("listening", address=bind, port=controller.port)
             await controller.run(bridge, transport)
         except (Exception, asyncio.CancelledError) as error:

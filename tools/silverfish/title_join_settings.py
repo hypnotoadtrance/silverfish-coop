@@ -13,7 +13,7 @@ import secrets
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
-from . import direct_ip
+from . import direct_ip, link
 from .embedded_engine import _assert_no_reparse, _exact_existing
 from .embedded_startup import INVITE_LIMIT, _read_file
 from .native_player_avatar import character_appearance
@@ -92,15 +92,17 @@ def _parse(operation_id: str, fields: bytes) -> _Request:
     raise _DraftError("invalid_request")
 
 
-def _endpoint(payload: bytes) -> tuple[str, int, str]:
+def _endpoint(payload: bytes) -> tuple[str, int, str, str | None]:
     try:
-        address, port, password = payload.decode("utf-8").split("\t")
+        address, port, password, *verification = payload.decode("utf-8").split("\t")
+        if verification and (len(verification) != 1 or not re.fullmatch(r"[0-9a-f]{64}", verification[0])):
+            raise ValueError
         if len(address) > 45 or "%" in address or not re.fullmatch(r"[1-9][0-9]{0,4}", port):
             raise ValueError
         if int(port) > 65535:
             raise ValueError
         direct_ip._password_bytes(password)
-        return str(ip_address(address)), int(port), password
+        return str(ip_address(address)), int(port), password, verification[0] if verification else None
     except ValueError:
         raise _DraftError("invalid_endpoint") from None
 
@@ -310,13 +312,16 @@ class TitleJoinSettings:
     async def _connect(self, draft: _Direct, payload: bytes):
         from .service import PROTOCOL, staged_build, validate_invite
 
-        address, port, password = _endpoint(payload)
+        address, port, password, fingerprint = _endpoint(payload)
         build = staged_build(self._work)
         async with asyncio.timeout(self._timeout):
             try:
-                draft.connection = await direct_ip.connect(self._direct_profile, address, port, password, build, PROTOCOL)
+                draft.connection = await direct_ip.connect(self._direct_profile, address, port, password, build, PROTOCOL,
+                                                           verified_fingerprint=fingerprint)
             except direct_ip.Refused as error:
                 raise _DraftError(error.reason) from None
+            except link.LinkError:
+                raise _DraftError("direct_host_unreachable") from None
             try:
                 invite = validate_invite(draft.connection.session(), build, catalog=True)
                 if self._qualify_connection is not None:

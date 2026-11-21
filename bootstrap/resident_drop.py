@@ -43,6 +43,12 @@ Both players need the same co-op release and matching Steam game build.
 Co-op saves live under %LOCALAPPDATA%\SilverfishCoop\Resident by default.
 On the same network, use the host's LAN IP. Across networks the guest
 must be able to reach the host's chosen UDP port (7777 by default).
+
+Each campaign has its own guest characters. The host's identity belongs to
+the co-op installation and stays the same when the host changes campaigns.
+If the guest sees Verify host identity, the host can share the fingerprint
+from %LOCALAPPDATA%\SilverfishCoop\Resident\host-fingerprint.txt while hosting.
+Paste that fingerprint in the guest's verification screen.
 """
 _FULL_INSTALL = ("Use this ZIP for a first install or an update. It includes the pinned\n"
                  "UE4SS v4.0.0 loader and Project Silverfish signature. Updating with this\n"
