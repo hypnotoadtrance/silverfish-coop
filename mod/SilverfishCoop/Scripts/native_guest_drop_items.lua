@@ -18,6 +18,17 @@ drop_items.profiles = {
     },
 }
 
+for blueprint, label in pairs({
+    Item_MRE = "MRE",
+    Item_CannedPeaches = "Canned Peaches",
+    Item_CannedBeans = "Canned Beans",
+    Item_BrownMushroom = "Brown Mushroom",
+}) do
+    local actor = blueprint .. "_C"
+    local class = "/Game/Classes/Items/" .. blueprint .. "." .. actor
+    drop_items.profiles[class] = { actor = actor, label = label, maximum = 200, stackable = true }
+end
+
 function drop_items.actor_path(class, area, leaf, name)
     local profile = drop_items.profiles[class]
     if not profile or type(name) ~= "string" then return end

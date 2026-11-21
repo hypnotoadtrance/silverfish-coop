@@ -40,11 +40,14 @@ namespace
     using Position = std::array<double, 3>;
 
     constexpr auto ammo_base_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
+    constexpr auto health_item_base_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
+    constexpr auto consumable_base_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto interaction_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto ammo_begin_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C:ReceiveBeginPlay");
+    constexpr auto consumable_begin_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C:ReceiveBeginPlay");
     constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
     constexpr auto convert_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto add_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory");
@@ -58,7 +61,7 @@ namespace
 
     struct Actor
     {
-        U::FWeakObjectPtr object, box, display_type, display_base, equipment_base, item_base;
+        U::FWeakObjectPtr object, box, display_type, display_base, intermediate_base, item_base;
         U::FWeakObjectPtr interaction, begin, converter, add_inventory;
         bool begin_veto{};
     } projection;
@@ -67,7 +70,7 @@ namespace
     {
         U::FWeakObjectPtr pawn, world, driver, connection;
         bool host{};
-        const items::AmmoDisplay* ammo{};
+        const items::StackDisplay* display{};
         std::string epoch, id;
         Position source{};
         double visual_z{};
@@ -274,15 +277,19 @@ namespace
         return inert(actor);
     }
 
-    bool stock_schema(U::UClass* type, U::UClass* base, U::UClass* item_base, bool stock_ammo)
+    bool stock_schema(U::UClass* type, U::UClass* item_base)
     {
-        auto* equipment_base = stock_ammo ? nullptr : find<U::UClass>(equipment_base_path);
-        auto* parent = stock_ammo ? item_base : equipment_base;
-        if (!type || !base || !item_base || !parent || type->GetSuperStruct() != base || base->GetSuperStruct() != parent ||
-            (equipment_base && equipment_base->GetSuperStruct() != item_base))
+        const bool food = lease.display && lease.display->kind == items::StackKind::food;
+        const bool ammo = lease.display && !food;
+        auto* base = find<U::UClass>(food ? consumable_base_path : ammo ? ammo_base_path : weapon_base_path);
+        auto* intermediate = ammo ? nullptr : find<U::UClass>(food ? health_item_base_path : equipment_base_path);
+        if (!type || !base || !item_base || (!ammo && !intermediate) ||
+            type->GetSuperStruct() != (food ? intermediate : base) ||
+            base->GetSuperStruct() != (lease.display ? item_base : intermediate) ||
+            (intermediate && intermediate->GetSuperStruct() != (food ? base : item_base)))
             return false;
         auto* interaction = find<U::UFunction>(interaction_path);
-        auto* begin = find<U::UFunction>(stock_ammo ? ammo_begin_path : weapon_begin_path);
+        auto* begin = find<U::UFunction>(food ? consumable_begin_path : ammo ? ammo_begin_path : weapon_begin_path);
         auto* converter = find<U::UFunction>(convert_path);
         auto* add = find<U::UFunction>(add_path);
         auto* pawn_type = find<U::UClass>(pawn_path);
@@ -304,7 +311,7 @@ namespace
             if (function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
         projection.display_type = type;
         projection.display_base = base;
-        projection.equipment_base = equipment_base;
+        projection.intermediate_base = intermediate;
         projection.item_base = item_base;
         projection.interaction = interaction;
         projection.begin = begin;
@@ -331,7 +338,7 @@ namespace
         }
         auto* owner = function->GetOuterPrivate();
         if (!owner || (owner != projection.display_type.Get() && owner != projection.display_base.Get() &&
-            owner != projection.equipment_base.Get() && owner != projection.item_base.Get()) ||
+            owner != projection.intermediate_base.Get() && owner != projection.item_base.Get()) ||
             function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return;
@@ -608,14 +615,12 @@ namespace
 
     const char* spawn_projection()
     {
-        const bool stock_ammo = lease.ammo != nullptr;
-        auto* type = find<U::UClass>(stock_ammo ? lease.ammo->stock->item : items::pistol);
-        auto* base = find<U::UClass>(stock_ammo ? ammo_base_path : weapon_base_path);
+        auto* type = find<U::UClass>(lease.display ? lease.display->path : items::pistol);
         auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
         auto* const world = U::Cast<U::UWorld>(lease.world.Get());
         Spawn spawn;
         Collision collision;
-        if (!scope_current() || !stock_schema(type, base, find<U::UClass>(item_path), stock_ammo)
+        if (!scope_current() || !stock_schema(type, find<U::UClass>(item_path))
             || !defaults || defaults->GetClassPrivate() != type || !boolean(defaults, STR("bReplicates"), false)
             || !spawn.bind() || !collision.bind()) return "stock_drop_projection_schema_unavailable";
         auto* box_type = find<U::UClass>(STR("/Script/Engine.BoxComponent"));
@@ -649,15 +654,21 @@ namespace
         actor->SetActorTickEnabled(false);
         if (!inert(actor) || actor->IsActorTickEnabled() || !byte(actor, STR("RemoteRole"), 0))
             return "stock_drop_projection_inert_state_unverified";
-        if (stock_ammo)
+        if (lease.display)
         {
-            auto* mesh = object(actor, STR("SM_Ammo_HevRifle"));
-            auto* asset = find<U::UObject>(lease.ammo->mesh);
+            const bool ammo = lease.display->kind == items::StackKind::ammo;
+            auto* mesh = object(actor, ammo ? STR("SM_Ammo_HevRifle") : STR("DisplayMesh"));
+            auto* asset = find<U::UObject>(lease.display->mesh);
             if (!owned_component(actor, mesh, find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"))) ||
                 !asset || object(mesh, STR("StaticMesh")) != asset)
                 return "stock_drop_projection_components_unverified";
+            auto* primitive = find<U::UClass>(STR("/Script/Engine.PrimitiveComponent"));
+            if (!primitive) return "stock_drop_projection_component_type_unavailable";
+            const auto owned = actor->K2_GetComponentsByClass(primitive);
+            if (owned.Num() != 2 || !((owned[0] == box && owned[1] == mesh) || (owned[0] == mesh && owned[1] == box)))
+                return "stock_drop_projection_stock_component_census_unverified";
             const std::array components{box, mesh};
-            if (const auto* failure = collision.configure(actor, box, components, true)) return failure;
+            if (const auto* failure = collision.configure(actor, box, components, ammo)) return failure;
         }
         else if (const auto* failure = pistol_components(actor, box, collision)) return failure;
 
@@ -693,8 +704,8 @@ namespace
             return report(lua, false, "stock_drop_projection_class_unqualified");
         }
         const auto path = RC::to_wstring(class_path);
-        const auto* ammo = arguments == 7 ? &items::ammo.front() : items::find_ammo(path);
-        if (!ammo && path != items::pistol)
+        const auto* display = arguments == 7 ? &items::stacks.front() : items::find_stack(path);
+        if (!display && path != items::pistol)
         {
             clear();
             return report(lua, false, "stock_drop_projection_class_unqualified");
@@ -715,7 +726,7 @@ namespace
         auto* existing = static_cast<U::AActor*>(projection.object.Get());
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
-            lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.ammo == ammo &&
+            lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.display == display &&
             lease.source == source && mutable_actor(existing) &&
             existing->GetClassPrivate() == projection.display_type.Get() && live(projection.box.Get()) &&
             object(existing, STR("Box")) == projection.box.Get())
@@ -732,7 +743,7 @@ namespace
         lease.driver = driver;
         lease.connection = connection;
         lease.host = connection == nullptr;
-        lease.ammo = ammo;
+        lease.display = display;
         lease.epoch = epoch;
         lease.id = id;
         lease.source = source;

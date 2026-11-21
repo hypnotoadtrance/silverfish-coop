@@ -511,10 +511,11 @@ namespace
         const auto* row = inventory.exact_row(owner.frozen, id);
         namespace items = silverfish::native_guest_drop_items;
         auto* candidate = object_value(inventory.klass, row);
-        const auto* ammo = candidate ? items::find_ammo(candidate->GetPathName()) : nullptr;
-        auto* type = find<U::UClass>(ammo ? ammo->stock->item : items::pistol);
-        const bool stack = ammo != nullptr;
-        const bool nine_mm = stack && ammo->stock == &silverfish::guest_weapon_profiles::nine_mm_ball;
+        const auto* display = candidate ? items::find_stack(candidate->GetPathName()) : nullptr;
+        auto* type = find<U::UClass>(display ? display->path : items::pistol);
+        const bool stack = display != nullptr;
+        const bool nine_mm = display == &items::stacks.front();
+        const bool food = stack && display->kind == items::StackKind::food;
         if (!type || candidate != type || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
             inventory.never_drop->GetPropertyValueInContainer(row))
             return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
@@ -522,13 +523,16 @@ namespace
         if (!defaults || defaults->GetClassPrivate() != type ||
             !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), stack) ||
             !boolean(defaults, STR("DespawnIfPlayerOwns"), false) || !boolean(defaults, STR("bReplicates"), false))
+        {
+            if (food) return reply(lua, false, "native_guest_stack_drop_stock_food_default_flags_unqualified");
             return reply(lua, false, stack ? (nine_mm ? "native_guest_stack_drop_stock_9mm_default_flags_unqualified" :
                 "native_guest_stack_drop_stock_ammo_default_flags_unqualified") :
                 "native_guest_stack_drop_stock_pistol_default_flags_unqualified");
+        }
         const auto stored = inventory.quantity->GetPropertyValueInContainer(row);
         if (stack && stored != count)
-            return reply(lua, false, nine_mm ? "native_guest_stack_drop_stock_9mm_row_unqualified" :
-                "native_guest_stack_drop_stock_ammo_row_unqualified");
+            return reply(lua, false, food ? "native_guest_stack_drop_stock_food_row_unqualified" :
+                nine_mm ? "native_guest_stack_drop_stock_9mm_row_unqualified" : "native_guest_stack_drop_stock_ammo_row_unqualified");
         U::UFunction* weapon_tick{};
         if (!stack)
         {

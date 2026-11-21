@@ -5,6 +5,7 @@ import re
 
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
 from .guest_weapon_profiles import NINE_MM_BALL, STOCK_AMMO
+from .native_guest_consumable import MEALS
 from .native_gold import valid_guid
 from .party import REQUEST_ID
 from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
@@ -17,7 +18,11 @@ VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
 ITEM = NINE_MM_BALL.item_path
 LIGHT_PISTOL = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
-STACKABLE = {**dict.fromkeys((ammo.item_path for ammo in STOCK_AMMO), True), LIGHT_PISTOL: False}
+STACKABLE = {
+    **dict.fromkeys((ammo.item_path for ammo in STOCK_AMMO), True),
+    **dict.fromkeys((food.class_path for food in MEALS.values()), True),
+    LIGHT_PISTOL: False,
+}
 MAPS = {area: area.rsplit("/", 1)[1] for area in NORMAL_CAMPAIGN_MAPS | AUTHORED_MAPS}
 MAX_DROPS = 128
 MAX_ACTIVE = 4

@@ -906,7 +906,7 @@ namespace
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if (candidate.panel != panel || !item_class) return;
         const auto class_path = item_class->GetPathName();
-        const bool stack = silverfish::native_guest_drop_items::find_ammo(class_path) != nullptr;
+        const bool stack = silverfish::native_guest_drop_items::find_stack(class_path) != nullptr;
         if (!stack && class_path != silverfish::native_guest_drop_items::pistol) return;
 
         // Suppress stock TakeCard even when the selected row is stale or a request is already pending.
