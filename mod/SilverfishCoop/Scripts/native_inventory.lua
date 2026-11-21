@@ -1,7 +1,8 @@
 local inventory = {}
 local guest_save = require("guest_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split, sorted
+local observation, split, sorted, stored
+local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local page_size = 16
 
 local function guid(value)
@@ -53,6 +54,27 @@ end
 function inventory.command(fields, state, phase)
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
+    if fields[2] == "native-inventory-store-equipment" then
+        stored = nil
+        local name, item = fields[3], fields[4]
+        if #fields ~= 4 or phase ~= "hosting" or not state.listening or state.server ~= false
+            or not guid(item) or type(SilverfishStoreNativeGuestEquipment) ~= "function" then
+            error("native_inventory_equip_refused_scope", 0)
+        end
+        local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+        if not exact or not pawn or not save then error("native_inventory_equip_refused_owner", 0) end
+        local screen = StaticFindObject(stock_backpack)
+        if not screen or not screen:IsValid() then LoadAsset(stock_backpack) end
+        local ok, status, slot, class, displaced = SilverfishStoreNativeGuestEquipment(pawn:GetAddress(), save:GetAddress(), item)
+        if ok ~= true then error(tostring(status), 0) end
+        if status ~= "stored" or math.type(slot) ~= "integer" or slot < 0 or slot > 7
+            or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
+            or (displaced ~= "-" and (not guid(displaced) or displaced == item)) then
+            error("mutation_unverified_native_inventory_equip_receipt", 0)
+        end
+        stored = { map = state.map, pawn = name, guid = item, slot = slot, class = class, displaced = displaced }
+        return "native guest equipment slot verified"
+    end
     if fields[2] ~= "native-inventory-census" then return end
     observation = nil
     local slot, offset = fields[3], math.tointeger(tonumber(fields[4]))
@@ -84,7 +106,7 @@ function inventory.command(fields, state, phase)
 end
 
 function inventory.reset()
-    observation, split, sorted = nil, nil, nil
+    observation, split, sorted, stored = nil, nil, nil, nil
 end
 
 function inventory.rows(state, phase, status_row)
@@ -102,6 +124,13 @@ function inventory.rows(state, phase, status_row)
     end
     if sorted and sorted.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-sort", sorted.map, sorted.pawn, sorted.status, sorted.count)
+    end
+    if type(SilverfishStoreNativeGuestEquipment) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-store-equipment-capability", 1)
+    end
+    if stored and stored.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-store-equipment", stored.map, stored.pawn, stored.guid,
+            stored.slot, stored.class, stored.displaced)
     end
     local report = observation
     if not report or report.map ~= state.map then return rows end

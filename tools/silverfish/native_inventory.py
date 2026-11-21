@@ -23,6 +23,19 @@ SPLIT_VIEW = "native_guest_inventory_split_view"
 SORT = "native-inventory-sort"
 SORT_CAPABILITY = "native_inventory_sort_capability"
 SORT_KEY = "native_inventory_sort"
+STORE_EQUIPMENT = "native-inventory-store-equipment"
+STORE_CAPABILITY = "native_inventory_store_equipment_capability"
+STORE_KEY = "native_inventory_store_equipment"
+_STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
+
+
+def equipment_receipt(fields, area):
+    _, world, pawn, item, slot, item_class, displaced = fields
+    if (world != area or not valid_guid(item) or slot not in "01234567" or len(slot) != 1
+            or len(item_class) > 256 or not _STOCK_CLASS.fullmatch(item_class)
+            or (displaced != "-" and (not valid_guid(displaced) or displaced == item))):
+        raise ValueError("Invalid stock equipment slot report")
+    return dict(map=world, pawn=pawn, guid=item, slot=int(slot), class_path=item_class, displaced=displaced)
 
 
 def valid_page_offset(offset: int) -> bool:
@@ -173,6 +186,57 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     host.control.event("native_guest_inventory_sort_committed", operation_id=operation, revision=revision, **result[SORT_KEY])
+    return result
+
+
+async def store_equipment(host, bridge, character: str, item, operation: str) -> dict:
+    if not valid_guid(item) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("native_inventory_equip_requires_item_and_operation")
+    game = host.last_game
+    if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(STORE_CAPABILITY) != 1
+            or time.monotonic() - host.last_seen > 3):
+        raise party.RuleError("native_inventory_equip_unavailable")
+    owner = host.native_recipients().get(character, {})
+    player = host.party["players"].get(character)
+    if not owner.get("connected") or not owner.get("pawn") or not player:
+        raise party.RuleError("guest_not_active")
+    fingerprint = [STORE_EQUIPMENT, item, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
+        raise party.RuleError("native_inventory_equip_refused_downed_or_respawning")
+
+    area, pawn = game["map"], owner["pawn"]
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(STORE_EQUIPMENT, pawn, item, timeout=6)
+        except RuntimeError as error:
+            if str(error).startswith("native_inventory_equip_refused_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(STORE_KEY, {})
+        if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("guid"))
+                != ("hosting", area, area, pawn, item)):
+            raise RuntimeError("The host did not verify the guest's stock equipment move")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        result = {STORE_KEY: dict(proof, owner=character)}
+        candidate = party.load_party(host.party)
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    host.party, host.native_checkpoint_unsafe = candidate, False
+    host.control.event("native_guest_inventory_equip_committed", operation_id=operation, revision=revision, **result[STORE_KEY])
     return result
 
 

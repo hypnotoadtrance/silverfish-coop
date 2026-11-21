@@ -2027,6 +2027,10 @@ class Bridge:
                 elif fields[0] == "native-inventory-sort" and len(fields) == 5:
                     data["native_inventory_sort"] = {"map": fields[1], "pawn": fields[2], "state": fields[3],
                                                      "count": int(fields[4])}
+                elif fields == [native_inventory.STORE_EQUIPMENT + "-capability", "1"]:
+                    data[native_inventory.STORE_CAPABILITY] = 1
+                elif fields[0] == native_inventory.STORE_EQUIPMENT and len(fields) == 7:
+                    data[native_inventory.STORE_KEY] = native_inventory.equipment_receipt(fields, data.get("map"))
                 elif fields == ["native-inventory-split-capability", "1"]:
                     data[native_inventory.SPLIT_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]

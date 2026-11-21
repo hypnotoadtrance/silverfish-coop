@@ -138,6 +138,7 @@ namespace
     {
         Unreal::FName drop_item{STR("DropItem")};
         Unreal::FName action_drop{STR("ActionDrop")};
+        Unreal::FName action_equip{STR("ActionEquip")};
         Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName sort_items{STR("SortItems")};
@@ -1112,7 +1113,7 @@ namespace
     }
 
     void intercept_backpack_action(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
-                                   bool from_menu, std::string_view use = {})
+                                   bool from_menu, std::string_view action = {})
     {
         if (function->GetNumParms() != 0 || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
@@ -1148,7 +1149,7 @@ namespace
         const auto equipped_index = drop_equipment_index(manager, candidate.panel);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if ((candidate.panel != panel && !equipped_index) || !item_class) return;
-        const auto stacks = use.empty() ? silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class))
+        const auto stacks = action.empty() ? silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class))
                                         : std::optional<bool>{false};
         if (!stacks) return;
         const bool stack = *stacks;
@@ -1162,13 +1163,14 @@ namespace
 
         auto* allow = field<Unreal::FBoolProperty>(manager, STR("CanDropItems"));
         auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
-        auto* underwater = use.empty() ? nullptr : field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("HeadUnderWater"));
+        const bool using_item = action.starts_with("use-");
+        auto* underwater = using_item ? field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("HeadUnderWater")) : nullptr;
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
         if (!bound || (!scope.host && equipped_index) ||
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
-            (use.empty() ? !allow || !allow->GetPropertyValueInContainer(manager)
-                         : !underwater || underwater->GetPropertyValueInContainer(scope.pawn.Get())) ||
+            (action.empty() && (!allow || !allow->GetPropertyValueInContainer(manager))) ||
+            (using_item && (!underwater || underwater->GetPropertyValueInContainer(scope.pawn.Get()))) ||
             !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
             (from_menu && (object_field(menu, STR("ItemManager")) != manager || !same_widget_player(menu))) ||
             !held_class || object_value(held_class, held.value) ||
@@ -1197,7 +1199,7 @@ namespace
                 !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
         }
         const auto count = stack ? saved_ammo : 1;
-        const auto entry = !use.empty() ? use :
+        const auto entry = !action.empty() ? action :
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
@@ -1348,6 +1350,11 @@ namespace
         if (name == entries->drop_item || name == entries->action_drop)
         {
             intercept_backpack_action(iteration, context, function, name == entries->action_drop);
+            return;
+        }
+        if (name == entries->action_equip)
+        {
+            if (!scope.host) intercept_backpack_action(iteration, context, function, true, "equip");
             return;
         }
         if (name == entries->sort_items)
@@ -1718,7 +1725,7 @@ namespace
             if (!cancel) return finish(false, "refresh_unavailable");
             manager->ProcessEvent(cancel, nullptr);
         }
-        if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" ||
+        if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" || completed.entry == "equip" ||
             completed.entry.starts_with("use-"))
         {
             const Unreal::FName close_name{STR("CloseContextMenu")};
@@ -1732,6 +1739,23 @@ namespace
         auto* refresh = stock_no_args(panel, refresh_name);
         if (!refresh) return finish(false, "refresh_unavailable");
         panel->ProcessEvent(refresh, nullptr);
+        if (completed.entry == "equip")
+        {
+            auto* slots = field<Unreal::FArrayProperty>(manager, STR("EquipSlots"));
+            auto* slot_property = slots ? Unreal::CastField<Unreal::FObjectProperty>(slots->GetInner()) : nullptr;
+            if (!slot_property) return finish(false, "refresh_unavailable");
+            Unreal::FScriptArrayHelper widgets(slots, slots->ContainerPtrToValuePtr<void>(manager));
+            if (widgets.Num() < 8 || widgets.Num() > 16) return finish(false, "refresh_unavailable");
+            for (int index = 0; index < 8; ++index)
+            {
+                auto* slot = object_value(slot_property, widgets.GetRawPtr(index));
+                if (!exact_class(slot, equipment_slot_path) || !same_widget_player(slot) ||
+                    object_field(slot, STR("ItemManager")) != manager) return finish(false, "refresh_unavailable");
+                auto* refresh_slot = stock_no_args(slot, refresh_name);
+                if (!refresh_slot) return finish(false, "refresh_unavailable");
+                slot->ProcessEvent(refresh_slot, nullptr);
+            }
+        }
         // A co-op drop changes both the source panel and the stock floor list.
         // Rebuild the floor cards from the live actors instead of keeping their old entries.
         auto* screen = completed.screen.Get();

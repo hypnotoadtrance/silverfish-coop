@@ -1725,6 +1725,152 @@ namespace
         void operator()(void* storage) const { type->DestroyAndFreeValue(storage); }
     };
 
+    bool accepts_stock_quick_slot(int index, Unreal::UClass* item_class, std::uint8_t item_type)
+    {
+        std::basic_string<Unreal::TCHAR> path{
+            STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C:WidgetTree.ItemSlot_1")};
+        path.back() += static_cast<Unreal::TCHAR>(index);
+        auto* slot = find<Unreal::UObject>(path.c_str());
+        if (!live(slot) || slot->GetClassPrivate() != find<Unreal::UClass>(
+                STR("/Game/Classes/GUI/New/Components/ItemSlot.ItemSlot_C"))) return false;
+        auto* inventory_index = field<Unreal::FIntProperty>(slot, STR("InventoryIndex"));
+        auto* item_index = field<Unreal::FIntProperty>(slot, STR("ItemIndex"));
+        auto* types = field<Unreal::FArrayProperty>(slot, STR("TypeFilters"));
+        auto* classes = field<Unreal::FArrayProperty>(slot, STR("ClassFilters"));
+        auto* type = types ? Unreal::CastField<Unreal::FByteProperty>(types->GetInner()) : nullptr;
+        auto* cls = classes ? Unreal::CastField<Unreal::FClassProperty>(classes->GetInner()) : nullptr;
+        if (!inventory_index || !item_index || inventory_index->GetPropertyValueInContainer(slot) != 0 ||
+            item_index->GetPropertyValueInContainer(slot) != index || !type || !cls) return false;
+
+        Unreal::FScriptArrayHelper type_filters(types, types->ContainerPtrToValuePtr<void>(slot));
+        Unreal::FScriptArrayHelper class_filters(classes, classes->ContainerPtrToValuePtr<void>(slot));
+        bool type_matches = type_filters.Num() == 0;
+        for (int i = 0; i < type_filters.Num(); ++i)
+            type_matches |= type->GetPropertyValue(type_filters.GetRawPtr(i)) == item_type;
+        if (!type_matches) return false;
+        if (class_filters.Num() == 0) return true;
+        for (int i = 0; i < class_filters.Num(); ++i)
+        {
+            auto* allowed = Unreal::Cast<Unreal::UClass>(cls->GetObjectPropertyValue(class_filters.GetRawPtr(i)));
+            if (allowed && item_class->IsChildOf(allowed)) return true;
+        }
+        return false;
+    }
+
+    int store_stock_equipment(const Lua& lua)
+    {
+        Context context;
+        if (!resolve(lua, context, nullptr).empty() || !ready_pawn(context) ||
+            std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+                return hold.fenced && hold.pawn.Get() == context.pawn;
+            })) return result(lua, false, "native_inventory_equip_refused_owner");
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0)
+            return result(lua, false, "native_inventory_equip_refused_source");
+        auto* type = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+        auto* base = inventory.item_class->GetMetaClass().Get();
+        auto* defaults = live(type) && base && type != base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
+        auto* item_type = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+        auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        if (!defaults || !item_type || !boolean(defaults, STR("Stacks"), false) || !payload ||
+            payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
+            return result(lua, false, "native_inventory_equip_refused_item");
+
+        auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
+        auto* equipped = inventory.equipment->ContainerPtrToValuePtr<void>(context.save);
+        Unreal::FScriptArrayHelper equipment(inventory.equipment, equipped);
+        constexpr int quick_slots = 8;
+        if (equipment.Num() < quick_slots || equipment.Num() > max_inventory)
+            return result(lua, false, "native_inventory_equip_refused_layout");
+        const auto selected = inventory.selected->GetPropertyValueInContainer(context.save);
+        const auto item_kind = item_type->GetPropertyValueInContainer(defaults);
+        int target = -1;
+        int occupied = -1;
+        for (int index = 0; index < quick_slots; ++index)
+        {
+            if (index == selected || !accepts_stock_quick_slot(index, type, item_kind)) continue;
+            const auto* row = equipment.GetRawPtr(index);
+            const auto id = inventory.identity(row);
+            auto* current_class = inventory.row_class(row);
+            if (!current_class && id == Guid{})
+            {
+                target = index;
+                break;
+            }
+            if (live(current_class) && id != Guid{} && occupied < 0) occupied = index;
+        }
+        if (target < 0) target = occupied;
+        if (target < 0) return result(lua, false, "native_inventory_equip_refused_slot");
+
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        auto* bag_property = inventory.backpack;
+        auto* equip_property = inventory.equipment;
+        Value original_bag(bag_property->AllocateAndInitializeValue(), {bag_property});
+        Value proposed_bag(bag_property->AllocateAndInitializeValue(), {bag_property});
+        Value original_equipment(equip_property->AllocateAndInitializeValue(), {equip_property});
+        Value proposed_equipment(equip_property->AllocateAndInitializeValue(), {equip_property});
+        if (!original_bag || !proposed_bag || !original_equipment || !proposed_equipment)
+            return result(lua, false, "native_inventory_equip_refused_storage");
+        bag_property->CopyCompleteValue(original_bag.get(), bag);
+        bag_property->CopyCompleteValue(proposed_bag.get(), bag);
+        equip_property->CopyCompleteValue(original_equipment.get(), equipped);
+        equip_property->CopyCompleteValue(proposed_equipment.get(), equipped);
+        Unreal::FScriptArrayHelper proposed_items(bag_property, proposed_bag.get());
+        Unreal::FScriptArrayHelper proposed_slots(equip_property, proposed_equipment.get());
+        auto* source_row = proposed_items.GetRawPtr(inventory.backpack_index);
+        auto* target_row = proposed_slots.GetRawPtr(target);
+        const auto* old_slot = equipment.GetRawPtr(target);
+        const auto old_guid = inventory.identity(old_slot);
+        const bool replacing = old_guid != Guid{};
+        if (replacing)
+        {
+            auto displaced = context;
+            displaced.guid = old_guid;
+            Inventory located;
+            if (!locate(displaced, located).empty() || located.equipment_index != target)
+                return result(lua, false, "native_inventory_equip_refused_displaced_guid");
+        }
+        // A replaced row keeps its GUID and full payload in the former source
+        // position, so this move cannot create a second copy or lose a gun.
+        inventory.type->CopyCompleteValue(target_row, inventory.item);
+        if (replacing) inventory.type->CopyCompleteValue(source_row, old_slot);
+        else proposed_items.RemoveValues(inventory.backpack_index, 1);
+
+        const auto same_item = [&](const void* first, const void* second) {
+            return inventory.type->Identical(first, second) &&
+                payload->Identical(payload->ContainerPtrToValuePtr<void>(first), payload->ContainerPtrToValuePtr<void>(second));
+        };
+        if (!same_item(target_row, inventory.item) || (replacing && !same_item(source_row, old_slot)) ||
+            !ownership_current(context) || !bag_property->Identical(original_bag.get(), bag) ||
+            !equip_property->Identical(original_equipment.get(), equipped))
+            return result(lua, false, "native_inventory_equip_refused_staging");
+        bag_property->CopyCompleteValue(bag, proposed_bag.get());
+        equip_property->CopyCompleteValue(equipped, proposed_equipment.get());
+        if (!ownership_current(context) || !bag_property->Identical(proposed_bag.get(), bag) ||
+            !equip_property->Identical(proposed_equipment.get(), equipped) ||
+            inventory.selected->GetPropertyValueInContainer(context.save) != selected)
+        {
+            if (ownership_current(context))
+            {
+                bag_property->CopyCompleteValue(bag, original_bag.get());
+                equip_property->CopyCompleteValue(equipped, original_equipment.get());
+                if (bag_property->Identical(original_bag.get(), bag) && equip_property->Identical(original_equipment.get(), equipped))
+                    return result(lua, false, "native_inventory_equip_refused_rolled_back");
+            }
+            return result(lua, false, "mutation_unverified_native_inventory_equip");
+        }
+        result(lua, true, "stored");
+        lua.set_integer(target);
+        lua.set_string(RC::to_utf8_string(type->GetPathName()));
+        std::array<char, 32> formatted{};
+        constexpr std::string_view digits = "0123456789ABCDEF";
+        for (std::size_t word = 0; word < old_guid.size(); ++word)
+            for (int part = 0; part < 8; ++part)
+                formatted[word * 8 + part] = digits[(old_guid[word] >> ((7 - part) * 4)) & 15];
+        lua.set_string(replacing ? std::string_view{formatted.data(), formatted.size()} : std::string_view{"-"});
+        return 5;
+    }
+
     int sort_backpack(const Lua& lua)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || !Unreal::IsInGameThreadRaw() ||
@@ -2002,6 +2148,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
+    lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
     {
         if (env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_HEADLESS"))

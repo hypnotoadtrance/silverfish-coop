@@ -78,7 +78,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
-                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
+                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_inventory.STORE_EQUIPMENT,
+                        native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(),
@@ -1673,6 +1674,8 @@ class Host:
             gameplay[native_inventory.SPLIT_CAPABILITY] = 1
         if self.last_game.get(native_inventory.SORT_CAPABILITY) == 1:
             gameplay[native_inventory.SORT_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.STORE_CAPABILITY) == 1:
+            gameplay[native_inventory.STORE_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
@@ -1827,6 +1830,8 @@ class Host:
                     result = await native_stock_door.pry(self, bridge, character, target, request["operation_id"], kind)
             elif action == native_inventory.SORT:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
+            elif action == native_inventory.STORE_EQUIPMENT:
+                result = await native_inventory.store_equipment(self, bridge, character, target, request["operation_id"])
             elif action == native_guest_ui.ACTION:
                 result = await native_guest_ui.capture(self, bridge, character, target)
             elif action == "native-inventory-list":

@@ -125,7 +125,7 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
 
 
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
-                          stock_split: bool = False) -> dict:
+                          stock_split: bool = False, stock_equip: bool = False) -> dict:
     def qualified(game):
         return (game.get("native_enemy_loot_cqc_version") == 3
                 and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
@@ -233,6 +233,25 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert by_guid[guid]["class_path"] == by_guid[new_guid]["class_path"] == stack["class_path"], after
         assert len(after["items"]) == len(inventory["items"]) + 1, after
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
+    equip_proof = None
+    if stock_equip:
+        before = await submit(guest_run, "native-inventory-list")
+        host_run = host.campaign / "run"
+        host_before = await submit(host_run, "native-inventory-list")
+        assert before["ok"] and host_before["ok"], (before, host_before)
+        inventory = before["native_inventory"]
+        shotgun = "/Game/Classes/Weapons/Wep_BoltAction_Shotgun.Wep_BoltAction_Shotgun_C"
+        item = next((row for row in inventory["items"] if row["class_path"] == shotgun and row["source"] == "backpack"), None)
+        assert item is not None, inventory
+        equipped = await submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=item["guid"])
+        assert equipped["ok"], equipped
+        equip_proof = equipped[native_inventory.STORE_KEY]
+        assert equipped["stock_inventory_proof"] == f"verified stock equipment slot {equip_proof['slot']}"
+        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        row, = (row for row in after["items"] if row["guid"] == item["guid"])
+        assert row == dict(item, source="equipment", index=equip_proof["slot"]), (row, item)
+        assert {row["guid"] for row in after["items"]} == {row["guid"] for row in inventory["items"]}
+        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -243,6 +262,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
             **({"guest_stock_menu_split": split_proof} if split_proof else {}),
+            **({"guest_stock_menu_equip": equip_proof} if equip_proof else {}),
             **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs,
                 "guest_stock_menu_sort": stock_sort_proof}
                if stock_drop_proof else {})}
@@ -268,7 +288,8 @@ async def create_stock_split_character(guest, join, name):
 
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
-                 second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False) -> None:
+                 second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
+                 stock_equip: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -297,7 +318,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
-        if stock_drop or stock_split:
+        if stock_drop or stock_split or stock_equip:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
@@ -336,8 +357,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
         first, second = seats
         async def check_gameplay(host, guest, pawn):
-            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split)
-        create = create_stock_split_character if stock_split else create_stock_drop_character if stock_drop else None
+            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split, stock_equip=stock_equip)
+        create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                   create_character=create))
         proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
@@ -381,10 +402,11 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
+    parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
-                       stock_drop=args.stock_drop, stock_split=args.stock_split))
+                       stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip))

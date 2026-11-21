@@ -23,8 +23,9 @@ STOCK_DROP_FIXTURE = "native-inventory-stock-drop-fixture"
 STOCK_USE_FIXTURE = "native-inventory-stock-use-fixture"
 STOCK_SORT_FIXTURE = "native-inventory-stock-sort-fixture"
 STOCK_SPLIT_FIXTURE = "native-inventory-stock-split-fixture"
+STOCK_EQUIP_FIXTURE = "native-inventory-stock-equip-fixture"
 STOCK_FIXTURES = {STOCK_DROP_FIXTURE: "drop", STOCK_USE_FIXTURE: "use",
-                  STOCK_SORT_FIXTURE: "sort", STOCK_SPLIT_FIXTURE: "split"}
+                  STOCK_SORT_FIXTURE: "sort", STOCK_SPLIT_FIXTURE: "split", STOCK_EQUIP_FIXTURE: "equip"}
 _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
@@ -89,8 +90,8 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
     split = native_inventory.split_target(target) if splitting else None
     if splitting and split is None:
         raise ValueError("Select an exact stock stack, split amount, and current quantity")
-    capability = (native_inventory.SORT_CAPABILITY if sorting else
-                  native_inventory.SPLIT_CAPABILITY if splitting else record.CAPABILITY)
+    capability = {"sort": native_inventory.SORT_CAPABILITY, "split": native_inventory.SPLIT_CAPABILITY,
+                  "equip": native_inventory.STORE_CAPABILITY}.get(mode, record.CAPABILITY)
     selection = "-" if sorting else split[0] if splitting else target
     valid_selection = target is None if sorting else valid_guid(selection)
     if (game.get("state") != "connected" or not game.get("save_scope") or not pawn
@@ -100,7 +101,7 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
         raise ValueError("The selected stock backpack action is unavailable")
     arguments = (str(split[1]),) if splitting else ()
     snapshot = await client.bridge.command("native-inventory-view-fixture", f"stock-{mode}", epoch, selection, *arguments, timeout=5)
-    match = re.fullmatch(r"stock guest (sort|split|context_menu|use-[a-z-]+) (-|[0-9A-F]{32})"
+    match = re.fullmatch(r"stock guest (sort|split|equip|context_menu|use-[a-z-]+) (-|[0-9A-F]{32})"
                          r" (0|[1-9][0-9]{0,9}) ([1-9][0-9]{0,15})(?: ([1-9][0-9]{0,9}))?",
                          snapshot.get("ack", {}).get("message", ""))
     if (not match or match[2] != selection or (not splitting and int(match[3]) > record.MAX_QUANTITY)
@@ -137,6 +138,17 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
                     or not valid_guid(created := receipt.get("new_guid")) or created == guid):
                 raise RuntimeError("The host did not verify both resulting stock stacks")
             committed = (str(remaining), created)
+        elif mode == "equip":
+            if entry != "equip" or quantity != 1:
+                raise ValueError("The native action did not select one equipment item")
+            key = native_inventory.STORE_KEY
+            receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, guid)).get(key)
+            if (not isinstance(receipt, dict)
+                    or (receipt.get("owner"), receipt.get("map"), receipt.get("guid")) != (client.invite["character_id"], area, guid)
+                    or type(slot := receipt.get("slot")) is not int or not 0 <= slot < 8
+                    or ((displaced := receipt.get("displaced")) != "-" and (not valid_guid(displaced) or displaced == guid))):
+                raise RuntimeError("The host did not verify the saved stock equipment slot")
+            committed = ("equipped", str(slot), displaced)
         elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
             meal = native_guest_consumable.MEALS.get(action)
