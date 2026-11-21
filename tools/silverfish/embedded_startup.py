@@ -4,7 +4,7 @@ import asyncio
 from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import hashlib
 from ipaddress import ip_address
 import json
@@ -366,6 +366,7 @@ async def _run(*, timeout: float = 15) -> None:
 
 async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path, headless: bool) -> None:
     from . import service
+    from .control import select_run
     from .title_session import SessionPlan
 
     settings = _decode(_read_file(mailbox / RESIDENT_FILE, REQUEST_LIMIT))
@@ -379,11 +380,8 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
 
     default_bind, default_port = endpoint(settings["bind"], settings["port"])
 
-    def status():
-        return runtime.read_json(campaign / "run" / "status.json")
-
-    def host_plan(bind, port, password=""):
-        mode, area = service.menu_host_start(campaign, profile=saved.parent)
+    def host_plan(selected, bind, port, password=""):
+        mode, area = service.menu_host_start(selected, profile=saved.parent)
 
         async def start():
             private = runtime.spare_udp_port()
@@ -391,14 +389,17 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
                 private = runtime.spare_udp_port()
             if private == port:
                 raise RuntimeError("A distinct private Unreal port was not available")
-            engine = EmbeddedEngine(os.getpid(), mailbox, saved, private, session_directory=campaign)
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, private, session_directory=selected)
             await engine.observe_title()
             await service.host_game(
-                work, campaign, bind, port, headless, resident_engine=engine,
+                work, selected, bind, port, headless, resident_engine=engine,
                 direct_password=password,
                 max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
                 **({"start_preset": mode} if mode == "wanderer" else {}),
             )
+
+        def status():
+            return runtime.read_json(selected / "run" / "status.json")
 
         return SessionPlan(start, status,
                            lambda frame: frame.get("endpoint") == {"address": bind, "port": port}
@@ -406,14 +407,22 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
 
     def resolve(claim):
         if claim.host_settings is None:
-            return host_plan(default_bind, default_port)
+            return host_plan(campaign, default_bind, default_port)
         name, address, port_text = claim.host_settings
+        selected = campaign
         if name and name != campaign.name:
-            raise ValueError("The resident title has a different campaign profile")
+            if saved.parent == campaign / "game-user":
+                raise ValueError("The resident title has a different campaign profile")
+            selected = select_run(work, "campaigns", name)
+            if selected != campaign.parent / name:
+                raise ValueError("The campaign directory is redirected")
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
-        return host_plan(bind, port, claim.direct_password or "")
+        return host_plan(selected, bind, port, claim.direct_password or "")
 
-    plan = replace(host_plan(default_bind, default_port), resolve_claim=resolve)
+    async def no_selection():
+        raise ValueError("Choose a host campaign first")
+
+    plan = SessionPlan(no_selection, lambda: None, lambda _: False, resolve_claim=resolve)
     await _resident_title(mailbox, saved, campaign, {"host": plan})
 
 

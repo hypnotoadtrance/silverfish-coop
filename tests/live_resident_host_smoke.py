@@ -34,6 +34,11 @@ def stock_save_hashes(profile: Path) -> dict[str, str]:
     return fingerprints
 
 
+async def stock_profile(bridge):
+    frame = await bridge.command("native-title-stock-profile-fixture")
+    return frame["ack"]["message"]
+
+
 async def verify(work: Path, original: Path, *, direct: bool = False, title_profiles: bool = False) -> None:
     originals = saved_hashes(original)
     if ("steamapps" in {part.casefold() for part in work.parts} or work.is_relative_to(original)
@@ -53,7 +58,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
             saves = seat / "Saved" / "SaveGames"
             saves.mkdir(parents=True)
             for stock_save in (original / "SaveGames").glob("*.sav"):
-                shutil.copyfile(stock_save, saves / stock_save.name)
+                shutil.copy2(stock_save, saves / stock_save.name)
             solo_baselines[seat] = stock_save_hashes(seat)
             assert "Config.sav" in solo_baselines[seat] and len(solo_baselines[seat]) > 1
     nonce = uuid.uuid4().hex
@@ -78,8 +83,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
         assert frame[title.PANEL_KEY]["actions"] == [action]
         return frame
 
-    async def hosting(port):
-        state = await wait(host_run, lambda value: value.get("state") == "hosting"
+    async def hosting(port, run=host_run):
+        state = await wait(run, lambda value: value.get("state") == "hosting"
                            and value.get("endpoint", {}).get("port") == port)
         assert state["pid"] == process.pid and process.poll() is None
         assert state["game"]["map"] == OBSERVATORY and owns_udp_port(process.pid, port)
@@ -91,22 +96,25 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
                     return state, status["attempt"]
                 await asyncio.sleep(.1)
 
-    async def stop_host(port, *, pause_exit=False):
+    async def stop_host(port, *, pause_exit=False, owner=campaign):
+        run = owner / "run"
         if pause_exit:
             await stock_pause(bridge, "open")
             await stock_pause(bridge, "save_and_quit")
         else:
-            assert (await submit(host_run, "stop"))["ok"]
-        stopped = await wait(host_run, lambda value: value.get("state") == "stopped")
+            assert (await submit(run, "stop"))["ok"]
+        stopped = await wait(run, lambda value: value.get("state") == "stopped")
         await offer(bridge, profile, "host")
         assert stopped["pid"] == process.pid and process.poll() is None and not owns_udp_port(process.pid, port)
         return CampaignStore.read_existing(
-            campaign / "save", verify_world=verify_travel_checkpoint,
+            owner / "save", verify_world=verify_travel_checkpoint,
             verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data),
         )
 
     try:
         await offer(bridge, profile, "host")
+        if title_profiles:
+            stock_host = await stock_profile(bridge)
         if direct:
             for operation in ("open", "next", "next", "next", "password", "submit"):
                 await bridge.command("native-title-host-form-fixture", operation)
@@ -160,6 +168,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
             await form("port", str(port))
 
         await offer(guest_bridge, guest_profile, "join")
+        if title_profiles:
+            stock_guest = await stock_profile(guest_bridge)
         if direct:
             await open_direct()
             await form("no_password")
@@ -267,11 +277,29 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
         evidence["sessions"].append({"pid": second["pid"], "port": edited_port, "revision": final["revision"],
                                      "restored_slot": save["slot"], "scope_released": True})
         if title_profiles:
+            other_name = "title-host-settings-" + uuid.uuid4().hex[:8]
+            other = select_run(work, "campaigns", other_name)
+            await bridge.command("native-title-host-form-fixture", "open")
+            await bridge.command("native-title-host-form-fixture", "campaign", other_name)
+            await bridge.command("native-title-host-form-fixture", "port", str(edited_port))
+            await bridge.command("native-title-host-form-fixture", "submit")
+            other_host, _ = await hosting(edited_port, other / "run")
+            other_scope_id = other_host["game"]["save_scope"]
+            assert other_scope_id != scope
+            other_checkpoint = await stop_host(edited_port, owner=other)
+            assert other_checkpoint["world"][native_host_save.SCOPE_FIELD] == other_scope_id
+            assert CampaignStore.read_existing(campaign / "save", verify_checkpoint=lambda data:
+                                               native_host_save.verify_checkpoint(profile, data)) == final
+
             host_scope = native_host_save.checkpoint_profile(profile, final)
             guest_scope_directory = native_host_save.directory(native_host_save.SaveScope(guest_profile, guest_scope))
             assert native_host_save.directory(host_scope).is_dir() and guest_scope_directory.is_dir()
-            assert not (campaign / "game-user").exists() and not (guest / "game-user").exists()
+            assert not any((owner / "game-user").exists() for owner in (campaign, guest, other))
+            await offer(guest_bridge, guest_profile, "join")
+            assert await stock_profile(bridge) == stock_host and await stock_profile(guest_bridge) == stock_guest
             evidence["separate_title_and_ledger"] = True
+            evidence["separate_host_campaigns"] = [scope, other_scope_id]
+            evidence["stock_preferences_and_continue_preserved"] = True
         evidence["verified"] = True
     finally:
         if guest_process is not None and guest_process.poll() is None:
@@ -280,8 +308,13 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
             await runtime.stop_game(process)
         evidence["original_saves_verified"] = saved_hashes(original) == originals
         if title_profiles:
-            evidence["stock_slots_preserved"] = {seat.parent.name: stock_save_hashes(seat) == baseline
-                                                 for seat, baseline in solo_baselines.items()}
+            evidence["stock_slots_preserved"] = {}
+            evidence["stock_config_rewritten"] = {}
+            for seat, baseline in solo_baselines.items():
+                observed = stock_save_hashes(seat)
+                evidence["stock_config_rewritten"][seat.parent.name] = (
+                    observed.pop("Config.sav", None) != baseline.pop("Config.sav"))
+                evidence["stock_slots_preserved"][seat.parent.name] = observed == baseline
             evidence["verified"] &= all(evidence["stock_slots_preserved"].values())
         evidence["verified"] &= evidence["original_saves_verified"]
         runtime.write_json(case / "resident-host-verification.json", evidence)

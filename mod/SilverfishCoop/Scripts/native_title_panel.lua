@@ -207,6 +207,38 @@ local function fixture_enabled()
     return os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 end
 
+local function stock_profile_fixture(fields, state, phase)
+    if #fields ~= 2 or not fixture_enabled() or not title.probe(state, phase)
+        or require("native_save_scope").selected() then error("title_stock_profile_unavailable", 0) end
+    local instance = state.world.OwningGameInstance
+    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(instance) or not valid(statics) then error("title_stock_profile_unavailable", 0) end
+    local loaded = statics:LoadGameFromSlot("Config", 0)
+    local active = instance.GamePlay_Config
+    local config_class = StaticFindObject("/Game/Classes/Global/Settings_Config_BP.Settings_Config_BP_C")
+    if not valid(loaded) or not valid(active) or not same(loaded:GetClass(), config_class)
+        or not same(active:GetClass(), config_class) then error("title_stock_config_unavailable", 0) end
+    local values = {}
+    for _, key in ipairs({
+        "FOV", "MouseSensitivity", "AdsSensitivity", "InvertXAxis", "InvertYAxis",
+        "VolumeMaster", "VolumeSfx", "VolumeMusic", "VolumeSpeech", "Subtitles",
+        "VolumetricFog", "ResQuality", "AAMethod", "Gamma",
+    }) do
+        local value = active[key]
+        if (type(value) ~= "number" and type(value) ~= "boolean") or loaded[key] ~= value then
+            error("title_stock_config_readback_failed", 0)
+        end
+        values[#values + 1] = tostring(value)
+    end
+    local recent = {}
+    instance:Find_MostRecentSaveFile(recent, recent)
+    if not recent.SaveFileFound or not valid(recent.Save) or type(recent.Save.PlayerHealth) ~= "number" then
+        error("title_stock_continue_unavailable", 0)
+    end
+    values[#values + 1] = tostring(recent.Save.PlayerHealth)
+    return table.concat(values, ":")
+end
+
 local function host_form_fixture_command(fields, state, phase)
     if not fixture_enabled() then error("title_host_form_fixture_unavailable", 0) end
     local operation, value = fields[3], fields[4]
@@ -461,6 +493,7 @@ function panel.sync(state, phase)
 end
 
 function panel.command(fields, state, phase)
+    if fields[2] == "native-title-stock-profile-fixture" then return stock_profile_fixture(fields, state, phase) end
     if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-host-form-fixture" then return host_form_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-join-form-fixture" then return join_form_fixture_command(fields, state, phase) end
