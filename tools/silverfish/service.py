@@ -5304,6 +5304,8 @@ class Client:
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
                     if target:
                         result["stock_inventory_proof"] = self.last_game.get("ack", {}).get("message")
+                elif action == native_guest_drop.STOCK_DROP_FIXTURE:
+                    result = await native_guest_drop.stock_menu_fixture(self, request.get("target"), path.stem)
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):
                         raise ValueError("Connect and wait for the authenticated client damage guard")

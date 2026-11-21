@@ -815,10 +815,10 @@ namespace
                same_widget_player(manager) && same_widget_player(screen) && same_widget_player(panel);
     }
 
-    [[nodiscard]] bool qualified_drop_host()
+    [[nodiscard]] bool qualified_drop_seat(bool host)
     {
-        return host_drop_enabled() && scope.host && scope.generation == generation.load(std::memory_order_acquire) &&
-               current_player(scope) &&
+        return (!host || host_drop_enabled()) && scope.host == host &&
+               scope.generation == generation.load(std::memory_order_acquire) && current_player(scope) &&
                silverfish::native_guest_drop_maps::contains(static_cast<Unreal::UWorld*>(scope.world.Get()));
     }
 
@@ -836,10 +836,12 @@ namespace
                });
     }
 
-    [[nodiscard]] bool host_drop_argument(std::int64_t pawn, std::string_view epoch)
+    [[nodiscard]] bool drop_argument(std::int64_t pawn, std::string_view epoch, bool host)
     {
         return drop_epoch_valid(epoch) && std::ranges::equal(epoch, host_drop_scope.epoch) &&
-               current_host_argument(pawn) && host_drop_scope_matches(canonical_host_save()) &&
+               pawn > 0 && scope.address == static_cast<std::uintptr_t>(pawn) &&
+               hooks_ready.load(std::memory_order_acquire) && qualified_drop_seat(host) && Clock::now() < scope.expires &&
+               host_drop_scope_matches(canonical_host_save()) &&
                Clock::now() < host_drop_scope.expires;
     }
 
@@ -925,7 +927,7 @@ namespace
     void intercept_drag_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
                              const void* parameters)
     {
-        if (!parameters || !live(manager) || !exact_class(manager, manager_path) || !qualified_drop_host() ||
+        if (!parameters || !live(manager) || !exact_class(manager, manager_path) || !qualified_drop_seat(true) ||
             function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 2 ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* screen = object_field(manager, STR("ParentScreen"));
@@ -992,18 +994,29 @@ namespace
                                            now + request_lease, manager, screen, panel, "drag_to_floor"};
     }
 
-    void intercept_host_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
-                             bool from_menu)
+    void intercept_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function, bool from_menu)
     {
         if (function->GetNumParms() != 0 || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !live(manager) || !exact_class(manager, manager_path) ||
-            function->GetOuterPrivate() != manager->GetClassPrivate() || !qualified_drop_host()) return;
+            function->GetOuterPrivate() != manager->GetClassPrivate() || !qualified_drop_seat(scope.host)) return;
 
         auto* screen = object_field(manager, STR("ParentScreen"));
         auto* panel = object_field(screen, STR("BackpackPanel"));
         if (!exact_drop_screen(manager, screen, panel)) return;
 
+        auto* save = canonical_host_save();
+        const auto now = Clock::now();
+        const bool matches = host_drop_scope_matches(save);
+        const bool bound = matches && now < host_drop_scope.expires;
+        // A guest scope always routes drops through the host, including a
+        // refused card. No stock mutation may proceed on the projected save.
+        if (!scope.host)
+        {
+            if (!matches) return;
+            iteration.PreventOriginalFunctionCall();
+            if (!iteration.OriginalFunctionCallPrevented()) return;
+        }
         auto* card = object_field(manager, STR("HoveredCard"));
         Unreal::UObject* menu = nullptr;
         if (from_menu)
@@ -1022,16 +1035,17 @@ namespace
         const bool stack = *stacks;
 
         // Suppress stock TakeCard even when the selected row is stale or a request is already pending.
-        iteration.PreventOriginalFunctionCall();
-        if (!iteration.OriginalFunctionCallPrevented()) return;
+        if (scope.host)
+        {
+            iteration.PreventOriginalFunctionCall();
+            if (!iteration.OriginalFunctionCallPrevented()) return;
+        }
 
-        const auto now = Clock::now();
-        auto* save = canonical_host_save();
         auto* allow = field<Unreal::FBoolProperty>(manager, STR("CanDropItems"));
         auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
-        if (!host_drop_scope_matches(save) || now >= host_drop_scope.expires ||
+        if (!bound || (!scope.host && equipped_index) ||
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
             !allow || !allow->GetPropertyValueInContainer(manager) || !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
             (from_menu && (object_field(menu, STR("ItemManager")) != manager || !same_widget_player(menu))) ||
@@ -1210,7 +1224,7 @@ namespace
         }
         if (name == entries->drop_item || name == entries->action_drop)
         {
-            intercept_host_drop(iteration, context, function, name == entries->action_drop);
+            intercept_drop(iteration, context, function, name == entries->action_drop);
             return;
         }
         const bool manager = name == entries->action_use || name == entries->quick_move ||
@@ -1464,18 +1478,23 @@ namespace
                !function->HasAnyFunctionFlags(Unreal::FUNC_Net) ? function : nullptr;
     }
 
-    int lua_set_host_drop(const Lua& lua)
+    template <bool host>
+    int lua_set_drop(const Lua& lua)
     {
         bool accepted = false;
         if (Unreal::IsInGameThreadRaw())
         {
-            if (lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_string(2))
+            if (lua.get_stack_size() == (host ? 2 : 3) && lua.is_integer(1) && lua.is_string(2) &&
+                (host || lua.is_integer(3)))
             {
                 // LuaMadeSimple getters remove the value, so take arguments from the top down.
+                const auto view_address = host ? 0 : lua.get_integer(3);
                 const std::string epoch{lua.get_string(2)};
                 const auto pawn = lua.get_integer(1);
                 auto* save = canonical_host_save();
-                if (save && drop_epoch_valid(epoch) && current_host_argument(pawn) && qualified_drop_host())
+                if (save && drop_epoch_valid(epoch) && pawn > 0 && scope.address == static_cast<std::uintptr_t>(pawn) &&
+                    hooks_ready.load(std::memory_order_acquire) && qualified_drop_seat(host) && Clock::now() < scope.expires &&
+                    (host || (view_address > 0 && reinterpret_cast<std::uintptr_t>(save) == static_cast<std::uintptr_t>(view_address))))
                 {
                     if (!host_drop_scope_matches(save) || !std::ranges::equal(epoch, host_drop_scope.epoch))
                         clear_host_drop();
@@ -1500,13 +1519,14 @@ namespace
         return 0;
     }
 
-    int lua_take_host_drop(const Lua& lua)
+    template <bool host>
+    int lua_take_drop(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2))
             return 0;
         const std::string epoch{lua.get_string(2)};
         const auto pawn = lua.get_integer(1);
-        if (!host_drop_argument(pawn, epoch) || !host_drop_request ||
+        if (!drop_argument(pawn, epoch, host) || !host_drop_request ||
             host_drop_request->taken || Clock::now() >= host_drop_request->expires)
             return 0;
 
@@ -1521,7 +1541,8 @@ namespace
         return 4;
     }
 
-    int lua_finish_host_drop(const Lua& lua)
+    template <bool host>
+    int lua_finish_drop(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) ||
             !lua.is_integer(3))
@@ -1529,7 +1550,7 @@ namespace
         const auto sequence = lua.get_integer(3);
         const std::string epoch{lua.get_string(2)};
         const auto pawn = lua.get_integer(1);
-        if (!host_drop_argument(pawn, epoch) || !host_drop_request || !host_drop_request->taken ||
+        if (!drop_argument(pawn, epoch, host) || !host_drop_request || !host_drop_request->taken ||
             host_drop_request->sequence != sequence || Clock::now() >= host_drop_request->expires)
             return probe_result(lua, false, "scope_changed");
 
@@ -2509,10 +2530,13 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishSetNativeTransportScope", lua_enroll);
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
-        lua.register_function("SilverfishSetNativeHostDropScope", lua_set_host_drop);
+        lua.register_function("SilverfishSetNativeHostDropScope", lua_set_drop<true>);
+        lua.register_function("SilverfishSetNativeGuestDropScope", lua_set_drop<false>);
         lua.register_function("SilverfishClearNativeHostDropScope", lua_clear_host_drop);
-        lua.register_function("SilverfishTakeNativeHostDropRequest", lua_take_host_drop);
-        lua.register_function("SilverfishFinishNativeHostDropRequest", lua_finish_host_drop);
+        lua.register_function("SilverfishTakeNativeHostDropRequest", lua_take_drop<true>);
+        lua.register_function("SilverfishFinishNativeHostDropRequest", lua_finish_drop<true>);
+        lua.register_function("SilverfishTakeNativeGuestDropRequest", lua_take_drop<false>);
+        lua.register_function("SilverfishFinishNativeGuestDropRequest", lua_finish_drop<false>);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);
         lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_transport_request<TransportKind::Gold>);
         lua.register_function("SilverfishInspectNativeGoldTransport", lua_inspect_cube<TransportKind::Gold>);

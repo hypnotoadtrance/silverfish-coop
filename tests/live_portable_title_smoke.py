@@ -16,7 +16,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
-from tools.silverfish import embedded_startup, runtime
+from tools.silverfish import embedded_startup, native_guest_drop, native_world_loot, runtime
 from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
@@ -122,7 +122,7 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         return await native_mailbox(root, process)
 
 
-async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False) -> dict:
     def qualified(game):
         return (game.get("native_enemy_loot_cqc_version") == 3
                 and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
@@ -148,6 +148,25 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
     preview = await submit(guest_run, "native-inventory-view-fixture", target="stock")
     assert preview["ok"] and re.fullmatch(r"verified stock guest inventory with \d+ backpack cards",
                                           preview.get("stock_inventory_proof", "")), preview
+    stock_drop_proof = None
+    if stock_drop:
+        contents = await submit(guest_run, "native-inventory-list")
+        assert contents["ok"], contents
+        selected = next(row for row in contents["native_inventory"]["items"]
+                        if native_guest_drop.droppable(row, generic=True))
+        dropped = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=selected["guid"])
+        assert dropped["ok"], dropped
+        stock_drop_proof = dropped[native_guest_drop.RESULT]
+        assert (stock_drop_proof["guid"], stock_drop_proof["class_path"], stock_drop_proof["quantity"]) == (
+            selected["guid"], selected["class_path"], selected["quantity"],
+        ), dropped
+        identity = native_world_loot.player_drop_identity(stock_drop_proof["drop_id"])
+        for seat in (host, guest):
+            await seat.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {}))
+        contents = await submit(guest_run, "native-inventory-list")
+        assert contents["ok"] and selected["guid"] not in {
+            row["guid"] for row in contents["native_inventory"]["items"]
+        }, contents
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -156,11 +175,12 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
-            "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True}
+            "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
+            **({"guest_stock_menu_drop": stock_drop_proof} if stock_drop_proof else {})}
 
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
-                 second_legacy_work: Path | None = None) -> None:
+                 second_legacy_work: Path | None = None, *, stock_drop: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -223,8 +243,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             baselines.append((hashes, await stock_profile(seat.bridge)))
 
         first, second = seats
-        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=verify_gameplay))
-        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=verify_gameplay))
+        async def check_gameplay(host, guest, pawn):
+            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop)
+        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay))
+        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay))
         assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
@@ -261,9 +283,11 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True, help="Clean replica with the release ZIP applied and no mods.txt")
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--stock-drop", action="store_true", help="test the stock guest backpack context-menu drop")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
-                       args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy))
+                       args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
+                       stock_drop=args.stock_drop))

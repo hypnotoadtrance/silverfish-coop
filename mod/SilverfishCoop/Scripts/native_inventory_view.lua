@@ -13,6 +13,9 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local inventory_action_path = "/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory"
 local inventory_action_event = "InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0"
 local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
+local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
+local context_menu_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
@@ -404,7 +407,54 @@ local function widget_at(array, index)
     return widget
 end
 
-local function stock_preview(state, phase, current, action, stack)
+local function stock_card_guid(card)
+    local id = exact(card, card_path) and card.Item[item_guid]
+    if not id then return end
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
+end
+
+local function stock_drop_fixture(screen, current, save, epoch, item)
+    if type(SilverfishSetNativeGuestDropScope) ~= "function"
+        or type(SilverfishTakeNativeGuestDropRequest) ~= "function"
+        or type(SilverfishFinishNativeGuestDropRequest) ~= "function" then
+        error("The native stock drop hooks are unavailable", 0)
+    end
+    local manager, panel = screen.ItemManager, screen.BackpackPanel
+    local card
+    for index = 1, panel.Cards:GetArrayNum() do
+        local candidate = widget_at(panel.Cards, index)
+        if stock_card_guid(candidate) == item then
+            if card then error("The stock backpack contains a duplicate item identity", 0) end
+            card = candidate
+        end
+    end
+    local pawn = current.pawn:GetAddress()
+    if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
+        or not SilverfishSetNativeGuestDropScope(pawn, epoch, save:GetAddress()) then
+        error("The stock backpack drop could not bind its exact item and guest", 0)
+    end
+    manager:OpenContextMenu(card)
+    local menu = manager.ItemContextMenu
+    if not exact(menu, context_menu_path) or not same(menu["Item Card"], card) then
+        error("The stock item context menu did not select that backpack card", 0)
+    end
+    local rows = save.PlayerBackpack:GetArrayNum()
+    manager:ActionDrop()
+    manager:ActionDrop()
+    local sequence, guid, quantity, entry = SilverfishTakeNativeGuestDropRequest(pawn, epoch)
+    if math.type(sequence) ~= "integer" or sequence < 1 or guid ~= item or math.type(quantity) ~= "integer"
+        or quantity < 1 or quantity > 200 or entry ~= "context_menu"
+        or save.PlayerBackpack:GetArrayNum() ~= rows or stock_card_guid(card) ~= item then
+        error("The stock guest drop did not produce one intent without changing the local backpack", 0)
+    end
+    if SilverfishTakeNativeGuestDropRequest(pawn, epoch) ~= nil
+        or not SilverfishFinishNativeGuestDropRequest(pawn, epoch, sequence) then
+        error("The stock guest drop did not consume exactly one intent", 0)
+    end
+    return ("stock guest drop %s %d"):format(guid, quantity)
+end
+
+local function stock_preview(state, phase, current, action, stack, drop_epoch, drop_item)
     local save = save_scope.bind_guest(state, phase)
     if not valid(save) or not same(current.pawn.Save, save) then
         error("The stock inventory preview requires the isolated guest save", 0)
@@ -431,20 +481,22 @@ local function stock_preview(state, phase, current, action, stack)
             if valid(card) and valid(card.Item[class_field]) then displayed = displayed + 1 end
         end
         if displayed ~= expected then error("The stock inventory preview did not render the isolated backpack") end
-        return displayed
+        if drop_item then return stock_drop_fixture(screen, current, save, drop_epoch, drop_item) end
+        return ("verified stock guest inventory with %d backpack cards"):format(displayed)
     end)
     local closed = pcall(function()
         if stack:GetArrayNum() == 1 and exact(widget_at(stack, 1), inventory_path) then controller:CloseMenu({}) end
     end)
     local guarded = SilverfishSetNativeInventoryViewScope(current.pawn:GetAddress(), true)
+    if drop_item and type(SilverfishClearNativeHostDropScope) == "function" then SilverfishClearNativeHostDropScope() end
     if not closed or not guarded or stack:GetArrayNum() ~= 0 then
         error("The stock inventory preview could not restore its menu scope", 0)
     end
     if not success then error(proof, 0) end
-    return ("verified stock guest inventory with %d backpack cards"):format(proof)
+    return proof
 end
 
-local function fixture(current, state, phase, preview)
+local function fixture(current, state, phase, preview, drop_epoch, drop_item)
     if not headless or not can_view(current) or not same_context(current, binding) then
         error("The fixture requires an enrolled headless stock inventory viewer", 0)
     end
@@ -452,7 +504,7 @@ local function fixture(current, state, phase, preview)
     if not action or not stack or stack:GetArrayNum() ~= 0 then
         error("The exact stock inventory menu fixture is unavailable", 0)
     end
-    if preview then return stock_preview(state, phase, current, action, stack) end
+    if preview then return stock_preview(state, phase, current, action, stack, drop_epoch, drop_item) end
     current.controller[inventory_action_event](current.controller, {}, 0, 0, action)
     if stack:GetArrayNum() ~= 0 or not take(current)
         or not observation or observation.state == "error" then
@@ -475,6 +527,12 @@ function inventory_view.command(fields, state, phase)
     end
     if operation == "native-inventory-view-fixture" and (#fields == 2 or #fields == 3 and fields[3] == "stock") then
         return fixture(current, state, phase, fields[3] == "stock")
+    end
+    if operation == "native-inventory-view-fixture" and #fields == 5 and fields[3] == "stock-drop"
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+        and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$") and #fields[5] == 32 and fields[5]:match("^[0-9A-F]+$")
+        and fields[5]:find("[^0]") then
+        return fixture(current, state, phase, true, fields[4], fields[5])
     end
     local sequence = integer(fields[3], 9007199254740991)
     if not observation or not same_context(current, observation.context)
