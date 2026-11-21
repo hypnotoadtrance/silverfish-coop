@@ -7,18 +7,20 @@ local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControle
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local pause_class = "/Game/Classes/GUI/Menu_Pause_Widget.Menu_Pause_Widget_C"
 local confirmation_class = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
+local set_paused = "/Script/Engine.GameplayStatics:SetGamePaused"
 local prompt_press = "BndEvt__Menu_Pause_Widget_Button_Continue_1_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature"
 local save_press = "BndEvt__Menu_Pause_Widget_Button_SaveAndQuit_K2Node_ComponentBoundEvent_5_Pressed__DelegateSignature"
 local confirm_press = "BndEvt__ConfirmationScreen_Button_Confirm_K2Node_ComponentBoundEvent_2_Pressed__DelegateSignature"
 local cancel_press = "BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature"
 local fixture_command = "native-coop-pause-fixture"
-local fixture_actions = {open = true, prompt = true, cancel = true, confirm = true, save_and_quit = true}
+local fixture_actions = {open = true, running = true, prompt = true, cancel = true, confirm = true, save_and_quit = true}
 local reasons = {quit_to_menu = true, save_and_quit = true}
 
 local offer_path, eligibility_path, input_path, request_path
 local fixture_command_path, fixture_reply_path, fixture_previous, fixture_pending
 local fixture_seen, fixture_count = {}, 0
 local bound, written_eligibility, requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
+local active_scene
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -49,8 +51,21 @@ local function context(state, phase)
         or (valid(driver.ServerConnection) and true or false) ~= (role == "guest") then return end
     local world_id, controller_id, pawn_id = pointer(world), pointer(controller), pointer(pawn)
     if not world_id or not controller_id or not pawn_id then return end
-    return {world = world, controller = controller, pawn = pawn, role = role,
+    return {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
         address = table.concat({world_id, controller_id, pawn_id}, "\t")}
+end
+
+local function keep_world_running(_, world_context, paused)
+    local scene = active_scene
+    if not scene or paused:get() ~= true or not valid(scene.world) or not valid(scene.controller)
+        or not same(scene.world.NetDriver, scene.driver) or not same(scene.controller.Pawn, scene.pawn)
+        or not same(scene.controller:GetWorld(), scene.world) then return end
+    local menu = world_context:get()
+    if exact(menu, pause_class) and same(menu:GetOwningPlayer(), scene.controller)
+        and same(menu:GetOuter(), scene.world.OwningGameInstance) then
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        if valid(statics) and statics:IsGamePaused(scene.world) == false then paused:set(false) end
+    end
 end
 
 local function read(path, limit)
@@ -100,13 +115,13 @@ local function revoke()
 end
 
 function pause.clear()
+    active_scene = nil
     revoke()
     fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil
 end
 
-local function qualified(state, phase)
+local function qualified(scene)
     if not offer_path then return end
-    local scene = context(state, phase)
     local generation, expires
     if scene then generation, expires = lease(scene.role) end
     if not generation or bound and bound.generation == generation
@@ -179,10 +194,13 @@ local function service_fixture(state, phase)
 end
 
 function pause.sync(state, phase)
-    if not offer_path then return end
-    local scene = qualified(state, phase)
-    if scene then consume(scene) else pause.clear() end
-    service_fixture(state, phase)
+    local scene = context(state, phase)
+    if offer_path then
+        local managed = qualified(scene)
+        if managed then consume(managed) else pause.clear() end
+    end
+    active_scene = scene
+    if offer_path then service_fixture(state, phase) end
 end
 
 local function reject(reason) error("native_coop_pause_fixture_" .. reason, 0) end
@@ -229,7 +247,7 @@ function pause.command(fields, state, phase)
     if not embedded or not fixtures then reject("unavailable") end
     local action = fields[3]
     if #fields ~= 3 or not fixture_actions[action] then reject("arguments") end
-    local scene = qualified(state, phase)
+    local scene = qualified(context(state, phase))
     if not scene or requested then reject("scope_unavailable") end
     local stack = scene.controller.MenuStack
     local count = stack and stack:GetArrayNum()
@@ -247,6 +265,10 @@ function pause.command(fields, state, phase)
         fixture_menu = menus[1]
     elseif not count or not owned_pause(fixture_menu, scene) or not same(stack[1], fixture_menu) then
         reject("exact_stock_pause_unavailable")
+    elseif action == "running" then
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        if count ~= 1 or not fixture_menu:IsVisible() or not valid(statics) then reject("stock_pause_covered") end
+        if statics:IsGamePaused(scene.world) ~= false then reject("world_paused") end
     elseif action == "prompt" then
         if count ~= 1 or not fixture_menu:IsVisible() then reject("stock_pause_covered") end
         fixture_menu[prompt_press](fixture_menu)
@@ -283,6 +305,7 @@ function pause.rows(state, phase, row)
 end
 
 function pause.start(bridge)
+    RegisterHook(set_paused, keep_world_running)
     if not embedded then return end
     offer_path = bridge .. "/native-coop-pause-session.tsv"
     eligibility_path = bridge .. "/native-session-exit-eligibility.state"

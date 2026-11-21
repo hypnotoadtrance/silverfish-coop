@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import suppress
 import json
+from math import dist
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -118,7 +119,7 @@ async def verify(work: Path, original: Path):
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
 
             guest_bridge = launched[guest]
-            for action in ("open", "prompt", "cancel"):
+            for action in ("open", "running", "prompt", "cancel"):
                 await stock_pause(guest_bridge, action)
             assert not (guest_bridge.directory / "native-coop-pause-response.tsv").exists()
             evidence["stock_cancel_kept_guest_connected"] = (await wait(guest_run, lambda state:
@@ -139,8 +140,26 @@ async def verify(work: Path, original: Path):
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
 
             host_bridge = launched[campaign]
-            for action in ("open", "save_and_quit"):
-                await stock_pause(host_bridge, action)
+            await stock_pause(host_bridge, "open")
+            await stock_pause(host_bridge, "running")
+            scene = await host_bridge.wait_for(lambda game: game.get("native_scene", {}).get("game_seconds") is not None)
+            clock = scene["native_scene"]["game_seconds"]
+            remote = scene["pawns"]["guest"]["location"]
+            guest_bridge = launched[guest]
+            before = guest_bridge.snapshot()["pawns"]["local"]["location"]
+            await guest_bridge.walk(1, 0, 800, continuous=True)
+            moved = await guest_bridge.wait_for(
+                lambda game: dist(game["pawns"]["local"]["location"], before) > 15)
+            later = await host_bridge.wait_for(lambda game:
+                (game.get("native_scene", {}).get("game_seconds") or 0) > clock
+                and dist(game["pawns"]["guest"]["location"], remote) > 15)
+            await stock_pause(host_bridge, "running")
+            evidence["host_menu_kept_world_running"] = {
+                "guest_distance": dist(moved["pawns"]["local"]["location"], before),
+                "host_observed_distance": dist(later["pawns"]["guest"]["location"], remote),
+                "clock_before": clock, "clock_after": later["native_scene"]["game_seconds"],
+            }
+            await stock_pause(host_bridge, "save_and_quit")
             host_final, guest_final = await asyncio.gather(
                 wait(host_run, lambda state: state.get("state") == "stopped"),
                 wait(guest_run, lambda state: state.get("state") == "stopped"),

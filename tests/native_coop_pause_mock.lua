@@ -19,11 +19,13 @@ end
 
 local controller_class = object(50)
 local pawn_class = object(51)
+local pause_class = object(52)
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local world = object(10)
 world.GetFullName = function() return "World " .. map .. ".PlaytestMap_01" end
 world.NetDriver = object(11)
 world.NetDriver.World = world
+world.OwningGameInstance = object(13)
 local controller = object(20, controller_class)
 local pawn = object(30, pawn_class)
 local authority = true
@@ -34,6 +36,13 @@ controller.IsLocalController = function() return true end
 pawn.IsLocallyControlled = function() return true end
 controller.Loading = false
 local state = {listening = true, server = false, world = world, map = map, controller = controller, local_pawn = {pawn = pawn}}
+local menu = object(40, pause_class)
+menu.GetOwningPlayer = function() return controller end
+menu.GetOuter = function() return world.OwningGameInstance end
+local pause_hook
+local already_paused = false
+local statics = object(53)
+statics.IsGamePaused = function(_, current) assert(current == world); return already_paused end
 
 local function fake_open(path, mode)
     if mode == "rb" and not fs[path] then return end
@@ -63,6 +72,12 @@ local env = setmetatable({
     StaticFindObject = function(path)
         if path:find("PlayerControler_FP", 1, true) then return controller_class end
         if path:find("Player_FP", 1, true) then return pawn_class end
+        if path:find("Menu_Pause_Widget", 1, true) then return pause_class end
+        if path == "/Script/Engine.Default__GameplayStatics" then return statics end
+    end,
+    RegisterHook = function(path, callback)
+        assert(path == "/Script/Engine.GameplayStatics:SetGamePaused")
+        pause_hook = callback
     end,
 }, {__index = _G})
 
@@ -77,16 +92,34 @@ end
 local function row(...)
     return table.concat({...}, "\t")
 end
+local function requests_pause(widget)
+    local requested_pause = true
+    pause_hook(nil, {get = function() return widget end}, {
+        get = function() return requested_pause end,
+        set = function(_, value) requested_pause = value end,
+    })
+    return requested_pause
+end
 
 bridge.start(prefix)
 descriptor(first, "host", 104)
 bridge.sync(state, "ready")
 assert(fs[eligible] == nil and fs[request] == nil)
+assert(requests_pause(menu), "A title or solo session must keep stock pause")
 local allowed, error_text = pcall(bridge.command, {"1", "native-coop-pause-fixture", "open"}, state, "hosting")
 assert(not allowed and error_text == "native_coop_pause_fixture_unavailable")
 bridge.sync(state, "hosting")
 assert(fs[eligible] == table.concat({1, first, "host", "a", "14", "1e", 104}, "\t") .. "\n")
 assert(bridge.rows(state, "hosting", row)[1] == row("native-coop-pause", "host", first, "armed", 0))
+assert(not requests_pause(menu), "The host's exact stock pause menu keeps the world running")
+already_paused = true
+assert(requests_pause(menu), "The menu cannot undo an existing pause")
+already_paused = false
+assert(requests_pause(object(41)), "Other widgets keep their stock pause requests")
+local driver = world.NetDriver
+world.NetDriver = object(42)
+assert(requests_pause(menu), "An expired world binding cannot change pause")
+world.NetDriver = driver
 
 capture(second, 1, "quit_to_menu")
 bridge.sync(state, "hosting")
@@ -131,11 +164,13 @@ authority, state.server, world.NetDriver.ServerConnection = false, true, object(
 descriptor(third, "guest", 109)
 bridge.sync(state, "connected")
 assert(fs[eligible] == table.concat({1, third, "client", "a", "14", "1e", 109}, "\t") .. "\n")
+assert(not requests_pause(menu), "The client's exact stock pause menu keeps the world running")
 capture(third, 4, "quit_to_menu")
 bridge.sync(state, "connected")
 assert(fs[request] == table.concat({1, third, 4, "guest", "quit_to_menu"}, "\t") .. "\n")
 bridge.clear()
 assert(fs[eligible] == nil and fs[request] ~= nil, "revocation never removes an already-published worker request")
+assert(requests_pause(menu), "Session exit restores the stock pause request")
 
 embedded = false
 local standalone = assert(loadfile(script, "t", env))()
