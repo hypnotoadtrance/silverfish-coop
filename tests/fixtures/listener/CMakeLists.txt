@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.22)
+project(SilverfishCoopListenerProof LANGUAGES CXX)
+
+set(SILVERFISH_UE4SS_SOURCE_DIR "" CACHE PATH "Path to the pinned UE4SS v4.0.0 source checkout")
+if(NOT TARGET UE4SS)
+    if(NOT EXISTS "${SILVERFISH_UE4SS_SOURCE_DIR}/deps/first/Unreal/include/Unreal/Hooks.hpp")
+        message(FATAL_ERROR "Set SILVERFISH_UE4SS_SOURCE_DIR to the pinned v4.0.0 checkout.")
+    endif()
+    add_subdirectory("${SILVERFISH_UE4SS_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ue4ss")
+endif()
+
+add_library(SilverfishCoopListenerProof SHARED listener_probe.cpp)
+target_compile_features(SilverfishCoopListenerProof PRIVATE cxx_std_23)
+target_link_libraries(SilverfishCoopListenerProof PRIVATE UE4SS ws2_32)
+set_target_properties(SilverfishCoopListenerProof PROPERTIES OUTPUT_NAME main)
