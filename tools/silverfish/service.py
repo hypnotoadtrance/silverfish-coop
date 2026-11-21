@@ -3740,6 +3740,47 @@ class Host:
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
+            for operation_id, target in bridge.interactions():
+                if self.stopping or self.native_checkpoint_unsafe:
+                    break
+                try:
+                    if world_loot := native_world_loot.target_parts(target):
+                        action, claim = self.world_loot.claim_target(self.last_game, world_loot)
+                        if action == native_world_loot.ENEMY_CLAIM:
+                            result = await native_enemy_loot.claim(self, bridge, "host", claim, operation_id)
+                        elif action == native_stock_enemy_drops.CLAIM:
+                            result = await native_stock_enemy_drops.claim(self, bridge, "host", claim, operation_id)
+                        elif action == native_guest_drop.RECLAIM:
+                            async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                                result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
+                        else:
+                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif stack_drop := native_guest_drop_projection.target_parts(target):
+                        async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                            result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif native_loose_pickup.target_path(target):
+                        result = await native_loose_pickup.claim(self, bridge, "host", target, operation_id)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif target in native_authored_pickup.SOURCES:
+                        await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
+                    elif target == native_subway_valve.INPUT:
+                        await native_subway_valve.activate(self, bridge, "host", self.zone_epoch)
+                    elif native_enemy_shells.target_parts(target):
+                        await native_enemy_loot.claim(self, bridge, "host", target, operation_id)
+                    elif target:
+                        await native_inventory_death.recover(self, bridge, "host", target, operation_id)
+                    else:
+                        try:
+                            self.act("host", operation_id, "interact", None)
+                        except party.RuleError as error:
+                            bag = native_inventory_death.nearby_bag(self, "host") if str(error) == "no_interaction_in_range" else None
+                            if not bag:
+                                raise
+                            await native_inventory_death.recover(self, bridge, "host", bag, operation_id)
+                except (ValueError, OSError, RuntimeError) as error:
+                    self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             self.last_game = await self.pickup_playback.sync(
                 bridge, self.control, self.last_game, self.pickup_audio.frame(self.last_game, self.zone_epoch),
                 self.zone_epoch, self.control.generation)
@@ -3786,47 +3827,6 @@ class Host:
                     if self.world_loot.last_error != str(error):
                         self.world_loot.last_error = str(error)
                         self.control.event("world_loot_projection_unavailable", reason=str(error))
-            for operation_id, target in bridge.interactions():
-                if self.stopping or self.native_checkpoint_unsafe:
-                    break
-                try:
-                    if world_loot := native_world_loot.target_parts(target):
-                        action, claim = self.world_loot.claim_target(self.last_game, world_loot)
-                        if action == native_world_loot.ENEMY_CLAIM:
-                            result = await native_enemy_loot.claim(self, bridge, "host", claim, operation_id)
-                        elif action == native_stock_enemy_drops.CLAIM:
-                            result = await native_stock_enemy_drops.claim(self, bridge, "host", claim, operation_id)
-                        elif action == native_guest_drop.RECLAIM:
-                            async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
-                                result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
-                        else:
-                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
-                        self.control.event("local_interaction", operation_id=operation_id, **result)
-                    elif stack_drop := native_guest_drop_projection.target_parts(target):
-                        async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
-                            result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
-                        self.control.event("local_interaction", operation_id=operation_id, **result)
-                    elif native_loose_pickup.target_path(target):
-                        result = await native_loose_pickup.claim(self, bridge, "host", target, operation_id)
-                        self.control.event("local_interaction", operation_id=operation_id, **result)
-                    elif target in native_authored_pickup.SOURCES:
-                        await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
-                    elif target == native_subway_valve.INPUT:
-                        await native_subway_valve.activate(self, bridge, "host", self.zone_epoch)
-                    elif native_enemy_shells.target_parts(target):
-                        await native_enemy_loot.claim(self, bridge, "host", target, operation_id)
-                    elif target:
-                        await native_inventory_death.recover(self, bridge, "host", target, operation_id)
-                    else:
-                        try:
-                            self.act("host", operation_id, "interact", None)
-                        except party.RuleError as error:
-                            bag = native_inventory_death.nearby_bag(self, "host") if str(error) == "no_interaction_in_range" else None
-                            if not bag:
-                                raise
-                            await native_inventory_death.recover(self, bridge, "host", bag, operation_id)
-                except (ValueError, OSError, RuntimeError) as error:
-                    self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             await self.service_requests(bridge, transport)
             if invites is not None:
                 active = (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe or self.party.get("wipe"))
@@ -4747,6 +4747,7 @@ class Client:
                               retained: dict | None = None) -> dict:
         if not self.transport.connected or (action != "keep" and self.last_game.get("state") != "connected"):
             raise RuntimeError("game_connection_unavailable")
+        area, epoch = self.last_game.get("map"), self.zone_epoch
         if action == native_authored_pickup.ACTION:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target):
@@ -4763,6 +4764,24 @@ class Client:
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
+        if (self.last_game.get("map"), self.zone_epoch) == (area, epoch) and epoch:
+            # The request already returned the committed roll or pickup. Feed it
+            # to the normal projection before the next periodic host snapshot.
+            roll = reply.get("native_loot_roll")
+            if (action == "native-loot-open" and isinstance(roll, dict)
+                    and (roll.get("map"), roll.get("crate")) == (area, target)
+                    and native_loot.CRATES.get(target) == area):
+                self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
+            claimed = reply.get(native_loose_pickup.PROOF)
+            if action == native_loose_pickup.CLAIM and isinstance(claimed, dict):
+                path = native_loose_pickup.target_path(target.partition("@")[0]) if target else None
+                if path and (claimed.get("map"), claimed.get("actor"), claimed.get("epoch")) == (area, path, epoch):
+                    hidden = self.gameplay.setdefault(native_loose_pickup.STATE, [])
+                    if path not in hidden:
+                        hidden.append(path)
+            if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()):
+                native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
+                                               area, epoch, target.rsplit("@", 1)[-1])
         cue = reply.pop(native_pickup_audio.KEY, None)
         if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
             if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:
@@ -5074,7 +5093,7 @@ class Client:
                 and native_mindcore_view.qualified_stage(self.gameplay, stage)
                 and (stage == 1 or self.gameplay.get("host_world", {}).get(native_mosby_station_view.DOWNLOAD_READY) is True))
 
-    async def refresh_gameplay(self) -> None:
+    async def refresh_gameplay(self, *, project: bool = True) -> None:
         if self.check_host_end():
             return
         now = time.monotonic()
@@ -5109,6 +5128,11 @@ class Client:
                             self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), epoch)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
+        if project:
+            await self.project_gameplay()
+
+    async def project_gameplay(self) -> None:
+        now = time.monotonic()
         if (now >= self.next_projection and not self.needs_travel and not self.server_transitioning
                 and self.last_game.get("state") == "connected"):
             try:
@@ -5481,7 +5505,7 @@ class Client:
             if self.stopping or self.check_host_end():
                 break
             if self.transport.connected:
-                await self.refresh_gameplay()
+                await self.refresh_gameplay(project=False)
             if self.stopping:
                 break
             repair_needed = (not self.transport.connected or self.needs_travel
@@ -5510,6 +5534,36 @@ class Client:
                 await self.mindcore_carry.poll(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
+            interactions = self.bridge.interactions()
+            if active and not self.stopping:
+                for operation_id, target in interactions:
+                    try:
+                        world_loot = native_world_loot.target_parts(target)
+                        if world_loot:
+                            action, claim = self.world_loot.claim_target(self.last_game, world_loot)
+                            result = await self.gameplay_action(action, operation_id, claim)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        stack_drop = native_guest_drop_projection.target_parts(target)
+                        if stack_drop:
+                            result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        if door := native_stock_door.target_actor(target):
+                            result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
+                                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
+                                  else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
+                                  else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
+                                  else "native-wipe-recover" if target else "interact")
+                        if action == native_subway_valve.ACTIVATE:
+                            target = self.zone_epoch
+                        result = await self.gameplay_action(action, operation_id, target)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    except (ValueError, OSError, RuntimeError) as error:
+                        self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             if (self.loot_view and self.last_game.get(native_world_loot.CAPABILITY, 0)
                     < native_world_loot.SHARED_PICKUPS_VERSION):
                 rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
@@ -5565,7 +5619,6 @@ class Client:
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame, present=not world_items,
                 )
-            interactions = self.bridge.interactions()
             if self.invite.get("native_loot_input") or world_items:
                 try:
                     self.last_game = await self.world_loot.sync(
@@ -5582,39 +5635,12 @@ class Client:
                     if self.world_loot.last_error != str(error):
                         self.world_loot.last_error = str(error)
                         self.control.event("world_loot_projection_unavailable", reason=str(error))
-            if active and not self.stopping:
-                for operation_id, target in interactions:
-                    try:
-                        world_loot = native_world_loot.target_parts(target)
-                        if world_loot:
-                            action, claim = self.world_loot.claim_target(self.last_game, world_loot)
-                            result = await self.gameplay_action(action, operation_id, claim)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        stack_drop = native_guest_drop_projection.target_parts(target)
-                        if stack_drop:
-                            result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        if door := native_stock_door.target_actor(target):
-                            result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
-                            self.control.event("local_interaction", operation_id=operation_id, **result)
-                            continue
-                        action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
-                                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
-                                  else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
-                                  else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
-                                  else "native-wipe-recover" if target else "interact")
-                        if action == native_subway_valve.ACTIVATE:
-                            target = self.zone_epoch
-                        result = await self.gameplay_action(action, operation_id, target)
-                        self.control.event("local_interaction", operation_id=operation_id, **result)
-                    except (ValueError, OSError, RuntimeError) as error:
-                        self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
-            elif self.last_game.get("native_bag_projection", {}).get("count"):
+            if not active and self.last_game.get("native_bag_projection", {}).get("count"):
                 with contextlib.suppress(OSError, RuntimeError):
                     self.last_game = await self.bridge.command("native-bag-projection-clear", timeout=2)
                     self.bag_projection_key = None
+            if self.transport.connected and not self.stopping:
+                await self.project_gameplay()
             self.control.status(active=not self.stopping, role="client",
                                 state="connected" if active else "reconnecting",
                                 link_connected=self.transport.connected, reconnect_suspended=self.suspended,

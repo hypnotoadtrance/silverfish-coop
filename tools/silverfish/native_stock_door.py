@@ -12,6 +12,7 @@ TAG = "native-stock-door"
 KEY = "native_stock_doors"
 ACTION = "native-stock-door-interact"
 RESULT = "native_stock_door_interaction"
+DELTA = "native_stock_door_delta"
 FIXTURE = "native-stock-door-fixture"
 INPUT_FIXTURE = "native-stock-door-input-fixture"
 STAGE_FIXTURE = "native-stock-door-stage-fixture"
@@ -71,12 +72,27 @@ def parse_pry(fields, phase, area):
     return dict(map=area, actor=actor, pawn=pawn, guid=guid, kind=kind, before=before, after=after)
 
 
-def frame(game, epoch):
+def frame(game, epoch, actor=None):
     if game.get("state") != "hosting" or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
         return {}
+    doors = game.get(KEY, {})
+    if actor is not None:
+        doors = {actor: doors[actor]} if actor in doors else {}
     fields = (*_FLAGS, *_ANGLES, *_OFFSET)
-    return {"map": game["map"], "epoch": epoch,
-            "doors": {name: {key: row[key] for key in fields} for name, row in game[KEY].items()}} if game.get(KEY) else {}
+    return {"map": game["map"], "epoch": epoch, "sequence": game.get("sequence", 0),
+            "doors": {name: {key: row[key] for key in fields} for name, row in doors.items()}} if doors else {}
+
+
+def accept_delta(gameplay, delta, area, epoch, actor):
+    if (not isinstance(delta, dict) or (delta.get("map"), delta.get("epoch")) != (area, epoch)
+            or not isinstance(doors := delta.get("doors"), dict) or set(doors) != {actor}
+            or actor_map(actor) != area or type(sequence := delta.get("sequence")) is not int or sequence <= 0):
+        return
+    previous = gameplay.get(KEY, {})
+    if (previous.get("map"), previous.get("epoch")) != (area, epoch):
+        gameplay[KEY] = delta
+    elif sequence > previous.get("sequence", 0):
+        gameplay[KEY] = dict(delta, doors=previous["doors"] | doors)
 
 
 def matches(report, desired):
@@ -151,7 +167,8 @@ async def interact(host, bridge, character, requested, operation):
 
     host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2)
     host.last_seen = time.monotonic()
-    result = {RESULT: {"actor": actor, "open": host.last_game[KEY][actor]["open"]}}
+    result = {RESULT: {"actor": actor, "open": host.last_game[KEY][actor]["open"]},
+              DELTA: frame(host.last_game, epoch, actor)}
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result
@@ -202,7 +219,7 @@ async def pry(host, bridge, character, requested, operation, kind):
 
         host.last_game = snapshot if unlocked(snapshot) else await bridge.wait_for(unlocked, timeout=4)
         host.last_seen = time.monotonic()
-        result = {PRY_RESULT: dict(proof, locked=False, broken=True)}
+        result = {PRY_RESULT: dict(proof, locked=False, broken=True), DELTA: frame(host.last_game, epoch, actor)}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
