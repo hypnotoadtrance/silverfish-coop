@@ -20,6 +20,7 @@ STARTUP_KEY = native_title_entry.STARTUP_KEY
 BRIDGE_ENV = "SILVERFISH_COOP_BRIDGE"
 OPT_IN_ENV = "SILVERFISH_COOP_EMBEDDED_ENGINE"
 _ROLE_ROOTS = {"host": "campaigns", "client": "clients"}
+UNIFIED_ENV = "SILVERFISH_COOP_UNIFIED_TITLE"
 _UUID = re.compile(r"[a-f0-9]{32}")
 _FEATURE = re.compile(r"SILVERFISH_COOP_[A-Z0-9_]+")
 _STARTUP_OPTIONS = ("userdir", "multihome", "port")
@@ -153,7 +154,10 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
 
     if not NAME.fullmatch(directory.name):
         raise ValueError("Invalid staged engine profile name")
-    role_path = _exact_existing(work / _ROLE_ROOTS[role] / directory.name)
+    unified = role == "title" and required_env.get(UNIFIED_ENV) == "1"
+    if role == "title" and not unified:
+        raise ValueError("A unified title process requires its own startup environment")
+    role_path = _exact_existing(work / ("titles" if unified else _ROLE_ROOTS[role]) / directory.name)
     if directory.resolve(strict=True) != role_path:
         raise ValueError("The profile does not belong to the staged engine role")
     bridge = Path(startup.environment.get(BRIDGE_ENV) or "")
@@ -166,7 +170,7 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     resident = required_env.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
     if requested_directory != role_path / "game-user":
         seat = requested_directory.parent
-        if (not resident or requested_directory.name != "game-user" or seat.parent != work / "titles"
+        if (not resident or unified or requested_directory.name != "game-user" or seat.parent != work / "titles"
                 or not NAME.fullmatch(seat.name)):
             raise ValueError("The engine was not started with its isolated user directory")
         for branch in (seat.parent, seat):

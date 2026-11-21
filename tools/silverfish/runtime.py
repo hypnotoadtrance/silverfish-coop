@@ -317,7 +317,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
            embedded_engine: bool = False, inspect_title_profile: bool = False, pause_fixture: bool = False,
            embedded_startup: str | None = None, resident_title: bool = False,
-           resident_direct_join: bool = False) -> dict[str, str]:
+           resident_direct_join: bool = False, unified_title: bool = False) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
@@ -337,6 +337,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_EMBEDDED_STARTUP", None)
     env.pop("SILVERFISH_COOP_RESIDENT_TITLE", None)
     env.pop("SILVERFISH_COOP_TITLE_DIRECT_JOIN", None)
+    env.pop("SILVERFISH_COOP_UNIFIED_TITLE", None)
     env.pop("SILVERFISH_COOP_PAUSE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
@@ -360,6 +361,11 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES", None)
     backend = native_death_backend(work)
     host_role = port is not None or (resident_title and native_events)
+    guest_role = not host_role or unified_title
+    if unified_title:
+        if not resident_title or not native_events or not native_guest or not resident_direct_join:
+            raise ValueError("A unified title requires both resident co-op roles")
+        env["SILVERFISH_COOP_UNIFIED_TITLE"] = "1"
     if native_events and (backend != "cpp" or not host_role):
         raise ValueError("Native event scope requires a staged C++ listen host")
     if native_guest and not native_events:
@@ -386,7 +392,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
             raise ValueError("The resident title requires a packaged role with no startup port")
         env["SILVERFISH_COOP_RESIDENT_TITLE"] = "1"
     if resident_direct_join:
-        if not resident_title or host_role:
+        if not resident_title or not guest_role:
             raise ValueError("Direct Join requires a packaged resident guest title")
         env["SILVERFISH_COOP_TITLE_DIRECT_JOIN"] = "1"
     if pause_fixture:
@@ -399,17 +405,17 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         env["SILVERFISH_COOP_INSPECT_TITLE_PROFILE"] = "1"
     if native_zone_walls and not native_zones:
         raise ValueError("Physical exit blockers require native exit handling")
-    if guest_reload_input and (host_role or not native_zones):
+    if guest_reload_input and (not guest_role or not native_zones):
         raise ValueError("Stock guest reload input requires a staged native client")
-    if guest_primary_input and (host_role or not native_zones):
+    if guest_primary_input and (not guest_role or not native_zones):
         raise ValueError("Stock guest primary input requires a staged native client")
     if guest_held_fire and not (native_zones and (native_guest if host_role else guest_primary_input)):
         raise ValueError("Stock held fire requires the corresponding native host and guest controls")
-    if guest_clock and (host_role or not native_zones):
+    if guest_clock and (not guest_role or not native_zones):
         raise ValueError("The stock guest clock requires a staged native client")
     if host_camera_input and (not host_role or not native_guest or not native_zones):
         raise ValueError("Stock host camera input requires a staged native campaign host")
-    if guest_inventory_view and (host_role or not native_zones):
+    if guest_inventory_view and (not guest_role or not native_zones):
         raise ValueError("The guest inventory view requires a staged native client")
     if native_shop_view and (not native_zones or host_role and not native_guest):
         raise ValueError("The merchant view requires scoped native guest ownership")
@@ -417,7 +423,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         raise ValueError("Natural stock crate interaction requires scoped native guest ownership")
     if native_dead_bridge_enemy_loot and (not host_role or not native_guest or not native_zones or not native_loot_input):
         raise ValueError("Stock Dead Bridge enemy loot requires the native campaign host and escrow bridge")
-    if broker_input and (not native_zones or host_role):
+    if broker_input and (not native_zones or not guest_role):
         raise ValueError("Broker interact input requires a staged native guest")
     if native_wipe_view and (not native_zones or host_role and not native_guest):
         raise ValueError("The stock item retention overlay requires staged native guest ownership")
@@ -447,7 +453,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
     if native_loot_input:
         env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
-        if headless and not host_role:
+        if headless and guest_role:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_dead_bridge_enemy_loot:
         env["SILVERFISH_COOP_NATIVE_CQC_LOOT"] = "1"
@@ -487,13 +493,13 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
     if native_shop_view:
         env["SILVERFISH_COOP_NATIVE_SHOP_VIEW"] = "1"
-        if headless and not host_role:
+        if headless and guest_role:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if broker_input:
         env["SILVERFISH_COOP_NATIVE_BROKER_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
-    if (native_mosby_station or native_mindcore_view) and headless and not host_role:
+    if (native_mosby_station or native_mindcore_view) and headless and guest_role:
         env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_wipe_view:
         env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"

@@ -18,7 +18,7 @@ import uuid
 from . import runtime
 from .control import NAME
 from .embedded_engine import (
-    BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, _assert_no_reparse, _current_startup, _exact_existing, _qualify,
+    BRIDGE_ENV, OPT_IN_ENV, UNIFIED_ENV, EmbeddedEngine, _assert_no_reparse, _current_startup, _exact_existing, _qualify,
 )
 
 
@@ -27,6 +27,7 @@ RESIDENT_ENV = "SILVERFISH_COOP_RESIDENT_TITLE"
 DIRECT_JOIN_ENV = "SILVERFISH_COOP_TITLE_DIRECT_JOIN"
 RESIDENT_FILE = "resident-host.json"
 RESIDENT_JOIN_FILE = "resident-join.json"
+UNIFIED_FILE = "resident-title.json"
 _RESIDENT_FEATURES = ("SILVERFISH_COOP_NATIVE_EVENTS", "SILVERFISH_COOP_NATIVE_GUEST_SAVE", "SILVERFISH_COOP_NATIVE_ZONE")
 REQUEST_FILE = "startup-request.json"
 CLAIM_FILE = "startup-claimed.json"
@@ -172,7 +173,8 @@ def _bridge(bridge: Path, role: str, profile: str, nonce: str) -> tuple[Path, Pa
         raise ValueError("The embedded startup bridge must be local and role-owned")
     directory = bridge.parents[2]
     work = bridge.parents[4]
-    if directory.name != profile or bridge != work / _ROLES[role] / profile / "run" / "game-bridge" / nonce:
+    root = "titles" if role == "title" else _ROLES[role]
+    if directory.name != profile or bridge != work / root / profile / "run" / "game-bridge" / nonce:
         raise ValueError("The embedded startup bridge does not belong to that role and profile")
     for path in (work, directory.parent, directory, directory / "run", bridge.parent, bridge):
         _directory(path)
@@ -286,8 +288,8 @@ async def _run(*, timeout: float = 15) -> None:
 
     if type(timeout) not in (int, float) or not 0 < timeout <= 30:
         raise ValueError("Expected a bounded embedded startup timeout")
-    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, RESIDENT_ENV, "SILVERFISH_COOP_HEADLESS",
-                                *_RESIDENT_FEATURES))
+    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, RESIDENT_ENV, UNIFIED_ENV, DIRECT_JOIN_ENV,
+                                "SILVERFISH_COOP_HEADLESS", *_RESIDENT_FEATURES))
     nonce = startup.environment.get(STARTUP_ENV)
     if startup.environment.get(OPT_IN_ENV) != "1" or not _nonce(nonce):
         raise ValueError("The packaged worker is not opted into embedded startup")
@@ -300,7 +302,9 @@ async def _run(*, timeout: float = 15) -> None:
     bridge = Path(startup.environment.get(BRIDGE_ENV) or "")
     if not bridge.is_absolute() or bridge.name != nonce or len(bridge.parents) < 5:
         raise ValueError("The packaged worker lacks its exact boot bridge")
-    for role, root in _ROLES.items():
+    unified = startup.environment.get(UNIFIED_ENV) == "1"
+    roles = {"title": "titles"} if unified else _ROLES
+    for role, root in roles.items():
         if bridge.parents[3].name == root:
             break
     else:
@@ -314,13 +318,17 @@ async def _run(*, timeout: float = 15) -> None:
         if not runtime.qualified_authored_routes(work):
             raise ValueError("The resident worker requires its qualified native stage")
         required = {STARTUP_ENV: nonce, RESIDENT_ENV: "1"}
-        if role == "host":
+        if role in {"host", "title"}:
             required.update(dict.fromkeys(_RESIDENT_FEATURES, "1"))
+        if unified:
+            required.update({UNIFIED_ENV: "1", DIRECT_JOIN_ENV: "1"})
         saved, _ = _qualify(startup, work, directory, role, required)
-        resident = _resident_host if role == "host" else _resident_join
+        resident = {"title": _resident_unified, "host": _resident_host, "client": _resident_join}[role]
         await resident(work, directory, bridge, saved, headless)
         return
 
+    if unified:
+        raise ValueError("The unified title requires the resident worker")
     path, claimed = bridge / REQUEST_FILE, bridge / CLAIM_FILE
     async with asyncio.timeout(timeout):
         while True:
@@ -365,20 +373,24 @@ async def _run(*, timeout: float = 15) -> None:
 
 
 async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path, headless: bool) -> None:
-    from . import service
-    from .control import select_run
-    from .title_session import SessionPlan
-
     settings = _decode(_read_file(mailbox / RESIDENT_FILE, REQUEST_LIMIT))
     if set(settings) != {"schema", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
         raise ValueError("Invalid resident Host configuration")
+    plan = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
+    await _resident_title(mailbox, saved, campaign, {"host": plan})
+
+
+def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port):
+    from . import service
+    from .control import select_run
+    from .title_session import SessionPlan
 
     def endpoint(bind, port):
         if type(bind) is not str or "%" in bind or type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Host requires a valid UDP port and a numeric local address")
         return str(ip_address(bind)), port
 
-    default_bind, default_port = endpoint(settings["bind"], settings["port"])
+    default_bind, default_port = endpoint(default_bind, default_port)
 
     def host_plan(selected, bind, port, password=""):
         mode, area = service.menu_host_start(selected, profile=saved.parent)
@@ -422,8 +434,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
     async def no_selection():
         raise ValueError("Choose a host campaign first")
 
-    plan = SessionPlan(no_selection, lambda: None, lambda _: False, resolve_claim=resolve)
-    await _resident_title(mailbox, saved, campaign, {"host": plan})
+    return SessionPlan(no_selection, lambda: None, lambda _: False, resolve_claim=resolve)
 
 
 async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
@@ -467,6 +478,14 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
 
 
 async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    plan, settings = _resident_direct_join_plan(work, directory, mailbox, saved, headless)
+    try:
+        await _resident_title(mailbox, saved, directory, {"join": plan}, join_settings=settings)
+    finally:
+        await settings.close()
+
+
+def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, available=None):
     from . import direct_ip, service
     from .title_join_settings import TitleJoinSettings
     from .title_session import SessionPlan
@@ -475,6 +494,10 @@ async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, save
         if invite.get("native_zones") is not True:
             raise ValueError("The host does not offer native co-op")
         options = service.guest_engine_options(work, invite)
+        if available is not None:
+            if any(enabled and not available.get(feature) for feature, enabled in options.items()):
+                raise ValueError("The title is missing features required by the host")
+            return
         required = service._embedded_features(work, headless, None, options, resident=True)
         if _current_startup(tuple(required)).environment != required:
             raise ValueError("The resident guest lacks the host's staged game features")
@@ -505,11 +528,34 @@ async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, save
     async def no_selection():
         raise ValueError("A Direct IP character selection is required")
 
-    plan = SessionPlan(no_selection, status, lambda _: False, resolve_claim=resolve)
+    return SessionPlan(no_selection, status, lambda _: False, resolve_claim=resolve), settings
+
+
+async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    from . import service
+    from .control import select_run
+
+    settings = _decode(_read_file(mailbox / UNIFIED_FILE, REQUEST_LIMIT))
+    if set(settings) != {"schema", "campaign", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
+        raise ValueError("Invalid unified title configuration")
+    name = settings["campaign"]
+    if not isinstance(name, str):
+        raise ValueError("Expected a co-op campaign name")
+    campaign = select_run(work, "campaigns", name)
+    guest = select_run(work, "clients", seat.name)
+    if campaign != work / "campaigns" / name or guest != work / "clients" / seat.name:
+        raise ValueError("The resident role directory is redirected")
+    options = service.unified_title_options(work)
+    required = service._embedded_features(work, headless, None, options, resident=True, unified=True)
+    if _current_startup(tuple(required)).environment != required:
+        raise ValueError("The unified title lacks the standard native co-op capabilities")
+
+    host = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
+    join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
     try:
-        await _resident_title(mailbox, saved, directory, {"join": plan}, join_settings=settings)
+        await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings)
     finally:
-        await settings.close()
+        await join_settings.close()
 
 
 async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None):

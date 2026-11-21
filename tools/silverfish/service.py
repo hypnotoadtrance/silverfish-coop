@@ -3547,14 +3547,14 @@ class Host:
 
 
 def _embedded_features(work: Path, headless: bool, internal_port: int | None, options: dict, *,
-                       resident: bool = False) -> dict[str, str | None]:
+                       resident: bool = False, unified: bool = False) -> dict[str, str | None]:
     startup = os.environ.get("SILVERFISH_COOP_EMBEDDED_STARTUP")
     pause_fixture = os.environ.get("SILVERFISH_COOP_PAUSE_FIXTURES") == "1"
     title_fixture = resident and os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     direct_join = resident and os.environ.get("SILVERFISH_COOP_TITLE_DIRECT_JOIN") == "1"
     expected = game_environment(work, headless, internal_port, embedded_engine=True, embedded_startup=startup,
                                 pause_fixture=pause_fixture, title_fixture=title_fixture, resident_title=resident,
-                                resident_direct_join=direct_join, **options)
+                                resident_direct_join=direct_join, unified_title=unified, **options)
     return {name: expected.get(name) for name in os.environ.keys() | expected.keys()
             if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
 
@@ -5122,6 +5122,22 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
                 guest_clock=native_zones and staged_script(work, "native_guest_clock.lua"), guest_held_fire=guest_held_fire,
                 native_mosby_station=mosby_station_enabled, native_mindcore_view=mindcore_view_enabled,
                 guest_mre=invite.get("native_guest_mre", False))
+
+
+def unified_title_options(work: Path) -> dict:
+    """Start the standard native menu capabilities for either role in one process."""
+    stage = _host_stage_options(work, True, True)
+    guest = guest_engine_options(work, {
+        "native_zones": True, "native_zone_walls": True, "expanded_zones": True,
+        "native_guest_controls": staged_guest_controls(work),
+        "native_wipe_view": stage["native_wipe_view"], "native_loot_input": stage["native_loot_input"],
+        "native_broker_input": staged_script(work, "native_broker_input.lua"),
+        "native_mosby_station": staged_script(work, "native_mosby_station_view.lua"),
+        "native_mindcore_view": staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"),
+    })
+    return guest | MENU_HOST_OPTIONS | stage | {
+        "host_dig_live": staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"),
+    }
 
 
 async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Connection, headless: bool,

@@ -197,16 +197,18 @@ namespace
         const auto role_root = run_profile.parent_path();
         const auto profile = run_profile / L"game-user";
         const bool guest = windows_path_equal(role_root, work / L"clients");
+        const bool resident = environment(L"SILVERFISH_COOP_RESIDENT_TITLE") == L"1";
+        const bool unified = environment(L"SILVERFISH_COOP_UNIFIED_TITLE") == L"1";
+        const bool valid_root = unified ? resident && windows_path_equal(role_root, work / L"titles")
+                                        : guest || windows_path_equal(role_root, work / L"campaigns");
         state = L"startup_scope_bridge_refused";
         if (bridge.filename() != nonce || bridge_folder.filename() != L"game-bridge" || run.filename() != L"run" ||
-            !profile_name(run_profile.filename().native()) ||
-            (!guest && !windows_path_equal(role_root, work / L"campaigns"))) return {};
+            !profile_name(run_profile.filename().native()) || !valid_root) return {};
         for (const auto& path : {role_root, run_profile, run, bridge_folder, bridge})
             if (!exact_path(path, true)) return {};
 
         state = L"startup_scope_arguments_refused";
-        const bool resident = environment(L"SILVERFISH_COOP_RESIDENT_TITLE") == L"1";
-        if (!matches_command_line(image, profile, work, resident, guest && !resident)) return {};
+        if (!matches_command_line(image, profile, work, resident && !unified, guest && !resident)) return {};
         return mod / L"runtime";
     }
 
