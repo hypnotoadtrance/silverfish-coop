@@ -23,7 +23,7 @@ VIEW = "native_stash_view"
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
 _TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw)\|([0-9A-F]{32})\Z")
-_VIEW_CARD = re.compile(r"(?:stash|backpack):([0-9A-F]{32})\Z")
+_VIEW_CARD = re.compile(r"(?:(?:drag|cancel|return|close)-)?(?:stash|backpack):([0-9A-F]{32})\Z")
 _PATH = re.compile(r"([A-Za-z0-9_-]+_C) (/Game/Classes/Maps/[A-Za-z0-9_/-]+)\.([A-Za-z0-9_-]+):PersistentLevel\.([A-Za-z0-9_-]+)\Z")
 _ITEM_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 

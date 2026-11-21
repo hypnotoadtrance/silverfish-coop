@@ -18,7 +18,7 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
-async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
+async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False):
     name = "stash-screen-" + uuid.uuid4().hex[:8]
     run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -89,10 +89,21 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
         return (answer[native_stash.VIEW] or {}).get("sequence", 0)
 
     async def move_by_screen(site, item, mode, direction):
-        seen = await ask(guest_run, "native-stash-view-fixture", target=site)
-        opened = seen[native_stash.VIEW]["sequence"]
-        await render("stash", after=opened - 1)
-        await click(f"{mode}:{item}")
+        async def open_screen():
+            seen = await ask(guest_run, "native-stash-view-fixture", target=site)
+            opened = seen[native_stash.VIEW]["sequence"]
+            await render("stash", after=opened - 1)
+            return opened
+
+        opened = await open_screen()
+        if drag:
+            for gesture in ("cancel", "return"):
+                assert await click(f"{gesture}-{mode}:{item}") == opened
+            assert await click(f"close-{mode}:{item}") == 0
+            expected_stash = [item] if direction == "withdraw" else []
+            assert await stash_items(guest_run, site) == expected_stash
+            opened = await open_screen()
+        await click(f"{'drag-' if drag else ''}{mode}:{item}")
         await render(mode, after=opened)
         events = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
         receipt = next(event for line in reversed(events) if (event := json.loads(line))["event"] == "native_stash_view_item_moved"
@@ -175,7 +186,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
         assert weapon["stored_ammo"] == 7
         evidence.update(deposit=deposit, withdrawal=withdrawal, magazine=weapon["stored_ammo"],
                         deposit_map=DEAD_BRIDGE, withdrawal_map=destination, combined_host_empty=True,
-                        host_withdraw_refused=denied["error"], per_site_other_empty=True, verified=True)
+                        host_withdraw_refused=denied["error"], per_site_other_empty=True, stock_drag=drag, verified=True)
     finally:
         for process, directory in reversed(jobs):
             if process.returncode is None:
@@ -195,6 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--same-map", action="store_true", help="check two Dead Bridge stashes without zone travel")
+    parser.add_argument("--drag", action="store_true", help="test the stock held-item cursor, cancel, and cross-panel insert")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
-                       same_map=options.same_map))
+                       same_map=options.same_map, drag=options.drag))

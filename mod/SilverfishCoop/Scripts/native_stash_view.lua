@@ -254,7 +254,8 @@ function view.command(fields, state, phase)
         local screen = current and current.screen
         if not valid(screen) or current.state ~= "rendered" then error("native_stash_view_fixture_click_unavailable", 0) end
         if target == "close" then view.clear(); return "stock stash closed" end
-        local source, wanted = target:match("^(%a+):([0-9A-F]+)$")
+        local action, source, wanted = target:match("^(%a+)%-(%a+):([0-9A-F]+)$")
+        if not action then source, wanted = target:match("^(%a+):([0-9A-F]+)$") end
         local panel = source == "backpack" and screen.BackpackPanel or source == "stash" and screen.StashPanel
         if not valid(panel) then error("native_stash_view_fixture_panel_unavailable", 0) end
         local manager = screen.ItemManager
@@ -262,7 +263,48 @@ function view.command(fields, state, phase)
             local card = entry(panel.Cards, index)
             if valid(card) and identifier(card.Item[item_guid]) == wanted then
                 local stash_count, backpack_count = screen.StashPanel.Cards:GetArrayNum(), screen.BackpackPanel.Cards:GetArrayNum()
-                if source == "backpack" then
+                if action then
+                    manager:StartHoverCard(card)
+                    manager:InitiateItemTake()
+                    manager:EndHoverCard(card)
+                    if manager.HoldingItem ~= true or identifier(manager.HeldItem[item_guid]) ~= wanted
+                        or not manager.HeldItemWidget:IsVisible()
+                        or screen.StashPanel.Cards:GetArrayNum() ~= stash_count
+                        or screen.BackpackPanel.Cards:GetArrayNum() ~= backpack_count
+                        or SilverfishTakeNativeStashMove(screen:GetAddress()) then
+                        error("native_stash_view_fixture_stock_pickup_unverified", 0)
+                    end
+                    if action == "close" then
+                        local controller = current.binding.controller
+                        view.clear()
+                        if visible(controller, screen) then
+                            error("native_stash_view_fixture_close_while_holding_failed", 0)
+                        end
+                        return "stock stash closed while holding an uncommitted item"
+                    end
+                    if action == "cancel" then
+                        manager:ReturnItem(manager.HeldItem, {})
+                    else
+                        local destination = action == "return" and panel
+                            or source == "backpack" and screen.StashPanel or screen.BackpackPanel
+                        if action == "drag" and destination.IsInsertMode ~= true then
+                            error("native_stash_view_fixture_stock_target_not_ready", 0)
+                        end
+                        manager:InsertItem(destination, -1)
+                        manager:InsertItem(destination, -1)
+                    end
+                    if manager.HoldingItem ~= false or identifier(manager.HeldItem[item_guid]) then
+                        error("native_stash_view_fixture_stock_cursor_not_cleared", 0)
+                    end
+                    if action ~= "drag" then
+                        if SilverfishTakeNativeStashMove(screen:GetAddress())
+                            or screen.StashPanel.Cards:GetArrayNum() ~= stash_count
+                            or screen.BackpackPanel.Cards:GetArrayNum() ~= backpack_count then
+                            error("native_stash_view_fixture_stock_return_changed_inventory", 0)
+                        end
+                        return "stock stash cursor cleared without moving an item"
+                    end
+                elseif source == "backpack" then
                     manager.HoveredCard = card
                     manager:QuickMove()
                     manager:QuickMove()
@@ -282,7 +324,7 @@ function view.command(fields, state, phase)
                     or screen.BackpackPanel.Cards:GetArrayNum() ~= backpack_count
                     or SilverfishTakeNativeStashMove(screen:GetAddress()) then error("native_stash_view_fixture_move_unverified", 0) end
                 queue(source, guid)
-                return "stock stash QuickMove captured"
+                return action and "stock stash drag captured" or "stock stash QuickMove captured"
             end
         end
         error("native_stash_view_fixture_card_unavailable", 0)

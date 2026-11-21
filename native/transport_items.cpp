@@ -151,12 +151,17 @@ namespace
         Unreal::FName action_quick_move{STR("ActionQuickMove")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName save_stash{STR("Save_StashToGI")};
-        std::array<Unreal::FName, 15> stash_mutations{
+        Unreal::FName begin_take{STR("InitiateItemTake")};
+        Unreal::FName finish_take{STR("FinalTakeItem")};
+        Unreal::FName cancel_take{STR("CancelTakeItem")};
+        Unreal::FName return_item{STR("ReturnItem")};
+        Unreal::FName clear_held{STR("ClearHeldItem")};
+        std::array<Unreal::FName, 13> stash_mutations{
             Unreal::FName{STR("AddItem")}, Unreal::FName{STR("InsertItem")}, Unreal::FName{STR("RemoveItem")},
             Unreal::FName{STR("TakeCard")}, Unreal::FName{STR("TakeItem")}, Unreal::FName{STR("SplitCardStack")},
             Unreal::FName{STR("QuickStack")}, Unreal::FName{STR("TryStackItem")}, Unreal::FName{STR("SplitStack")},
             Unreal::FName{STR("SortItems")}, Unreal::FName{STR("ReturnItem")}, Unreal::FName{STR("SetItemAtIndex")},
-            Unreal::FName{STR("InitiateItemTake")}, Unreal::FName{STR("FinalTakeItem")}, Unreal::FName{STR("QuickSplitStack")},
+            Unreal::FName{STR("QuickSplitStack")},
         };
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
@@ -253,6 +258,9 @@ namespace
         Guid item{};
         bool deposit{};
         Unreal::FWeakObjectPtr backup;
+        Unreal::FWeakObjectPtr drag_source;
+        Guid drag_item{};
+        Guid taking_item{};
     };
 
     std::optional<Entries> entries;
@@ -1514,6 +1522,86 @@ namespace
                array_has_widget(floor, STR("Cards"), card, false) ? card : nullptr;
     }
 
+    struct StashCard
+    {
+        ItemView item;
+        Guid guid;
+    };
+
+    bool stash_panel(Unreal::UObject* panel)
+    {
+        return panel && (panel == stash_screen.backpack.Get() || panel == stash_screen.storage.Get());
+    }
+
+    std::optional<StashCard> stash_card(Unreal::UObject* card, Unreal::UObject* manager)
+    {
+        if (!live(card) || !exact_class(card, card_path) || !same_widget_player(card) ||
+            object_field(card, STR("ItemManager")) != manager) return {};
+        const auto item = card_item(card);
+        const GuidFields fields(item.structure);
+        if (!stash_panel(item.panel) || !array_has_widget(item.panel, STR("Cards"), card, false) || !fields.valid() ||
+            !live(object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value))) return {};
+        const auto guid = fields.read(item.value);
+        return guid == Guid{} ? std::nullopt : std::optional{StashCard{item, guid}};
+    }
+
+    void queue_stash_move(const Guid& guid, Unreal::UObject* origin)
+    {
+        stash_screen.accepting = false;
+        stash_screen.item = guid;
+        stash_screen.deposit = origin == stash_screen.backpack.Get();
+    }
+
+    bool qualified_stash_action(Unreal::UObject* screen, Unreal::UObject* object, Unreal::UFunction* function, int parameters)
+    {
+        return stash_screen.accepting && stash_seat() && stash_screen.generation == scope.generation &&
+               top_stock_menu() == screen && function->GetOuterPrivate() == object->GetClassPrivate() &&
+               function->GetNumParms() == parameters && !function->GetReturnProperty() &&
+               !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net);
+    }
+
+    void clear_stash_cursor(Unreal::UObject* manager)
+    {
+        if (auto* clear = stock_no_args(manager, entries->clear_held)) manager->ProcessEvent(clear, nullptr);
+    }
+
+    void start_stash_cursor(Unreal::UObject* manager, const StashCard& selected)
+    {
+        auto* taking = field<Unreal::FBoolProperty>(manager, STR("IsTakingItem"));
+        auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
+        auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
+        auto* move = manager->GetClassPrivate()->GetFunctionByNameInChain(Unreal::FName(STR("MoveItemToCursor")));
+        auto* animate = field<Unreal::FBoolProperty>(move, STR("Anim"));
+        if (!taking || !taking->GetPropertyValueInContainer(manager) || !holding ||
+            holding->GetPropertyValueInContainer(manager) || !item_struct(held, selected.item.structure) ||
+            !move || move->GetOuterPrivate() != manager->GetClassPrivate() || move->GetNumParms() != 1 ||
+            move->GetReturnProperty() || move->GetParmsSize() != 1 || !animate || animate->GetOffset_Internal() != 0 ||
+            move->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+
+        // Show the stock held-item widget while leaving both source arrays untouched.
+        held->CopyCompleteValue(held->ContainerPtrToValuePtr<void>(manager), selected.item.value);
+        taking->SetPropertyValueInContainer(manager, false);
+        std::byte parameters{};
+        animate->SetPropertyValueInContainer(&parameters, false);
+        stash_screen.drag_source = selected.item.panel;
+        stash_screen.drag_item = selected.guid;
+        manager->ProcessEvent(move, &parameters);
+        if (!holding->GetPropertyValueInContainer(manager)) clear_stash_cursor(manager);
+    }
+
+    void finish_stash_cursor(Unreal::UObject* manager, Unreal::UObject* target)
+    {
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        const GuidFields fields(held.structure);
+        auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
+        auto* origin = stash_screen.drag_source.Get();
+        if (!holding || !holding->GetPropertyValueInContainer(manager) ||
+            !stash_panel(origin) || stash_screen.drag_item == Guid{} || !fields.valid() ||
+            fields.read(held.value) != stash_screen.drag_item) return;
+        if (target != origin) queue_stash_move(stash_screen.drag_item, origin);
+        clear_stash_cursor(manager);
+    }
+
     bool intercept_stash(Iteration& call, Unreal::UObject* context, Unreal::UFunction* function, const Unreal::FName& name)
     {
         auto* screen = stash_screen.screen.Get();
@@ -1536,39 +1624,79 @@ namespace
                 !array_has_widget(scope.controller.Get(), STR("MenuStack"), screen, false))
                 return false;
             call.PreventOriginalFunctionCall();
+            if (call.OriginalFunctionCallPrevented() && name == entries->insert_item && stash_panel(context) &&
+                manager && stash_screen.drag_item != Guid{} && qualified_stash_action(screen, context, function, 3))
+                finish_stash_cursor(manager, context);
             return true;
         }
 
-        if (!quick && !mutation && name != entries->drop_item && name != entries->action_drop &&
+        if (name == entries->clear_held)
+        {
+            stash_screen.drag_item = {};
+            stash_screen.drag_source.Reset();
+            stash_screen.taking_item = {};
+            return false;
+        }
+        if (name == entries->cancel_take)
+        {
+            stash_screen.taking_item = {};
+            return false;
+        }
+        if (name == entries->begin_take)
+        {
+            if (qualified_stash_action(screen, manager, function, 0) && stash_screen.drag_item == Guid{})
+            {
+                if (const auto selected = stash_card(object_field(manager, STR("HoveredCard")), manager))
+                {
+                    stash_screen.taking_item = selected->guid;
+                    return false;
+                }
+            }
+            call.PreventOriginalFunctionCall();
+            return true;
+        }
+        const bool finish_take = name == entries->finish_take;
+        const bool insert = name == entries->insert_item;
+        // Let the stock manager choose the destination widget. Its panel's
+        // InsertItem call is where the transfer becomes a host request.
+        if (insert && stash_screen.drag_item != Guid{} && qualified_stash_action(screen, manager, function, 2)) return false;
+        if (!quick && !finish_take && !insert && !mutation && name != entries->drop_item && name != entries->action_drop &&
             name != entries->action_equip && name != entries->action_use && name != entries->action_pickup &&
             name != entries->use_held && name != entries->confirm_use && name != entries->final_split &&
             name != entries->position_split &&
             std::ranges::find(entries->guarded_inventory_actions, name) == entries->guarded_inventory_actions.end())
             return false;
         call.PreventOriginalFunctionCall();
-        if (!call.OriginalFunctionCallPrevented() || !quick || !stash_screen.accepting || !stash_seat() ||
-            stash_screen.generation != scope.generation || top_stock_menu() != screen ||
-            function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 0 ||
-            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return true;
+        if (!call.OriginalFunctionCallPrevented()) return true;
+        if (name == entries->return_item && stash_screen.drag_item != Guid{})
+        {
+            clear_stash_cursor(manager);
+            return true;
+        }
+        if ((!quick && !finish_take) || stash_screen.drag_item != Guid{} ||
+            !qualified_stash_action(screen, manager, function, 0)) return true;
 
         const bool from_menu = name == entries->action_quick_move;
         auto* menu = from_menu ? object_field(manager, STR("ItemContextMenu")) : nullptr;
         if (from_menu && (!exact_class(menu, context_menu_path) || !same_widget_player(menu) ||
                           object_field(menu, STR("ItemManager")) != manager)) return true;
         auto* card = from_menu ? object_field(menu, STR("Item Card")) : object_field(manager, STR("HoveredCard"));
-        if (!exact_class(card, card_path) || !same_widget_player(card) ||
-            object_field(card, STR("ItemManager")) != manager) return true;
-        const auto item = card_item(card);
-        const bool deposit = item.panel && item.panel == stash_screen.backpack.Get();
-        if ((!deposit && item.panel != stash_screen.storage.Get()) ||
-            !array_has_widget(item.panel, STR("Cards"), card, false)) return true;
-        const GuidFields fields(item.structure);
-        if (!fields.valid()) return true;
-        const auto guid = fields.read(item.value);
-        if (guid == Guid{}) return true;
-        stash_screen.accepting = false;
-        stash_screen.item = guid;
-        stash_screen.deposit = deposit;
+        const auto selected = stash_card(card, manager);
+        if (finish_take)
+        {
+            const auto expected = stash_screen.taking_item;
+            stash_screen.taking_item = {};
+            if (selected && selected->guid == expected) start_stash_cursor(manager, *selected);
+            auto* taking = field<Unreal::FBoolProperty>(manager, STR("IsTakingItem"));
+            if (taking && taking->GetPropertyValueInContainer(manager))
+            {
+                if (auto* cancel = stock_no_args(manager, entries->cancel_take))
+                    manager->ProcessEvent(cancel, nullptr);
+            }
+            return true;
+        }
+        if (!selected) return true;
+        queue_stash_move(selected->guid, selected->item.panel);
         if (from_menu)
         {
             if (auto* close = stock_no_args(manager, Unreal::FName(STR("CloseContextMenu"))))
