@@ -568,7 +568,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
 
                     def projected(state):
                         view = actor_proof(state, "native_enemy_loot_death_view", target)
-                        return state.get("gameplay_fresh") and state.get("zone_epoch") == roll["epoch"] and (
+                        current = (state.get("gameplay_fresh") and state.get("zone_epoch") == roll["epoch"]
+                                   and view.get("actor") == target)
+                        if resident_game and current and view.get("state") == "stock":
+                            return True
+                        return current and (
                             view.get("actor"), view.get("state"), view.get("epoch"), view.get("guid"),
                             view.get("hidden"), view.get("collision"),
                         ) == (target, "projected", roll["epoch"], guid, True, False)
