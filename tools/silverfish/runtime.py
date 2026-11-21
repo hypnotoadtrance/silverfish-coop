@@ -32,6 +32,7 @@ from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_player_avatar
 from . import native_voice
+from . import native_starburst_effects
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
@@ -2371,6 +2372,24 @@ class Bridge:
                     live, suppressed = map(int, fields[1:])
                     if 0 <= live <= 1024 and 0 <= suppressed and data.get("state") in {"hosting", "connected"}:
                         data["native_anomaly_field"] = {"live": live, "suppressed": suppressed}
+                elif fields[0] == "native-starburst-cue" and len(fields) == 7 and data.get("state") == "hosting":
+                    cues = data.setdefault(native_starburst_effects.KEY, [])
+                    serial, kind, *components = fields[1:]
+                    location = [_finite(axis) for axis in components[:3]]
+                    scale = _finite(components[3])
+                    if (len(cues) < native_starburst_effects.MAX_CUES and serial.isascii() and serial.isdecimal()
+                            and 0 < len(serial) <= 15 and 0 < int(serial) and kind in native_starburst_effects.KINDS
+                            and None not in location and scale is not None and 0 < scale <= 10):
+                        cues.append([int(serial), kind, location, scale])
+                elif fields[0] == "native-starburst-capture" and len(fields) == 3 and data.get("state") == "hosting":
+                    charge, blast = map(int, fields[1:])
+                    if charge >= 0 and blast >= 0:
+                        data["native_starburst_capture"] = {"charge": charge, "blast": blast}
+                elif fields[0] == "native-burner-jet" and len(fields) == 6:
+                    jets = data.setdefault("native_burner_jets", [])
+                    if len(jets) < 64 and all(bit in {"0", "1"} for bit in fields[4:]):
+                        jets.append({"location": [_finite(axis) for axis in fields[1:4]], "collision": fields[4] == "1",
+                                     "particles_active": fields[5] == "1"})
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if len(positions) < 1024 and fields[1] in {"starburst", "burner"} and fields[5] in {"0", "1"}:

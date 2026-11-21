@@ -43,6 +43,7 @@ from . import native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_voice
+from . import native_starburst_effects
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -1714,6 +1715,10 @@ class Host:
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
+            if cues := self.last_game.get(native_starburst_effects.KEY):
+                gameplay[native_starburst_effects.KEY] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
+                }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
@@ -3215,7 +3220,7 @@ class Host:
                     result = {"native_friendly_fire": snapshot.get("native_friendly_fire")}
                 elif action in ("native-hazard-position", "native-hazard-start", "native-hazard-return"):
                     result = await self.native_hazard(bridge, action)
-                elif action == "native-anomaly-field-fixture" and self.fixtures:
+                elif action in {"native-anomaly-field-fixture", "native-anomaly-trigger-fixture"} and self.fixtures:
                     snapshot = await bridge.command(action, request.get("target") or "-", timeout=4)
                     result = {"native_anomaly_field": snapshot.get("native_anomaly_field", {})}
                 elif action == "native-fall-position" and self.native_guest and self.fixtures:
@@ -4544,6 +4549,7 @@ class Client:
         self.loot_tracking = None
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
+        self.starburst_playback = native_starburst_effects.Playback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.next_projection = 0.0
@@ -5223,6 +5229,9 @@ class Client:
                 if time.monotonic() - self.gameplay_seen < 3:
                     self.last_game = await self.voice_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), self.zone_epoch)
+                    self.last_game = await self.starburst_playback.sync(
+                        self.bridge, self.control, self.last_game, self.gameplay.get(native_starburst_effects.KEY),
+                        self.zone_epoch, self.host_session)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS
 
 
-async def verify(work, vanilla):
+async def verify(work, vanilla, activate):
     name = f"anomaly-field-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -34,9 +35,12 @@ async def verify(work, vanilla):
     proof = {"verified": False}
 
     async def launch(run, label, *arguments):
+        env = dict(os.environ)
+        if activate and label == "guest":
+            env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{label}.log").open("wb") as log:
             job = await asyncio.create_subprocess_exec(*cli, *arguments, stdout=log, stderr=log, cwd=REPO,
-                                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                                                       creationflags=subprocess.CREATE_NO_WINDOW, env=env)
         jobs.append((run, job))
 
     def scene(status):
@@ -48,6 +52,22 @@ async def verify(work, vanilla):
     def projected(status, trap):
         return next((row for row in positions(status) if row["kind"] == trap["kind"]
                      and math.dist(row["location"], trap["location"]) < 3), None)
+
+    def jet(status, position, reach):
+        return next((row for row in status.get("game", {}).get("native_burner_jets", [])
+                     if math.dist(row["location"], position) < reach), None)
+
+    def played_cues():
+        log = guest / "events.jsonl"
+        if not log.exists():
+            return []
+        text = log.read_text(encoding="utf-8")
+        x, y, z = traps["starburst"]["location"]
+        # Stock Starburst cues originate at its sphere, 200 units above the actor root.
+        source = [x, y, z + 200]
+        return [event for line in text[:text.rfind("\n")].splitlines()
+                if (event := json.loads(line)).get("event") == "native_starburst_effect_played"
+                and math.dist(event["location"], source) < 5]
 
     try:
         await launch(host, "host", "host", "--campaign", name, "--port", "0", "--start-zone", CROSSROADS,
@@ -97,6 +117,35 @@ async def verify(work, vanilla):
         rejoined = await wait(guest, replicas_visible)
         assert all(not projected(rejoined, trap)["collision"] for trap in traps.values()), rejoined
         proof["reconnect"] = True
+        if activate:
+            first = await wait(host, lambda row: row.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            health = first["game"]["pawns"]["local"]["health"]
+            guest_health = first["game"]["pawns"]["guest"]["health"]
+            assert health > 0 and guest_health > 0, first["game"]["pawns"]
+            triggered = await submit(host, "native-anomaly-trigger-fixture", target="starburst")
+            assert triggered["ok"], triggered
+            await wait(guest, lambda _: {event["cue"] for event in played_cues()} == {"charge", "blast"}, timeout=14)
+            cues = played_cues()
+            assert len(cues) == 2 and all(event["particles"] for event in cues), cues
+            proof["starburst_cues"] = cues
+            struck = await wait(host, lambda row: row.get("game", {}).get("player_effects", {}).get("guest", {}).get("state") == "downed"
+                                or (row.get("game", {}).get("pawns", {}).get("guest", {}).get("health") or guest_health) < guest_health,
+                                timeout=8)
+            assert struck["game"]["pawns"]["local"]["health"] == health and not struck["gameplay"]["wipe"], struck["game"]["pawns"]
+            proof["starburst_guest_effect"] = struck["game"]["player_effects"].get("guest")
+            triggered = await submit(host, "native-anomaly-trigger-fixture", target="burner")
+            assert triggered["ok"], triggered
+            burning = await wait(host, lambda row: jet(row, traps["burner"]["location"], 250), timeout=16)
+            host_jet = jet(burning, traps["burner"]["location"], 250)
+            viewed = await wait(guest, lambda row: (jet(row, host_jet["location"], 3) or {}).get("particles_active"), timeout=10)
+            guest_jet = jet(viewed, host_jet["location"], 3)
+            assert host_jet["collision"] and not guest_jet["collision"] and guest_jet["particles_active"], (host_jet, guest_jet)
+            await wait(guest, lambda row: row.get("state") == "connected" and not jet(row, host_jet["location"], 3), timeout=15)
+            await wait(host, lambda row: not jet(row, host_jet["location"], 3), timeout=8)
+            proof["burner_jet"] = {"host": host_jet, "guest": guest_jet, "expired_on_both": True}
+            after = await wait(host, lambda row: row.get("game", {}).get("pawns", {}).get("local", {}).get("health") is not None)
+            assert after["game"]["pawns"]["local"]["health"] == health, after["game"]["pawns"]
+            proof["host_health_preserved"] = health
         proof["verified"] = True
     except BaseException as error:
         proof["failure"] = str(error) or type(error).__name__
@@ -122,5 +171,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--activate", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate))
