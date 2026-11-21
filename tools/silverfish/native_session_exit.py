@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 
-from .embedded_engine import _assert_no_reparse, _exact_existing
+from .embedded_engine import EmbeddedEngine, _assert_no_reparse, _exact_existing, owns_session_bridge
 from .embedded_startup import _read_file
 from .runtime import write_text
 from .title_handoff import TOKEN
@@ -24,8 +24,8 @@ _RECORD = re.compile(rb"1\t([0-9a-f]{32})\t([1-9][0-9]{0,14})\t(host|guest)\t(qu
 class PauseExit:
     """Dispatch one native decision through the serialized role loop."""
 
-    def __init__(self, bridge: Path, control, role: str, *, clock=time.time):
-        if (role not in {"host", "guest"} or bridge.parent != control.run / "game-bridge"
+    def __init__(self, bridge: Path, control, role: str, *, engine: EmbeddedEngine | None = None, clock=time.time):
+        if (role not in {"host", "guest"} or not owns_session_bridge(bridge, control.run, engine)
                 or not TOKEN.fullmatch(bridge.name)):
             raise ValueError("The Pause exit mailbox must belong to the active co-op role")
         self._bridge = _exact_existing(bridge)

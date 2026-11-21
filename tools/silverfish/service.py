@@ -3343,10 +3343,12 @@ class Host:
         self.relay = transport
         if self.mindcore_carry:
             self.mindcore_carry.bridge = bridge
-        invites = (native_host_invitation.HostInvitationMailbox(bridge.directory, self.control.run, self.invite)
+        engine = bridge.process if isinstance(bridge.process, EmbeddedEngine) else None
+        invites = (native_host_invitation.HostInvitationMailbox(
+            bridge.directory, self.control.run, self.invite, engine=engine)
                    if self.native_events and self.native_zones else None)
-        pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host")
-                      if isinstance(bridge.process, EmbeddedEngine) and self.native_zones else None)
+        pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
+                      if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")

@@ -284,9 +284,17 @@ function fresh.prepare(state, phase, name, slot, seed_text, difficulty)
     local old_save = instance.SaveSlot_Ref
     local old_slot, old_autosave = text(instance.CurrentSaveSlot), instance.SaveAfterTransition
     local old_travel, old_respawning = instance.Travel_TimeStep, instance.Respawning
-    require_exact(old_slot == "None" and type(old_autosave) == "boolean"
-        and type(old_travel) == "number" and old_respawning == false and instance.BackPackOpen == false
-        and array_count(instance.PassiveEffects) == 0, "fresh_title_state_unqualified")
+    local passive_count = array_count(instance.PassiveEffects)
+    local scoped = require("native_save_scope").selected() ~= nil
+    require_exact(type(old_slot) == "string" and type(old_autosave) == "boolean"
+        and type(old_travel) == "number" and type(old_respawning) == "boolean"
+        and instance.BackPackOpen == false and passive_count
+        and (scoped or old_slot == "None" and not old_respawning and passive_count == 0),
+        "fresh_title_state_unqualified")
+    local old_passives = {}
+    for index = 1, passive_count do
+        old_passives[index] = FName(require_exact(text(instance.PassiveEffects[index]), "old_traits_unavailable"))
+    end
 
     local character = character_row()
     local rules = data_row("GameMode_Presets_DT", "GameMode_Rules_Struct", difficulty)
@@ -307,6 +315,7 @@ function fresh.prepare(state, phase, name, slot, seed_text, difficulty)
         instance.SaveAfterTransition = false
         instance.Travel_TimeStep = 0
         instance.Respawning = false
+        instance.PassiveEffects = {}
         save.GameRules = rules
         instance:Apply_CharacterTraits(character)
         require_exact(text(save.Level) == level and text(save.Entrance) == "" and array_count(instance.PassiveEffects) == 1
@@ -341,14 +350,22 @@ function fresh.prepare(state, phase, name, slot, seed_text, difficulty)
         instance.SaveAfterTransition = old_autosave
         instance.Travel_TimeStep = old_travel
         instance.Respawning = old_respawning
-        instance.PassiveEffects = {}
+        instance.PassiveEffects = old_passives
         require_exact(same(instance.SaveSlot_Ref, old_save) and text(instance.CurrentSaveSlot) == old_slot
             and instance.SaveAfterTransition == old_autosave and instance.Travel_TimeStep == old_travel
-            and instance.Respawning == old_respawning and array_count(instance.PassiveEffects) == 0, "rollback_unverified")
+            and instance.Respawning == old_respawning and array_count(instance.PassiveEffects) == passive_count,
+            "rollback_unverified")
+        for index = 1, passive_count do
+            require_exact(text(instance.PassiveEffects[index]) == text(old_passives[index]), "rollback_unverified")
+        end
         error(prepared, 0)
     end
     receipt = prepared
     return "stock Wanderer campaign prepared for listen travel"
+end
+
+function fresh.clear()
+    receipt = nil
 end
 
 local function outcome(state, phase)

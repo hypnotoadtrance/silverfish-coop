@@ -13,7 +13,7 @@ import time
 from uuid import UUID
 
 from .campaign import _CREDENTIAL_RE
-from .embedded_engine import _assert_no_reparse, _exact_existing
+from .embedded_engine import EmbeddedEngine, _assert_no_reparse, _exact_existing, owns_session_bridge
 from .embedded_startup import INVITE_LIMIT, _read_file
 from .title_handoff import TOKEN
 
@@ -125,9 +125,10 @@ class HostInvitationMailbox:
     local host and supplies its exact control generation and zone epoch.
     """
 
-    def __init__(self, bridge: Path, campaign_run: Path, issue: Callable[[dict], dict], *, clock=time.time):
+    def __init__(self, bridge: Path, campaign_run: Path, issue: Callable[[dict], dict], *,
+                 engine: EmbeddedEngine | None = None, clock=time.time):
         self._bridge, self._run = _ordinary_directory(bridge), _ordinary_directory(campaign_run)
-        if bridge.parent != campaign_run / "game-bridge" or not _token(bridge.name):
+        if not owns_session_bridge(bridge, campaign_run, engine) or not _token(bridge.name):
             raise ValueError("The invitation mailbox must belong to the current campaign bridge")
         _ordinary_directory(bridge.parent)
         if not callable(issue):

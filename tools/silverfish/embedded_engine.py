@@ -303,3 +303,10 @@ class EmbeddedEngine:
             return ready
         finally:
             self._state = "released"
+
+
+def owns_session_bridge(bridge: Path, run: Path, engine: EmbeddedEngine | None = None) -> bool:
+    if engine is None:
+        return bridge.parent == run / "game-bridge"
+    return (engine.bridge.directory == bridge and engine.session_directory / "run" == run
+            and engine.poll() is None)

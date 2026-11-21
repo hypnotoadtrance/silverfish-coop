@@ -439,6 +439,7 @@ local function run_command(fields, state, current_phase)
             return "selected co-op save scope"
         end
         native_save_scope.release(argument)
+        native_fresh_campaign.clear()
         return "released co-op save scope"
     end
 
