@@ -16,6 +16,7 @@ CLAIM = "native-loose-pickup-claim"
 PROOF = "native_loose_pickup_claim"
 FIXTURE = "native-loose-pickup-fixture"
 NEARBY_FIXTURE = "native-loose-pickup-nearby-fixture"
+STOCK_CARD_FIXTURE = "native-inventory-stock-nearby-fixture"
 EXPIRE_FIXTURE = "native-loose-pickup-expire-fixture"
 APPROACH = "native-loose-pickup-approach"
 PROJECT = "native-loose-pickup-project"
@@ -138,6 +139,17 @@ async def project(service, bridge, hidden):
         if (reply.get("map"), reply.get("state")) != (area, "connected"):
             raise RuntimeError("The loose pickup projection changed worlds")
         service.last_game = reply
+
+
+async def refresh_claimed_stock_view(client):
+    if client.last_game.get("native_inventory_view", {}).get("state") != "stock":
+        return
+    try:
+        await project(client, client.bridge, client.gameplay.get(STATE))
+        await client.guest_ui.refresh(client)
+        client.last_game = await client.bridge.command("native-inventory-stock-refresh", client.zone_epoch, timeout=4)
+    except (OSError, RuntimeError, ValueError) as error:
+        client.control.event("native_loose_pickup_view_refresh_unavailable", reason=str(error))
 
 
 async def expire_fixture(host, bridge, target):

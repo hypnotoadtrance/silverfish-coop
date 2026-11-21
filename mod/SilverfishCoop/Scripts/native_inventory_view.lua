@@ -768,6 +768,8 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
         and operation ~= "native-inventory-stock-drop-finish"
         and operation ~= "native-inventory-stock-open"
+        and operation ~= "native-inventory-stock-refresh"
+        and operation ~= "native-inventory-stock-nearby-fixture"
         and operation ~= "native-inventory-stock-use-click-fixture"
         and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-use-result"
@@ -779,6 +781,41 @@ function inventory_view.command(fields, state, phase)
         error("Stock inventory view requires the exact standing connected guest", 0)
     end
     if operation == "native-inventory-stock-open" then return open_stock_inventory(fields, current, state, phase) end
+    if operation == "native-inventory-stock-refresh" and #fields == 3 then
+        local live = stock_session
+        local stack = current.controller.MenuStack
+        if not live or not same_context(current, live.context) or live.epoch ~= fields[3]
+            or stack:GetArrayNum() ~= 1 or not same(widget_at(stack, 1), live.screen) then
+            return "stock inventory closed before refresh"
+        end
+        live.screen.BackpackPanel:FullRefresh()
+        if not stock_cards(live.screen, live.save) then error("stock backpack contents did not refresh", 0) end
+        return "verified stock backpack refresh"
+    end
+    if operation == "native-inventory-stock-nearby-fixture" and (#fields == 3 or #fields == 4) and headless and stock_session
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        local screen = stock_session.screen
+        local actor = StaticFindObject(fields[3])
+        local guid
+        for index = 1, screen.FloorActors:GetArrayNum() do
+            if same(screen.FloorActors[index], actor) then guid = stock_item_guid(screen.FloorItems[index]); break end
+        end
+        if #fields == 4 then
+            local displayed = stock_cards(screen, stock_session.save, fields[4], 1)
+            if not guid and displayed and valid(actor) and actor.bHidden then return "verified stock Nearby Items transfer" end
+            error("The stock Nearby Items transfer is not visible in the open backpack", 0)
+        end
+        for index = 1, guid and screen.FloorPanel.Cards:GetArrayNum() or 0 do
+            local card = widget_at(screen.FloorPanel.Cards, index)
+            if stock_card_guid(card) == guid then
+                screen.ItemManager:OpenContextMenu(card)
+                screen.ItemManager:ActionPickup()
+                if valid(actor) and actor.bHidden == false then return "stock Nearby Items card requested" end
+                break
+            end
+        end
+        error("The chosen loose actor was not on the stock Nearby Items panel", 0)
+    end
     if operation == "native-inventory-stock-use-click-fixture" and #fields == 3 and headless and stock_session and not stock_drop
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local screen = stock_session.screen

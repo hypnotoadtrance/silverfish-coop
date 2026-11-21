@@ -17,10 +17,13 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
-from tools.silverfish import embedded_startup, native_guest_consumable, native_guest_drop, native_inventory, native_world_loot, runtime
+from tools.silverfish import (
+    embedded_startup, native_guest_consumable, native_guest_drop, native_inventory, native_loose_pickup, native_world_loot, runtime,
+)
 from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
+from live_loose_pickup_smoke import DEFAULT_ACTOR
 from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
@@ -125,7 +128,7 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
 
 
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
-                          stock_split: bool = False, stock_equip: bool = False) -> dict:
+                          stock_split: bool = False, stock_equip: bool = False, stock_nearby: bool = False) -> dict:
     def qualified(game):
         return (game.get("native_enemy_loot_cqc_version") == 3
                 and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
@@ -252,9 +255,39 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert row == dict(item, source="equipment", index=equip_proof["slot"], droppable=False), (row, item)
         assert {row["guid"] for row in after["items"]} == {row["guid"] for row in inventory["items"]}
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
+    if stock_nearby:
+        host_run = host.campaign / "run"
+        target = f"loose:{DEFAULT_ACTOR}"
+        host_pawn = game["pawns"]["local"]["name"]
+        for participant in (host_pawn, pawn):
+            approached = await host.bridge.command(native_loose_pickup.APPROACH, DEFAULT_ACTOR, participant, timeout=5)
+            assert approached.get("ack", {}).get("message") == "shared level pickup approach verified", approached["ack"]
+        for run in (host_run, guest_run):
+            await wait(run, lambda state: state.get("game", {}).get(native_loose_pickup.KEY, {})
+                       .get(DEFAULT_ACTOR, {}).get("state") == "available")
+        host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    nearby_proof = None
+    if stock_nearby:
+        clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=target)
+        assert clicked["ok"] and clicked["proof"] == "stock Nearby Items card requested", clicked
+        for run in (host_run, guest_run):
+            await wait(run, lambda state: state.get("game", {}).get(native_loose_pickup.KEY, {})
+                       .get(DEFAULT_ACTOR, {}).get("state") == "claimed")
+        events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        nearby_proof, = [event[native_loose_pickup.PROOF] for event in events
+                         if event.get(native_loose_pickup.PROOF, {}).get("actor") == DEFAULT_ACTOR]
+        display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{target}@{nearby_proof['guid']}")
+        assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
+        inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        assert inventory["owner"] == nearby_proof["owner"], nearby_proof
+        matching = [row for row in inventory["items"] if row["guid"] == nearby_proof["guid"]]
+        assert [(row["class_path"], row["quantity"]) for row in matching] == [(nearby_proof["class_path"], 1)], matching
+        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
+        duplicate = await submit(host_run, native_loose_pickup.CLAIM, target=target)
+        assert duplicate.get("error") == "loose_pickup_already_claimed", duplicate
     normal_tab_proof = None
     if stock_drop:
         before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
@@ -275,6 +308,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
+            **({"guest_stock_nearby_pickup": nearby_proof} if nearby_proof else {}),
             **({"normal_tab_use": normal_tab_proof} if normal_tab_proof else {}),
             **({"guest_stock_menu_split": split_proof} if split_proof else {}),
             **({"guest_stock_menu_equip": equip_proof} if equip_proof else {}),
@@ -304,7 +338,7 @@ async def create_stock_split_character(guest, join, name):
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
-                 stock_equip: bool = False) -> None:
+                 stock_equip: bool = False, stock_nearby: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -333,7 +367,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
-        if stock_drop or stock_split or stock_equip:
+        if stock_drop or stock_split or stock_equip or stock_nearby:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
@@ -372,7 +406,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
         first, second = seats
         async def check_gameplay(host, guest, pawn):
-            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split, stock_equip=stock_equip)
+            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
+                                         stock_equip=stock_equip, stock_nearby=stock_nearby)
         create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                   create_character=create))
@@ -418,10 +453,12 @@ if __name__ == "__main__":
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
+    parser.add_argument("--stock-nearby", action="store_true", help="pick up a loose actor from the guest's stock Nearby Items panel")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
-                       stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip))
+                       stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
+                       stock_nearby=args.stock_nearby))

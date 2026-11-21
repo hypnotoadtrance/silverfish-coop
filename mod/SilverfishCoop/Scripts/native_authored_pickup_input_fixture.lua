@@ -369,8 +369,8 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
         table.concat(names, "|", 1, math.min(#names, 4))), 0)
 end
 
-local function approach_scope(state, phase, pawn, actor, map)
-    return headless and host_fixtures and phase == "hosting" and state.listening and state.server == false
+local function approach_scope(state, phase, pawn, actor, map, title_fixture)
+    return headless and (host_fixtures or title_fixture) and phase == "hosting" and state.listening and state.server == false
         and map == state.map and same(pawn:GetWorld(), state.world) and same(actor:GetWorld(), state.world)
         and pawn.Dead == false and pawn:HasAuthority()
 end
@@ -417,8 +417,8 @@ function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     approach_clear_sight(state, pawn, actor, box, label, distances, office_desk and bearing + 90 or bearing, true, false)
 end
 
-function input.approach_world_loot(state, phase, pawn, actor, box)
-    if not approach_scope(state, phase, pawn, actor, state.map)
+function input.approach_world_loot(state, phase, pawn, actor, box, title_fixture)
+    if not approach_scope(state, phase, pawn, actor, state.map, title_fixture)
         or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
         error("world_loot_fixture_scope_unavailable", 0)
     end

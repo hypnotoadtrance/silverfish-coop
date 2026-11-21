@@ -5355,6 +5355,14 @@ class Client:
                         raise ValueError("Select an item on the mounted stock backpack")
                     self.last_game = await self.bridge.command(action, item, timeout=5)
                     result = {"stock_action": self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})}
+                elif action == native_loose_pickup.STOCK_CARD_FIXTURE:
+                    target, separator, guid = (request.get("target") or "").partition("@")
+                    actor = native_loose_pickup.target_path(target)
+                    if (not actor or (separator and not native_gold.valid_guid(guid))
+                            or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
+                        raise ValueError("Select an actor on the mounted stock Nearby Items panel")
+                    self.last_game = await self.bridge.command(action, actor, *((guid,) if separator else ()), timeout=5)
+                    result = {"actor": actor, "proof": self.last_game.get("ack", {}).get("message")}
                 elif action in native_guest_drop.STOCK_FIXTURES:
                     result = await native_guest_drop.stock_menu_fixture(
                         self, request.get("target"), path.stem, native_guest_drop.STOCK_FIXTURES[action],
@@ -5620,6 +5628,8 @@ class Client:
                             target = self.zone_epoch
                         result = await self.gameplay_action(action, operation_id, target)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
+                        if action == native_loose_pickup.CLAIM:
+                            await native_loose_pickup.refresh_claimed_stock_view(self)
                     except (ValueError, OSError, RuntimeError) as error:
                         self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
             if (self.loot_view and self.last_game.get(native_world_loot.CAPABILITY, 0)

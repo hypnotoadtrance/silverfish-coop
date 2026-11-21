@@ -1251,6 +1251,45 @@ namespace
         return attached ? nullptr : save;
     }
 
+    Scope* nearby_pickup(U::UObject* screen, const RowSchema& rows, const Guid& wanted, bool& matching_row)
+    {
+        if (wanted == Guid{}) return nullptr;
+
+        auto* items_property = field<U::FArrayProperty>(screen, STR("FloorItems"));
+        auto* actors_property = field<U::FArrayProperty>(screen, STR("FloorActors"));
+        auto* item_property = items_property ? U::CastField<U::FStructProperty>(items_property->GetInner()) : nullptr;
+        auto* actor_property = actors_property ? U::CastField<U::FObjectProperty>(actors_property->GetInner()) : nullptr;
+        if (!item_property || item_property->GetStruct().Get() != rows.type || !actor_property) return nullptr;
+        U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
+        U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
+        if (items.Num() != actors.Num() || items.Num() > 2048) return nullptr;
+
+        for (int i = 0; i < items.Num(); ++i)
+        {
+            if (rows.identity(items.GetRawPtr(i)) != wanted) continue;
+            auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
+            auto* scope = actor_scope(actor);
+            if (!scope || !scope->profile->discovered || scope->profile->stock_cash) return nullptr;
+            auto* controller = scope->controller.Get();
+            auto* stack_property = field<U::FArrayProperty>(controller, STR("MenuStack"));
+            auto* widget_property = stack_property ? U::CastField<U::FObjectProperty>(stack_property->GetInner()) : nullptr;
+            if (!widget_property) return nullptr;
+            U::FScriptArrayHelper stack(stack_property, stack_property->ContainerPtrToValuePtr<void>(controller));
+            if (!stack.Num() || widget_property->GetObjectPropertyValue(stack.GetRawPtr(stack.Num() - 1)) != screen)
+                return nullptr;
+            matching_row = rows.matches_actor(items.GetRawPtr(i), actor);
+            return scope;
+        }
+        return nullptr;
+    }
+
+    bool enqueue_nearby(Scope& scope, U::UObject* pawn)
+    {
+        if (!admit_input(scope, pawn, scope.box.Get())) return false;
+        scope.observed = {Clock::now() + std::chrono::seconds(4), ++sequence, false, true};
+        return true;
+    }
+
     void intercept_floor_pickup(Iteration& call, U::UObject* screen, U::UFunction* function, const void* args)
     {
         constexpr auto screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
@@ -1266,36 +1305,11 @@ namespace
 
         RowSchema rows;
         if (!rows.bind()) return;
-        const auto wanted = rows.read_guid(key->ContainerPtrToValuePtr<void>(args));
-        if (wanted == Guid{}) return;
-
-        auto* items_property = field<U::FArrayProperty>(screen, STR("FloorItems"));
-        auto* actors_property = field<U::FArrayProperty>(screen, STR("FloorActors"));
-        auto* item_property = items_property ? U::CastField<U::FStructProperty>(items_property->GetInner()) : nullptr;
-        auto* actor_property = actors_property ? U::CastField<U::FObjectProperty>(actors_property->GetInner()) : nullptr;
-        if (!item_property || item_property->GetStruct().Get() != rows.type || !actor_property) return;
-        U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
-        U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
-        if (items.Num() != actors.Num() || items.Num() > 2048) return;
-
-        for (int i = 0; i < items.Num(); ++i)
-        {
-            if (rows.identity(items.GetRawPtr(i)) != wanted) continue;
-            auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
-            auto* scope = actor_scope(actor);
-            if (!scope || !scope->profile->discovered || scope->profile->stock_cash) return;
-            auto* controller = scope->controller.Get();
-            auto* stack_property = field<U::FArrayProperty>(controller, STR("MenuStack"));
-            auto* widget_property = stack_property ? U::CastField<U::FObjectProperty>(stack_property->GetInner()) : nullptr;
-            if (!widget_property || !local_scope(*scope)) return;
-            U::FScriptArrayHelper stack(stack_property, stack_property->ContainerPtrToValuePtr<void>(controller));
-            if (!stack.Num() || widget_property->GetObjectPropertyValue(stack.GetRawPtr(stack.Num() - 1)) != screen) return;
-            call.PreventOriginalFunctionCall();
-            if (call.OriginalFunctionCallPrevented() && admit_input(*scope, scope->pawn.Get(), scope->box.Get()) &&
-                rows.matches_actor(items.GetRawPtr(i), actor))
-                scope->observed = {Clock::now() + std::chrono::seconds(4), ++sequence, false, true};
-            return;
-        }
+        bool matching_row{};
+        auto* scope = nearby_pickup(screen, rows, rows.read_guid(key->ContainerPtrToValuePtr<void>(args)), matching_row);
+        if (!scope) return;
+        call.PreventOriginalFunctionCall();
+        if (call.OriginalFunctionCallPrevented() && matching_row) enqueue_nearby(*scope, scope->pawn.Get());
     }
 
     const char* convert(const RowSchema& rows, U::UObject* pawn, U::UObject* actor, U::UObject* scratch, Guid& guid)
@@ -2451,6 +2465,17 @@ namespace
 
 namespace silverfish::native_authored_pickup
 {
+    bool queue_nearby_pickup(U::UObject* screen, U::UObject* pawn, const Guid& guid)
+    {
+        if (!ready() || !live(screen) ||
+            !exact(screen, STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"))) return false;
+        RowSchema rows;
+        if (!rows.bind()) return false;
+        bool matching_row{};
+        auto* scope = nearby_pickup(screen, rows, guid, matching_row);
+        return scope && matching_row && !scope->host && enqueue_nearby(*scope, pawn);
+    }
+
     U::UWorld* qualify_mindcore_results(std::uintptr_t pawn, std::uintptr_t detached, std::uintptr_t canonical,
                                        std::string_view guid)
     {

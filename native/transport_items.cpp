@@ -1,4 +1,5 @@
 #include "transport_items.hpp"
+#include "authored_pickup.hpp"
 #include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
 #include "guest_weapon_registry.hpp"
@@ -144,6 +145,8 @@ namespace
         Unreal::FName sort_items{STR("SortItems")};
         Unreal::FName final_split{STR("FinalSplitStack")};
         Unreal::FName position_split{STR("PositionSplitStackPopup")};
+        Unreal::FName action_pickup{STR("ActionPickup")};
+        Unreal::FName action_quick_move{STR("ActionQuickMove")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
@@ -152,8 +155,7 @@ namespace
         Unreal::FName teleport{STR("Teleport")};
         Unreal::FName matrix_script{STR("ExecuteUbergraph_Art_TeleportCube")};
         Unreal::FName apply_effects{STR("ApplyItemEffects")};
-        std::array<Unreal::FName, 10> guarded_inventory_actions{
-            Unreal::FName{STR("ActionPickup")}, Unreal::FName{STR("ActionQuickMove")},
+        std::array<Unreal::FName, 8> guarded_inventory_actions{
             Unreal::FName{STR("ActionUnequip")}, Unreal::FName{STR("PickUpAction")},
             Unreal::FName{STR("InitiateItemTake")}, Unreal::FName{STR("FinalTakeItem")},
             Unreal::FName{STR("EquipToNumberSlot")}, Unreal::FName{STR("QuickSplitStack")},
@@ -1346,6 +1348,19 @@ namespace
         receipt = {receipt.count + 1, role, item.name, entry, reason};
     }
 
+    Unreal::UObject* selected_floor_card(Unreal::UObject* manager, bool context_menu)
+    {
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* floor = object_field(screen, STR("FloorPanel"));
+        auto* menu = context_menu ? object_field(manager, STR("ItemContextMenu")) : nullptr;
+        if (context_menu && (!exact_class(menu, context_menu_path) || !same_widget_player(menu) ||
+                             object_field(menu, STR("ItemManager")) != manager)) return nullptr;
+        auto* card = context_menu ? object_field(menu, STR("Item Card")) : object_field(manager, STR("HoveredCard"));
+        return exact_class(card, card_path) && object_field(card, STR("InventoryWidget")) == floor &&
+               same_widget_player(card) && object_field(card, STR("ItemManager")) == manager &&
+               array_has_widget(floor, STR("Cards"), card, false) ? card : nullptr;
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, const void* parameters)
     {
         if (!context || !function || !entries || iteration.OriginalFunctionCallPrevented())
@@ -1360,6 +1375,27 @@ namespace
             auto* screen = object_field(context, STR("ParentScreen"));
             return exact_drop_screen(context, screen, object_field(screen, STR("BackpackPanel")));
         };
+        const bool context_pickup = name == entries->action_pickup || name == entries->action_quick_move;
+        if ((context_pickup || name == entries->quick_move) && guarded_inventory())
+        {
+            auto* card = selected_floor_card(context, context_pickup);
+            if (context_pickup || card)
+            {
+                iteration.PreventOriginalFunctionCall();
+                if (!iteration.OriginalFunctionCallPrevented() || !card || Clock::now() >= host_drop_scope.expires ||
+                    function->GetNumParms() != 0 || function->GetReturnProperty() ||
+                    function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+                const auto item = card_item(card);
+                const GuidFields fields(item.structure);
+                if (fields.valid() && silverfish::native_authored_pickup::queue_nearby_pickup(
+                        object_field(context, STR("ParentScreen")), scope.pawn.Get(), fields.read(item.value)) && context_pickup)
+                {
+                    if (auto* close = stock_no_args(context, Unreal::FName(STR("CloseContextMenu"))))
+                        context->ProcessEvent(close, nullptr);
+                }
+                return;
+            }
+        }
         if (host_drop_scope.stock_inventory &&
             std::ranges::find(entries->guarded_inventory_actions, name) != entries->guarded_inventory_actions.end() &&
             guarded_inventory())

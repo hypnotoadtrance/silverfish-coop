@@ -5,6 +5,7 @@ local drill_head = require("native_prototype_drill_pickup")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -395,6 +396,17 @@ local function owner(state, phase, name)
     return pawn, save, statics
 end
 
+local function refresh_loose_inventory(state, backpack)
+    local controller = state.controller
+    local stack = valid(controller) and controller.MenuStack
+    local screen = stack and stack:GetArrayNum() == 1 and stack[1]
+    local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
+    if valid(screen) and same(screen:GetClass(), class) and same(screen:GetOwningPlayer(), controller) then
+        if backpack then screen.BackpackPanel:FullRefresh() end
+        screen.FloorPanel:FullRefresh()
+    end
+end
+
 local function claim(fields, state, phase, profile)
     local name, slot = fields[3], fields[4]
     if phase ~= "hosting" or not exact_slot(slot) then
@@ -508,18 +520,7 @@ local function claim(fields, state, phase, profile)
         if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
             error("mutation_unverified_loose_pickup_retirement", 0)
         end
-        if pawn:IsLocallyControlled() then
-            pcall(function()
-                local controller = pawn.Controller
-                local stack = controller.MenuStack
-                local screen = stack:GetArrayNum() == 1 and stack[1]
-                local class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
-                if screen and same(screen:GetClass(), class) and same(screen:GetOwningPlayer(), controller) then
-                    screen.BackpackPanel:FullRefresh()
-                    screen.FloorPanel:FullRefresh()
-                end
-            end)
-        end
+        pcall(refresh_loose_inventory, state, pawn:IsLocallyControlled())
     end
     if report.ok and profile.callback then
         local delivered, effect = SilverfishStockAuthoredPickupCallback(pawn:GetAddress(), save:GetAddress(), true, profile.source)
@@ -669,12 +670,17 @@ function pickup.command(fields, state, phase)
             error("loose_pickup_projection_arguments", 0)
         end
         local hidden = mode == "hide"
+        local changed = false
         for index = 4, #fields do
             local profile = loose_profile(fields[index], state)
-            if profile and profile.claimed ~= hidden and not SilverfishProjectNativeAuthoredPickup(hidden, profile.source) then
-                error("loose_pickup_projection_unverified", 0)
+            if profile and profile.claimed ~= hidden then
+                if not SilverfishProjectNativeAuthoredPickup(hidden, profile.source) then
+                    error("loose_pickup_projection_unverified", 0)
+                end
+                changed = true
             end
         end
+        if changed then pcall(refresh_loose_inventory, state, false) end
         return "shared level item visibility synchronized"
     end
     if action == "native-loose-pickup-nearby-fixture" then
@@ -709,9 +715,9 @@ function pickup.command(fields, state, phase)
         pickup.update(state, phase)
         local approach = action == "native-loose-pickup-approach"
         local profile = #fields == (approach and 4 or 3) and loose_profile(fields[3], state)
+        local fixture_host = host_fixtures or (approach and title_fixtures)
         if not profile or profile.claimed or not fixtures
-            or (approach and (phase ~= "hosting" or not host_fixtures))
-            or (phase == "hosting" and not host_fixtures) then
+            or (approach and phase ~= "hosting") or (phase == "hosting" and not fixture_host) then
             local diagnose = SilverfishDiagnoseLoosePickup
             local reason = fixtures and type(diagnose) == "function" and diagnose(fields[3]) or "scope"
             error("loose_pickup_fixture_scope_unavailable:" .. reason, 0)
@@ -725,7 +731,7 @@ function pickup.command(fields, state, phase)
         end
         if not valid(pawn) or not valid(actor) then error("loose_pickup_fixture_scope_unavailable", 0) end
         if approach then
-            stock_input_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box)
+            stock_input_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box, title_fixtures)
             return "shared level pickup approach verified"
         end
         return stock_input_fixture.press_world_loot(state, pawn, actor, actor.Box, function()
