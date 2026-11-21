@@ -319,7 +319,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         guest_inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         assert drop_reclaim_proof["claimed_by"] == guest_inventory["owner"]
         assert sum(row["guid"] == drop_reclaim_proof["guid"] for row in guest_inventory["items"]) == 1
-        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
+        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     normal_tab_proof = None
     if stock_drop:
         before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]

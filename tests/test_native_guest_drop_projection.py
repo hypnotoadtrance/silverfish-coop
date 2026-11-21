@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, party
+from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_world_loot, party
 from tools.silverfish import native_guest_drop_projection as projection
 
 
@@ -50,6 +50,23 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                 projection.parse(changed, state, MAP)
         self.assertEqual(projection.target_parts(f"stack-drop:{epoch}:{ID}"), (epoch, ID))
         self.assertIsNone(projection.target_parts(f"stack-drop:{epoch}:{ID.upper()}"))
+
+    async def test_committed_world_pickup_is_not_recreated_by_an_older_snapshot(self):
+        client, view = self.client(), native_world_loot.Projection()
+        game, rows = client.last_game, client.gameplay[record.STATE]
+        identity = native_world_loot.player_drop_identity(ID)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)
+        epoch = view.epoch
+        self.assertIn(identity, view.items)
+        await view.retire_claim(bridge, game, (epoch, identity))
+        bridge.command.assert_awaited_with(native_world_loot.RETIRE, epoch, identity, timeout=3)
+        await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)
+        self.assertNotIn(identity, view.items)
+        bridge.command.assert_awaited_with(native_world_loot.FRAME, MAP, epoch, timeout=3)
+        await view.sync(bridge, game, {}, "second", client.zone_epoch, active=True, player_drops=rows)
+        self.assertIn(identity, view.items)
+        self.assertNotEqual(view.epoch, epoch)
 
     async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()
