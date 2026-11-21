@@ -249,7 +249,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert equipped["stock_inventory_proof"] == f"verified stock equipment slot {equip_proof['slot']}"
         after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         row, = (row for row in after["items"] if row["guid"] == item["guid"])
-        assert row == dict(item, source="equipment", index=equip_proof["slot"]), (row, item)
+        assert row == dict(item, source="equipment", index=equip_proof["slot"], droppable=False), (row, item)
         assert {row["guid"] for row in after["items"]} == {row["guid"] for row in inventory["items"]}
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
