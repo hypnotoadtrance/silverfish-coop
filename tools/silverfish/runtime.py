@@ -316,7 +316,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False, native_mindcore_view: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
            embedded_engine: bool = False, inspect_title_profile: bool = False, pause_fixture: bool = False,
-           embedded_startup: str | None = None) -> dict[str, str]:
+           embedded_startup: str | None = None, resident_title: bool = False) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
@@ -334,6 +334,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_TITLE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_ENGINE", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_STARTUP", None)
+    env.pop("SILVERFISH_COOP_RESIDENT_TITLE", None)
     env.pop("SILVERFISH_COOP_PAUSE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
@@ -356,7 +357,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_NATIVE_WIPE_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES", None)
     backend = native_death_backend(work)
-    if native_events and (backend != "cpp" or port is None):
+    host_role = port is not None or resident_title
+    if native_events and (backend != "cpp" or not host_role):
         raise ValueError("Native event scope requires a staged C++ listen host")
     if native_guest and not native_events:
         raise ValueError("Native guest ownership requires native event scope")
@@ -364,7 +366,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         raise ValueError("Stock guest regeneration requires native campaign guest ownership")
     if guest_sickness and (not native_guest or not native_zones):
         raise ValueError("Stock guest sickness requires native campaign guest ownership")
-    if guest_mre and (not native_zones or port is not None and not native_guest):
+    if guest_mre and (not native_zones or host_role and not native_guest):
         raise ValueError("Stock guest MRE use requires native campaign guest ownership")
     if native_zones and backend != "cpp":
         raise ValueError("Natural exit handling requires a staged C++ game")
@@ -377,6 +379,10 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
                 or not re.fullmatch(r"[a-f0-9]{32}", embedded_startup) or embedded_startup == "0" * 32):
             raise ValueError("Invalid packaged embedded game startup identity")
         env["SILVERFISH_COOP_EMBEDDED_STARTUP"] = embedded_startup
+    if resident_title:
+        if embedded_startup is None or port is not None or not native_guest:
+            raise ValueError("The resident title requires a packaged host with no startup port")
+        env["SILVERFISH_COOP_RESIDENT_TITLE"] = "1"
     if pause_fixture:
         if not (headless and embedded_startup is not None):
             raise ValueError("The Pause fixture requires a headless packaged role")
@@ -387,27 +393,27 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         env["SILVERFISH_COOP_INSPECT_TITLE_PROFILE"] = "1"
     if native_zone_walls and not native_zones:
         raise ValueError("Physical exit blockers require native exit handling")
-    if guest_reload_input and (port is not None or not native_zones):
+    if guest_reload_input and (host_role or not native_zones):
         raise ValueError("Stock guest reload input requires a staged native client")
-    if guest_primary_input and (port is not None or not native_zones):
+    if guest_primary_input and (host_role or not native_zones):
         raise ValueError("Stock guest primary input requires a staged native client")
-    if guest_held_fire and not (native_zones and (native_guest if port is not None else guest_primary_input)):
+    if guest_held_fire and not (native_zones and (native_guest if host_role else guest_primary_input)):
         raise ValueError("Stock held fire requires the corresponding native host and guest controls")
-    if guest_clock and (port is not None or not native_zones):
+    if guest_clock and (host_role or not native_zones):
         raise ValueError("The stock guest clock requires a staged native client")
-    if host_camera_input and (port is None or not native_guest or not native_zones):
+    if host_camera_input and (not host_role or not native_guest or not native_zones):
         raise ValueError("Stock host camera input requires a staged native campaign host")
-    if guest_inventory_view and (port is not None or not native_zones):
+    if guest_inventory_view and (host_role or not native_zones):
         raise ValueError("The guest inventory view requires a staged native client")
-    if native_shop_view and (not native_zones or port is not None and not native_guest):
+    if native_shop_view and (not native_zones or host_role and not native_guest):
         raise ValueError("The merchant view requires scoped native guest ownership")
-    if native_loot_input and (not native_zones or port is not None and not native_guest):
+    if native_loot_input and (not native_zones or host_role and not native_guest):
         raise ValueError("Natural stock crate interaction requires scoped native guest ownership")
-    if native_dead_bridge_enemy_loot and (port is None or not native_guest or not native_zones or not native_loot_input):
+    if native_dead_bridge_enemy_loot and (not host_role or not native_guest or not native_zones or not native_loot_input):
         raise ValueError("Stock Dead Bridge enemy loot requires the native campaign host and escrow bridge")
-    if broker_input and (not native_zones or port is not None):
+    if broker_input and (not native_zones or host_role):
         raise ValueError("Broker interact input requires a staged native guest")
-    if native_wipe_view and (not native_zones or port is not None and not native_guest):
+    if native_wipe_view and (not native_zones or host_role and not native_guest):
         raise ValueError("The stock item retention overlay requires staged native guest ownership")
     if backend:
         env["SILVERFISH_COOP_NATIVE_DEATH"] = "1" if backend == "overlay" else backend
@@ -430,12 +436,12 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
                 and staged_script(work, "native_campaign_npc.lua", "NPC_NotDeer_C")):
             env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1",
                        SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW="notdeer")
-        if port is not None and native_fixtures:
+        if host_role and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
     if native_loot_input:
         env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
-        if headless and port is None:
+        if headless and not host_role:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_dead_bridge_enemy_loot:
         env["SILVERFISH_COOP_NATIVE_CQC_LOOT"] = "1"
@@ -454,7 +460,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     if guest_held_fire:
         env["SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE"] = "1"
     if guest_melee_canary:
-        if not (headless and native_guest and native_zones and native_fixtures and port is not None):
+        if not (headless and native_guest and native_zones and native_fixtures and host_role):
             raise ValueError("The Old Pipe animation canary requires a staged headless native host")
         env["SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY"] = "1"
     if guest_clock:
@@ -463,7 +469,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
             env["SILVERFISH_COOP_NATIVE_GUEST_CLOCK_FIXTURES"] = "1"
     if host_camera_input:
         env["SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT"] = "1"
-    if host_dig_live and port is not None and native_guest and native_zones:
+    if host_dig_live and host_role and native_guest and native_zones:
         env["SILVERFISH_COOP_NATIVE_HOST_DIG"] = "1"
         if host_dig_live_fixture and headless and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES"] = "1"
@@ -475,13 +481,13 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         env["SILVERFISH_COOP_NATIVE_INVENTORY_VIEW"] = "1"
     if native_shop_view:
         env["SILVERFISH_COOP_NATIVE_SHOP_VIEW"] = "1"
-        if headless and port is None:
+        if headless and not host_role:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if broker_input:
         env["SILVERFISH_COOP_NATIVE_BROKER_INPUT"] = "1"
         if headless:
             env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
-    if (native_mosby_station or native_mindcore_view) and headless and port is None:
+    if (native_mosby_station or native_mindcore_view) and headless and not host_role:
         env["SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES"] = "1"
     if native_wipe_view:
         env["SILVERFISH_COOP_NATIVE_WIPE_VIEW"] = "1"
@@ -511,13 +517,13 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     arguments += f' -userdir="{profile}" -unattended -NoSplash -windowed'
     if runtime_listener and (type(port) is not int or not 1 <= port <= 65535):
         raise ValueError("The runtime listener requires a private UDP port")
-    if not runtime_listener:
+    if not runtime_listener and not options.get("resident_title"):
         arguments += " -MULTIHOME=127.0.0.1"
         if port is not None:
             arguments += f" -port={port}"
     info = None
     if headless:
-        role = "host" if port is not None else "guest"
+        role = "host" if port is not None or options.get("resident_title") else "guest"
         if (render_capture != role or options.get("embedded_engine") or options.get("title_fixture")
                 or options.get("inspect_title_profile")):
             arguments += " -nullrhi"

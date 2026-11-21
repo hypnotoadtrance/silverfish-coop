@@ -119,7 +119,7 @@ class TitleSession:
                  retire_title=None, on_title_ready: Callable[[], None] | None = None,
                  title_saved_directory: Path | None = None, poll_interval: float = .1,
                  startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
-                 join_settings=None):
+                 join_settings=None, resident: bool = False):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -128,11 +128,14 @@ class TitleSession:
             raise ValueError("Expected bounded title supervision intervals")
         if (on_title_ready is None) != (title_saved_directory is None):
             raise ValueError("The title handoff requires an isolated save directory and readiness callback")
+        if resident and (title_saved_directory is None or retire_title is not None):
+            raise ValueError("The resident supervisor requires its current title profile")
         self._bridge = bridge
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)
         self._on_title_ready = on_title_ready
         self._title_saved_directory = title_saved_directory
+        self._resident = resident
         self._poll_interval = poll_interval
         self._startup_timeout = startup_timeout
         self._stall_timeout = stall_timeout
@@ -236,6 +239,10 @@ class TitleSession:
             self._control.event("title_selection_accepted", source=source,
                                 attempt=dict(action=claim.action, request_id=claim.request_id, generation=claim.generation))
 
+    def _solo_title(self, snapshot) -> bool:
+        return bool(_isolated_stock_title(snapshot, self._title_saved_directory)
+                    and snapshot.get("save_scope", False) is None)
+
     async def run(self) -> None:
         if self._handoff is not None:
             raise RuntimeError("This title supervisor is already running")
@@ -246,13 +253,14 @@ class TitleSession:
         try:
             while self._bridge.process.poll() is None:
                 snapshot = self._bridge.snapshot()
-                offered = self._handoff.refresh(snapshot, self._plans)
+                plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
+                offered = self._handoff.refresh(snapshot, plans)
                 if self._on_title_ready is not None:
                     panel = snapshot.get(native_title_entry.PANEL_KEY, {}) if snapshot else {}
                     frame = _isolated_stock_title(snapshot, self._title_saved_directory) if offered else None
-                    if not isinstance(panel, dict) or (panel.get("state"), panel.get("mounted"), panel.get("actions")) != (
-                        "ready", True, actions,
-                    ):
+                    panel_states = ("ready", "pending") if self._resident else ("ready",)
+                    if (not isinstance(panel, dict) or panel.get("state") not in panel_states
+                            or (panel.get("mounted"), panel.get("actions")) != (True, actions)):
                         frame = None
                     if frame and initial_frame and frame[1] == initial_frame[1] and frame[0] > initial_frame[0]:
                         self._publish("offered", actions=actions)
@@ -341,7 +349,7 @@ class TitleSession:
                     break
                 snapshot = self._bridge.snapshot()
                 title = _stock_title(snapshot)
-                if snapshot is not None and (title is None or title[1] != original_title[1]):
+                if not self._resident and snapshot is not None and (title is None or title[1] != original_title[1]):
                     error = "stock_title_changed"
                     break
                 now = time.monotonic()
@@ -373,9 +381,17 @@ class TitleSession:
                         and _ready(status, claim.action) and plan.ready(status)):
                     if ready_at is None:
                         ready_at = title[0] if title else original_title[0]
-                    if title and title[0] > max(ready_at, original_title[0]):
+                    if self._resident:
+                        game = status["game"]
+                        ready_here = (snapshot is not None and snapshot.get("mode") == game["mode"]
+                                      and snapshot.get("state") == game["state"] and snapshot.get("map") == game["map"]
+                                      and snapshot.get("sequence", 0) >= game.get("sequence", 0))
+                    else:
+                        ready_here = title and title[0] > max(ready_at, original_title[0])
+                    if ready_here:
                         self._starting = False
-                        await self._retire_title()
+                        if not self._resident:
+                            await self._retire_title()
                         retired = True
                         self._last_failure = None
                         self._publish("ready", attempt=attempt, progress=_GAME_PHASE[claim.action])
@@ -383,6 +399,15 @@ class TitleSession:
                             self._poll_control()
                             await asyncio.wait((task,), timeout=self._poll_interval)
                         reason = await task
+                        if self._resident:
+                            final, returned = _read_plan_status(plan), self._bridge.snapshot()
+                            if (not _is_attempt(final, baseline, started_wall, claim.action, producer_pid())
+                                    or final["generation"] != child_generation or final.get("active") is not False
+                                    or final.get("state") != "stopped"
+                                    or not self._solo_title(returned)):
+                                raise RuntimeError("The resident session did not return to its solo title")
+                            self._publish("stopped", attempt=attempt)
+                            return False
                         if reason in native_session_exit.ORDERLY_REASONS:
                             final = _read_plan_status(plan)
                             self.return_to_title = (
@@ -422,6 +447,8 @@ class TitleSession:
         current = _is_attempt(status, baseline, started_wall, claim.action, producer_pid())
         cleanup_proven = current and status.get("active") is False and status["generation"] == child_generation
         unsafe = (current and status.get("active") is True) or (child_generation is not None and not cleanup_proven)
+        if self._resident and cleanup_proven and not self._solo_title(self._bridge.snapshot()):
+            unsafe = True
         self._last_failure = dict(attempt, code="cleanup_unverified" if unsafe else error)
         self._publish("cleanup_unverified" if unsafe else "failed", attempt=attempt)
         return unsafe

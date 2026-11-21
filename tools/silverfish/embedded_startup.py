@@ -4,7 +4,7 @@ import asyncio
 from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 from ipaddress import ip_address
 import json
@@ -18,11 +18,14 @@ import uuid
 from . import runtime
 from .control import NAME
 from .embedded_engine import (
-    BRIDGE_ENV, OPT_IN_ENV, _assert_no_reparse, _current_startup, _exact_existing, _qualify,
+    BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, _assert_no_reparse, _current_startup, _exact_existing, _qualify,
 )
 
 
 STARTUP_ENV = "SILVERFISH_COOP_EMBEDDED_STARTUP"
+RESIDENT_ENV = "SILVERFISH_COOP_RESIDENT_TITLE"
+RESIDENT_FILE = "resident-host.json"
+_RESIDENT_FEATURES = ("SILVERFISH_COOP_NATIVE_EVENTS", "SILVERFISH_COOP_NATIVE_GUEST_SAVE", "SILVERFISH_COOP_NATIVE_ZONE")
 REQUEST_FILE = "startup-request.json"
 CLAIM_FILE = "startup-claimed.json"
 ACCEPTED_FILE = "startup-accepted.json"
@@ -281,7 +284,8 @@ async def _run(*, timeout: float = 15) -> None:
 
     if type(timeout) not in (int, float) or not 0 < timeout <= 30:
         raise ValueError("Expected a bounded embedded startup timeout")
-    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, "SILVERFISH_COOP_HEADLESS"))
+    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, RESIDENT_ENV, "SILVERFISH_COOP_HEADLESS",
+                                *_RESIDENT_FEATURES))
     nonce = startup.environment.get(STARTUP_ENV)
     if startup.environment.get(OPT_IN_ENV) != "1" or not _nonce(nonce):
         raise ValueError("The packaged worker is not opted into embedded startup")
@@ -304,6 +308,13 @@ async def _run(*, timeout: float = 15) -> None:
     expected_image = _exact_existing(work / "stage" / runtime.SHIPPING, directory=False)
     if startup.image != expected_image or startup.pid != os.getpid():
         raise ValueError("The packaged worker does not own the exact staged executable")
+    if startup.environment.get(RESIDENT_ENV) == "1":
+        if role != "host" or not runtime.qualified_authored_routes(work):
+            raise ValueError("The resident worker requires its native host stage")
+        required = {STARTUP_ENV: nonce, RESIDENT_ENV: "1"} | dict.fromkeys(_RESIDENT_FEATURES, "1")
+        saved, _ = _qualify(startup, work, directory, role, required)
+        await _resident_host(work, directory, bridge, saved, headless)
+        return
 
     path, claimed = bridge / REQUEST_FILE, bridge / CLAIM_FILE
     async with asyncio.timeout(timeout):
@@ -346,6 +357,60 @@ async def _run(*, timeout: float = 15) -> None:
                 raise ValueError("The invitation does not offer embedded native co-op")
             accept()
             await service.join_game(work, directory, invitation, headless, selection.character_id, embedded_engine=True)
+
+
+async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    from . import service
+    from .title_session import SessionPlan, TitleSession
+
+    settings = _decode(_read_file(mailbox / RESIDENT_FILE, REQUEST_LIMIT))
+    if set(settings) != {"schema", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
+        raise ValueError("Invalid resident Host configuration")
+
+    def endpoint(bind, port):
+        if type(bind) is not str or "%" in bind or type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("Host requires a valid UDP port and a numeric local address")
+        return str(ip_address(bind)), port
+
+    default_bind, default_port = endpoint(settings["bind"], settings["port"])
+
+    def status():
+        return runtime.read_json(campaign / "run" / "status.json")
+
+    def host_plan(bind, port):
+        mode, area = service.menu_host_start(campaign)
+
+        async def start():
+            private = runtime.spare_udp_port()
+            if private == port:
+                private = runtime.spare_udp_port()
+            if private == port:
+                raise RuntimeError("A distinct private Unreal port was not available")
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, private)
+            await engine.observe_title()
+            await service.host_game(
+                work, campaign, bind, port, headless, resident_engine=engine,
+                max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
+                **({"start_preset": mode} if mode == "wanderer" else {}),
+            )
+
+        return SessionPlan(start, status,
+                           lambda frame: frame.get("endpoint") == {"address": bind, "port": port}
+                           and frame["game"]["map"] == area)
+
+    def resolve(claim):
+        if claim.host_settings is None:
+            return host_plan(default_bind, default_port)
+        name, address, port_text = claim.host_settings
+        if name and name != campaign.name:
+            raise ValueError("The resident title has a different campaign profile")
+        bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
+        return host_plan(bind, port)
+
+    title = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+    plan = replace(host_plan(default_bind, default_port), resolve_claim=resolve)
+    await TitleSession(title.bridge, {"host": plan}, resident=True, title_saved_directory=saved,
+                       on_title_ready=lambda: None).run()
 
 
 def run() -> None:

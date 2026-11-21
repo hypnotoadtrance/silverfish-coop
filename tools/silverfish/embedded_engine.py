@@ -205,6 +205,10 @@ class EmbeddedEngine:
     def poll(self) -> int | None:
         return self.returncode
 
+    @property
+    def profile(self) -> Path:
+        return self._saved_directory.parent
+
     @classmethod
     async def acquire(cls, work: Path, directory: Path, *, role: str, internal_port: int | None = None,
                       required_env: Mapping[str, str | None] | None = None, timeout: float = 12) -> "EmbeddedEngine":
@@ -227,11 +231,17 @@ class EmbeddedEngine:
                 raise RuntimeError("The staged engine lease was already used in this process")
             cls._used = True
         engine = cls(startup.pid, mailbox, saved_directory, internal_port)
+        await engine.observe_title(timeout=timeout)
+        return engine
+
+    async def observe_title(self, *, timeout: float = 12) -> None:
+        if self._state != "acquiring":
+            raise RuntimeError("The engine lease already observed a title")
         first = None
 
         def advancing(snapshot):
             nonlocal first
-            frame = _isolated_stock_title(snapshot, saved_directory)
+            frame = _isolated_stock_title(snapshot, self._saved_directory)
             if not frame:
                 first = None
                 return False
@@ -240,10 +250,9 @@ class EmbeddedEngine:
                 return False
             return frame[0] > first[0]
 
-        status = await engine.bridge.wait_for(advancing, timeout=timeout)
-        engine._sequence = status["sequence"]
-        engine._state = "active"
-        return engine
+        status = await self.bridge.wait_for(advancing, timeout=timeout)
+        self._sequence = status["sequence"]
+        self._state = "active"
 
     async def select_save_scope(self, scope: native_host_save.SaveScope) -> None:
         if self._state != "active" or self._save_scope is not None or scope.profile != self._saved_directory.parent:

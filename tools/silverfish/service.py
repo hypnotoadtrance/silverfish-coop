@@ -3612,7 +3612,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     difficulty: str | None = None,
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
-                    embedded_port: int | None = None, runtime_listener: bool = False) -> None:
+                    embedded_port: int | None = None, runtime_listener: bool = False,
+                    resident_engine: EmbeddedEngine | None = None) -> None:
+    if resident_engine is not None:
+        if (embedded_port is not None or resident_engine.internal_port is None
+                or resident_engine.profile != directory / "game-user"):
+            raise ValueError("The resident title does not own this campaign profile")
+        embedded_port = resident_engine.internal_port
     if embedded_port is not None and (type(embedded_port) is not int or not 1 <= embedded_port <= 65535
                                       or port == embedded_port or not (native_events and native_guest and native_zones)):
         raise ValueError("Embedded hosting requires a staged native campaign and a distinct private game port")
@@ -3694,6 +3700,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         if embedded_port is not None and not old_world:
             storage = native_host_save.SaveScope(profile, uuid.UUID(campaign["campaign_id"]).hex)
         save_scope = storage if isinstance(storage, native_host_save.SaveScope) else None
+        if resident_engine is not None and save_scope is None:
+            raise ValueError("The resident title requires a scoped campaign")
         persist_guest, native_profile = _host_save_options(work, storage, native_guest, authored)
         if save_scope and (native_profile is None or not staged_script(work, "native_save_scope.lua")):
             raise ValueError("Restage the co-op save scope bridge to open this campaign")
@@ -3740,7 +3748,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                 native_dead_bridge_enemy_loot=native_dead_bridge_enemy_loot, guest_melee_canary=guest_melee_canary,
                                 host_dig_live=host_dig_live, host_dig_live_fixture=host_dig_live_fixture, **stage_options)
             if embedded_port is not None:
-                embedded = await _acquire_embedded_game(work, directory, "host", headless, embedded_port, game_options)
+                embedded = resident_engine or await _acquire_embedded_game(
+                    work, directory, "host", headless, embedded_port, game_options)
                 process, bridge = embedded, embedded.bridge
             else:
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
