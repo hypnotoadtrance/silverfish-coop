@@ -1,0 +1,173 @@
+"""Share stock hinged door locks and collision poses in the current world."""
+
+import math
+import re
+import time
+
+from . import party
+
+
+TAG = "native-stock-door"
+KEY = "native_stock_doors"
+ACTION = "native-stock-door-interact"
+RESULT = "native_stock_door_interaction"
+FIXTURE = "native-stock-door-fixture"
+INPUT_FIXTURE = "native-stock-door-input-fixture"
+STAGE_FIXTURE = "native-stock-door-stage-fixture"
+TRACE_FIXTURE = "native-stock-door-trace"
+TRACE_RESULT = "native_stock_door_trace"
+TARGET_PREFIX = "stock-door:"
+_ACTOR = re.compile(r"[A-Za-z0-9_]+ (/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
+_FLAGS = ("locked", "broken", "open")
+_ANGLES = ("pitch", "yaw", "roll")
+_OFFSET = ("x", "y", "z")
+
+
+def actor_map(actor):
+    match = _ACTOR.fullmatch(actor) if isinstance(actor, str) and len(actor) <= 384 else None
+    if match and match[1].rsplit("/", 1)[-1] == match[2]:
+        return match[1]
+    return None
+
+
+def target_actor(target):
+    if isinstance(target, str) and target.startswith(TARGET_PREFIX):
+        actor = target[len(TARGET_PREFIX):]
+        if actor_map(actor):
+            return actor
+    return None
+
+
+def parse(fields, phase, area):
+    if (len(fields) != 19 or fields[:2] != [TAG, area] or actor_map(fields[2]) != area
+            or phase not in ("hosting", "connected") or any(flag not in ("0", "1") for flag in fields[3:6])
+            or fields[18] not in ("0", "1", "2", "3", "4", "5")):
+        raise ValueError("Invalid stock hinged door frame")
+    angles = list(map(float, fields[6:9]))
+    offsets = list(map(float, fields[9:12]))
+    geometry = list(map(float, fields[12:18]))
+    if (any(not -360 <= axis <= 360 for axis in angles) or any(not -10000 <= axis <= 10000 for axis in offsets)
+            or any(not -1e7 <= axis <= 1e7 for axis in geometry)):
+        raise ValueError("Invalid stock door pose")
+    return (dict(zip(_FLAGS, (flag == "1" for flag in fields[3:6]))) | dict(zip(_ANGLES, angles))
+            | dict(zip(_OFFSET, offsets))
+            | {"panel_location": geometry[:3], "knob_location": geometry[3:], "collision": int(fields[18])})
+
+
+def frame(game, epoch):
+    if game.get("state") != "hosting" or not isinstance(epoch, str) or not party.REQUEST_ID.fullmatch(epoch):
+        return {}
+    fields = (*_FLAGS, *_ANGLES, *_OFFSET)
+    return {"map": game["map"], "epoch": epoch,
+            "doors": {name: {key: row[key] for key in fields} for name, row in game[KEY].items()}} if game.get(KEY) else {}
+
+
+def matches(report, desired):
+    return (all(report.get(flag) is desired[flag] for flag in _FLAGS)
+            and all(abs((report.get(key, math.inf) - desired[key] + 180) % 360 - 180) <= .05 for key in _ANGLES)
+            and all(abs(report.get(key, math.inf) - desired[key]) <= .05 for key in _OFFSET))
+
+
+async def project(bridge, game, frame, epoch):
+    area = game.get("map")
+    if (not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, epoch)
+            or game.get("state") != "connected"):
+        return game
+    local = game.get(KEY, {})
+    doors = frame.get("doors")
+    if not local or not isinstance(doors, dict) or len(doors) > 240:
+        return game
+    batch = []
+    for name, expected in doors.items():
+        if (name not in local or actor_map(name) != area or not isinstance(expected, dict)
+                or any(type(expected.get(flag)) is not bool for flag in _FLAGS)
+                or any(type(expected.get(axis)) not in (float, int) or not -360 <= expected[axis] <= 360 for axis in _ANGLES)
+                or any(type(expected.get(axis)) not in (float, int) or not -10000 <= expected[axis] <= 10000 for axis in _OFFSET)
+                or matches(local[name], expected)):
+            continue
+        batch.append((name, expected))
+        if len(batch) == 24:
+            break
+    if not batch:
+        return game
+    args = ("|".join((name, *("1" if row[flag] else "0" for flag in _FLAGS),
+                       *(str(row[key]) for key in (*_ANGLES, *_OFFSET)))) for name, row in batch)
+    result = await bridge.command(TAG + "-project", area, *args, timeout=4)
+    after = result.get(KEY, {})
+    if (result.get("state"), result.get("map")) != ("connected", area) or any(
+            not matches(after.get(name, {}), row) for name, row in batch):
+        raise RuntimeError("Stock hinged door projection did not match the host")
+    return result
+
+
+async def interact(host, bridge, character, requested, operation):
+    epoch, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+    game = host.last_game
+    area = game.get("map")
+    member = host.native_recipients().get(character, {})
+    row = game.get(KEY, {}).get(actor)
+    if (not epoch or epoch != host.zone_epoch or actor_map(actor) != area or not row
+            or game.get("state") != "hosting" or host.transitioning or host.stopping or host.native_checkpoint_unsafe
+            or not member.get("connected") or host.party["wipe"] or host.party["players"][character]["downed"]
+            or not party.REQUEST_ID.fullmatch(operation)):
+        raise party.RuleError("stock_door_scope_unavailable")
+    fingerprint = [ACTION, requested, None]
+    receipts = host.party["receipts"].setdefault(character, [])
+    for receipt in receipts:
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if row["locked"]:
+        raise party.RuleError("stock_door_locked")
+    try:
+        reply = await bridge.command(TAG + "-guest-interact", actor, member["pawn"], timeout=4)
+    except RuntimeError as error:
+        if str(error).startswith("stock_door_guest_"):
+            raise party.RuleError(str(error)) from error
+        raise
+
+    def toggled(frame):
+        observed = frame.get(KEY, {}).get(actor, {})
+        return ((frame.get("state"), frame.get("map")) == ("hosting", area) and observed.get("locked") is False
+                and observed.get("open") is not None and observed["open"] != row["open"])
+
+    host.last_game = reply if toggled(reply) else await bridge.wait_for(toggled, timeout=2)
+    host.last_seen = time.monotonic()
+    result = {RESULT: {"actor": actor, "open": host.last_game[KEY][actor]["open"]}}
+    receipts.append({"id": operation, "request": fingerprint, "result": result})
+    del receipts[:-party.RECENT_ACTIONS]
+    return result
+
+
+async def stage(host, bridge, requested, side):
+    role, _, actor = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+    game = host.last_game
+    row = game.get(KEY, {}).get(actor)
+    if (not row or role not in ("host", "guest") or side not in (0, 1, 2, 3)
+            or game.get("state") != "hosting" or host.transitioning or host.native_checkpoint_unsafe):
+        raise party.RuleError("Select a stock door, paired player, and approach side")
+    slot, binding = host.role_pawn(role)
+    if not slot:
+        raise party.RuleError("The paired stock door fixture pawn is unavailable")
+    x, y, z = row["knob_location"]
+    dx, dy = ((110, 0), (0, 110), (-110, 0), (0, -110))[side]
+    report = await bridge.restore(slot, {"location": [x + dx, y + dy, z]}, binding=binding)
+    host.last_game, host.last_seen = report, time.monotonic()
+    return {"position": report["pawns"][slot]["location"]}
+
+
+async def trace_fixture(bridge, game, target):
+    parts = target.split("@") if isinstance(target, str) else []
+    if len(parts) != 4 or parts[0] not in game.get(KEY, {}) or parts[1] not in ("0", "2"):
+        raise ValueError("Select an exact stock door and trace endpoints")
+    actor, query, start, end = parts
+    coordinates = (*start.split(","), *end.split(","))
+    if len(start.split(",")) != 3 or len(end.split(",")) != 3 or any(
+            not -1e7 <= float(axis) <= 1e7 for axis in coordinates):
+        raise ValueError("Select two finite world points around the stock door")
+    frame = await bridge.command(TRACE_FIXTURE, actor, query, *coordinates, timeout=4)
+    proof = frame.get(TRACE_RESULT, {})
+    if (proof.get("actor"), proof.get("query")) != (actor, int(query)):
+        raise RuntimeError("The exact stock door trace did not verify")
+    return frame, {TRACE_RESULT: proof}

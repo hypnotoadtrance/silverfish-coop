@@ -94,14 +94,33 @@ namespace
 
     enum class Seat { unavailable, host, guest };
 
-    Seat seat(U::UObject* door)
+    bool ordinary_door(U::UObject* door)
     {
-        if (!live(door) || door->GetClassPrivate() != find<U::UClass>(door_type) || door->GetPathName() != door_path)
-            return Seat::unavailable;
+        auto* type = door->GetClassPrivate();
+        auto* base = find<U::UClass>(base_type);
+        auto* pry = field<U::FBoolProperty>(door, STR("Can_PryOpen"));
+        if (!type || !base || !type->IsChildOf(base) || !pry || !pry->GetPropertyValueInContainer(door)) return false;
+        auto* root = object(door, STR("RootComponent"));
+        auto* arrow = object(door, STR("Arrow"));
+        auto* panel = object(door, STR("DoorMesh"));
+        auto* knob = object(door, STR("Box_Knob"));
+        return live(root) && live(arrow) && live(panel) && live(knob) &&
+            arrow->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.ArrowComponent")) &&
+            panel->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.StaticMeshComponent")) &&
+            knob->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.BoxComponent")) &&
+            object(arrow, STR("AttachParent")) == root && object(panel, STR("AttachParent")) == arrow &&
+            object(knob, STR("AttachParent")) == panel;
+    }
+
+    Seat seat(U::UObject* door, bool allow_ordinary = false)
+    {
+        if (!live(door)) return Seat::unavailable;
+        const bool special = door->GetClassPrivate() == find<U::UClass>(door_type) && door->GetPathName() == door_path;
+        if (!special && !(allow_ordinary && ordinary_door(door))) return Seat::unavailable;
         auto* actor = static_cast<U::AActor*>(door);
         auto* world = actor->GetWorld();
         auto* ending = field<U::FBoolProperty>(door, STR("bActorIsBeingDestroyed"));
-        if (!live(world) || world->GetPathName() != world_path || !ending || ending->GetPropertyValueInContainer(door) ||
+        if (!live(world) || (special && world->GetPathName() != world_path) || !ending || ending->GetPropertyValueInContainer(door) ||
             actor->GetLevel() != object(world, STR("PersistentLevel"))) return Seat::unavailable;
         auto* instance = object(world, STR("OwningGameInstance"));
         auto* driver = object(world, STR("NetDriver"));
@@ -129,8 +148,9 @@ namespace
         const auto name = function->GetFName();
         const bool script_graph = name == graph;
         if (!script_graph && std::ranges::find(wrappers, name) == wrappers.end()) return;
-        if (function->GetOuterPrivate() != find<U::UClass>(base_type) ||
-            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || seat(receiver) != Seat::guest) return;
+        if (function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || seat(receiver, true) != Seat::guest) return;
+        if (script_graph ? function->GetOuterPrivate() != find<U::UClass>(base_type) :
+            receiver->GetClassPrivate()->GetFunctionByNameInChain(name) != function) return;
         if (!script_graph || guarded_graph_entry(function, args)) call.PreventOriginalFunctionCall();
     }
 }
@@ -144,11 +164,11 @@ namespace silverfish::native_datasilo_door
             wrappers[i] = U::FName{stock_entries[i].wrapper, U::FNAME_Add};
         graph = U::FName{graph_name, U::FNAME_Add};
         hooks[0] = Hook::RegisterProcessEventPreCallback(intercept,
-            {false, false, owner, STR("Guard Data Silo upper door event")});
+            {false, false, owner, STR("Guard stock door event")});
         hooks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* receiver, U::FFrame& frame, void*) {
                 if (frame.Object() == receiver) intercept(call, receiver, frame.Node(), frame.Locals());
-            }, {false, false, owner, STR("Guard Data Silo upper door script")});
+            }, {false, false, owner, STR("Guard stock door script")});
         if (hooks[0] == Hook::ERROR_ID || hooks[1] == Hook::ERROR_ID)
         {
             uninstall_hooks();
@@ -172,6 +192,10 @@ namespace silverfish::native_datasilo_door
         if (!enabled()) return;
         lua.register_function("SilverfishDataSiloDoorGuardAvailable", [](const Lua& state) {
             state.set_bool(available() && seat(find<U::UObject>(door_path)) != Seat::unavailable);
+            return 1;
+        });
+        lua.register_function("SilverfishStockDoorGuardAvailable", [](const Lua& state) {
+            state.set_bool(available());
             return 1;
         });
     }

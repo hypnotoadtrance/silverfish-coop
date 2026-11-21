@@ -38,6 +38,7 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
+from . import native_stock_door
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -73,6 +74,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
+                        native_stock_door.ACTION,
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -783,6 +785,8 @@ class Host:
             view[native_loot.STATE_KEY] = rolls
         if locks := self.last_game.get(native_loot.VEHICLE_LOCKS):
             view[native_loot.VEHICLE_LOCKS] = locks
+        if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
+            view[native_stock_door.KEY] = doors
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
@@ -1769,6 +1773,8 @@ class Host:
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
+            elif action == native_stock_door.ACTION:
+                result = await native_stock_door.interact(self, bridge, character, target, request["operation_id"])
             elif action == native_inventory.SORT:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
@@ -2779,6 +2785,18 @@ class Host:
                         raise RuntimeError("The stock vehicle pry did not unlock the exact trunk")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     result = {native_loot.VEHICLE_LOCKS: {crate: False}}
+                elif action == native_stock_door.FIXTURE and self.fixtures:
+                    actor = request.get("target")
+                    if not isinstance(actor, str) or actor not in self.last_game.get(native_stock_door.KEY, {}):
+                        raise ValueError("Select an exact stock door in the current world")
+                    self.last_game = await bridge.command(action, "pry", actor, timeout=4)
+                    self.last_seen = time.monotonic()
+                    result = {"actor": actor}
+                elif action == native_stock_door.STAGE_FIXTURE and self.fixtures:
+                    result = await native_stock_door.stage(self, bridge, request.get("target"), request.get("amount"))
+                elif action == native_stock_door.TRACE_FIXTURE and self.fixtures:
+                    self.last_game, result = await native_stock_door.trace_fixture(bridge, self.last_game, request.get("target"))
+                    self.last_seen = time.monotonic()
                 elif action in ("native-quest-catalog", "native-quest-list"):
                     catalog = await self.read_quest_catalog(bridge)
                     result = {"native_quest_catalog": catalog} if action == "native-quest-catalog" else {
@@ -4532,7 +4550,7 @@ class Client:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
-        elif action in native_loot.PRY_TOOL_ACTIONS.values():
+        elif action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION:
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
@@ -4886,6 +4904,8 @@ class Client:
                 await self.downed_markers.sync(self)
                 await native_dead_drop.project_client(self)
                 if time.monotonic() - self.gameplay_seen < 3:
+                    self.last_game = await native_stock_door.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
@@ -5067,6 +5087,15 @@ class Client:
                         raise ValueError("Select an exact authored crate on the current map")
                     self.last_game = await self.bridge.command(action, crate, timeout=5)
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
+                elif action in (native_stock_door.FIXTURE, native_stock_door.INPUT_FIXTURE):
+                    actor = request.get("target")
+                    if not isinstance(actor, str) or actor not in self.last_game.get(native_stock_door.KEY, {}):
+                        raise ValueError("Select an exact stock door in the current world")
+                    args = ("guard", actor) if action == native_stock_door.FIXTURE else (actor,)
+                    self.last_game = await self.bridge.command(action, *args, timeout=4)
+                    result = {"actor": actor}
+                elif action == native_stock_door.TRACE_FIXTURE:
+                    self.last_game, result = await native_stock_door.trace_fixture(self.bridge, self.last_game, request.get("target"))
                 elif action == "native-loot-view-fixture" and self.loot_view:
                     self.last_game = await self.loot_view.fixture(action, request.get("target"))
                     result = {"native_loot_view": self.last_game.get("native_loot_view", {})}
@@ -5312,6 +5341,10 @@ class Client:
                         stack_drop = native_guest_drop_projection.target_parts(target)
                         if stack_drop:
                             result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        if door := native_stock_door.target_actor(target):
+                            result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES

@@ -373,6 +373,8 @@ local function stock_focus(pawn, box, dispatch, focus_refusal)
     return invoked, consumed, detail
 end
 
+input.stock_focus = stock_focus
+
 local function pry_with_crowbar(current, state, phase, pawn_name, guid)
     local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
     local pawn, crate, save = scope.pawn, scope.crate, scope.save

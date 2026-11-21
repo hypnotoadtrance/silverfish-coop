@@ -27,6 +27,7 @@ local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
 local native_datasilo_lift = require("native_datasilo_lift")
 local native_datasilo_door = require("native_datasilo_door")
+local native_stock_door = require("native_stock_door")
 local native_cistern_lockpick = require("native_cistern_lockpick")
 local native_mindcore_carry = require("native_mindcore_carry")
 local native_mindcore_carry_view = require("native_mindcore_carry_view")
@@ -994,6 +995,7 @@ local function run_command(fields, state, current_phase)
         or native_mindcore.command(fields, state, current_phase)
         or native_datasilo_lift.command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
+        or native_stock_door.command(fields, state, current_phase)
         or native_cistern_lockpick.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
         or native_mindcore_carry.command(fields, state, current_phase)
@@ -1169,6 +1171,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_cistern_lockpick.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

@@ -27,6 +27,7 @@ from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
+from . import native_stock_door
 from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
@@ -704,6 +705,7 @@ class Bridge:
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)
+                    and not native_stock_door.target_actor(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
@@ -1350,6 +1352,16 @@ class Bridge:
                     if role is None or data.get("map") != native_mindcore.MAP or native_datasilo_door.KEY in data:
                         raise ValueError("Invalid upper Data Silo door frame scope")
                     data[native_datasilo_door.KEY] = native_datasilo_door.parse(fields, role)
+                elif fields[0] == native_stock_door.TAG:
+                    report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
+                    doors = data.setdefault(native_stock_door.KEY, {})
+                    if fields[2] in doors or len(doors) >= 240:
+                        raise ValueError("Repeated or oversized stock hinged door frame")
+                    doors[fields[2]] = report
+                elif (fields[0] == native_stock_door.TRACE_FIXTURE and len(fields) == 5
+                      and native_stock_door.actor_map(fields[2]) == fields[1] == data.get("map")
+                      and fields[3] in ("0", "2") and fields[4] in ("0", "1")):
+                    data[native_stock_door.TRACE_RESULT] = {"actor": fields[2], "query": int(fields[3]), "panel": fields[4] == "1"}
                 elif fields[0] == native_datasilo_lift.RIDER_TAG:
                     slot, rider = native_datasilo_lift.parse_rider(fields)
                     lift = data.get(native_datasilo_lift.KEY)

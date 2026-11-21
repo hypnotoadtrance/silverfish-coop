@@ -3,6 +3,7 @@ local native_bag_projection = require("native_bag_projection")
 local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_authored_pickup = require("native_authored_pickup")
 local native_enemy_shell_view = require("native_enemy_shell_view")
+local native_stock_door = require("native_stock_door")
 
 local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -67,6 +68,7 @@ local function write_interaction(pawn, pickup_source)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
     local target = pickup_source or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
+        or native_stock_door.focused_target(pawn)
     local file = io.open(input_file, "ab")
     if not file then return end
     input_sequence = input_sequence + 1
@@ -742,6 +744,20 @@ end
 
 function players.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-stock-door-input-fixture" and #fields == 3 then
+        local pawn = local_player and local_player.pawn
+        if not valid(pawn) or desired[local_player.name] or native_interact_address ~= pawn:GetAddress()
+            or type(SilverfishProbeNativeInteractInput) ~= "function" then
+            error("stock_door_guest_input_fixture_unavailable", 0)
+        end
+        return native_stock_door.input_fixture(state, phase, fields[3], pawn, function()
+            local ok, reason = SilverfishProbeNativeInteractInput(native_interact_address)
+            if not ok then error(reason, 0) end
+            if sync_native_interact(phase) ~= "stock-door:" .. fields[3] then
+                error("stock_door_guest_input_fixture_not_published", 0)
+            end
+        end)
+    end
     if command == "native-enemy-shell-input-fixture" and #fields == 3 then
         local pawn = local_player and local_player.pawn
         if not valid(pawn) or desired[local_player.name] or native_interact_address ~= pawn:GetAddress()
