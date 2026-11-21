@@ -88,6 +88,8 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
                             and state.get("zone_epoch") != previous_epoch and state.get("link_connected")
                             and state.get("game", {}).get("native_guest_save", {}).get("state") == "bound", timeout=55)
         await wait(client_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
+                   and state.get("character_id") == invite["character_id"]
+                   and state.get("host_session") == joined["generation"]
                    and state.get("zone_epoch") == joined["zone_epoch"] and state.get("game", {}).get("map") == area,
                    timeout=55)
         return joined
@@ -174,7 +176,20 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
                 raise RuntimeError(f"All tested approaches to {route.actor} were obstructed")
 
             guest_lane = await near_probe("guest", "guest_veto", ("guest_denied",) if door else ("wall",))
-            await act(position, target="guest", exit_position="far", **options)
+            distant = await submit(run, position, target="guest", exit_position="far", **options)
+            if door and not distant.get("ok") and distant.get("error", "").endswith(
+                    "No verified stock floor near the named transition door"):
+                # An enclosed corridor may only offer walkable ground beside its other stock door.
+                for anchor in AUTHORED_ROUTES:
+                    if anchor.source != route.source or anchor.kind != "door" or anchor.entrance == route.entrance:
+                        continue
+                    placement = await submit(run, position, target="guest", exit_position="near", entrance=anchor.entrance)
+                    if placement.get("ok"):
+                        leg["distant_door_anchor"] = anchor.actor
+                        distant = placement
+                        break
+            if not distant.get("ok"):
+                raise RuntimeError(f"{position} refused with {distant.get('error')}")
             host_lane = await near_probe("host", "distance_veto", ("host_out_of_range",) if door else ("wall",), guest_lane)
             if check_regroup:
                 named = await wait(run, lambda state: any(

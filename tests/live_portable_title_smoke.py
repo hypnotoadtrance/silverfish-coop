@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -119,6 +120,22 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         return await native_mailbox(root, process)
 
 
+async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
+    def qualified(game):
+        return (game.get("native_enemy_loot_cqc_version") == 3
+                and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
+                and "guest_sickness" in game.get("native_guest_sickness", {}).get(pawn, {}))
+
+    game = await host.bridge.wait_for(qualified)
+    heartbeat = guest.bridge.directory / "native-shop-view-heartbeat"
+    async with asyncio.timeout(10):
+        while not heartbeat.is_file():
+            await asyncio.sleep(.1)
+    assert 0 <= int(time.time()) - int(heartbeat.read_text(encoding="ascii")) <= 5
+    return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
+            "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True}
+
+
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None) -> None:
     roots = (work, first_game, second_game, original)
@@ -181,8 +198,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             baselines.append((hashes, await stock_profile(seat.bridge)))
 
         first, second = seats
-        proof["sessions"].append(await start_pair(first, second, "Second portable scout"))
-        proof["sessions"].append(await start_pair(second, first, "First portable scout"))
+        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=verify_gameplay))
+        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=verify_gameplay))
         assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2

@@ -38,7 +38,7 @@ async def offered(seat):
                                       and game[native_title_entry.PANEL_KEY]["actions"] == ["host", "join"])
 
 
-async def start_pair(host, guest, character_name):
+async def start_pair(host, guest, character_name, *, on_join=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -76,6 +76,7 @@ async def start_pair(host, guest, character_name):
 
     paired = await wait(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     pawn = paired["game"]["native_guest_save"]["pawn"]
+    gameplay = await on_join(host, guest, pawn) if on_join else {}
     assert (await submit(guest_run, "drop-link"))["ok"]
     await wait(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
                                          for row in frame.get("campaign", {}).get("leases", ())))
@@ -100,7 +101,7 @@ async def start_pair(host, guest, character_name):
     assert saved["characters"][character]["state"]["native_guest_save"]
     return {"host_pid": host_pid, "guest_pid": guest_pid, "campaign_id": saved["campaign_id"],
             "revision": saved["revision"], "character_id": character, "same_pawn_after_reconnect": True,
-            "title_return_and_sockets_closed": True}
+            "title_return_and_sockets_closed": True, **gameplay}
 
 
 async def verify(work, original):

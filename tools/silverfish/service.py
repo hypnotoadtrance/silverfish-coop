@@ -3597,6 +3597,17 @@ def _host_stage_options(work: Path, native_guest: bool, native_zones: bool) -> d
                 host_camera_input=scoped and staged_script(work, "native_host_camera.lua"))
 
 
+def _staged_held_fire(work: Path) -> bool:
+    return (staged_script(work, "native_guest_smg_hold.lua", "held-fire-command.tsv")
+            and staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent"))
+
+
+def _staged_cqc_loot(work: Path) -> bool:
+    return (staged_script(work, "native_enemy_loot.lua", "native-enemy-loot-cqc-capability")
+            and staged_script(work, "native_enemy_loot_registry.lua", "refinery-cqc-v1")
+            and staged_script(work, "guest_save.lua", "native-guest-bind-exact"))
+
+
 def _host_save_options(work: Path, profile: native_host_save.Profile, native_guest: bool, authored: bool
                        ) -> tuple[bool, native_host_save.Profile | None]:
     persist_guest = native_guest and staged_script(work, "guest_save.lua", "native-guest-save-frame")
@@ -3706,10 +3717,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     native_backend = native_death_backend(work)
     stage_options = _host_stage_options(work, native_guest, native_zones)
     native_loot_input = stage_options["native_loot_input"]
-    if native_dead_bridge_enemy_loot and not (native_loot_input and native_backend == "cpp" and
-            staged_script(work, "native_enemy_loot.lua", "native-enemy-loot-cqc-capability") and
-            staged_script(work, "native_enemy_loot_registry.lua", "refinery-cqc-v1") and
-            staged_script(work, "guest_save.lua", "native-guest-bind-exact")):
+    if native_dead_bridge_enemy_loot and not (native_loot_input and native_backend == "cpp" and _staged_cqc_loot(work)):
         raise ValueError("Stock placed CQC enemy loot requires the current native co-op stage")
     broker_input = native_guest and native_zones and staged_script(work, "native_broker_input.lua")
     wipe_view_enabled = stage_options["native_wipe_view"]
@@ -3727,9 +3735,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     if guest_melee_canary and not (headless and fixtures and native_guest and native_zones and native_backend == "cpp"
                                   and staged_script(work, "native_guest_melee.lua", "SilverfishStartNativeGuestMeleeCanary")):
         raise ValueError("The Old Pipe animation canary requires the current staged headless native co-op bridge")
-    if guest_held_fire and not (native_guest_controls and
-                                staged_script(work, "native_guest_smg_hold.lua", "held-fire-command.tsv")
-                                and staged_script(work, "native_guest_primary_input.lua", "native-guest-held-fire-intent")):
+    if guest_held_fire and not (native_guest_controls and _staged_held_fire(work)):
         raise ValueError("Stock held fire requires the current native guest controls stage")
     if guest_regen and not staged_script(work, "native_guest_regen.lua"):
         raise ValueError("Restage the native host to enable stock guest regeneration")
@@ -5202,18 +5208,36 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
                 guest_mre=invite.get("native_guest_mre", False))
 
 
-def unified_title_options(work: Path) -> dict:
+def unified_host_options(work: Path) -> dict:
+    """Select qualified features for a campaign opened from the in-game title."""
+    return MENU_HOST_OPTIONS | {
+        "native_shop_view": staged_script(work, "native_shop_view.lua"),
+        "guest_regen": staged_script(work, "native_guest_regen.lua"),
+        "guest_sickness": staged_script(work, "native_guest_sickness.lua"),
+        "guest_mre": staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"),
+        "guest_held_fire": staged_guest_controls(work) and _staged_held_fire(work),
+        "native_dead_bridge_enemy_loot": (native_death_backend(work) == "cpp"
+                                         and staged_script(work, "native_loot_crate_input.lua") and _staged_cqc_loot(work)),
+    }
+
+
+def unified_title_options(work: Path, *, host_options: dict | None = None) -> dict:
     """Start the standard native menu capabilities for either role in one process."""
     stage = _host_stage_options(work, True, True)
+    if host_options is None:
+        host_options = unified_host_options(work)
     guest = guest_engine_options(work, {
         "native_zones": True, "native_zone_walls": True, "expanded_zones": True,
         "native_guest_controls": staged_guest_controls(work),
+        "native_shop_view": host_options["native_shop_view"],
+        "native_guest_held_fire": host_options["guest_held_fire"],
+        "native_guest_mre": host_options["guest_mre"],
         "native_wipe_view": stage["native_wipe_view"], "native_loot_input": stage["native_loot_input"],
         "native_broker_input": staged_script(work, "native_broker_input.lua"),
         "native_mosby_station": staged_script(work, "native_mosby_station_view.lua"),
         "native_mindcore_view": staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"),
     })
-    return guest | MENU_HOST_OPTIONS | stage | {
+    return guest | host_options | stage | {
         "host_dig_live": staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"),
     }
 

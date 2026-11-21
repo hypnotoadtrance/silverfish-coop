@@ -420,7 +420,7 @@ def _reserve_campaign(work: Path, campaign_root: Path) -> Path:
 
 
 def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port, *,
-                        automatic_campaigns=False):
+                        automatic_campaigns=False, host_options=None):
     from . import service
     from .control import select_run
     from .title_host_campaigns import saved_campaign
@@ -432,6 +432,8 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         return str(ip_address(bind)), port
 
     default_bind, default_port = endpoint(default_bind, default_port)
+    if host_options is None:
+        host_options = service.MENU_HOST_OPTIONS
 
     def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None):
         mode, area = (("resume", resume_area) if resume_area is not None
@@ -451,7 +453,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             await service.host_game(
                 work, selected, bind, port, headless, resident_engine=engine,
                 direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
-                max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
+                max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
                 **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
             )
 
@@ -596,14 +598,15 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
     guest = select_run(work, "clients", seat.name)
     if campaign != work / "campaigns" / name or guest != work / "clients" / seat.name:
         raise ValueError("The resident role directory is redirected")
-    options = service.unified_title_options(work)
+    host_options = service.unified_host_options(work)
+    options = service.unified_title_options(work, host_options=host_options)
     required = service._embedded_features(work, headless, None, options, resident=True, unified=True)
     if _current_startup(tuple(required)).environment != required:
         raise ValueError("The unified title lacks the standard native co-op capabilities")
 
     defaults = HostDefaults(name, settings["bind"], settings["port"])
     host = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port,
-                               automatic_campaigns=True)
+                               automatic_campaigns=True, host_options=host_options)
     join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
     try:
         await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,

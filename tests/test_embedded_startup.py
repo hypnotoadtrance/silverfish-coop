@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
@@ -122,6 +123,41 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             await startup._run()
         with self.assertRaisesRegex(FileExistsError, "already has a request"):
             startup.publish(bridge, request)
+
+    async def test_unified_title_arms_and_passes_qualified_gameplay_to_host(self):
+        capabilities = {
+            "native_shop_view": "SILVERFISH_COOP_NATIVE_SHOP_VIEW",
+            "guest_regen": "SILVERFISH_COOP_NATIVE_GUEST_REGEN",
+            "guest_sickness": "SILVERFISH_COOP_NATIVE_GUEST_SICKNESS",
+            "guest_mre": "SILVERFISH_COOP_NATIVE_GUEST_MRE",
+            "guest_held_fire": "SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE",
+            "native_dead_bridge_enemy_loot": "SILVERFISH_COOP_NATIVE_CQC_LOOT",
+        }
+        with (patch.object(service, "native_death_backend", return_value="cpp"),
+              patch.object(runtime, "native_death_backend", return_value="cpp"),
+              patch.object(service, "staged_script", return_value=True),
+              patch.object(service, "staged_guest_controls", return_value=True),
+              patch.object(service, "menu_host_start", return_value=("wanderer", OBSERVATORY)),
+              patch.object(startup, "EmbeddedEngine") as engine,
+              patch.object(runtime, "spare_udp_port", return_value=PRIVATE_PORT)):
+            engine.return_value.observe_title = AsyncMock()
+            host = service.unified_host_options(self.work)
+            title = service.unified_title_options(self.work, host_options=host)
+            environment = runtime.game_environment(self.work, False, embedded_engine=True, resident_title=True,
+                                                   resident_direct_join=True, unified_title=True,
+                                                   embedded_startup=BRIDGE_ID, base_env={}, **title)
+            self.assertEqual({name: host[name] for name in capabilities}, dict.fromkeys(capabilities, True))
+            self.assertEqual({key: environment[key] for key in capabilities.values()},
+                             dict.fromkeys(capabilities.values(), "1"))
+            plan = startup._resident_host_plan(self.work, self.host, self.path(self.host),
+                                               self.host / "game-user/Saved", False,
+                                               "127.0.0.1", PUBLIC_PORT, host_options=host)
+            await plan.resolve_claim(SimpleNamespace(host_settings=None)).start()
+            self.host_game.assert_awaited_once_with(
+                self.work, self.host, "127.0.0.1", PUBLIC_PORT, False, resident_engine=engine.return_value,
+                direct_password="", stock_creator=False, resume_existing=False,
+                max_guests=service.MENU_HOST_GUEST_LIMIT, start_preset="wanderer", **host,
+            )
 
     async def test_existing_host_uses_resume_path(self):
         request = self.request(self.host, replace(HOST, start="resume"))
