@@ -20,9 +20,10 @@ if str(REPO) not in sys.path:
 from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
-                                           OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name, loot_capacity)
+                                           OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
+                                           loot_capacity, valid_loot_trait_calls)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -72,9 +73,14 @@ FAMILY_SCENES = {
     "stock-fridge": (CISTERN, "Loot_Fridge_BP_C", "Loot_Fridge_BP_C_1"),
     "stock-wardrobe": ("/Game/Classes/Maps/Maps_OverWorld/Slums_P", "Loot_Wardrobe_BP_C", "Loot_Wardrobe_BP_C_2"),
     "stock-gun-wardrobe": (CROSSROADS, "Loot_Wardrobe_Guns_BP_C", "LootCabnet_Large_BP_C_12"),
+    "stock-large-crate": (CROSSROADS, "LootCrate_Large_BP_C", "LootCrate_Large_BP_C_5"),
+    "stock-guaranteed-large-crate": (RAIL_YARD, "LootCrate_Large_BP_C", "LootCrate_Large_BP_C_3"),
+    "stock-cult-large-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Large_BP_C", "LootCrate_Cult_Large_BP_C_1"),
+    "stock-guaranteed-cult-large-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Large_BP_C", "LootCrate_Cult_Large_BP_C_31"),
+    "stock-weapon-crate": (BLACK_MARKET, "LootCrate_Weapon_BP_C", "LootCrate_Weapon_BP_C_1"),
 }
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
-                           if replenish == 2 or family == "Loot_Stash_Small_BP_C"}
+                           if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -335,7 +341,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert all(status_of(committed, sibling) != "exhausted" and status_of(replicated, sibling) != "exhausted"
                            for sibling in sibling_names)
             elif crate in GUARANTEED_CRATES:
-                assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
+                assert valid_loot_trait_calls(crate, roll["trait_calls"]) and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
             elif cabinet:
                 assert roll["trait_calls"] == 5 and len(roll["items"]) <= 4, roll
                 if natural_lab_roll and not roll["items"]:

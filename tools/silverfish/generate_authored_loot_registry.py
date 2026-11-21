@@ -33,9 +33,17 @@ WEAPON_ROLL = ("CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Weapons,SpawnChan
                "False,False,False,False,False,CallFunc_SpawnLoot_Object_1)")
 SPARE_ROLL = ("CallFunc_Array_Get_Item_2.SpawnLoot(Loot Table_Items,SpawnChance_Item,0,GuaranteeSpawn,"
               "False,False,False,False,False,CallFunc_SpawnLoot_Object_2)")
+CRATE_WEAPON_ROLL = ("Loot_SpawnerGun.SpawnLoot(Loot Table_Weapons,1,0,"
+                     "CallFunc_RandomBoolWithWeightFromStream_ReturnValue,Seeded,False,False,False,False,CallFunc_SpawnLoot_Object)")
+CRATE_AMMO_ROLL = ("CallFunc_Array_Get_Item.SpawnLoot(K2Node_MakeMap_Map,0.8,0,"
+                   "True,False,True,False,False,False,CallFunc_SpawnLoot_Object_1)")
+CRATE_FALLBACK_ROLL = ("CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,"
+                       "GuaranteeSpawn,Seeded,True,False,False,False,CallFunc_SpawnLoot_Object_2)")
+CRATE_WEAPON_SPAWNERS = ("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_SpawnerGun")
 FAMILY_OVERRIDE_ROWS = GUARANTEED_OVERRIDE_ROWS | {"Office", "Garage", "Marine", "TownHouse", "LabSupplies", "Shop_Food",
                                                    "Uncommon_Basic", "PoliceEquipment", "Uncommon_Special",
-                                                   "Weapon_Specialized", "Rare"}
+                                                   "Weapon_Specialized", "Rare", "Weapon_UltraRare", "Weapon_HighEnd",
+                                                   "Weapon_Spec_Mill", "Weapon_Rare", "Weapon_HighEnd_Mill"}
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,7 @@ class ContainerFamily:
     prop_components: tuple[str, ...] = ()
     named_spawners: tuple[str, ...] = ()
     rolls: tuple[str, ...] = (STOCK_ROLL,)
+    weapon_first: bool = False
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
@@ -102,6 +111,14 @@ CONTAINER_FAMILIES = {
     "Loot_Wardrobe_Guns_BP_C": ContainerFamily("gun_wardrobe", 0x7E9, slots=4, paired_doors=True,
         named_spawners=("Loot_Spawner1", "Loot_Spawner2", "Loot_SpawnerGun", "Loot_SpawnerGun1"),
         rolls=(FURNITURE_ROLL, WEAPON_ROLL, SPARE_ROLL)),
+    "LootCrate_Large_BP_C": ContainerFamily("large_crate", 0x703, slots=5,
+        named_spawners=CRATE_WEAPON_SPAWNERS, rolls=(CRATE_WEAPON_ROLL, CRATE_AMMO_ROLL, CRATE_FALLBACK_ROLL), weapon_first=True),
+    "LootCrate_Cult_Large_BP_C": ContainerFamily("cult_large_crate", 0xF, slots=5, stock_ping=True,
+        named_spawners=CRATE_WEAPON_SPAWNERS, rolls=(CRATE_WEAPON_ROLL, CRATE_AMMO_ROLL, CRATE_FALLBACK_ROLL), weapon_first=True),
+    "LootCrate_Weapon_BP_C": ContainerFamily("weapon_crate", 0x48F, slots=5, guaranteed=True, replenish=PERMANENT_REPLENISHMENT,
+        named_spawners=CRATE_WEAPON_SPAWNERS, weapon_first=True, rolls=(
+            "Loot_SpawnerGun.SpawnLoot(Loot Table_Weapons,1,0,GuaranteeSpawn,Seeded,False,False,True,False,CallFunc_SpawnLoot_Object)",
+            CRATE_AMMO_ROLL)),
 }
 
 
@@ -172,6 +189,14 @@ def family_placements(audit):
                 or actor.get("GuaranteeSpawn", "False") != str(spec.guaranteed)
                 or actor.get("Replenish_Mode") != spec.replenish):
             raise ValueError(f"Cooked container family does not match its stock interaction: {family}")
+        if spec.weapon_first:
+            slot_loops = [("Loot_Spawner", "Loot_Spawner3")]
+            if CRATE_FALLBACK_ROLL in spec.rolls:
+                slot_loops.append(CRATE_WEAPON_SPAWNERS[:-1])
+            observed = set(re.findall(r"ArrayInnerProp=-, Elements=\[([^\]]*)\]", "\n".join(calls)))
+            if (observed != {", ".join(slots) for slots in slot_loops}
+                    or "DynamicCast(ClassPtr=Weapon_Master_BP_C, Target=CallFunc_SpawnLoot_Object, RawValue=-)" not in calls):
+                raise ValueError(f"Cooked weapon and fallback spawners changed: {family}")
 
     profiles, seen = [], set()
     pinned = {SMALL_CABINET_PROFILE[:2], OFFICE_DESK_PROFILE[:2]}
@@ -192,7 +217,11 @@ def family_placements(audit):
             required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
         if any(fields.get(key) != value for key, value in required.items()):
             continue
-        if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS:
+        tunable = {"ContainerExpectedValue", "Seeded"} if spec.weapon_first else set()
+        if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS - tunable:
+            continue
+        if spec.weapon_first and (not re.fullmatch(r"[0-9]{1,9}", fields.get("ContainerExpectedValue", "0"))
+                                  or fields.get("Seeded", "True") not in {"True", "False"}):
             continue
         if (area, actor) in seen or not FAMILY_ACTOR.fullmatch(actor):
             raise ValueError(f"Invalid or duplicate stock container {area} {actor}")
@@ -220,7 +249,11 @@ def family_catalog(profiles):
              "CLASS_CAPACITIES = {"]
     for family, spec in CONTAINER_FAMILIES.items():
         lines.append(f"    {family!r}: {spec.slots},")
-    lines.extend(("}", "", "CONTAINER_PLACEMENTS = ("))
+    lines.extend(("}", "", "MIXED_GUARANTEE_CLASSES = frozenset({"))
+    for family, spec in CONTAINER_FAMILIES.items():
+        if spec.weapon_first and CRATE_FALLBACK_ROLL in spec.rolls:
+            lines.append(f"    {family!r},")
+    lines.extend(("})", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
         lines.append(f"    {row!r},")
     return "\n".join((*lines, ")", ""))
@@ -251,7 +284,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         "        const RC::CharType* actor_class;", "        const RC::CharType* input;",
         "        const RC::CharType* script;", "        std::int32_t input_entry;", "        std::uint8_t slots;",
         "        bool stock_ping{};", "        bool paired_doors{};",
-        "        std::span<const RC::CharType* const> spawner_names{};", "    };", "",
+        "        std::span<const RC::CharType* const> spawner_names{};", "        bool weapon_first{};", "    };", "",
         '    inline constexpr StockClass small_crate{',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
@@ -266,6 +299,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             names = ", ".join(f'STR("{name}")' for name in spec.named_spawners)
             header.append(f"    inline constexpr std::array {spec.symbol}_spawners{{{names}}};")
             flags += f", {spec.symbol}_spawners"
+        if spec.weapon_first:
+            flags += ", true"
         header.extend((f"    inline constexpr StockClass {spec.symbol}{{",
                        f'        STR("{path}"),',
                        f'        STR("{path}:SendInteractionToActor"),',

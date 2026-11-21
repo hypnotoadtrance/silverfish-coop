@@ -6,7 +6,7 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import CRATES, GUARANTEED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform
+from .authored_loot import CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform, valid_loot_trait_calls
 from .native_gold import valid_guid
 
 
@@ -370,8 +370,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             items = proof["items"]
             calls = proof["trait_calls"]
             capacity = loot_capacity(crate)
-            trait_verified = calls == 0 if crate in GUARANTEED_CRATES else 1 <= calls <= 1 + capacity
-            if (not proof["invoked"] or not proof["looted"] or not trait_verified
+            if (not proof["invoked"] or not proof["looted"] or not valid_loot_trait_calls(crate, calls)
                     or proof["item_count"] != len(items) or len(items) > capacity
                     or len({item["actor"] for item in items}) != len(items)
                     or any(not valid_guid(item.get("guid")) for item in items)

@@ -10,7 +10,7 @@ import stat
 import uuid
 
 from .campaign import CampaignFormatError
-from .authored_loot import CRATES, GUARANTEED_CRATES, loot_capacity, valid_item_transform
+from .authored_loot import CRATES, loot_capacity, valid_item_transform, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
@@ -206,7 +206,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, CRATES[container])
                 or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != CRATES[container]
                 or not isinstance(roll.get("opener"), str) or roll["opener"] not in members
-                or type(calls) is not int or not (calls == 0 if container in GUARANTEED_CRATES else 1 <= calls <= 1 + capacity)
+                or not valid_loot_trait_calls(container, calls)
                 or any(type(item) is not dict or not valid_guid(item.get("guid"))
                        or not isinstance(item.get("actor"), str) or not item["actor"]
                        or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")

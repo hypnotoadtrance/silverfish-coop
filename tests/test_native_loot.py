@@ -193,9 +193,12 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_trait_queries_follow_the_exact_authored_guarantee(self):
         guaranteed_crate = full_name(OBSERVATORY, "LootCrate_Small_BP_C_1")
+        mixed_crate = full_name(RAIL_YARD, "LootCrate_Large_BP_C_3")
         for area, crate, calls, can_commit in (
             (OBSERVATORY, guaranteed_crate, 0, True),
             (OBSERVATORY, guaranteed_crate, 1, False),
+            (RAIL_YARD, mixed_crate, 1, True),
+            (RAIL_YARD, mixed_crate, 2, False),
             (CROSSROADS, OTHER_CRATE, 0, False),
         ):
             with self.subTest(crate=crate, trait_calls=calls):
@@ -212,7 +215,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 bridge = SimpleNamespace(command=AsyncMock(side_effect=open_crate))
                 if can_commit:
                     result = await native_loot.perform(host, bridge, "host", "open", crate, OPERATION)
-                    self.assertEqual(result["native_loot_roll"]["trait_calls"], 0)
+                    self.assertEqual(result["native_loot_roll"]["trait_calls"], calls)
                     self.assertTrue(result["native_loot_roll"]["lucky_looter"])
                     host.checkpoint_native.assert_awaited_once()
                 else:

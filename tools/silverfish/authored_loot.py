@@ -2,7 +2,7 @@
 
 import math
 
-from .authored_container_placements import CLASS_CAPACITIES, CONTAINER_PLACEMENTS
+from .authored_container_placements import CLASS_CAPACITIES, CONTAINER_PLACEMENTS, MIXED_GUARANTEE_CLASSES
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -521,6 +521,16 @@ LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
 
 def loot_capacity(container: str) -> int:
     return CONTAINER_CAPACITIES.get(container, 2 if container in CRATES else 0)
+
+
+def valid_loot_trait_calls(container: str, calls: object) -> bool:
+    if type(calls) is not int:
+        return False
+    if container in GUARANTEED_CRATES:
+        # The first gun slot can run one independent karma query even when
+        # the container guarantees its fallback items.
+        return 0 <= calls <= int(container.partition(" ")[0] in MIXED_GUARANTEE_CLASSES)
+    return 1 <= calls <= 1 + loot_capacity(container)
 
 
 def valid_item_transform(transform: object) -> bool:

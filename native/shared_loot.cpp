@@ -47,6 +47,7 @@ namespace
     constexpr auto instance_class = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_class = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto weapon_class = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto replenish_enum = STR("/Game/Classes/Libraries/Enums_Lib/RespawnSetting_Enum.RespawnSetting_Enum");
     constexpr auto karma_path =
         STR("/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C:AffectKarma");
@@ -358,6 +359,7 @@ namespace
         Unreal::FIntProperty* instances{};
         Unreal::UClass* item_type{};
         Unreal::UClass* actor_type{};
+        Unreal::UClass* weapon_type{};
     };
 
     bool blueprint(Unreal::UFunction* function, Unreal::UClass* owner_class, int parameters)
@@ -395,6 +397,7 @@ namespace
             argument<Unreal::FObjectProperty>(schema.open, STR("HitComponent"), false, offsetof(OpenParams, hit));
         schema.item = argument<Unreal::FObjectProperty>(schema.spawn, STR("Object"), true, 0x68);
         schema.guaranteed = argument<Unreal::FBoolProperty>(schema.spawn, STR("GuaranteedLoot"), false, 0x60);
+        if (context.profile->stock_class->weapon_first) schema.weapon_type = find<Unreal::UClass>(weapon_class);
         schema.effect = argument<Unreal::FNameProperty>(schema.passive, STR("EffectName"), false, 0);
         schema.count = argument<Unreal::FBoolProperty>(schema.passive, STR("CountInstances"), false, 8);
         schema.active = argument<Unreal::FBoolProperty>(schema.passive, STR("EffectActive"), true, 9);
@@ -402,7 +405,8 @@ namespace
         return schema.opener && schema.opener->GetPropertyClass().Get() == context.pawn->GetClassPrivate() &&
                schema.hit_component && schema.hit_component->GetPropertyClass().Get() == scene_type &&
                schema.item && schema.item->GetPropertyClass().Get() == schema.actor_type &&
-               (!context.guarantee_spawn || schema.guaranteed) && schema.effect && schema.count && schema.active && schema.instances;
+               schema.guaranteed && (!context.profile->stock_class->weapon_first || schema.weapon_type) &&
+               schema.effect && schema.count && schema.active && schema.instances;
     }
 
     // Its first UE FRandomStream fraction is exactly zero. Check this on a
@@ -584,6 +588,15 @@ namespace
         }
     };
 
+    struct SpawnObservation
+    {
+        void* output{};
+        bool guaranteed{};
+        bool finished{};
+        bool actor_returned{};
+        bool weapon_returned{};
+    };
+
     struct OpenScope
     {
         const Context& context;
@@ -591,8 +604,7 @@ namespace
         std::array<Unreal::FWeakObjectPtr, max_container_slots> items{};
         std::array<bool, max_container_slots> produced{};
         std::array<std::string, max_container_slots> item_classes{};
-        std::array<void*, max_container_slots> spawn_outputs{};
-        std::array<int, max_container_slots> spawns{};
+        std::array<SpawnObservation, max_container_slots> spawns{};
         std::array<int, max_container_slots> rolls{};
         int accounts{};
         std::string_view problem{};
@@ -703,9 +715,10 @@ namespace
         const bool account = caller->Object() == scope.context.crate && caller->Node() == scope.schema.karma;
         const bool roll = index >= 0 && caller->Node() == scope.schema.roll;
         if (!account && !roll) return;
-        // GuaranteeSpawn bypasses both AffectKarma's accounting branch and
-        // each child's RollKarma. The stock weighted table still runs.
-        if (scope.context.guarantee_spawn)
+        // AffectKarma uses the container's setting. Weapon-first crates can
+        // independently select the gun draw's guarantee through the stock stream.
+        if (account ? scope.context.guarantee_spawn :
+            !scope.spawns[index].output || scope.spawns[index].guaranteed || scope.spawns[index].finished)
         {
             scope.problem = "stock_loot_guaranteed_karma_branch_changed";
             return;
@@ -756,8 +769,9 @@ namespace
         const auto index = spawner_index(scope.context, object);
         if (index < 0) return;
         auto* out = stock_spawn_output(scope, iteration, object, frame);
-        auto& prepared = scope.spawn_outputs[static_cast<std::size_t>(index)];
-        if (!out || prepared)
+        auto& prepared = scope.spawns[static_cast<std::size_t>(index)];
+        const auto* locals = frame.Locals();
+        if (!out || !locals || prepared.output)
         {
             scope.problem = "stock_loot_spawner_output_unverified";
             return;
@@ -765,7 +779,8 @@ namespace
         // The Blueprint loop reuses the output variable. SpawnLoot leaves it
         // untouched when no class is selected, so clear it before each draw.
         scope.schema.item->SetObjectPropertyValue(out, nullptr);
-        prepared = out;
+        prepared.output = out;
+        prepared.guaranteed = scope.schema.guaranteed->GetPropertyValueInContainer(locals);
     }
 
     void capture_item(OpenScope& scope, Iteration& iteration, Unreal::UObject* component, Unreal::FFrame& frame)
@@ -773,15 +788,14 @@ namespace
         const auto index = spawner_index(scope.context, component);
         if (index < 0) return;
         auto* out = stock_spawn_output(scope, iteration, component, frame);
-        const auto* locals = scope.context.guarantee_spawn ? frame.Locals() : nullptr;
-        const bool guaranteed_branch = !scope.context.guarantee_spawn ||
-            (locals && scope.schema.guaranteed->GetPropertyValueInContainer(locals));
         const auto slot = static_cast<std::size_t>(index);
-        if (!out || out != scope.spawn_outputs[slot] || !guaranteed_branch || ++scope.spawns[slot] != 1)
+        auto& spawn = scope.spawns[slot];
+        if (!out || out != spawn.output || spawn.finished)
         {
             scope.problem = "stock_loot_spawner_frame_unverified";
             return;
         }
+        spawn.finished = true;
         auto* actor = scope.schema.item->GetObjectPropertyValue(out);
         if (!actor) return;
         if (!live(actor) || !actor->IsA(scope.schema.actor_type) || !authority(actor, scope.context.world))
@@ -789,6 +803,8 @@ namespace
             scope.problem = "stock_loot_spawner_result_unverified";
             return;
         }
+        spawn.actor_returned = true;
+        spawn.weapon_returned = scope.schema.weapon_type && actor->IsA(scope.schema.weapon_type);
         if (actor->IsA(scope.schema.item_type))
         {
             scope.produced[slot] = true;
@@ -797,6 +813,34 @@ namespace
         }
         else if (scope.context.profile->pinned_furniture && scope.context.profile->stock_class == &silverfish::authored_loot::office_desk)
             scope.problem = "stock_office_desk_item_class_unverified";
+    }
+
+    bool verified_spawn_route(const OpenScope& scope)
+    {
+        const auto& stock = *scope.context.profile->stock_class;
+        const bool guaranteed = scope.context.guarantee_spawn;
+        if (!stock.weapon_first)
+        {
+            return std::all_of(scope.spawns.begin(), scope.spawns.begin() + stock.slots, [guaranteed](const auto& spawn) {
+                return spawn.finished && (!guaranteed || spawn.guaranteed);
+            });
+        }
+
+        // Cooked gun crates always try the last slot first. A Weapon_Master
+        // result runs the two ammo slots. An empty regular or Cult gun draw
+        // runs all four item slots. A non-weapon result skips both loops.
+        const auto& gun = scope.spawns[4];
+        const bool gun_only = &stock == &silverfish::authored_loot::weapon_crate;
+        if (!gun.finished || (gun_only && gun.guaranteed != guaranteed)) return false;
+        const bool fallback = !gun_only && !gun.actor_returned;
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            const bool ammo = gun.weapon_returned && (index == 0 || index == 3);
+            const auto& slot = scope.spawns[index];
+            if (slot.finished != (fallback || ammo) || (slot.finished && slot.guaranteed != (ammo || guaranteed)))
+                return false;
+        }
+        return true;
     }
 
     void capture(Iteration& iteration, Unreal::UObject* object, Unreal::FFrame& frame, void*)
@@ -912,7 +956,7 @@ namespace
             else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
             else if (!context.guarantee_spawn && scope.accounts != 1)
                 scope.problem = "stock_loot_open_karma_query_unverified";
-            else if (!std::all_of(scope.spawns.begin(), scope.spawns.begin() + slots, [](int calls) { return calls == 1; }))
+            else if (!verified_spawn_route(scope))
                 scope.problem = "stock_loot_open_roll_calls_unverified";
             else if (object_field(context.crate, STR("Player")) != context.pawn)
                 scope.problem = "stock_loot_open_opener_changed";
