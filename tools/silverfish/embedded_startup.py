@@ -340,6 +340,7 @@ async def _run_qualified(startup, work, directory, bridge, role, nonce, headless
             required.update({UNIFIED_ENV: "1", DIRECT_JOIN_ENV: "1"})
         if startup.environment.get(INSTALLED_ENV) == "1":
             required[INSTALLED_ENV] = "1"
+            runtime.verify_installed_lua(work)
         saved, _ = _qualify(startup, work, directory, role, required)
         resident = {"title": _resident_unified, "host": _resident_host, "client": _resident_join}[role]
         await resident(work, directory, bridge, saved, headless)

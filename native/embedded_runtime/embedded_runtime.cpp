@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <Python.h>
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -42,6 +44,7 @@ namespace
     constexpr wchar_t installed_env[] = L"SILVERFISH_COOP_INSTALLED_TITLE";
     constexpr wchar_t headless_env[] = L"SILVERFISH_COOP_HEADLESS";
     constexpr auto install_config = L"resident-install.json";
+    constexpr auto portable_config = L"resident-portable.json";
     constexpr auto python_dll = L"python314.dll";
     constexpr std::string_view manifest_digest = SILVERFISH_RUNTIME_MANIFEST_SHA256;
     constexpr std::size_t max_path = 32768;
@@ -123,6 +126,22 @@ namespace
         return windows_path_equal(path, fs::canonical(path));
     }
 
+    bool exists_on_disk(const fs::path& path)
+    {
+        const auto attributes = GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES) return true;
+        const auto error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return false;
+        throw std::system_error(static_cast<int>(error), std::system_category());
+    }
+
+    fs::path runtime_path(const fs::path& mod)
+    {
+        if (!exists_on_disk(mod / portable_config)) return mod / L"runtime";
+        auto prefix = manifest_digest.substr(0, 16);
+        return mod / (L"runtime-" + std::wstring(prefix.begin(), prefix.end()));
+    }
+
     bool profile_name(std::wstring_view name)
     {
         auto alphanumeric = [](wchar_t ch) {
@@ -194,7 +213,8 @@ namespace
             !windows_path_equal(image, stage / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
             !windows_path_equal(addon, mod / L"dlls/main.dll") ||
             !exact_path(stage / L"silverfish-coop-stage.json", false) ||
-            (installed && !exact_path(mod / install_config, false))) return {};
+            (installed && !(exact_path(mod / install_config, false) ||
+                            exact_path(mod / portable_config, false)))) return {};
 
         const fs::path bridge(environment(bridge_env));
         const auto bridge_folder = bridge.parent_path();
@@ -217,7 +237,7 @@ namespace
         state = L"startup_scope_arguments_refused";
         if (!matches_command_line(image, profile, work, resident && !unified, guest && !resident,
                                   installed && environment(headless_env) != L"1")) return {};
-        return mod / L"runtime";
+        return runtime_path(mod);
     }
 
     struct Manifest
@@ -304,6 +324,20 @@ namespace
         };
     };
 
+    struct PortableBoot
+    {
+        int schema{};
+        std::string shipping_sha256;
+        std::map<std::string, std::string> features;
+
+        struct glaze
+        {
+            static constexpr auto value = glz::object(
+                "schema", &PortableBoot::schema, "shipping_sha256", &PortableBoot::shipping_sha256,
+                "features", &PortableBoot::features);
+        };
+    };
+
     bool under(const fs::path& child, const fs::path& root)
     {
         for (auto path = child; !path.empty(); path = path.parent_path())
@@ -333,21 +367,108 @@ namespace
         return body && Sha256{}.matches(*body, digest);
     }
 
+    std::optional<fs::path> portable_workspace(bool& isolated)
+    {
+        const CommandArguments arguments;
+        if (!arguments.values) return std::nullopt;
+        fs::path profile;
+        bool offscreen = false, null_renderer = false;
+        for (int index = 1; index < arguments.count; ++index)
+        {
+            const std::wstring_view argument(arguments.values[index]);
+            if (windows_equal(argument, L"-SilverfishCoopIsolated")) isolated = true;
+            if (windows_equal(argument, L"-RenderOffScreen")) offscreen = true;
+            if (windows_equal(argument, L"-NullRHI")) null_renderer = true;
+            const auto equals = argument.find(L'=');
+            if (equals != argument.npos && windows_equal(argument.substr(0, equals), L"-userdir"))
+                profile = argument.substr(equals + 1);
+        }
+        if (isolated)
+        {
+            const auto title = profile.parent_path();
+            const auto titles = title.parent_path();
+            if (!offscreen || !null_renderer || !exact_path(profile, true) ||
+                !windows_path_equal(profile.filename(), L"game-user") ||
+                !windows_path_equal(title.filename(), L"local") ||
+                !windows_path_equal(titles.filename(), L"titles")) return std::nullopt;
+            return titles.parent_path();
+        }
+        if (!profile.empty() || offscreen || null_renderer) return std::nullopt;
+        std::array<wchar_t, MAX_PATH> local{};
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local.data())) ||
+            !exact_path(fs::path(local.data()), true)) return std::nullopt;
+        return fs::path(local.data()) / L"SilverfishCoop" / L"Resident";
+    }
+
+    bool ensure_directory(const fs::path& path)
+    {
+        if (exact_path(path, true)) return true;
+        if (!path.is_absolute() || path.lexically_normal() != path || path == path.root_path() ||
+            exists_on_disk(path) || !ensure_directory(path.parent_path())) return false;
+        fs::create_directory(path);
+        return exact_path(path, true);
+    }
+
+    std::optional<InstalledBoot> load_boot_config(const fs::path& mod)
+    {
+        InstalledBoot config;
+        const auto descriptor = mod / install_config;
+        const auto portable = mod / portable_config;
+        const bool has_descriptor = exists_on_disk(descriptor);
+        if (has_descriptor)
+        {
+            const auto handle = exact_path(descriptor, false) ? open_pinned(descriptor) : Handle(nullptr);
+            const auto bytes = handle ? read(handle.get(), 8192) : std::nullopt;
+            if (!bytes || glz::read_json(config, *bytes) || config.schema != 1) return std::nullopt;
+        }
+        if (exists_on_disk(portable))
+        {
+            const auto handle = exact_path(portable, false) ? open_pinned(portable) : Handle(nullptr);
+            const auto bytes = handle ? read(handle.get(), 8192) : std::nullopt;
+            PortableBoot defaults;
+            if (!bytes || glz::read_json(defaults, *bytes) || defaults.schema != 1 ||
+                defaults.features.contains("SILVERFISH_COOP_HEADLESS") ||
+                defaults.features.contains("SILVERFISH_COOP_TITLE_FIXTURES") ||
+                defaults.features.contains("SILVERFISH_COOP_PAUSE_FIXTURES")) return std::nullopt;
+            if (has_descriptor && config.shipping_sha256 != defaults.shipping_sha256) return std::nullopt;
+            if (!has_descriptor)
+            {
+                const auto work = portable_workspace(config.isolated);
+                if (!work) return std::nullopt;
+                const auto encoded = work->u8string();
+                config.work.assign(encoded.begin(), encoded.end());
+                config.schema = 1;
+                config.shipping_sha256 = defaults.shipping_sha256;
+                config.seat = "local";
+                config.campaign = "default";
+                config.bind = "0.0.0.0";
+                config.port = 7777;
+            }
+            config.features = std::move(defaults.features);
+            if (config.isolated)
+            {
+                config.features["SILVERFISH_COOP_HEADLESS"] = "1";
+                config.features["SILVERFISH_COOP_TITLE_FIXTURES"] = "1";
+                config.features["SILVERFISH_COOP_PAUSE_FIXTURES"] = "1";
+            }
+        }
+        return config.schema == 1 ? std::optional(std::move(config)) : std::nullopt;
+    }
+
     std::optional<Handle> boot_installed_title(HMODULE module)
     {
         const auto image = module_image(nullptr);
         const auto mod = module_image(module).parent_path().parent_path();
         const auto binaries = image.parent_path();
         const auto game = binaries.parent_path().parent_path().parent_path();
-        const auto descriptor = mod / install_config;
-        if (!exact_path(image, false) || !exact_path(descriptor, false) ||
+        if (!exact_path(image, false) ||
             !windows_path_equal(mod, binaries / L"ue4ss" / L"Mods" / mod_name) ||
             !windows_path_equal(image, game / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
             !exact_path(game / L"silverfish-coop-stage.json", false)) return std::nullopt;
-        const auto handle = open_pinned(descriptor);
-        const auto bytes = handle ? read(handle.get(), 8192) : std::nullopt;
-        InstalledBoot config;
-        if (!bytes || glz::read_json(config, *bytes) || config.schema != 1 ||
+        auto configured = load_boot_config(mod);
+        if (!configured) return std::nullopt;
+        const auto& config = *configured;
+        if (!lower_hex(std::string_view(config.shipping_sha256), 64) ||
             config.port < 1 || config.port > 65535 || config.features.size() > 64 ||
             config.features.contains("SILVERFISH_COOP_INSTALLED_TITLE") ||
             config.features.contains("SILVERFISH_COOP_EMBEDDED_STARTUP") ||
@@ -366,9 +487,8 @@ namespace
         const auto title = work / L"titles" / seat;
         const auto run = title / L"run";
         const auto mailbox = run / L"game-bridge";
-        for (const auto& path : {work, title.parent_path(), title, run, mailbox})
-            if (!exact_path(path, true)) return std::nullopt;
-        if (under(work, game) || under(game, work) ||
+        if (!work.is_absolute() || work.lexically_normal() != work ||
+            under(work, game) || under(game, work) ||
             !matches_command_line(image, title / L"game-user", work, false, false, !config.isolated) ||
             !matches_shipping_image(image, config.shipping_sha256))
             return std::nullopt;
@@ -382,9 +502,18 @@ namespace
                 (value != "1" && value != "cpp" && value != "notdeer")) return std::nullopt;
             updates.emplace(std::wstring(key.begin(), key.end()), std::wstring(value.begin(), value.end()));
         }
-        const auto runtime_manifest = open_pinned(mod / L"runtime" / L"runtime-manifest.json");
+        const auto runtime_manifest = open_pinned(runtime_path(mod) / L"runtime-manifest.json");
         const auto manifest = runtime_manifest ? read(runtime_manifest.get(), max_manifest) : std::nullopt;
         if (!manifest || !Sha256{}.matches(*manifest, manifest_digest)) return std::nullopt;
+        if (exists_on_disk(mod / portable_config))
+        {
+            if (!ensure_directory(mailbox)) return std::nullopt;
+        }
+        else
+        {
+            for (const auto& path : {work, title.parent_path(), title, run, mailbox})
+                if (!exact_path(path, true)) return std::nullopt;
+        }
 
         Handle lease(CreateFileW((run / L"installed-title.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                  OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));

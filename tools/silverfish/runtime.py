@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -269,7 +270,12 @@ def qualified_authored_routes(work: Path) -> bool:
 
 
 def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
-    path = (content_root(work) / SHIPPING).parent / MOD_SCRIPTS / name
+    stage = content_root(work)
+    if _installed_layout.get() is not None:
+        inventory = read_json(stage / "silverfish-coop-stage.json").get("lua_files")
+        if isinstance(inventory, dict) and name not in inventory:
+            return False
+    path = (stage / SHIPPING).parent / MOD_SCRIPTS / name
     return path.is_file() and (marker is None or marker in path.read_text(encoding="utf-8"))
 
 
@@ -282,14 +288,52 @@ def staged_guest_controls(work: Path) -> bool:
     ))
 
 
-def _code_fingerprint(directory: Path, extension: str) -> str:
+def _code_fingerprint(directory: Path, extension: str, inventory: dict | None = None) -> str:
+    if inventory is None:
+        paths = [item for item in directory.rglob(f"*{extension}") if item.is_file()]
+    else:
+        if type(inventory) is not dict or not 1 <= len(inventory) <= 4096 or "main.lua" not in inventory:
+            raise ValueError("The co-op Lua file list is invalid")
+        paths = []
+        folded = set()
+        for name, expected in inventory.items():
+            relative = PurePosixPath(name)
+            if (relative.as_posix() != name or relative.suffix != extension
+                    or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part) or part.endswith(".") for part in relative.parts)
+                    or type(expected) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                    or name.casefold() in folded):
+                raise ValueError("The co-op Lua file list is invalid")
+            folded.add(name.casefold())
+            paths.append(directory.joinpath(*relative.parts))
     digest = hashlib.sha256()
-    for path in sorted(item for item in directory.rglob(f"*{extension}") if item.is_file()):
-        digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
+    for path in sorted(paths):
+        name = path.relative_to(directory).as_posix()
+        if inventory is not None:
+            try:
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_size > 2 * 1024**2
+                        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        or path.resolve(strict=True) != path.absolute()):
+                    raise ValueError(f"Invalid installed co-op script {name}")
+            except FileNotFoundError as error:
+                raise ValueError(f"Missing installed co-op script {name}") from error
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         contents = path.read_bytes().replace(b"\r\n", b"\n")
-        digest.update(hashlib.sha256(contents).digest())
+        fingerprint = hashlib.sha256(contents)
+        if inventory is not None and fingerprint.hexdigest() != inventory[name]:
+            raise ValueError(f"The installed co-op script differs from the release: {name}")
+        digest.update(fingerprint.digest())
     return digest.hexdigest()
+
+
+def verify_installed_lua(work: Path) -> None:
+    stage = content_root(work)
+    metadata = read_json(stage / "silverfish-coop-stage.json")
+    if "lua_files" in metadata:
+        if not isinstance(metadata["lua_files"], dict):
+            raise ValueError("The co-op Lua file list is invalid")
+        _code_fingerprint((stage / SHIPPING).parent / MOD_SCRIPTS, ".lua", metadata["lua_files"])
 
 
 def staged_build(work: Path) -> str:
@@ -303,7 +347,7 @@ def staged_build(work: Path) -> str:
     scripts = (stage / SHIPPING).parent / MOD_SCRIPTS
     if not (scripts / "main.lua").is_file():
         raise ValueError("Stage is missing the Silverfish co-op scripts")
-    parts = ["silverfish-coop-content-v1", game_build, _code_fingerprint(scripts, ".lua"),
+    parts = ["silverfish-coop-content-v1", game_build, _code_fingerprint(scripts, ".lua", metadata.get("lua_files")),
              _code_fingerprint(REPO / "tools/silverfish", ".py")]
     backend = native_death_backend(work, metadata)
     if backend == "overlay":

@@ -83,6 +83,33 @@ class StageBackendTests(unittest.TestCase):
         script.unlink()
         self.assertNotEqual(runtime.staged_build(self.work), build)
 
+    def test_portable_update_fingerprints_only_its_current_lua_files(self):
+        expected = runtime.staged_build(self.work)
+        main = self.scripts / "main.lua"
+        self.metadata["lua_files"] = {"main.lua": hashlib.sha256(main.read_bytes()).hexdigest()}
+        runtime.write_json(self.manifest, self.metadata)
+        (self.scripts / "old_release.lua").write_bytes(b"return {'no longer shipped'}\n")
+        with runtime.installed_content(self.work, self.stage):
+            runtime.verify_installed_lua(self.work)
+            self.assertTrue(runtime.staged_script(self.work, "main.lua"))
+            self.assertFalse(runtime.staged_script(self.work, "old_release.lua"))
+            self.assertEqual(runtime.staged_build(self.work), expected)
+
+            main.write_bytes(b"return nil\r\n")
+            self.assertEqual(runtime.staged_build(self.work), expected)
+            main.write_bytes(b"return {}\n")
+            with self.assertRaisesRegex(ValueError, "differs from the release"):
+                runtime.verify_installed_lua(self.work)
+            main.unlink()
+            with self.assertRaisesRegex(ValueError, "Missing installed co-op script"):
+                runtime.verify_installed_lua(self.work)
+
+    def test_portable_lua_inventory_refuses_redirected_file_names(self):
+        self.metadata["lua_files"] = {"main.lua": "a" * 64, "../outside.lua": "a" * 64}
+        runtime.write_json(self.manifest, self.metadata)
+        with self.assertRaisesRegex(ValueError, "file list is invalid"):
+            runtime.verify_installed_lua(self.work)
+
     def test_launcher_code_changes_the_peer_fingerprint(self):
         launcher = self.work / "tools/silverfish/service.py"
         launcher.parent.mkdir(parents=True)
