@@ -41,7 +41,7 @@ local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", 
 local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
 local event_path, equip_path, is_downed, binding, observation, display
-local binding_state, stock_drop
+local binding_state, stock_drop, stock_session, sync_stock
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -95,9 +95,9 @@ end
 
 function inventory_view.clear()
     remove_display()
-    if stock_drop then
-        local previous = stock_drop
-        stock_drop = nil
+    if stock_session or stock_drop then
+        local previous = stock_session or stock_drop
+        stock_session, stock_drop = nil, nil
         pcall(function()
             local controller = previous.context.controller
             local stack = valid(controller) and controller.MenuStack
@@ -166,6 +166,7 @@ function inventory_view.sync(state, phase)
     end
     binding = current
     binding_state = allowed and "ready" or "blocked"
+    if stock_session then sync_stock(current, state, phase, allowed) end
     if observation and observation.state ~= "closed" and not allowed then
         remove_display()
         observation.state = "closed"
@@ -565,25 +566,30 @@ local function stock_action_fixture(screen, current, save, epoch, item, use, spl
     return ("stock guest %s %s %d %d"):format(entry, guid, quantity, sequence)
 end
 
+local function open_stock_screen(state, current, action, stack, save)
+    local owner = state.world.OwningGameInstance
+    local controller = current.controller
+    controller[inventory_action_event](controller, {}, 0, 0, action)
+    local screen = stack:GetArrayNum() == 1 and widget_at(stack, 1) or nil
+    if not exact(screen, inventory_path) or not same(screen:GetOwningPlayer(), controller)
+        or not same(screen.BackpackPanel.Target, owner) or not same(owner.SaveSlot_Ref, save)
+        or not same(screen.ItemManager.ParentScreen, screen) then
+        error("The stock inventory did not bind the guest's isolated backpack", 0)
+    end
+    local displayed = stock_cards(screen, save)
+    if not displayed then error("The stock inventory did not render the isolated backpack") end
+    return screen, displayed
+end
+
 local function stock_preview(state, phase, current, action, stack, drop_epoch, drop_item, use, split, equip)
     local save = save_scope.bind_guest(state, phase)
     if not valid(save) or not same(current.pawn.Save, save) then
         error("The stock inventory preview requires the isolated guest save", 0)
     end
-    local owner = state.world.OwningGameInstance
     local controller = current.controller
     SilverfishClearNativeInventoryViewScope()
     local success, proof = pcall(function()
-        controller[inventory_action_event](controller, {}, 0, 0, action)
-        local count = stack:GetArrayNum()
-        local screen = count == 1 and widget_at(stack, 1) or nil
-        if not exact(screen, inventory_path) or not same(screen:GetOwningPlayer(), controller)
-            or not same(screen.BackpackPanel.Target, owner) or not same(owner.SaveSlot_Ref, save)
-            or not same(screen.ItemManager.ParentScreen, screen) then
-            error("The stock inventory preview did not bind the guest's backpack")
-        end
-        local displayed = stock_cards(screen, save)
-        if not displayed then error("The stock inventory preview did not render the isolated backpack") end
+        local screen, displayed = open_stock_screen(state, current, action, stack, save)
         if drop_item then return stock_action_fixture(screen, current, save, drop_epoch, drop_item, use, split, equip) end
         return ("verified stock guest inventory with %d backpack cards"):format(displayed)
     end)
@@ -599,6 +605,63 @@ local function stock_preview(state, phase, current, action, stack, drop_epoch, d
     end
     if not success then error(proof, 0) end
     return proof
+end
+
+local function open_stock_inventory(fields, current, state, phase)
+    local sequence = integer(fields[3], 9007199254740991)
+    local epoch = fields[4]
+    local stack, action = current.controller.MenuStack, load_class(inventory_action_path)
+    local save = save_scope.bind_guest(state, phase)
+    local pawn = current.pawn:GetAddress()
+    if #fields ~= 4 or not observation or observation.state ~= "pending" or observation.sequence ~= sequence
+        or not same_context(current, observation.context) or not epoch or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$")
+        or stock_session or stock_drop or not valid(save) or not action or not stack or stack:GetArrayNum() ~= 0
+        or type(SilverfishSetNativeGuestDropScope) ~= "function"
+        or not SilverfishSetNativeGuestDropScope(pawn, epoch, save:GetAddress(), true) then
+        error("The stock inventory could not open for the current co-op guest", 0)
+    end
+    SilverfishClearNativeInventoryViewScope()
+    local ok, screen, displayed = pcall(open_stock_screen, state, current, action, stack, save)
+    local guarded = SilverfishSetNativeInventoryViewScope(pawn, true)
+    if not ok or not guarded then
+        if stack:GetArrayNum() == 1 and exact(widget_at(stack, 1), inventory_path) then current.controller:CloseMenu({}) end
+        SilverfishClearNativeHostDropScope()
+        error(ok and "The stock inventory input could not be restored" or screen, 0)
+    end
+    stock_session = {context = current, screen = screen, save = save, epoch = epoch}
+    observation.state, observation.pending_offset = "stock", nil
+    return ("opened stock guest inventory with %d backpack cards"):format(displayed)
+end
+
+sync_stock = function(current, state, phase, allowed)
+    local session, stack = stock_session, current.controller.MenuStack
+    local top, present = stack:GetArrayNum(), false
+    for index = 1, math.min(top, 32) do
+        if same(widget_at(stack, index), session.screen) then present = true; break end
+    end
+    local exposed = top > 0 and same(widget_at(stack, top), session.screen)
+    if not present or (exposed and not allowed) then
+        if exposed then current.controller:CloseMenu({}) end
+        stock_session = nil
+        if not stock_drop then SilverfishClearNativeHostDropScope() end
+        if observation then observation.state = "closed" end
+        return
+    end
+    local save = save_scope.bind_guest(state, phase)
+    local pawn = current.pawn:GetAddress()
+    if not same(save, session.save) or not SilverfishSetNativeGuestDropScope(pawn, session.epoch, save:GetAddress(), true) then
+        if exposed then current.controller:CloseMenu({}) end
+        stock_session, stock_drop = nil, nil
+        SilverfishClearNativeHostDropScope()
+        if observation then observation.state = "closed" end
+        return
+    end
+    if stock_drop or not exposed or not allowed then return end
+    local sequence, guid, quantity, entry, expected = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
+    if not sequence then return end
+    stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
+        guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
+        sort = entry == "sort", split = entry == "split" and quantity or nil, equip = entry == "equip", live = true}
 end
 
 local function finish_stock_drop(fields, current, state, phase)
@@ -622,10 +685,12 @@ local function finish_stock_drop(fields, current, state, phase)
     local ok, result = pcall(function()
         local save = save_scope.bind_guest(state, phase)
         local pawn = current.pawn:GetAddress()
-        if not same(save, pending.save) or not SilverfishSetNativeGuestDropScope(pawn, pending.epoch, save:GetAddress()) then
+        if not same(save, pending.save) or not SilverfishSetNativeGuestDropScope(pawn, pending.epoch, save:GetAddress(),
+                                                                                  pending.live == true) then
             error("The stock inventory settlement lost its isolated backpack", 0)
         end
         local finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+        if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
         if equipped then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, slot + 1)
             if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= slot
@@ -661,6 +726,11 @@ local function finish_stock_drop(fields, current, state, phase)
         end
         return ("verified open stock backpack refresh with %d cards"):format(displayed)
     end)
+    if pending.live then
+        if not stock_session then SilverfishClearNativeHostDropScope() end
+        if not ok then error(result, 0) end
+        return result
+    end
     local stack = current.controller.MenuStack
     if stack:GetArrayNum() == 1 and same(widget_at(stack, 1), pending.screen) then current.controller:CloseMenu({}) end
     SilverfishClearNativeHostDropScope()
@@ -674,6 +744,12 @@ local function fixture(current, state, phase, preview, drop_epoch, drop_item, us
         error("The fixture requires an enrolled headless stock inventory viewer", 0)
     end
     local action, stack = load_class(inventory_action_path), current.controller.MenuStack
+    if action and stock_session and not preview then
+        current.controller[inventory_action_event](current.controller, {}, 0, 0, action)
+        sync_stock(current, state, phase, true)
+        if not stock_session then return "verified stock inventory closed through Inventory" end
+        error("The stock Inventory action did not close the mounted backpack", 0)
+    end
     if not action or not stack or stack:GetArrayNum() ~= 0 then
         error("The exact stock inventory menu fixture is unavailable", 0)
     end
@@ -691,6 +767,8 @@ function inventory_view.command(fields, state, phase)
     if operation ~= "native-inventory-view-render" and operation ~= "native-inventory-view-unavailable"
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
         and operation ~= "native-inventory-stock-drop-finish"
+        and operation ~= "native-inventory-stock-open"
+        and operation ~= "native-inventory-stock-use-click-fixture"
         and operation ~= "native-inventory-view-equip-result"
         and operation ~= "native-inventory-view-use-result"
         and operation ~= "native-inventory-view-split-result"
@@ -699,6 +777,23 @@ function inventory_view.command(fields, state, phase)
     if current and operation == "native-inventory-stock-drop-finish" then return finish_stock_drop(fields, current, state, phase) end
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
+    end
+    if operation == "native-inventory-stock-open" then return open_stock_inventory(fields, current, state, phase) end
+    if operation == "native-inventory-stock-use-click-fixture" and #fields == 3 and headless and stock_session and not stock_drop
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        local screen = stock_session.screen
+        local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
+        for index = 1, cards:GetArrayNum() do
+            local card = widget_at(cards, index)
+            if stock_card_guid(card) == fields[3] then
+                manager:OpenContextMenu(card)
+                manager:ActionUse()
+                sync_stock(current, state, phase, true)
+                if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end
+                break
+            end
+        end
+        error("The stock use click did not queue the chosen backpack item", 0)
     end
     if operation == "native-inventory-view-fixture" and (#fields == 2 or #fields == 3 and fields[3] == "stock") then
         return fixture(current, state, phase, fields[3] == "stock")
@@ -799,6 +894,10 @@ function inventory_view.rows(state, phase, status_row)
     if not current then return {} end
     local rows = {status_row("native-inventory-split-view-capability", 1)}
     if binding_state then rows[#rows + 1] = status_row("native-inventory-view-binding", binding_state) end
+    if stock_drop and stock_drop.live and same_context(current, stock_drop.context) then
+        rows[#rows + 1] = status_row("native-inventory-stock-action", current.map, current.name, stock_drop.epoch,
+            stock_drop.sequence, stock_drop.entry, stock_drop.guid, stock_drop.quantity, stock_drop.expected or 0)
+    end
     if not observation or not same_context(current, observation.context) then return rows end
     rows[#rows + 1] = status_row("native-inventory-view", observation.state, observation.sequence, current.map, current.name,
         observation.offset or 0, observation.total or 0, observation.count or 0)

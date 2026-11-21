@@ -254,13 +254,28 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
-    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    normal_tab_proof = None
+    if stock_drop:
+        before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        selected = next((row for row in before["items"] if row["source"] == "backpack"
+                         and row["class_path"] == native_guest_consumable.BANDAGE_CLASS), None)
+        assert selected is not None, before
+        clicked = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=selected["guid"])
+        assert clicked["ok"] and clicked["stock_action"]["guid"] == selected["guid"], clicked
+        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock"
+                   and "native_inventory_stock_action" not in state.get("game", {}))
+        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        remaining = [row["quantity"] for row in after["items"] if row["guid"] == selected["guid"]]
+        assert remaining == ([selected["quantity"] - 1] if selected["quantity"] > 1 else []), after
+        normal_tab_proof = {"guid": selected["guid"], "remaining": selected["quantity"] - 1}
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
+            **({"normal_tab_use": normal_tab_proof} if normal_tab_proof else {}),
             **({"guest_stock_menu_split": split_proof} if split_proof else {}),
             **({"guest_stock_menu_equip": equip_proof} if equip_proof else {}),
             **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs,

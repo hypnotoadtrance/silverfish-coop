@@ -125,7 +125,7 @@ The stock damage actor used to apply its screen effects and camera shake on the 
 
 A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.
 
-The packaged title test opened the stock Inventory screen with the guest's isolated backpack and verified the item cards from both seats. The ordinary co-op inventory binding still opens its existing item-action view while stock menu actions are integrated.
+The packaged title test used the normal Inventory action to open and close the stock Inventory screen with the guest's isolated backpack on both seats. Using a bandage from the native context menu updated the guest's host-owned save and refreshed the open screen. The focused stock-menu checks also cover sorting, dropping, bandages, MREs, ammo splits, and storing supported weapons in a compatible quick slot. Nearby Items pickup, general drag and drop, quick-slot hotkeys, and unequip still require host-authoritative handling in this screen.
 
 In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.
 

@@ -4533,6 +4533,7 @@ class Client:
         self.last_inventory_use = 0
         self.last_inventory_split = 0
         self.last_inventory_drop = 0
+        self.last_stock_inventory_action = 0
         self.guest_ui = native_guest_ui.GuestView()
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
@@ -4942,6 +4943,25 @@ class Client:
         identity = native_guest_drop.view_identity(self, sequence, area, pawn)
         operation = uuid.uuid5(self.bridge.input_namespace,
                                f"{self.host_session}:{self.zone_epoch}:{pawn}:inventory:{sequence}:{offset}").hex
+        if (event == "open" and self.last_game.get("save_scope") and native_guest_drop_record.supported_map(area)
+                and all(self.gameplay.get(capability) == 1 for capability in (
+                    native_guest_drop_record.CAPABILITY, native_inventory.STORE_CAPABILITY,
+                    native_inventory.SORT_CAPABILITY, native_inventory.SPLIT_CAPABILITY,
+                ))):
+            try:
+                if self.guest_ui.identity != (self.host_session, self.zone_epoch, area) or self.guest_ui.digest == "-":
+                    await self.guest_ui.refresh(self)
+                snapshot = await self.bridge.command("native-inventory-stock-open", str(sequence), self.zone_epoch, timeout=5)
+                proof = snapshot.get("native_inventory_view", {})
+                if (proof.get("state"), proof.get("sequence"), proof.get("map"), proof.get("pawn")) != (
+                    "stock", sequence, area, pawn,
+                ):
+                    raise RuntimeError("The native backpack did not verify its isolated view")
+                self.last_game = snapshot
+                self.control.event("native_stock_inventory_opened", operation_id=operation, **proof)
+                return
+            except (KeyError, TypeError, OSError, RuntimeError, ValueError) as error:
+                self.control.event("native_stock_inventory_unavailable", operation_id=operation, reason=str(error))
         try:
             page = await native_inventory.read_view_page(self, operation, offset)
             items, total = page["items"], page["total"]
@@ -5329,6 +5349,12 @@ class Client:
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
                     if target:
                         result["stock_inventory_proof"] = self.last_game.get("ack", {}).get("message")
+                elif action == "native-inventory-stock-use-click-fixture":
+                    item = request.get("target")
+                    if not native_gold.valid_guid(item) or self.last_game.get("native_inventory_view", {}).get("state") != "stock":
+                        raise ValueError("Select an item on the mounted stock backpack")
+                    self.last_game = await self.bridge.command(action, item, timeout=5)
+                    result = {"stock_action": self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})}
                 elif action in native_guest_drop.STOCK_FIXTURES:
                     result = await native_guest_drop.stock_menu_fixture(
                         self, request.get("target"), path.stem, native_guest_drop.STOCK_FIXTURES[action],
@@ -5626,6 +5652,7 @@ class Client:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
+            await native_guest_drop.service_stock_view(self, active)
             await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
             await self.service_inventory_equip(active)

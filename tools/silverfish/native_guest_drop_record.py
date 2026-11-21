@@ -5,7 +5,7 @@ import re
 
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
 from .guest_weapon_profiles import NINE_MM_BALL, STOCK_AMMO
-from .native_guest_consumable import MEALS
+from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULTS
 from .native_gold import valid_guid
 from .party import REQUEST_ID
 from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
@@ -18,6 +18,8 @@ GENERIC_CAPABILITY = "native_generic_inventory_drop"
 VIEW = "native_guest_inventory_drop_view"
 VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
+STOCK_ACTION_ROW = "native-inventory-stock-action"
+STOCK_ACTION_KEY = "native_inventory_stock_action"
 ITEM = NINE_MM_BALL.item_path
 LIGHT_PISTOL = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 STACKABLE = {
@@ -35,6 +37,26 @@ _CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z
 
 def valid_id(value) -> bool:
     return isinstance(value, str) and REQUEST_ID.fullmatch(value) is not None
+
+
+def parse_stock_action(fields, game):
+    _, area, pawn, epoch, sequence, entry, guid, count, expected = fields
+    if ((game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
+            != ("connected", area, pawn) or not valid_id(epoch)
+            or not re.fullmatch(r"[1-9][0-9]{0,15}", sequence) or int(sequence) >= 2**53
+            or not all(re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", value) for value in (count, expected))):
+        raise ValueError("Invalid stock backpack request scope")
+    amount, before = int(count), int(expected)
+    mode = {"sort": "sort", "split": "split", "equip": "equip", "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
+    if mode is None and entry.startswith("use-") and f"native-guest-{entry[4:]}" in CONSUMABLE_RESULTS:
+        mode = "use"
+    if (mode is None or (guid != "-" and not valid_guid(guid)) or (guid == "-") != (mode == "sort")
+            or (mode == "sort" and amount != 0) or (mode in ("use", "equip") and amount != 1)
+            or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
+            or (mode == "split" and not 0 < amount < before < 2**31) or (mode != "split" and before != 0)):
+        raise ValueError("Invalid stock backpack operation")
+    return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
+                count=amount, expected=before, mode=mode)
 
 
 def valid_position(value) -> bool:

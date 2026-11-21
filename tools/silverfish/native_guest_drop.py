@@ -110,7 +110,12 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
         raise RuntimeError("The stock screen did not verify the selected backpack action")
     client.last_game = snapshot
     entry, guid, count, sequence, expected = match.groups()
-    quantity = int(count)
+    return await settle_stock_action(client, area, epoch, operation, mode, entry, guid, int(count),
+                                     sequence, expected, split)
+
+
+async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split):
+    sorting, splitting = mode == "sort", mode == "split"
     accepted = False
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
@@ -128,6 +133,7 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
             if entry != "split" or expected is None or (guid, quantity, int(expected)) != split:
                 raise ValueError("The stock stack changed before the selected split")
             key = native_inventory.SPLIT_KEY
+            target = f"{guid}|{quantity}|{expected}"
             receipt = (await client.gameplay_action(native_inventory.SPLIT, operation, target)).get(key)
             remaining = split[2] - quantity
             if (not isinstance(receipt, dict)
@@ -166,7 +172,7 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
                 raise RuntimeError("The host did not verify consumption of the selected stock item")
             committed = (str(remaining),)
         else:
-            if entry != "context_menu" or quantity < 1:
+            if entry not in ("context_menu", "ctrl_click") or quantity < 1:
                 raise ValueError("The native action did not select a backpack drop")
             key, remaining = RESULT, 0
             receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)
@@ -187,6 +193,28 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
                 await client.bridge.command(*finish, "refused", timeout=3)
     client.last_game = await client.bridge.command(*finish, *committed, timeout=5)
     return {key: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
+
+
+async def service_stock_view(client, active: bool) -> None:
+    if not active or client.stopping or client.suspended:
+        return
+    view = client.last_game.get(record.STOCK_ACTION_KEY)
+    if (not view or view["epoch"] != client.zone_epoch or not client.transport.game_access
+            or view["sequence"] <= client.last_stock_inventory_action):
+        return
+    client.last_stock_inventory_action = view["sequence"]
+    area, epoch, sequence, mode, guid, count, expected = (
+        view[key] for key in ("area", "epoch", "sequence", "mode", "guid", "count", "expected")
+    )
+    operation = uuid.uuid5(client.bridge.input_namespace,
+                           f"{client.host_session}:{epoch}:{view['pawn']}:stock-inventory:{sequence}").hex
+    split = (guid, count, expected) if mode == "split" else None
+    try:
+        result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
+                                           guid, count, str(sequence), str(expected), split)
+        client.control.event("native_stock_inventory_action", operation_id=operation, **result)
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
+        client.control.event("native_stock_inventory_rejected", operation_id=operation, reason=str(error))
 
 
 async def service_view(client, active: bool) -> None:

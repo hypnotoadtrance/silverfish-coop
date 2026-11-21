@@ -152,6 +152,13 @@ namespace
         Unreal::FName teleport{STR("Teleport")};
         Unreal::FName matrix_script{STR("ExecuteUbergraph_Art_TeleportCube")};
         Unreal::FName apply_effects{STR("ApplyItemEffects")};
+        std::array<Unreal::FName, 10> guarded_inventory_actions{
+            Unreal::FName{STR("ActionPickup")}, Unreal::FName{STR("ActionQuickMove")},
+            Unreal::FName{STR("ActionUnequip")}, Unreal::FName{STR("PickUpAction")},
+            Unreal::FName{STR("InitiateItemTake")}, Unreal::FName{STR("FinalTakeItem")},
+            Unreal::FName{STR("EquipToNumberSlot")}, Unreal::FName{STR("QuickSplitStack")},
+            Unreal::FName{STR("InsertItem")}, Unreal::FName{STR("CashHeldMoney")},
+        };
     };
 
     struct Scope
@@ -211,6 +218,7 @@ namespace
         Unreal::FWeakObjectPtr pawn, world, save;
         std::uint64_t generation{};
         Clock::time_point expires{};
+        bool stock_inventory{};
     };
 
     struct HostDropRequest
@@ -1033,10 +1041,13 @@ namespace
         auto* kind = field<Unreal::FByteProperty>(function, STR("SortType"));
         if (!kind || kind->GetOffset_Internal() != 0 || !kind->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
             kind->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm)) return;
+        if (!host_drop_scope_matches(canonical_host_save())) return;
+        // The widget can request auto-sort while it is still being constructed.
+        if (host_drop_scope.stock_inventory) iteration.PreventOriginalFunctionCall();
         auto* screen = top_stock_menu();
         auto* manager = object_field(screen, STR("ItemManager"));
         auto* panel = object_field(screen, STR("BackpackPanel"));
-        if (!exact_drop_screen(manager, screen, panel) || !host_drop_scope_matches(canonical_host_save())) return;
+        if (!exact_drop_screen(manager, screen, panel)) return;
 
         iteration.PreventOriginalFunctionCall();
         const auto now = Clock::now();
@@ -1342,6 +1353,20 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        const auto guarded_inventory = [&] {
+            if (!host_drop_scope.stock_inventory || !qualified_drop_seat(false) || !exact_class(context, manager_path) ||
+                function->GetOuterPrivate() != context->GetClassPrivate() ||
+                !host_drop_scope_matches(canonical_host_save())) return false;
+            auto* screen = object_field(context, STR("ParentScreen"));
+            return exact_drop_screen(context, screen, object_field(screen, STR("BackpackPanel")));
+        };
+        if (host_drop_scope.stock_inventory &&
+            std::ranges::find(entries->guarded_inventory_actions, name) != entries->guarded_inventory_actions.end() &&
+            guarded_inventory())
+        {
+            iteration.PreventOriginalFunctionCall();
+            return;
+        }
         if (name == entries->insert_item)
         {
             intercept_drag_drop(iteration, context, function, parameters);
@@ -1404,6 +1429,11 @@ namespace
             }
             entry = name == entries->action_use ? "action_use" : name == entries->quick_move ? "quick_move" :
                 name == entries->use_held ? "use_held_item" : "confirm_use_item";
+            if (!artifact && guarded_inventory())
+            {
+                iteration.PreventOriginalFunctionCall();
+                return;
+            }
         }
         else
         {
@@ -1633,10 +1663,12 @@ namespace
         bool accepted = false;
         if (Unreal::IsInGameThreadRaw())
         {
-            if (lua.get_stack_size() == (host ? 2 : 3) && lua.is_integer(1) && lua.is_string(2) &&
+            const bool stock = !host && lua.get_stack_size() == 4 && lua.is_bool(4);
+            if ((stock || lua.get_stack_size() == (host ? 2 : 3)) && lua.is_integer(1) && lua.is_string(2) &&
                 (host || lua.is_integer(3)))
             {
                 // LuaMadeSimple getters remove the value, so take arguments from the top down.
+                const bool stock_inventory = stock && lua.get_bool(4);
                 const auto view_address = host ? 0 : lua.get_integer(3);
                 const std::string epoch{lua.get_string(2)};
                 const auto pawn = lua.get_integer(1);
@@ -1653,6 +1685,7 @@ namespace
                     host_drop_scope.save = save;
                     host_drop_scope.generation = scope.generation;
                     host_drop_scope.expires = Clock::now() + scope_lease;
+                    host_drop_scope.stock_inventory = stock_inventory;
                     accepted = true;
                 }
             }

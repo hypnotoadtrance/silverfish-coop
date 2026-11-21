@@ -123,6 +123,7 @@ class GuestView:
         character = client.invite["character_id"]
         reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
         await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+        self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
 
     async def project(self, client, character, contents):
