@@ -318,7 +318,9 @@ namespace
             base->GetSuperStruct() != (lease.display ? item_base : intermediate) ||
             (intermediate && intermediate->GetSuperStruct() != (food ? base : item_base))))
             return false;
-        auto* interaction = find<U::UFunction>(interaction_path);
+        auto* interaction = stock_loot ? type->GetFunctionByNameInChain(U::FName(STR("SendInteractionToActor")))
+                                       : find<U::UFunction>(interaction_path);
+        auto* interaction_owner = interaction ? U::Cast<U::UClass>(interaction->GetOuterPrivate()) : nullptr;
         auto* begin = stock_loot ? type->GetFunctionByNameInChain(U::FName(STR("ReceiveBeginPlay")))
             : find<U::UFunction>(food ? consumable_begin_path : ammo ? ammo_begin_path : weapon_begin_path);
         auto* converter = find<U::UFunction>(convert_path);
@@ -330,7 +332,8 @@ namespace
         auto* convert_item = parameter<U::FObjectProperty>(converter, STR("ItemActor"), 0, 8);
         auto* add_item = parameter<U::FObjectProperty>(add, STR("Item"), 0, 8);
         if (!player || !hit || (!stock_loot && !begin) || !convert_item || !add_item || !pawn_type || !scene_type ||
-            interaction->GetOuterPrivate() != item_base || interaction->GetNumParms() != 2 ||
+            !interaction_owner || !interaction_owner->IsChildOf(item_base) || !type->IsChildOf(interaction_owner) ||
+            (!stock_loot && interaction_owner != item_base) || interaction->GetNumParms() != 2 ||
             interaction->GetParmsSize() != 16 || interaction->GetReturnProperty() ||
             player->GetPropertyClass().Get() != pawn_type || hit->GetPropertyClass().Get() != scene_type ||
             (begin && ((!stock_loot && begin->GetOuterPrivate() != base) || begin->GetNumParms() ||

@@ -199,7 +199,8 @@ local function participant(state, name, host, world)
 end
 
 local function find_crate(world, profile)
-    local class = StaticFindObject(profile.office_desk and desk_class or profile.small_cabinet and cabinet_class or crate_class)
+    local class = StaticFindObject(profile.actor_class
+        or profile.office_desk and desk_class or profile.small_cabinet and cabinet_class or crate_class)
     local crate = StaticFindObject(profile.path)
     if not exact(crate, class) or crate:GetFullName() ~= profile.name or not authority(crate, world)
         or crate.SpawnSalt ~= profile.salt then

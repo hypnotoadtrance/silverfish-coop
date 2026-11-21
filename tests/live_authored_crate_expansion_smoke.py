@@ -51,6 +51,13 @@ LAB_ROUTE = (
 )
 DESK_SCENE = "lake-office-desk"
 SCENES[DESK_SCENE] = (OFFICE_DESK_PROFILE[0], (OFFICE_DESK_PROFILE[1],))
+FAMILY_SCENES = {
+    "stock-suitcase": (CISTERN, "Loot_SuitCase_BP_C", "Loot_SuitCase_BP_C_1"),
+    "stock-trunk": (CITY, "Loot_Trunk_BP_C", "LootCrate_Large_BP_C_1"),
+    "stock-cult-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Small_BP_C", "LootCrate_Cult_Small_BP_C_1"),
+    "stock-loot-stash": (CROSSROADS, "Loot_Stash_Small_BP_C", "Loot_Stash_Small_BP_C_1"),
+}
+SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
     "/Game/Classes/Items/Item_DeadBeetle.Item_DeadBeetle_C",
@@ -109,13 +116,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     if natural_lab_roll and (name != CABINET_SCENE or baseline or force_stock_roll):
         raise ValueError("The seeded Lab roll needs its fresh Wanderer route")
     area, actors = SCENES[name]
-    guaranteed = name in GUARANTEED_SCENES
+    guaranteed = name in GUARANTEED_SCENES or name == "stock-loot-stash"
     cabinet = name == CABINET_SCENE
     desk = name == DESK_SCENE
     permanent = guaranteed or cabinet or desk
-    targets = [full_name(area, actor) for actor in actors]
+    family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
+    targets = [full_name(area, actor, family) for actor in actors]
     assert all(CRATES.get(crate) == area for crate in targets)
-    if guaranteed:
+    if name in GUARANTEED_SCENES:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
     if cabinet:
         assert targets == [SMALL_CABINET]
@@ -279,6 +287,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
         for position, crate in enumerate(targets):
             await command("action", *host, "native-loot-approach", "--target", crate)
+            if family:
+                await command("action", *host, "native-loot-approach", "--target", f"host@{crate}")
             forced = None
             if force_stock_roll:
                 operation = uuid.uuid4().hex
@@ -326,8 +336,29 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             claim = None
             item = None
             if roll["items"]:
-                target = f"{roll['items'][0]['guid']}@{crate}"
-                request = ("action", *guest, "native-loot-claim", "--target", target, "--operation-id", uuid.uuid4().hex)
+                guid = roll["items"][0]["guid"]
+                target = f"{guid}@{crate}"
+                operation = uuid.uuid4().hex
+                if family:
+                    identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll['id']}:{guid}").hex
+
+                    def world_item(state):
+                        return state.get("game", {}).get("native_world_loot_items", {}).get(identity)
+
+                    for directory in (run, guest_run):
+                        present = await wait(directory, world_item)
+                        assert world_item(present)["class_path"] == roll["items"][0]["class_path"]
+                        assert not present["game"].get("native_loot_view")
+                    await command("action", *host, "native-world-loot-approach", "--target", f"guest@{identity}")
+                    press = await command("action", *guest, "native-world-loot-fixture", "--target", identity)
+                    assert press["native_world_loot_items"][identity]["sequence"] > 0, press
+                    for directory in (run, guest_run):
+                        await wait(directory, lambda state: not world_item(state))
+                    events = (json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+                    accepted, = [event for event in events if event.get("native_loot_claim", {}).get("guid") == guid]
+                    evidence["physical_pickup"] = accepted
+                    operation = accepted["operation_id"]
+                request = ("action", *guest, "native-loot-claim", "--target", target, "--operation-id", operation)
                 claim = (await command(*request))["native_loot_claim"]
                 assert claim["claimed_by"] == character and claim["guid"] == roll["items"][0]["guid"], claim
                 assert (await command(*request))["native_loot_claim"] == claim
@@ -451,7 +482,8 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
-    if any(area in GUARANTEED_SCENES or area in (CABINET_SCENE, DESK_SCENE) for area in arguments.area or ()) and not arguments.vanilla_saved:
+    if any(area in GUARANTEED_SCENES or area in (CABINET_SCENE, DESK_SCENE, "stock-loot-stash")
+           for area in arguments.area or ()) and not arguments.vanilla_saved:
         parser.error("Permanent stock loot scenes require --vanilla-saved")
     if arguments.force_stock_roll:
         if (arguments.area is not None and arguments.area != ["rail-yard"]) or not arguments.vanilla_saved:

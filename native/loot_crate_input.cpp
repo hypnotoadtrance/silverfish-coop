@@ -262,11 +262,16 @@ namespace
     {
         if (!ready() || !crate || !method || !args || call.OriginalFunctionCallPrevented()) return;
         static const U::FName open_name{STR("SendInteractionToActor")};
-        static const U::FName crate_script{STR("ExecuteUbergraph_LootCrate_Small_BP")};
-        static const U::FName cabinet_script{STR("ExecuteUbergraph_LootCabnet_Small_BP")};
-        static const U::FName desk_script{STR("ExecuteUbergraph_LootCabinet_Desk_BP")};
+        static const auto scripts = [] {
+            std::array<U::FName, silverfish::authored_loot::stock_classes.size()> names{};
+            std::ranges::transform(silverfish::authored_loot::stock_classes, names.begin(), [](const auto* type) {
+                const std::basic_string_view path{type->script};
+                return U::FName(path.substr(path.find_last_of(':') + 1).data());
+            });
+            return names;
+        }();
         const auto name = method->GetFName();
-        const bool script = name == crate_script || name == cabinet_script || name == desk_script;
+        const bool script = std::ranges::find(scripts, name) != scripts.end();
         if (name != open_name && !script) return;
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
         if (!profile || method != find<U::UFunction>(script ? profile->stock_class->script : profile->stock_class->input)) return;

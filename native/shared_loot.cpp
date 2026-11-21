@@ -1200,16 +1200,19 @@ namespace silverfish::shared_loot
         if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
-        if (!read_bool(crate, STR("Ping_IfOpened"), false)) return refuse("crate_settings_ping");
-        if (profile->stock_class->slots == max_container_slots)
+        if (!read_bool(crate, STR("Ping_IfOpened"), profile->stock_class->stock_ping)) return refuse("crate_settings_ping");
+        if (profile->stock_class != &authored_loot::small_crate)
         {
             auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
+            if (!opened || opened->GetSize() != sizeof(Unreal::FMulticastScriptDelegate))
+                return refuse("container_opened_delegate_schema");
+            if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
+                return refuse("container_opened_delegate_bound");
+        }
+        if (profile->stock_class->slots == max_container_slots)
+        {
             auto* items = field<Unreal::FMapProperty>(crate, STR("Loot Table_Items"));
             auto* rate = field<Unreal::FDoubleProperty>(crate, STR("SpawnChance_Item"));
-            if (!opened) return refuse("cabinet_opened_delegate_type");
-            if (opened->GetSize() != sizeof(Unreal::FMulticastScriptDelegate)) return refuse("cabinet_opened_delegate_layout");
-            if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
-                return refuse("cabinet_opened_delegate_bound");
             if (!items) return refuse("cabinet_default_items_schema");
             const bool desk = profile->stock_class == &authored_loot::office_desk;
             const auto failure = desk

@@ -2,6 +2,7 @@
 
 import math
 
+from .authored_container_placements import TWO_SLOT_PLACEMENTS
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -494,8 +495,9 @@ CRATE_PROFILES = tuple((*placement, None) for placement in PLACEMENTS) + OVERRID
 )
 
 
-def full_name(area: str, actor: str) -> str:
-    actor_class = actor.rsplit("_", 1)[0]
+def full_name(area: str, actor: str, actor_class: str | None = None) -> str:
+    if actor_class is None:
+        actor_class = actor.rsplit("_", 1)[0]
     return f"{actor_class} {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.{actor}"
 
 
@@ -508,7 +510,10 @@ OFFICE_DESK = full_name(*OFFICE_DESK_PROFILE[:2])
 FOUR_SLOT_CONTAINERS = frozenset({SMALL_CABINET, OFFICE_DESK})
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
 CRATES.update({SMALL_CABINET: LAB_E206, OFFICE_DESK: LAKE})
+CRATES.update({full_name(area, actor, family): area for family, area, actor, *_ in TWO_SLOT_PLACEMENTS})
 GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS) | {OFFICE_DESK}
+GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _, _, guaranteed, _ in TWO_SLOT_PLACEMENTS
+                      if guaranteed}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
 
 
