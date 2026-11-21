@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextvars import ContextVar
 import hashlib
 import json
 import math
@@ -209,8 +210,26 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None,
     return metadata
 
 
+_installed_layout: ContextVar[tuple[Path, Path] | None] = ContextVar("installed_layout", default=None)
+
+
+@contextlib.contextmanager
+def installed_content(work: Path, game: Path):
+    """Associate the verified installation with its separate private workspace."""
+    token = _installed_layout.set((work, game))
+    try:
+        yield
+    finally:
+        _installed_layout.reset(token)
+
+
+def content_root(work: Path) -> Path:
+    installed = _installed_layout.get()
+    return installed[1] if installed is not None and installed[0] == work else work / "stage"
+
+
 def has_native_death_patch(work: Path) -> bool:
-    packs = work / "stage" / PAKS
+    packs = content_root(work) / PAKS
     files = {suffix: packs / (DEATH_PATCH + suffix) for suffix in DEATH_PATCH_HASHES}
     if not any(path.exists() for path in files.values()):
         return False
@@ -224,7 +243,7 @@ def has_native_death_patch(work: Path) -> bool:
 
 
 def native_death_backend(work: Path, metadata: dict | None = None) -> str | None:
-    stage = work / "stage"
+    stage = content_root(work)
     if metadata is None:
         metadata = read_json(stage / "silverfish-coop-stage.json")
     overlay = has_native_death_patch(work)
@@ -244,13 +263,13 @@ def native_death_backend(work: Path, metadata: dict | None = None) -> str | None
 
 
 def qualified_authored_routes(work: Path) -> bool:
-    metadata = read_json(work / "stage" / "silverfish-coop-stage.json")
+    metadata = read_json(content_root(work) / "silverfish-coop-stage.json")
     return (metadata.get("game_build") == "8682dc057e1b38738862760a8c3b848a837c81d72c0e6ddffa3b7f963960374d"
             and native_death_backend(work, metadata) == "cpp")
 
 
 def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
-    path = (work / "stage" / SHIPPING).parent / MOD_SCRIPTS / name
+    path = (content_root(work) / SHIPPING).parent / MOD_SCRIPTS / name
     return path.is_file() and (marker is None or marker in path.read_text(encoding="utf-8"))
 
 
@@ -274,7 +293,7 @@ def _code_fingerprint(directory: Path, extension: str) -> str:
 
 
 def staged_build(work: Path) -> str:
-    stage = work / "stage"
+    stage = content_root(work)
     metadata = read_json(stage / "silverfish-coop-stage.json")
     if metadata.get("schema") != 1 or not (stage / SHIPPING).is_file():
         raise ValueError("Stage is missing or incompatible")
@@ -317,9 +336,10 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
            embedded_engine: bool = False, inspect_title_profile: bool = False, pause_fixture: bool = False,
            embedded_startup: str | None = None, resident_title: bool = False,
-           resident_direct_join: bool = False, unified_title: bool = False) -> dict[str, str]:
+           resident_direct_join: bool = False, unified_title: bool = False,
+           base_env=None) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
-    env = dict(os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
     env.pop("SILVERFISH_COOP_NATIVE_EVENTS", None)
     env.pop("SILVERFISH_COOP_NATIVE_GUEST_SAVE", None)

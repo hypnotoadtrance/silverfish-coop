@@ -21,6 +21,7 @@ BRIDGE_ENV = "SILVERFISH_COOP_BRIDGE"
 OPT_IN_ENV = "SILVERFISH_COOP_EMBEDDED_ENGINE"
 _ROLE_ROOTS = {"host": "campaigns", "client": "clients"}
 UNIFIED_ENV = "SILVERFISH_COOP_UNIFIED_TITLE"
+INSTALLED_ENV = "SILVERFISH_COOP_INSTALLED_TITLE"
 _UUID = re.compile(r"[a-f0-9]{32}")
 _FEATURE = re.compile(r"SILVERFISH_COOP_[A-Z0-9_]+")
 _STARTUP_OPTIONS = ("userdir", "multihome", "port")
@@ -136,9 +137,21 @@ def assert_private_saved_tree(profile: Path) -> None:
                     pending.append(entry.path)
 
 
+def _stock_profile() -> Path:
+    shell = ctypes.WinDLL("shell32.dll", winmode=0x800)
+    folder = shell.SHGetFolderPathW
+    folder.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR)
+    folder.restype = ctypes.c_long
+    buffer = ctypes.create_unicode_buffer(260)
+    if folder(None, 0x001C, None, 0, buffer) != 0:
+        raise OSError("Could not locate the Windows local application data directory")
+    return _exact_existing(Path(buffer.value)) / "SilverFish"
+
+
 def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
              required_env: Mapping[str, str | None]) -> tuple[Path, Path]:
-    executable = _exact_existing(work / "stage" / runtime.SHIPPING, directory=False)
+    game = runtime.content_root(work)
+    executable = _exact_existing(game / runtime.SHIPPING, directory=False)
     if (startup.pid != os.getpid() or not startup.argv
             or startup.image.resolve(strict=True) != executable
             or Path(startup.argv[0]).resolve(strict=True) != executable):
@@ -147,7 +160,7 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
         startup.environment.get(key) != value for key, value in required_env.items()
     ):
         raise ValueError("The embedded worker lacks its staged role environment")
-    metadata = runtime.read_json(_exact_existing(work / "stage" / "silverfish-coop-stage.json", directory=False))
+    metadata = runtime.read_json(_exact_existing(game / "silverfish-coop-stage.json", directory=False))
     fingerprint = metadata.get("game_build")
     if metadata.get("schema") != 1 or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
         raise ValueError("The embedded worker's game stage is unrecognized")
@@ -168,7 +181,13 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     options = _options(startup.argv)
     requested_directory = Path(options.get("userdir", ""))
     resident = required_env.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
-    if requested_directory != role_path / "game-user":
+    installed = required_env.get(INSTALLED_ENV) == "1"
+    if installed and (not unified or not resident):
+        raise ValueError("The installed game requires the unified title")
+    stock = installed and startup.environment.get("SILVERFISH_COOP_HEADLESS") != "1"
+    if stock and "userdir" in options:
+        raise ValueError("The installed title requires the stock player directory")
+    if not stock and requested_directory != role_path / "game-user":
         seat = requested_directory.parent
         if (not resident or unified or requested_directory.name != "game-user" or seat.parent != work / "titles"
                 or not NAME.fullmatch(seat.name)):
@@ -176,7 +195,7 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
         for branch in (seat.parent, seat):
             _assert_no_reparse(branch.lstat())
             _exact_existing(branch)
-    profile = _exact_existing(requested_directory)
+    profile = _exact_existing(_stock_profile() if stock else requested_directory)
     expected_bind = "127.0.0.1" if role == "client" and not resident else None
     if "port" in options or options.get("multihome") != expected_bind:
         raise ValueError("The engine startup network options do not match its staged role")

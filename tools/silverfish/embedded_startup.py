@@ -18,7 +18,8 @@ import uuid
 from . import runtime
 from .control import NAME
 from .embedded_engine import (
-    BRIDGE_ENV, OPT_IN_ENV, UNIFIED_ENV, EmbeddedEngine, _assert_no_reparse, _current_startup, _exact_existing, _qualify,
+    BRIDGE_ENV, INSTALLED_ENV, OPT_IN_ENV, UNIFIED_ENV, EmbeddedEngine,
+    _assert_no_reparse, _current_startup, _exact_existing, _qualify,
 )
 
 
@@ -284,11 +285,9 @@ def _host_start(directory: Path, selection: HostSelection) -> dict:
 
 async def _run(*, timeout: float = 15) -> None:
     """Consume the one request in the exact packaged game's private bridge."""
-    from . import service
-
     if type(timeout) not in (int, float) or not 0 < timeout <= 30:
         raise ValueError("Expected a bounded embedded startup timeout")
-    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, RESIDENT_ENV, UNIFIED_ENV, DIRECT_JOIN_ENV,
+    startup = _current_startup((OPT_IN_ENV, BRIDGE_ENV, STARTUP_ENV, RESIDENT_ENV, INSTALLED_ENV, UNIFIED_ENV, DIRECT_JOIN_ENV,
                                 "SILVERFISH_COOP_HEADLESS", *_RESIDENT_FEATURES))
     nonce = startup.environment.get(STARTUP_ENV)
     if startup.environment.get(OPT_IN_ENV) != "1" or not _nonce(nonce):
@@ -311,7 +310,23 @@ async def _run(*, timeout: float = 15) -> None:
         raise ValueError("The packaged worker's bridge role is unknown")
     directory = bridge.parents[2]
     work, _ = _bridge(bridge, role, directory.name, nonce)
-    expected_image = _exact_existing(work / "stage" / runtime.SHIPPING, directory=False)
+    if startup.environment.get(INSTALLED_ENV) == "1":
+        if not unified or startup.environment.get(RESIDENT_ENV) != "1":
+            raise ValueError("Installed startup requires the unified resident title")
+        game = startup.image.parents[len(runtime.SHIPPING.parts) - 1]
+        if (game.is_relative_to(work) or work.is_relative_to(game)
+                or startup.image != game / runtime.SHIPPING):
+            raise ValueError("The installed executable and co-op workspace are not distinct")
+        with runtime.installed_content(work, game):
+            await _run_qualified(startup, work, directory, bridge, role, nonce, headless, timeout)
+        return
+    await _run_qualified(startup, work, directory, bridge, role, nonce, headless, timeout)
+
+
+async def _run_qualified(startup, work, directory, bridge, role, nonce, headless, timeout):
+    from . import service
+
+    expected_image = _exact_existing(runtime.content_root(work) / runtime.SHIPPING, directory=False)
     if startup.image != expected_image or startup.pid != os.getpid():
         raise ValueError("The packaged worker does not own the exact staged executable")
     if startup.environment.get(RESIDENT_ENV) == "1":
@@ -320,14 +335,16 @@ async def _run(*, timeout: float = 15) -> None:
         required = {STARTUP_ENV: nonce, RESIDENT_ENV: "1"}
         if role in {"host", "title"}:
             required.update(dict.fromkeys(_RESIDENT_FEATURES, "1"))
-        if unified:
+        if role == "title":
             required.update({UNIFIED_ENV: "1", DIRECT_JOIN_ENV: "1"})
+        if startup.environment.get(INSTALLED_ENV) == "1":
+            required[INSTALLED_ENV] = "1"
         saved, _ = _qualify(startup, work, directory, role, required)
         resident = {"title": _resident_unified, "host": _resident_host, "client": _resident_join}[role]
         await resident(work, directory, bridge, saved, headless)
         return
 
-    if unified:
+    if role == "title":
         raise ValueError("The unified title requires the resident worker")
     path, claimed = bridge / REQUEST_FILE, bridge / CLAIM_FILE
     async with asyncio.timeout(timeout):

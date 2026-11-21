@@ -3,10 +3,12 @@
 #include <shellapi.h>
 #include <Python.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -37,6 +39,9 @@ namespace
     constexpr wchar_t startup_env[] = L"SILVERFISH_COOP_EMBEDDED_STARTUP";
     constexpr wchar_t bridge_env[] = L"SILVERFISH_COOP_BRIDGE";
     constexpr wchar_t embedded_env[] = L"SILVERFISH_COOP_EMBEDDED_ENGINE";
+    constexpr wchar_t installed_env[] = L"SILVERFISH_COOP_INSTALLED_TITLE";
+    constexpr wchar_t headless_env[] = L"SILVERFISH_COOP_HEADLESS";
+    constexpr auto install_config = L"resident-install.json";
     constexpr auto python_dll = L"python314.dll";
     constexpr std::string_view manifest_digest = SILVERFISH_RUNTIME_MANIFEST_SHA256;
     constexpr std::size_t max_path = 32768;
@@ -136,10 +141,10 @@ namespace
     };
 
     bool matches_command_line(const fs::path& image, const fs::path& profile, const fs::path& work,
-                              bool resident, bool legacy_loopback)
+                              bool other_profile, bool legacy_loopback, bool stock_profile = false)
     {
         const CommandArguments arguments;
-        if (!arguments.values || arguments.count < 2 ||
+        if (!arguments.values || arguments.count < 1 ||
             !windows_path_equal(arguments.values[0], image)) return false;
         bool userdir = false, loopback = false;
         for (int index = 1; index < arguments.count; ++index)
@@ -151,11 +156,11 @@ namespace
             if (windows_equal(name, L"-userdir"))
             {
                 const fs::path supplied(value);
-                if (userdir || !exact_path(supplied, true)) return false;
+                if (stock_profile || userdir || !exact_path(supplied, true)) return false;
                 if (!windows_path_equal(supplied, profile))
                 {
                     const auto seat = supplied.parent_path();
-                    if (!resident || !windows_equal(supplied.filename().native(), L"game-user") ||
+                    if (!other_profile || !windows_equal(supplied.filename().native(), L"game-user") ||
                         !windows_path_equal(seat.parent_path(), work / L"titles") ||
                         !profile_name(seat.filename().native()) || !exact_path(seat, true) ||
                         !exact_path(seat.parent_path(), true)) return false;
@@ -169,7 +174,7 @@ namespace
             }
             if (windows_equal(name, L"-port")) return false;
         }
-        return userdir && (loopback == legacy_loopback);
+        return (userdir != stock_profile) && (loopback == legacy_loopback);
     }
 
     fs::path qualify_startup(HMODULE module, std::wstring_view nonce, const wchar_t*& state)
@@ -182,19 +187,21 @@ namespace
         if (!exact_path(image, false) || !exact_path(addon, false)) return {};
         const auto binaries = image.parent_path();
         const auto stage = binaries.parent_path().parent_path().parent_path();
-        const auto work = stage.parent_path();
         const auto mod = binaries / L"ue4ss" / L"Mods" / mod_name;
+        const bool installed = environment(installed_env) == L"1";
         state = L"startup_scope_stage_refused";
-        if (stage.filename() != L"stage" ||
+        if ((!installed && stage.filename() != L"stage") ||
             !windows_path_equal(image, stage / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
             !windows_path_equal(addon, mod / L"dlls/main.dll") ||
-            !exact_path(stage / L"silverfish-coop-stage.json", false)) return {};
+            !exact_path(stage / L"silverfish-coop-stage.json", false) ||
+            (installed && !exact_path(mod / install_config, false))) return {};
 
         const fs::path bridge(environment(bridge_env));
         const auto bridge_folder = bridge.parent_path();
         const auto run = bridge_folder.parent_path();
         const auto run_profile = run.parent_path();
         const auto role_root = run_profile.parent_path();
+        const auto work = installed ? role_root.parent_path() : stage.parent_path();
         const auto profile = run_profile / L"game-user";
         const bool guest = windows_path_equal(role_root, work / L"clients");
         const bool resident = environment(L"SILVERFISH_COOP_RESIDENT_TITLE") == L"1";
@@ -203,12 +210,13 @@ namespace
                                         : guest || windows_path_equal(role_root, work / L"campaigns");
         state = L"startup_scope_bridge_refused";
         if (bridge.filename() != nonce || bridge_folder.filename() != L"game-bridge" || run.filename() != L"run" ||
-            !profile_name(run_profile.filename().native()) || !valid_root) return {};
+            !profile_name(run_profile.filename().native()) || !valid_root || (installed && !unified)) return {};
         for (const auto& path : {role_root, run_profile, run, bridge_folder, bridge})
             if (!exact_path(path, true)) return {};
 
         state = L"startup_scope_arguments_refused";
-        if (!matches_command_line(image, profile, work, resident && !unified, guest && !resident)) return {};
+        if (!matches_command_line(image, profile, work, resident && !unified, guest && !resident,
+                                  installed && environment(headless_env) != L"1")) return {};
         return mod / L"runtime";
     }
 
@@ -278,6 +286,130 @@ namespace
             return true;
         }
     };
+
+    struct InstalledBoot
+    {
+        int schema{}, port{};
+        bool isolated{};
+        std::string work, seat, campaign, bind;
+        std::map<std::string, std::string> features;
+
+        struct glaze
+        {
+            static constexpr auto value = glz::object(
+                "schema", &InstalledBoot::schema, "work", &InstalledBoot::work, "seat", &InstalledBoot::seat,
+                "campaign", &InstalledBoot::campaign, "bind", &InstalledBoot::bind, "port", &InstalledBoot::port,
+                "isolated", &InstalledBoot::isolated, "features", &InstalledBoot::features);
+        };
+    };
+
+    bool under(const fs::path& child, const fs::path& root)
+    {
+        for (auto path = child; !path.empty(); path = path.parent_path())
+        {
+            if (windows_path_equal(path, root)) return true;
+            if (path == path.root_path()) break;
+        }
+        return false;
+    }
+
+    std::wstring make_nonce()
+    {
+        std::array<UCHAR, 16> bytes{};
+        if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return {};
+        constexpr std::wstring_view digits = L"0123456789abcdef";
+        std::wstring result;
+        for (auto byte : bytes) { result += digits[byte >> 4]; result += digits[byte & 15]; }
+        return result;
+    }
+
+    std::optional<Handle> boot_installed_title(HMODULE module)
+    {
+        const auto image = module_image(nullptr);
+        const auto mod = module_image(module).parent_path().parent_path();
+        const auto binaries = image.parent_path();
+        const auto game = binaries.parent_path().parent_path().parent_path();
+        const auto descriptor = mod / install_config;
+        if (!exact_path(image, false) || !exact_path(descriptor, false) ||
+            !windows_path_equal(mod, binaries / L"ue4ss" / L"Mods" / mod_name) ||
+            !windows_path_equal(image, game / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
+            !exact_path(game / L"silverfish-coop-stage.json", false)) return std::nullopt;
+        const auto handle = open_pinned(descriptor);
+        const auto bytes = handle ? read(handle.get(), 8192) : std::nullopt;
+        InstalledBoot config;
+        if (!bytes || glz::read_json(config, *bytes) || config.schema != 1 ||
+            config.port < 1 || config.port > 65535 || config.features.size() > 64 ||
+            config.features.contains("SILVERFISH_COOP_INSTALLED_TITLE") ||
+            config.features.contains("SILVERFISH_COOP_EMBEDDED_STARTUP") ||
+            config.features.contains("SILVERFISH_COOP_BRIDGE") ||
+            config.features.contains("SILVERFISH_COOP_HEADLESS") != config.isolated) return std::nullopt;
+        for (auto name : {"SILVERFISH_COOP_EMBEDDED_ENGINE", "SILVERFISH_COOP_RESIDENT_TITLE",
+                          "SILVERFISH_COOP_UNIFIED_TITLE", "SILVERFISH_COOP_TITLE_DIRECT_JOIN"})
+            if (!config.features.contains(name) || config.features.at(name) != "1") return std::nullopt;
+        if (!std::all_of(config.bind.begin(), config.bind.end(), [](char ch) {
+                return ch == '.' || ch == ':' || (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+            }) || config.bind.empty() || config.bind.size() > 45) return std::nullopt;
+        const std::wstring seat(config.seat.begin(), config.seat.end());
+        const std::wstring campaign(config.campaign.begin(), config.campaign.end());
+        if (!profile_name(seat) || !profile_name(campaign)) return std::nullopt;
+        const auto work = fs::u8path(config.work);
+        const auto title = work / L"titles" / seat;
+        const auto run = title / L"run";
+        const auto mailbox = run / L"game-bridge";
+        for (const auto& path : {work, title.parent_path(), title, run, mailbox})
+            if (!exact_path(path, true)) return std::nullopt;
+        if (under(work, game) || under(game, work) ||
+            !matches_command_line(image, title / L"game-user", work, false, false, !config.isolated))
+            return std::nullopt;
+
+        std::map<std::wstring, std::wstring> updates;
+        for (const auto& [key, value] : config.features)
+        {
+            if (key.size() > 96 || !key.starts_with("SILVERFISH_COOP_") ||
+                !std::ranges::all_of(key, [](char ch) { return ch == '_' || (ch >= 'A' && ch <= 'Z') ||
+                                                                 (ch >= '0' && ch <= '9'); }) ||
+                (value != "1" && value != "cpp" && value != "notdeer")) return std::nullopt;
+            updates.emplace(std::wstring(key.begin(), key.end()), std::wstring(value.begin(), value.end()));
+        }
+        const auto runtime_manifest = open_pinned(mod / L"runtime" / L"runtime-manifest.json");
+        const auto manifest = runtime_manifest ? read(runtime_manifest.get(), max_manifest) : std::nullopt;
+        if (!manifest || !Sha256{}.matches(*manifest, manifest_digest)) return std::nullopt;
+
+        Handle lease(CreateFileW((run / L"installed-title.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                 OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!lease || !GetFileInformationByHandle(lease.get(), &info) ||
+            info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return std::nullopt;
+        const auto nonce = make_nonce();
+        const auto bridge = mailbox / nonce;
+        if (nonce.empty() || !fs::create_directory(bridge) || !exact_path(bridge, true)) return std::nullopt;
+        const auto request = "{\"schema\":1,\"campaign\":\"" + config.campaign + "\",\"bind\":\"" + config.bind
+            + "\",\"port\":" + std::to_string(config.port) + "}\n";
+        Handle selection(CreateFileW((bridge / L"resident-title.json").c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                     CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        DWORD written{};
+        if (!selection || !WriteFile(selection.get(), request.data(), static_cast<DWORD>(request.size()), &written, nullptr)
+            || written != request.size() || !FlushFileBuffers(selection.get())) return std::nullopt;
+
+        updates.emplace(bridge_env, bridge.native());
+        updates.emplace(installed_env, L"1");
+        for (const auto& [key, value] : updates)
+            if (!environment(key.c_str()).empty()) return std::nullopt;
+        for (const auto& [key, value] : updates)
+        {
+            if (_wputenv_s(key.c_str(), value.c_str()) == 0 && environment(key.c_str()) == value) continue;
+            for (const auto& [applied, ignored] : updates) _wputenv_s(applied.c_str(), L"");
+            return std::nullopt;
+        }
+        if (_wputenv_s(startup_env, nonce.c_str()) != 0 || startup_nonce() != nonce)
+        {
+            for (const auto& [key, ignored] : updates) _wputenv_s(key.c_str(), L"");
+            _wputenv_s(startup_env, L"");
+            return std::nullopt;
+        }
+        return lease;
+    }
 
     bool portable_file(std::string_view path)
     {
@@ -449,6 +581,7 @@ namespace
     class EmbeddedRuntime final : public RC::CppUserModBase
     {
         Hook::GlobalCallbackId tick = Hook::ERROR_ID;
+        std::optional<Handle> installed_lease;
 
     public:
         EmbeddedRuntime()
@@ -456,6 +589,15 @@ namespace
             ModName = mod_name;
             ModVersion = STR("0.1");
             ModIntendedSDKVersion = STR("4.0.0");
+            if (!lower_hex(manifest_digest, 64) || !environment(startup_env).empty()) return;
+            HMODULE module{};
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(&module_anchor), &module)) return;
+            try
+            {
+                if (auto lease = boot_installed_title(module)) installed_lease.emplace(std::move(*lease));
+            }
+            catch (...) {}
         }
 
         void on_unreal_init() override
