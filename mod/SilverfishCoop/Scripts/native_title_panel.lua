@@ -116,8 +116,8 @@ local function present(spec)
     end
 end
 
-local function button(key, label)
-    return {key = key, label = label}
+local function button(key, label, detail)
+    return {key = key, label = label, detail = detail}
 end
 
 local function multiplayer(offer)
@@ -278,8 +278,7 @@ local function show_saved(form)
         for index = first, math.min(first + 3, #saved) do
             local row = saved[index]
             local area = row.timestamp and #row.area > 23 and row.area:sub(1, 23) .. "…" or row.area
-            local label = row.timestamp and area .. "  /  " .. row.timestamp or area
-            rows[#rows + 1] = {button("load:" .. row.name, label)}
+            rows[#rows + 1] = {button("load:" .. row.name, area, row.timestamp)}
         end
         local pages = {}
         if first > 1 then pages[#pages + 1] = button("previous", "Previous") end

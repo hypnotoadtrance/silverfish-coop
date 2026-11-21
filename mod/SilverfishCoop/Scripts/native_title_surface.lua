@@ -56,9 +56,11 @@ local function label(view, value, size, color, wrap)
     return widget
 end
 
-local function text(view, value, size, color, x, y, w, h, wrap)
+local function text(view, value, size, color, x, y, w, h, wrap, z, justified)
     local widget = label(view, value, size, color, wrap)
-    place(cell(view.canvas, widget), x, y, w, h, 0)
+    if justified then widget:SetJustification(justified) end
+    if z then widget:SetClipping(1) end
+    place(cell(view.canvas, widget), x, y, w, h, z or 0)
 end
 
 local function prompt(view, field, y)
@@ -184,11 +186,17 @@ function surface.mount(context, spec, on_action)
             else
                 local w = math.floor((width - padding * 2 - gap * (#row - 1)) / #row)
                 for column, action in ipairs(row) do
+                    local x = padding + (column - 1) * (w + gap)
                     local button = controls.create(context, canvas, action.label, function()
                         if view.active then on_action(action.key) end
                     end, #row > 1 and 20 or 22)
                     view.buttons[action.key] = button
-                    place(button.slot, padding + (column - 1) * (w + gap), y, w, control_height, 1)
+                    place(button.slot, x, y, w, control_height, 1)
+                    if action.detail then
+                        button.widget.TextBlock_0:SetRenderOpacity(0)
+                        text(view, action.label, 19, rgba(0.91, 0.93, 0.92), x + 14, y + 8, w - 211, 28, false, 2)
+                        text(view, action.detail, 16, rgba(0.78, 0.82, 0.80), x + w - 190, y + 10, 176, 26, false, 2, 2)
+                    end
                 end
             end
         end

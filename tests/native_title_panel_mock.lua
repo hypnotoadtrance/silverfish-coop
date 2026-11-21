@@ -68,7 +68,7 @@ function surface.mount(owner, spec, dispatch)
         else
             for _, button in ipairs(row) do
                 assert(not view.buttons[button.key])
-                view.buttons[button.key] = {label = button.label, widget = object(view),
+                view.buttons[button.key] = {label = button.label, detail = button.detail, widget = object(view),
                     callback = function() dispatch(button.key) end}
             end
         end
@@ -370,8 +370,10 @@ click("browse")
 rejected("title_panel_fixture_button_unavailable", button("load:Second-Campaign"))
 files[host_catalog] = catalog
 click("browse")
-assert(display.buttons["load:First-Campaign"].label == "Observatory  /  2026-11-20 18:15:18"
-    and display.buttons["load:Second-Campaign"].label == "Tutorial Dock  /  2026-11-20 19:45:30")
+assert(display.buttons["load:First-Campaign"].label == "Observatory"
+    and display.buttons["load:First-Campaign"].detail == "2026-11-20 18:15:18"
+    and display.buttons["load:Second-Campaign"].label == "Tutorial Dock"
+    and display.buttons["load:Second-Campaign"].detail == "2026-11-20 19:45:30")
 click("load:Second-Campaign")
 assert(display.title == "Load Game" and display.note == "Tutorial Dock  /  2026-11-20 19:45:30"
     and host("port", "28181"))
