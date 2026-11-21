@@ -2286,8 +2286,11 @@ class Bridge:
                     if not native_guest_drop_record.valid_position(location):
                         raise ValueError("Invalid live stash position")
                     sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
+                elif fields == ["native-stash-live-census", "1"] and data.get("state") == "hosting":
+                    data[native_stash.LIVE_CENSUS] = True
                 elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
-                    if (fields[1] != data.get("map") or not SLOT.fullmatch(fields[3]) or not valid_guid(fields[4])
+                    live = fields[3] == "-" and data.get(native_stash.LIVE_CENSUS) is True
+                    if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
                             or fields[5] not in {"0", "1"} or not 0 <= int(fields[6]) <= 4096
                             or not 0 <= int(fields[7]) <= 4096 or not 0 <= int(fields[8]) <= 16):
                         raise ValueError("Invalid stash census")
@@ -2302,7 +2305,7 @@ class Bridge:
                     data[native_stash.MOVED] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         guid=fields[5], direction=fields[6], combined=fields[7] == "1", class_path=fields[8],
                         quantity=int(fields[9]))
-                elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10):
+                elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10, 11):
                     key = fields[0].removesuffix("-item").replace("-", "_")
                     if key not in data:
                         raise ValueError("Item report without an inventory census")
@@ -2311,10 +2314,14 @@ class Bridge:
                         "quantity": int(fields[5]), "stackable": fields[6] == "1",
                         "important": fields[7] == "1", "cannot_keep": fields[8] == "1",
                     }
-                    if len(fields) == 10:
+                    if len(fields) >= 10:
                         if fields[9] not in {"0", "1"}:
                             raise ValueError("Invalid stock inventory drop eligibility")
                         row["droppable"] = fields[9] == "1"
+                    if len(fields) == 11:
+                        if key != "native_stash_census" or data[key]["slot"] != "-" or not -2**31 <= int(fields[10]) < 2**31:
+                            raise ValueError("Invalid live stash item ammunition")
+                        row["ammo"] = int(fields[10])
                     data[key]["items"].append(row)
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {

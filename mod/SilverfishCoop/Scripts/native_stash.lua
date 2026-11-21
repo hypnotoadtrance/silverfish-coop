@@ -67,18 +67,25 @@ local function participant(state, phase, host, name)
     return guest_save.exact_item_context(state, phase, name)
 end
 
-local function census_context(state, phase, name, slot, id)
+local function stash_context(state, phase, name, id)
     local available, host, combined = selected_sites(state, phase)
     local site = available and available[id]
     if not site or not valid(site.actor) or site.actor:IsActorBeingDestroyed()
-        or identifier(site.actor.Stash_ID) ~= id or not same(site.actor:GetWorld(), state.world)
-        or not slot or #slot ~= 39 or not slot:match("^SFCoop_[0-9a-f]+$") then
+        or identifier(site.actor.Stash_ID) ~= id or not same(site.actor:GetWorld(), state.world) then
         error("native_stash_exact_site_unavailable", 0)
     end
     local pawn = participant(state, phase, host, name)
     if not valid(pawn) or pawn.Dead ~= false or not close_to(pawn, site.actor) then
         error("native_stash_participant_out_of_reach", 0)
     end
+    return pawn, combined, host
+end
+
+local function census_context(state, phase, name, slot, id)
+    if not slot or #slot ~= 39 or not slot:match("^SFCoop_[0-9a-f]+$") then
+        error("native_stash_exact_site_unavailable", 0)
+    end
+    local pawn, combined, host = stash_context(state, phase, name, id)
     local statics = StaticFindObject(statics_path)
     local snapshot = valid(statics) and statics:LoadGameFromSlot(slot, 0)
     if not valid(snapshot) then error("native_stash_census_save_unavailable", 0) end
@@ -167,8 +174,17 @@ function stash.command(fields, state, phase)
     if #fields ~= 6 or not offset or offset < 0 or offset > 4096 then
         error("native_stash_exact_site_unavailable", 0)
     end
-    local _, combined, snapshot = census_context(state, phase, name, slot, id)
-    local ok, status, source, total = SilverfishReadNativeStashCensus(snapshot:GetAddress(), combined, id)
+    local live = slot == "-"
+    local reader, target, combined
+    if live then
+        target, combined = stash_context(state, phase, name, id)
+        reader = SilverfishReadLiveNativeStashCensus
+    else
+        local _, saved_combined, snapshot = census_context(state, phase, name, slot, id)
+        target, combined, reader = snapshot, saved_combined, SilverfishReadNativeStashCensus
+    end
+    if type(reader) ~= "function" then error("native_stash_census_unavailable", 0) end
+    local ok, status, source, total = reader(target:GetAddress(), combined, id)
     if ok ~= true or status ~= "complete" or type(source) ~= "string" or math.type(total) ~= "integer"
         or total < 0 or total > 4096 then error(tostring(status), 0) end
     local items, seen = {}, 0
@@ -177,7 +193,7 @@ function stash.command(fields, state, phase)
         if seen > offset and seen <= offset + 16 then
             local item = {}
             for value in line:gmatch("[^\t]+") do item[#item + 1] = value end
-            if #item ~= 9 or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
+            if #item ~= (live and 10 or 9) or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
             items[#items + 1] = item
         end
     end
@@ -191,6 +207,9 @@ function stash.rows(state, phase, row)
     local available, _, combined = selected_sites(state, phase)
     if not available then return {} end
     local rows = {row("native-stash-setting", state.map, combined and 1 or 0)}
+    if type(SilverfishReadLiveNativeStashCensus) == "function" then
+        rows[#rows + 1] = row("native-stash-live-census", 1)
+    end
     for id, site in pairs(available) do
         if site and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
             local position = site.actor:K2_GetActorLocation()

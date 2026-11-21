@@ -12,6 +12,7 @@ from .native_gold import valid_guid
 
 LIST = "native-stash-list"
 CENSUS = "native-stash-census"
+LIVE_CENSUS = "native_stash_live_census"
 MOVE = "native-stash-move"
 MOVED = "native_stash_move"
 RESULT = "native_stash"
@@ -73,18 +74,21 @@ async def inspect(host, bridge, character, target):
     site, offset = selection[1], int(selection[2] or 0)
     scope = _scope(host, character, site)
     area, _, combined, pawn = scope
-    frame = await _frame(host, bridge, character, site, scope)
-    snapshot = await bridge.command(CENSUS, pawn, frame["slot"], site, str(offset), timeout=5)
+    live = host.last_game.get(LIVE_CENSUS) is True
+    slot = "-" if live else (await _frame(host, bridge, character, site, scope))["slot"]
+    snapshot = await bridge.command(CENSUS, pawn, slot, site, str(offset), timeout=5)
     report = snapshot.get("native_stash_census", {})
     if ((snapshot.get("state"), snapshot.get("map"), snapshot.get(SETTING)) != ("hosting", area, combined)
             or tuple(report.get(key) for key in ("map", "pawn", "slot", "site", "offset", "combined")) !=
-            (area, pawn, frame["slot"], site, offset, combined)):
+            (area, pawn, slot, site, offset, combined) or _scope(host, character, site) != scope):
         raise RuntimeError("The exact character and rest-site stash did not verify")
     items, total = report["items"], report["total"]
     if (len(items) != report["count"] or len(items) != min(native_inventory.PAGE_SIZE, max(0, total - offset))
             or len({item["guid"] for item in items}) != len(items)
             or any(item["source"] != "stash" or not valid_guid(item["guid"]) or item["quantity"] < 1
-                   or not 0 <= item["index"] < 4096 or not item["class_path"].startswith("/Game/") for item in items)):
+                   or not 0 <= item["index"] < 4096 or not item["class_path"].startswith("/Game/")
+                   or live and (type(item.get("ammo")) is not int or not -2**31 <= item["ammo"] < 2**31
+                                or item.get("stackable") and item["ammo"] != item["quantity"]) for item in items)):
         raise RuntimeError("The isolated stock stash page is incomplete")
     return {RESULT: dict(owner=character, site=site, combined=combined, offset=offset, total=total, items=items,
                          next_offset=offset + len(items) if offset + len(items) < total else None)}

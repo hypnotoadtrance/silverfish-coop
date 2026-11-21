@@ -18,7 +18,7 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
-async def verify(work: Path, vanilla_saved: Path):
+async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
     name = "stash-screen-" + uuid.uuid4().hex[:8]
     run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -65,7 +65,9 @@ async def verify(work: Path, vanilla_saved: Path):
     async def travel(source, destination):
         route, = (route for route in AUTHORED_ROUTES if
                   (route.source, route.destination, route.kind) == (source, destination, "overlap"))
-        previous_epoch = control.status(run)["zone_epoch"]
+        departure = await wait(run, lambda state: state.get("game", {}).get("map") == source
+                               and state["game"].get("native_zone", {}).get("state") == "ready")
+        previous_epoch = departure["zone_epoch"]
         endpoint = {"entrance": route.entrance, "exit_actor": route.actor}
         for role in ("guest", "host"):
             await ask(run, "native-exit-position", target=role, exit_position="near", **endpoint)
@@ -123,6 +125,11 @@ async def verify(work: Path, vanilla_saved: Path):
             invite["character_id"], False, item, 1,
         )
         assert await stash_items(guest_run, first) == [item]
+        live_census = state["game"].get(native_stash.LIVE_CENSUS) is True
+        if live_census:
+            deposit_page = (await ask(guest_run, native_stash.LIST, target=first))[native_stash.RESULT]
+            assert deposit_page["items"][0]["ammo"] == 7
+            evidence["live_census"] = {"deposited": deposit_page["items"][0]}
         backpack = (await ask(guest_run, "native-inventory-list"))["native_inventory"]
         assert item not in {row["guid"] for row in backpack["items"]}
         await approach("host", first)
@@ -131,14 +138,17 @@ async def verify(work: Path, vanilla_saved: Path):
         assert denied["error"] in {"native_stash_move_source_or_capacity", "native_stash_move_stored_identity"}
         await approach("guest", second)
         assert await stash_items(guest_run, second) == []
-        await travel(DEAD_BRIDGE, CROSSROADS)
-        await travel(CROSSROADS, OBSERVATORY)
-        arrived = await wait(run, lambda status: status.get("game", {}).get("map") == OBSERVATORY
-                             and status["game"].get(native_stash.SITES))
-        destination_site = next(iter(arrived["game"][native_stash.SITES]))
-        assert destination_site not in sites
-        await approach("guest", destination_site)
-        assert await stash_items(guest_run, destination_site) == []
+        destination, destination_site = DEAD_BRIDGE, second
+        if not same_map:
+            await travel(DEAD_BRIDGE, CROSSROADS)
+            await travel(CROSSROADS, OBSERVATORY)
+            destination = OBSERVATORY
+            arrived = await wait(run, lambda status: status.get("game", {}).get("map") == destination
+                                 and status["game"].get(native_stash.SITES))
+            destination_site = next(iter(arrived["game"][native_stash.SITES]))
+            assert destination_site not in sites
+            await approach("guest", destination_site)
+            assert await stash_items(guest_run, destination_site) == []
 
         await ask(run, "native-stash-setting-fixture", target="1")
         assert await stash_items(guest_run, destination_site) == [item]
@@ -150,11 +160,15 @@ async def verify(work: Path, vanilla_saved: Path):
 
         host = await launch("host-restart", run, *host_args, "--port", str(state["endpoint"]["port"]))
         await wait(run, lambda status: status.get("state") == "hosting" and status["generation"] != state["generation"]
-                   and status.get("game", {}).get("map") == OBSERVATORY
+                             and status.get("game", {}).get("map") == destination
                    and status["game"].get(native_stash.SETTING) is True)
         await join(await ask(run, "refresh-invite", target=invite["guest_id"]), "guest-restart")
         await approach("guest", destination_site)
         assert await stash_items(guest_run, destination_site) == [item]
+        if live_census:
+            restored_page = (await ask(guest_run, native_stash.LIST, target=destination_site))[native_stash.RESULT]
+            assert restored_page["items"][0]["ammo"] == 7
+            evidence["live_census"]["restored"] = restored_page["items"][0]
         withdrawal = await move_by_screen(destination_site, item, "stash", "withdraw")
         assert (withdrawal["owner"], withdrawal["combined"], withdrawal["guid"], withdrawal["quantity"]) == (
             invite["character_id"], True, item, 1,
@@ -163,7 +177,7 @@ async def verify(work: Path, vanilla_saved: Path):
         weapon = (await ask(guest_run, "native-guest-weapon-inspect", target=item))["native_guest_weapon"]
         assert weapon["stored_ammo"] == 7
         evidence.update(deposit=deposit, withdrawal=withdrawal, magazine=weapon["stored_ammo"],
-                        deposit_map=DEAD_BRIDGE, withdrawal_map=OBSERVATORY, combined_host_empty=True,
+                        deposit_map=DEAD_BRIDGE, withdrawal_map=destination, combined_host_empty=True,
                         host_withdraw_refused=denied["error"], per_site_other_empty=True, verified=True)
     finally:
         for process, directory in reversed(jobs):
@@ -183,5 +197,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--same-map", action="store_true", help="check two Dead Bridge stashes without zone travel")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
+                       same_map=options.same_map))

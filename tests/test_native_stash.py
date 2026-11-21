@@ -59,3 +59,20 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "scope_unavailable"):
             await native_stash.inspect(host, bridge, "foreign-character", SITE)
         self.assertEqual(bridge.command.await_count, 2)
+
+        game[native_stash.LIVE_CENSUS] = True
+        host.checkpoint_native.reset_mock()
+        row = dict(guid="D" * 32, source="stash", index=0, quantity=1, class_path="/Game/Classes/Items/Test.Test_C",
+                   stackable=False, ammo=7)
+        bridge.command.side_effect = None
+        bridge.command.return_value = {**game, "native_stash_census": dict(map=OBSERVATORY, pawn="guest-pawn",
+            slot="-", site=SITE, combined=False, total=1, offset=0, count=1, items=[row])}
+        live_view = (await native_stash.inspect(host, bridge, GUEST, SITE))[native_stash.RESULT]
+        self.assertEqual((live_view["owner"], live_view["items"]), (GUEST, [row]))
+        bridge.command.assert_awaited_with(native_stash.CENSUS, "guest-pawn", "-", SITE, "0", timeout=5)
+        host.checkpoint_native.assert_not_awaited()
+
+        bridge.command.return_value["native_stash_census"]["pawn"] = "host-pawn"
+        with self.assertRaisesRegex(RuntimeError, "exact character"):
+            await native_stash.inspect(host, bridge, GUEST, SITE)
+        host.checkpoint_native.assert_not_awaited()

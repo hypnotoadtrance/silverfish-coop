@@ -200,6 +200,7 @@ namespace
     struct Census
     {
         const Inventory& inventory;
+        bool include_stock_ammo{};
         std::unordered_map<Unreal::UClass*, ItemClass> classes;
         std::set<Guid> seen;
         std::string lines;
@@ -216,14 +217,17 @@ namespace
             auto [entry, inserted] = classes.try_emplace(type);
             auto& stock = entry->second;
             if (inserted && !stock.read(type)) return "native_inventory_census_item_class_unqualified";
-            const std::int32_t quantity = stock.stackable ? inventory.ammo->GetPropertyValueInContainer(value) : 1;
+            const auto ammo = inventory.ammo->GetPropertyValueInContainer(value);
+            const std::int32_t quantity = stock.stackable ? ammo : 1;
             if (quantity <= 0) return "native_inventory_census_invalid_stack_quantity";
 
             const bool droppable = source == "backpack" && stock.drop_class &&
                 !inventory.never_drop->GetPropertyValueInContainer(value);
-            std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\t{:d}\n",
+            std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\t{:d}",
                            identity[0], identity[1], identity[2], identity[3], source, index, stock.path, quantity,
                            stock.stackable, stock.important, stock.cannot_keep, droppable);
+            if (include_stock_ammo) std::format_to(std::back_inserter(lines), "\t{}", ammo);
+            lines.push_back('\n');
             return {};
         }
 
@@ -308,7 +312,9 @@ namespace
         }
     };
 
-    int read_stash(const Lua& lua)
+    Unreal::UObject* authoritative_save(Address address, bool combined);
+
+    int stash_census(const Lua& lua, bool read_live)
     {
         if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
             !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_string(3))
@@ -316,7 +322,9 @@ namespace
         const auto input = lua.get_integer();
         const bool combined = lua.get_bool();
         const auto target = stash_identity(lua.get_string());
-        auto* snapshot = input > 0 ? isolated_snapshot(static_cast<Address>(input)) : nullptr;
+        if (input <= 0) return result(lua, false, "native_stash_census_exact_save_and_site_required");
+        const auto address = static_cast<Address>(input);
+        auto* snapshot = read_live ? authoritative_save(address, combined) : isolated_snapshot(address);
         if (!snapshot || target == Guid{}) return result(lua, false, "native_stash_census_exact_save_and_site_required");
         Inventory inventory;
         StashStorage storage;
@@ -328,7 +336,7 @@ namespace
             return result(lua, false, "native_stash_census_array_out_of_bounds");
         const int selected = storage.select(stashes, inventory, combined, target);
         if (selected == -2) return result(lua, false, "native_stash_census_duplicate_site");
-        Census census{inventory};
+        Census census{inventory, read_live};
         if (selected >= 0)
         {
             if (const auto error = census.array(storage.contents, stashes.GetRawPtr(selected), "stash"); !error.empty())
@@ -339,6 +347,9 @@ namespace
         lua.set_integer(static_cast<std::int64_t>(census.seen.size()));
         return 4;
     }
+
+    int read_stash(const Lua& lua) { return stash_census(lua, false); }
+    int read_live_stash(const Lua& lua) { return stash_census(lua, true); }
 
     Unreal::UObject* object_field(Unreal::UObject* owner, const Unreal::TCHAR* name)
     {
@@ -522,6 +533,7 @@ namespace silverfish::inventory_census
         if (!enabled()) return;
         lua.register_function("SilverfishReadNativeInventoryCensus", read_census);
         lua.register_function("SilverfishReadNativeStashCensus", read_stash);
+        lua.register_function("SilverfishReadLiveNativeStashCensus", read_live_stash);
         lua.register_function("SilverfishMoveNativeStashItem", move_stash);
         lua.register_function("SilverfishVerifyNativeStashSave", verify_stash_save);
     }
