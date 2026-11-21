@@ -134,10 +134,10 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
                         return
                     await asyncio.sleep(.1)
 
-        async def open_direct():
+        async def open_direct(port=default_port):
             await form("open")
             await form("address", "127.0.0.1")
-            await form("port", str(default_port))
+            await form("port", str(port))
 
         await offer(guest_bridge, guest_profile, "join")
         if direct:
@@ -178,6 +178,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
             row.get("character_id") == character and row.get("state") == "active"
             for row in value.get("campaign", {}).get("leases", ())))
         assert rejoined["game"]["native_guest_save"]["pawn"] == pawn
+        await guest_bridge.wait_for(lambda frame: frame.get("stock_pause_exit", {}).get("state") == "armed")
         for operation in ("open", "prompt", "confirm"):
             await stock_pause(guest_bridge, operation)
         guest_stopped = await wait(guest_run, lambda value: value.get("state") == "stopped")
@@ -223,6 +224,16 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         assert second["game"]["save_scope"] == scope
         assert any(row["event"] == "native_host_save_restored" and row["slot"] == save["slot"]
                    and row["generation"] == second["generation"] for row in _events(host_run))
+        if direct:
+            await open_direct(edited_port)
+            await form("no_password")
+            await form_state("catalog;count=1")
+            await form("select", character)
+            await form("submit")
+            open_join = await wait(guest_run, lambda value: value.get("state") == "connected"
+                                   and value.get("generation") != joined_again["generation"])
+            assert open_join["character_id"] == character and open_join["pid"] == guest_process.pid
+            evidence["direct_title"]["passwordless_rejoin_on_edited_port"] = True
         final = await stop_host(edited_port)
         assert final["revision"] > checkpoint["revision"] and final["world"][native_host_save.SCOPE_FIELD] == scope
         evidence["sessions"].append({"pid": second["pid"], "port": edited_port, "revision": final["revision"],
