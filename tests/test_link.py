@@ -135,6 +135,26 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         for size in (1, 1024, 1200, 4097, 16_384):
             await self.exchange(size)
 
+    @unittest.skipUnless(os.name == "nt", "Windows UDP ownership tables are required")
+    async def test_resident_client_refuses_wildcard_game_socket_before_pinning_peer(self):
+        client = await start_client(game_pid=os.getpid())
+        self.addAsyncCleanup(client.close)
+        self.assertTrue((await self.connect_guest(client=client))["accepted"])
+        wildcard, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            DatagramInbox, local_addr=("0.0.0.0", 0))
+        self.addCleanup(wildcard.close)
+        wildcard.sendto(b"wildcard socket", client.address)
+        async with asyncio.timeout(3):
+            while client.game_local_datagrams == 0:
+                await asyncio.sleep(.01)
+        self.assertIsNone(client.unreal_local_port)
+        self.assertEqual(client.game_packets_sent, 0)
+
+        self.game_client.sendto(b"qualified socket", client.address)
+        received, _ = await self.host_inbox.next()
+        self.assertEqual(received, b"qualified socket")
+        self.assertEqual(client.unreal_local_port, self.game_client.get_extra_info("sockname")[1])
+
     async def test_reconnect_preserves_both_unreal_facing_endpoints(self):
         guest = self.request["guest_id"]
         self.request["runtime_id"] = self.client.runtime_id
