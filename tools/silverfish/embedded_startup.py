@@ -25,6 +25,7 @@ from .embedded_engine import (
 STARTUP_ENV = "SILVERFISH_COOP_EMBEDDED_STARTUP"
 RESIDENT_ENV = "SILVERFISH_COOP_RESIDENT_TITLE"
 RESIDENT_FILE = "resident-host.json"
+RESIDENT_JOIN_FILE = "resident-join.json"
 _RESIDENT_FEATURES = ("SILVERFISH_COOP_NATIVE_EVENTS", "SILVERFISH_COOP_NATIVE_GUEST_SAVE", "SILVERFISH_COOP_NATIVE_ZONE")
 REQUEST_FILE = "startup-request.json"
 CLAIM_FILE = "startup-claimed.json"
@@ -107,7 +108,7 @@ def _host(value: dict) -> HostSelection:
 
 
 def _join(value: dict) -> JoinSelection:
-    if set(value) != {"invite_sha256", "character_id"} or not _hash(value["invite_sha256"]):
+    if type(value) is not dict or set(value) != {"invite_sha256", "character_id"} or not _hash(value["invite_sha256"]):
         raise ValueError("Invalid embedded Join selection")
     character = value["character_id"]
     if not isinstance(character, str) or len(character) != 36 or str(uuid.UUID(character)) != character:
@@ -309,11 +310,14 @@ async def _run(*, timeout: float = 15) -> None:
     if startup.image != expected_image or startup.pid != os.getpid():
         raise ValueError("The packaged worker does not own the exact staged executable")
     if startup.environment.get(RESIDENT_ENV) == "1":
-        if role != "host" or not runtime.qualified_authored_routes(work):
-            raise ValueError("The resident worker requires its native host stage")
-        required = {STARTUP_ENV: nonce, RESIDENT_ENV: "1"} | dict.fromkeys(_RESIDENT_FEATURES, "1")
+        if not runtime.qualified_authored_routes(work):
+            raise ValueError("The resident worker requires its qualified native stage")
+        required = {STARTUP_ENV: nonce, RESIDENT_ENV: "1"}
+        if role == "host":
+            required.update(dict.fromkeys(_RESIDENT_FEATURES, "1"))
         saved, _ = _qualify(startup, work, directory, role, required)
-        await _resident_host(work, directory, bridge, saved, headless)
+        resident = _resident_host if role == "host" else _resident_join
+        await resident(work, directory, bridge, saved, headless)
         return
 
     path, claimed = bridge / REQUEST_FILE, bridge / CLAIM_FILE
@@ -361,7 +365,7 @@ async def _run(*, timeout: float = 15) -> None:
 
 async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path, headless: bool) -> None:
     from . import service
-    from .title_session import SessionPlan, TitleSession
+    from .title_session import SessionPlan
 
     settings = _decode(_read_file(mailbox / RESIDENT_FILE, REQUEST_LIMIT))
     if set(settings) != {"schema", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
@@ -407,9 +411,48 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
         return host_plan(bind, port)
 
-    title = EmbeddedEngine(os.getpid(), mailbox, saved, None)
     plan = replace(host_plan(default_bind, default_port), resolve_claim=resolve)
-    await TitleSession(title.bridge, {"host": plan}, resident=True, title_saved_directory=saved,
+    await _resident_title(mailbox, saved, {"host": plan})
+
+
+async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    from . import service
+    from .title_session import SessionPlan
+
+    settings = _decode(_read_file(mailbox / RESIDENT_JOIN_FILE, REQUEST_LIMIT))
+    if set(settings) != {"schema", "selection"} or type(settings["schema"]) is not int or settings["schema"] != 1:
+        raise ValueError("Invalid resident Join configuration")
+    selection = _join(settings["selection"])
+    path = mailbox / INVITE_FILE
+    with _pinned_invite(path, selection.invite_sha256) as invitation:
+        invite = service.load_invite(invitation, runtime.staged_build(work))
+        if invite.get("native_zones") is not True:
+            raise ValueError("The invitation does not offer embedded native co-op")
+        options = service.guest_engine_options(work, invite)
+    required = service._embedded_features(work, headless, None, options, resident=True)
+    if _current_startup(tuple(required)).environment != required:
+        raise ValueError("The resident guest lacks the invitation's staged game features")
+
+    async def start():
+        with _pinned_invite(path, selection.invite_sha256) as invitation:
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+            await engine.observe_title()
+            await service.join_game(work, directory, invitation, headless, selection.character_id,
+                                    resident_engine=engine)
+
+    def status():
+        return runtime.read_json(directory / "run" / "status.json")
+
+    plan = SessionPlan(start, status, lambda frame: frame.get("character_id") == selection.character_id
+                       and frame.get("gameplay_fresh") is True)
+    await _resident_title(mailbox, saved, {"join": plan})
+
+
+async def _resident_title(mailbox, saved, plans):
+    from .title_session import TitleSession
+
+    title = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+    await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None).run()
 
 

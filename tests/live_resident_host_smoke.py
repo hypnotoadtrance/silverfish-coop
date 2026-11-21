@@ -1,8 +1,8 @@
-"""Start and resume real co-op hosting in the same running stock title process."""
+"""Host and join real co-op sessions in the original staged title processes."""
 
 import argparse
 import asyncio
-from contextlib import suppress
+from hashlib import sha256
 from pathlib import Path
 import sys
 import uuid
@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.silverfish import embedded_startup, embedded_title_plan, native_host_save, native_title_entry as title, runtime
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import select_run, submit
-from tools.silverfish.service import MENU_HOST_OPTIONS, _host_stage_options, verify_travel_checkpoint
+from tools.silverfish.service import (
+    MENU_HOST_OPTIONS, _host_stage_options, guest_engine_options, load_invite, verify_travel_checkpoint,
+)
 from tools.silverfish.title_handoff import _isolated_stock_title
 from tools.silverfish.title_session import STATUS_FILE
 from tools.silverfish.travel import OBSERVATORY
@@ -20,7 +22,7 @@ from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 from live_native_runtime_rejoin_smoke import _events
 from live_same_process_listener_smoke import choose_ports
-from live_title_handoff_smoke import title_choice
+from live_stock_pause_exit_smoke import paired_checkpoint, stock_pause
 
 
 async def verify(work: Path, original: Path) -> None:
@@ -44,16 +46,16 @@ async def verify(work: Path, original: Path) -> None:
     options = MENU_HOST_OPTIONS | _host_stage_options(work, True, True)
     options["host_dig_live"] = runtime.staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope")
     process = runtime.launch(work, profile, mailbox, True, embedded_engine=True, embedded_startup=nonce,
-                             title_fixture=True, resident_title=True, **options)
+                             title_fixture=True, pause_fixture=True, resident_title=True, **options)
     bridge = runtime.Bridge(mailbox, process)
-    children, tasks = [], []
+    guest_process = None
     evidence = {"verified": False, "title_pid": process.pid, "sessions": []}
 
-    async def offer():
-        frame = await bridge.wait_for(lambda game: _isolated_stock_title(game, profile / "Saved")
-                                     and game["save_scope"] is None
-                                     and game.get(title.PANEL_KEY, {}).get("state") == "ready")
-        assert frame[title.PANEL_KEY]["actions"] == ["host"]
+    async def offer(game_bridge, game_profile, action):
+        frame = await game_bridge.wait_for(lambda game: _isolated_stock_title(game, game_profile / "Saved")
+                                          and game["save_scope"] is None
+                                          and game.get(title.PANEL_KEY, {}).get("state") == "ready")
+        assert frame[title.PANEL_KEY]["actions"] == [action]
         return frame
 
     async def hosting(port):
@@ -69,10 +71,14 @@ async def verify(work: Path, original: Path) -> None:
                     return state, status["attempt"]
                 await asyncio.sleep(.1)
 
-    async def stop_host(port):
-        assert (await submit(host_run, "stop"))["ok"]
+    async def stop_host(port, *, pause_exit=False):
+        if pause_exit:
+            await stock_pause(bridge, "open")
+            await stock_pause(bridge, "save_and_quit")
+        else:
+            assert (await submit(host_run, "stop"))["ok"]
         stopped = await wait(host_run, lambda value: value.get("state") == "stopped")
-        await offer()
+        await offer(bridge, profile, "host")
         assert stopped["pid"] == process.pid and process.poll() is None and not owns_udp_port(process.pid, port)
         return CampaignStore.read_existing(
             campaign / "save", verify_world=verify_travel_checkpoint,
@@ -80,31 +86,71 @@ async def verify(work: Path, original: Path) -> None:
         )
 
     try:
-        await offer()
+        await offer(bridge, profile, "host")
         await bridge.command("native-title-panel-press-fixture", "host")
         first, first_attempt = await hosting(default_port)
         scope = first["game"]["save_scope"]
         assert scope == uuid.UUID(first["campaign"]["campaign_id"]).hex
         invitation = await submit(host_run, "invite", name="Local guest", character="Resident Scout")
-        guest_plan = embedded_title_plan.guest_plan(work, guest, Path(invitation["invite_file"]), None, headless=True)
-        await title_choice(work, case, "join", guest_plan, children, tasks)
-        await wait(guest_run, lambda value: value.get("state") == "connected")
+        character = invitation["character_id"]
+        source = Path(invitation["invite_file"])
+        invite = load_invite(source, runtime.staged_build(work))
+        guest_options = guest_engine_options(work, invite)
+        guest_nonce = uuid.uuid4().hex
+        guest_mailbox = guest_run / "game-bridge" / guest_nonce
+        guest_profile = guest / "game-user"
+        guest_mailbox.mkdir(parents=True)
+        raw_invitation = source.read_bytes()
+        (guest_mailbox / embedded_startup.INVITE_FILE).write_bytes(raw_invitation)
+        runtime.write_json(guest_mailbox / embedded_startup.RESIDENT_JOIN_FILE, {
+            "schema": 1, "selection": {"invite_sha256": sha256(raw_invitation).hexdigest(), "character_id": character},
+        })
+        guest_process = runtime.launch(work, guest_profile, guest_mailbox, True, embedded_engine=True,
+                                       embedded_startup=guest_nonce, resident_title=True, title_fixture=True,
+                                       pause_fixture=True, **guest_options)
+        guest_bridge = runtime.Bridge(guest_mailbox, guest_process)
+        await offer(guest_bridge, guest_profile, "join")
+        await guest_bridge.command("native-title-panel-press-fixture", "join")
+        joined = await wait(guest_run, lambda value: value.get("state") == "connected")
+        guest_scope = uuid.UUID(character).hex
+        assert joined["pid"] == guest_process.pid and joined["game"]["save_scope"] == guest_scope
         paired = await wait(host_run, lambda value: value.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         pawn = paired["game"]["native_guest_save"]["pawn"]
         assert (await submit(guest_run, "drop-link"))["ok"]
         await wait(host_run, lambda value: any(
-            row.get("character_id") == invitation["character_id"] and row.get("state") == "reserved"
+            row.get("character_id") == character and row.get("state") == "reserved"
             for row in value.get("campaign", {}).get("leases", ())))
         assert (await submit(guest_run, "reconnect"))["resumed"]
         rejoined = await wait(host_run, lambda value: any(
-            row.get("character_id") == invitation["character_id"] and row.get("state") == "active"
+            row.get("character_id") == character and row.get("state") == "active"
             for row in value.get("campaign", {}).get("leases", ())))
         assert rejoined["game"]["native_guest_save"]["pawn"] == pawn
-        assert (await submit(guest_run, "stop"))["ok"]
-        await asyncio.wait_for(tasks[-1], 15)
-        checkpoint = await stop_host(default_port)
+        for operation in ("open", "prompt", "confirm"):
+            await stock_pause(guest_bridge, operation)
+        guest_stopped = await wait(guest_run, lambda value: value.get("state") == "stopped")
+        assert guest_stopped["pid"] == guest_process.pid and guest_stopped["stop_reason"] == "guest_left"
+        await offer(guest_bridge, guest_profile, "join")
+        await wait(host_run, lambda value: value.get("state") == "hosting" and not value["campaign"]["leases"])
+        detached = paired_checkpoint(campaign, character)["guest_save"]["slot"]
+        await guest_bridge.command("native-title-panel-press-fixture", "join")
+        joined_again = await wait(guest_run, lambda value: value.get("state") == "connected"
+                                  and value.get("generation") != joined["generation"])
+        assert joined_again["pid"] == guest_process.pid and joined_again["game"]["save_scope"] == guest_scope
+        assert joined_again["character_id"] == character and guest_process.poll() is None
+        await wait(host_run, lambda value: any(row.get("character_id") == character and row.get("state") == "active"
+                                              for row in value.get("campaign", {}).get("leases", ())))
+        assert any(row["event"] == "native_guest_save_restored" and row["slot"] == detached
+                   and row["character_id"] == character for row in _events(host_run))
+        checkpoint = await stop_host(default_port, pause_exit=True)
+        guest_final = await wait(guest_run, lambda value: value.get("state") == "stopped")
+        assert guest_final["pid"] == guest_process.pid and guest_final["stop_reason"] == "host_session_ended"
+        await offer(guest_bridge, guest_profile, "join")
+        assert guest_process.poll() is None
+        evidence["guest"] = {"title_pid": guest_process.pid, "joined_twice": True,
+                             "reconnected_to_original_pawn": True, "restored_slot": detached,
+                             "scope_released_after_host_stop": True}
         save = checkpoint["world"]["native_host_save"]
-        assert checkpoint["characters"][invitation["character_id"]]["state"]["native_guest_save"]
+        assert checkpoint["characters"][character]["state"]["native_guest_save"]
         evidence["sessions"].append({"pid": first["pid"], "port": default_port, "revision": checkpoint["revision"],
                                      "guest_reconnected": True, "scope_released": True})
 
@@ -123,14 +169,8 @@ async def verify(work: Path, original: Path) -> None:
                                      "restored_slot": save["slot"], "scope_released": True})
         evidence["verified"] = True
     finally:
-        for task in reversed(tasks):
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError, OSError, RuntimeError, ValueError, TimeoutError):
-                    await task
-        for child in reversed(children):
-            if child.poll() is None:
-                await runtime.stop_game(child)
+        if guest_process is not None and guest_process.poll() is None:
+            await runtime.stop_game(guest_process)
         if process.poll() is None:
             await runtime.stop_game(process)
         evidence["original_saves_verified"] = saved_hashes(original) == originals

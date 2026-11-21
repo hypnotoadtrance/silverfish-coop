@@ -357,7 +357,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_NATIVE_WIPE_VIEW", None)
     env.pop("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES", None)
     backend = native_death_backend(work)
-    host_role = port is not None or resident_title
+    host_role = port is not None or (resident_title and native_events)
     if native_events and (backend != "cpp" or not host_role):
         raise ValueError("Native event scope requires a staged C++ listen host")
     if native_guest and not native_events:
@@ -380,8 +380,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
             raise ValueError("Invalid packaged embedded game startup identity")
         env["SILVERFISH_COOP_EMBEDDED_STARTUP"] = embedded_startup
     if resident_title:
-        if embedded_startup is None or port is not None or not native_guest:
-            raise ValueError("The resident title requires a packaged host with no startup port")
+        if embedded_startup is None or port is not None or (host_role and not native_guest):
+            raise ValueError("The resident title requires a packaged role with no startup port")
         env["SILVERFISH_COOP_RESIDENT_TITLE"] = "1"
     if pause_fixture:
         if not (headless and embedded_startup is not None):
@@ -517,13 +517,14 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     arguments += f' -userdir="{profile}" -unattended -NoSplash -windowed'
     if runtime_listener and (type(port) is not int or not 1 <= port <= 65535):
         raise ValueError("The runtime listener requires a private UDP port")
-    if not runtime_listener and not options.get("resident_title"):
+    resident_host = options.get("resident_title") and options.get("native_events")
+    if not runtime_listener and not resident_host:
         arguments += " -MULTIHOME=127.0.0.1"
         if port is not None:
             arguments += f" -port={port}"
     info = None
     if headless:
-        role = "host" if port is not None or options.get("resident_title") else "guest"
+        role = "host" if port is not None or resident_host else "guest"
         if (render_capture != role or options.get("embedded_engine") or options.get("title_fixture")
                 or options.get("inspect_title_profile")):
             arguments += " -nullrhi"

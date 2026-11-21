@@ -3539,14 +3539,21 @@ class Host:
                             link_connected=self.game_link_connected(transport))
 
 
-async def _acquire_embedded_game(work: Path, directory: Path, role: str, headless: bool,
-                                 internal_port: int | None, options: dict) -> EmbeddedEngine:
+def _embedded_features(work: Path, headless: bool, internal_port: int | None, options: dict, *,
+                       resident: bool = False) -> dict[str, str | None]:
     startup = os.environ.get("SILVERFISH_COOP_EMBEDDED_STARTUP")
     pause_fixture = os.environ.get("SILVERFISH_COOP_PAUSE_FIXTURES") == "1"
+    title_fixture = resident and os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     expected = game_environment(work, headless, internal_port, embedded_engine=True, embedded_startup=startup,
-                                pause_fixture=pause_fixture, **options)
-    conditions = {name: expected.get(name) for name in os.environ.keys() | expected.keys()
-                  if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
+                                pause_fixture=pause_fixture, title_fixture=title_fixture, resident_title=resident,
+                                **options)
+    return {name: expected.get(name) for name in os.environ.keys() | expected.keys()
+            if name.startswith("SILVERFISH_COOP_") and name not in (BRIDGE_ENV, OPT_IN_ENV)}
+
+
+async def _acquire_embedded_game(work: Path, directory: Path, role: str, headless: bool,
+                                 internal_port: int | None, options: dict) -> EmbeddedEngine:
+    conditions = _embedded_features(work, headless, internal_port, options)
     return await EmbeddedEngine.acquire(work, directory, role=role, internal_port=internal_port,
                                         required_env=conditions)
 
@@ -5085,7 +5092,10 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
                     character_id: str | None = None, *, native_zones: bool = False,
                     native_zone_walls: bool = False, guest_reload_input: bool = False,
                     guest_inventory_view: bool = False, guest_primary_input: bool = False,
-                    embedded_engine: bool = False) -> None:
+                    embedded_engine: bool = False, resident_engine: EmbeddedEngine | None = None) -> None:
+    if resident_engine is not None and (embedded_engine or resident_engine.internal_port is not None
+                                        or resident_engine.profile != directory / "game-user"):
+        raise ValueError("The resident title does not own this guest profile")
     invite = load_invite(invitation, staged_build(work))
     game_options = guest_engine_options(work, invite, native_zones=native_zones, native_zone_walls=native_zone_walls,
                                         guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
@@ -5102,8 +5112,9 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
         result = "stopped"
         try:
             control.status(active=True, role="client", state="starting")
-            if embedded_engine:
-                embedded = await _acquire_embedded_game(work, directory, "client", headless, None, game_options)
+            if embedded_engine or resident_engine is not None:
+                embedded = resident_engine or await _acquire_embedded_game(
+                    work, directory, "client", headless, None, game_options)
                 process, bridge = embedded, embedded.bridge
                 await embedded.select_save_scope(
                     native_host_save.SaveScope(directory / "game-user", uuid.UUID(invite["character_id"]).hex))
