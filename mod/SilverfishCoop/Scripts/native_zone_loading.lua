@@ -1,10 +1,47 @@
 local loading = {}
 local fade_class = "/Game/Classes/GUI/FadeToBlack_Widget.FadeToBlack_Widget_C"
 local widgets = "/Script/UMG.Default__WidgetBlueprintLibrary"
+local level_class = "/Game/Classes/Actors/LevelControler_BP.LevelControler_BP_C"
+local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
+local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local current
 
 local function valid(object)
     return object and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function finish_guest_loading(state, phase)
+    if phase ~= "connected" or not state.listening or not state.server or not valid(state.world) then return end
+    local controller = state.controller
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not valid(controller) or controller.Loading ~= true or not valid(pawn)
+        or not same(controller:GetClass(), StaticFindObject(controller_class))
+        or not same(pawn:GetClass(), StaticFindObject(pawn_class))
+        or not controller:IsLocalController() or not pawn:IsLocallyControlled() or pawn:HasAuthority()
+        or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller)
+        or not same(controller:GetWorld(), state.world) or not same(pawn:GetWorld(), state.world) then return end
+    local driver, instance = state.world.NetDriver, state.world.OwningGameInstance
+    if not valid(driver) or not valid(driver.ServerConnection) or not same(driver.World, state.world)
+        or not same(driver.ServerConnection.Driver, driver) or not valid(instance) then return end
+    local statics, class = StaticFindObject("/Script/Engine.Default__GameplayStatics"), StaticFindObject(level_class)
+    if not valid(statics) or not valid(class) then return end
+    local found = {}
+    statics:GetAllActorsOfClass(state.world, class, found)
+    for _, value in ipairs(found.OutActors or found) do
+        local level = value
+        if level and type(level.type) == "function" and level:type() == "RemoteUnrealParam" then level = level:get() end
+        if valid(level) and same(level["As Game Instance FP"], instance)
+            and same(level:GetOuter(), state.world.PersistentLevel) and not level:IsActorBeingDestroyed() then
+            -- The stock level controller clears this flag once. A remote
+            -- player controller may arrive after that callback.
+            controller.Loading = false
+            return
+        end
+    end
 end
 
 local function remove()
@@ -17,6 +54,7 @@ function loading.clear()
 end
 
 function loading.sync(state, phase)
+    finish_guest_loading(state, phase)
     if not current then return end
     if os.time() >= current.expires or phase == "connected" and state.map == current.destination then
         loading.clear()
