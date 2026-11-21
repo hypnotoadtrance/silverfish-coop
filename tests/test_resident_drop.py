@@ -79,7 +79,7 @@ class ResidentDropTests(unittest.TestCase):
         runtime_path = embedded / self.runtime_folder
         activation = [mods / module / "enabled.txt" for module in ("SilverfishCoop", runtime.CPP_MOD_NAME, install_stage.MOD)]
         files = {
-            "Silverfish-Coop-README.txt", "silverfish-coop-stage.json",
+            "SilverFish/Silverfish-Coop-README.txt", runtime.PORTABLE_STAGE_MANIFEST.as_posix(),
             (binary / runtime.CPP_ADDON_DLL).as_posix(), (embedded / "dlls/main.dll").as_posix(),
             (embedded / "resident-portable.json").as_posix(),
             (runtime_path / "runtime-manifest.json").as_posix(), (runtime_path / "python314.dll").as_posix(),
@@ -91,7 +91,7 @@ class ResidentDropTests(unittest.TestCase):
             self.assertEqual(set(archive.namelist()), files)
             self.assertIsNone(archive.testzip())
             self.assertTrue(all(archive.read(path.as_posix()) == b"" for path in activation))
-            stage = json.loads(archive.read("silverfish-coop-stage.json"))
+            stage = json.loads(archive.read(runtime.PORTABLE_STAGE_MANIFEST.as_posix()))
             self.assertEqual(stage["lua_files"]["main.lua"], sha256(b"return true\n").hexdigest())
             self.assertEqual(stage["cpp_death_lab"]["addon"], sha256(self.gameplay.read_bytes()).hexdigest())
             descriptor = json.loads(archive.read((embedded / "resident-portable.json").as_posix()))

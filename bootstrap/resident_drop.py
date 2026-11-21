@@ -19,7 +19,8 @@ _BINARIES = runtime.SHIPPING.parent
 _MODS = _BINARIES / "ue4ss" / "Mods"
 _EMBEDDED = _MODS / install_stage.MOD
 _SCRIPTS = _BINARIES / runtime.MOD_SCRIPTS
-_STAGE = Path("silverfish-coop-stage.json")
+_STAGE = runtime.PORTABLE_STAGE_MANIFEST
+_README = Path("SilverFish/Silverfish-Coop-README.txt")
 _PORTABLE = "resident-portable.json"
 _SCRIPT_SOURCE = "mod/SilverfishCoop/Scripts/"
 _RUNTIME_SOURCE = layout.RUNTIME + "/"
@@ -31,9 +32,9 @@ _START = r"""Project Silverfish Co-op | Windows Direct IP trial {version}
 
 1. Close Project Silverfish. In the Steam library, right-click the game and
    select Manage > Browse local files. This opens the folder with SilverFish.exe.
-2. Extract this ZIP directly into that open game folder. The SilverFish
-   folder should merge with the existing one. Replace the mod files
-   when Windows asks. Use the same steps to update to a newer trial.
+2. Copy the SilverFish folder from this ZIP into the open game folder.
+   Merge it with the existing SilverFish folder and replace the mod
+   files when Windows asks. Use the same steps for future updates.
 3. Launch the game through Steam and choose Multiplayer. Choose Host to
    start or load a campaign, or Join by Direct IP to enter the host's IP,
    UDP port, and password if the host uses one.
@@ -140,7 +141,7 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         _BINARIES / runtime.CPP_ADDON_DLL: gameplay,
         _EMBEDDED / "dlls" / "main.dll": embedded,
         _STAGE: _json(stage),
-        Path("Silverfish-Coop-README.txt"): _START.format(version=version, variant=_FIRST_TIME if include_loader else _UPDATE).encode("ascii"),
+        _README: _START.format(version=version, variant=_FIRST_TIME if include_loader else _UPDATE).encode("ascii"),
     })
     for module in ("SilverfishCoop", runtime.CPP_MOD_NAME, install_stage.MOD):
         payload[_MODS / module / "enabled.txt"] = b""

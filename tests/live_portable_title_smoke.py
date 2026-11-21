@@ -61,7 +61,7 @@ def qualify_release(game: Path, legacy_work: Path | None) -> PortableRelease:
     embedded = mods / install_stage.MOD
     marker = embedded / "resident-portable.json"
     descriptor = embedded / "resident-install.json"
-    stage = game / "silverfish-coop-stage.json"
+    stage = game / runtime.PORTABLE_STAGE_MANIFEST
     activation = {
         mods / "mods.txt": fingerprint(mods / "mods.txt"),
         descriptor: fingerprint(descriptor),
@@ -153,6 +153,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         raise ValueError("Both replicas must use the same portable release")
     if qualified[0].activation[first_game / runtime.SHIPPING.parent / "ue4ss/Mods/mods.txt"] is not None:
         raise ValueError("The first replica must have no mods.txt")
+    if os.path.lexists(first_game / runtime.STAGE_MANIFEST):
+        raise ValueError("The clean replica must start from the contents of the SilverFish folder alone")
 
     case = work / ("portable-title-" + uuid.uuid4().hex[:8])
     case.mkdir()

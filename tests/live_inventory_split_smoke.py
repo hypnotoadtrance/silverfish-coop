@@ -84,10 +84,10 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
         return inventory["items"]
 
     def quantities(rows, tracked):
-        ammo = [row for row in rows if row["guid"] in tracked]
+        matching = [row for row in rows if row["guid"] in tracked]
         assert all(row["source"] == "backpack" and row["class_path"] == ammo.item_path
-                   and row["stackable"] is True and row["important"] is False for row in ammo), ammo
-        exact = {row["guid"]: row["quantity"] for row in ammo}
+                   and row["stackable"] is True and row["important"] is False for row in matching), matching
+        exact = {row["guid"]: row["quantity"] for row in matching}
         assert exact == tracked, (exact, tracked)
         return exact
 
@@ -178,9 +178,6 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 await stop(*jobs[-2])
                 await launch(host, "host-reclaim", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)
                 await wait(run, lambda state: state.get("state") == "hosting" and state.get("generation") != normal["generation"])
-                renewed = await ask("action", *host, "refresh-invite", "--target", invitation["guest_id"])
-                await launch(guest, "guest-reclaim", "join", *guest, "--invite", renewed["invite_file"], *guest_flags)
-                await enrolled()
                 frame = await wait(run, lambda state: state.get("game", {}).get(drop_projection.KEY, {}).get("drop_id")
                                    == operation)
                 before = frame["game"][drop_projection.KEY]
@@ -192,6 +189,9 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 tombstone = settled["campaign"]["world"]["party"][drop_record.STATE][operation]
                 assert tombstone["claimed_by"] == "host" and "escrow" not in tombstone
                 quantities(await page(host, "host"), {source: expected_quantity})
+                renewed = await ask("action", *host, "refresh-invite", "--target", invitation["guest_id"])
+                await launch(guest, "guest-reclaim", "join", *guest, "--invite", renewed["invite_file"], *guest_flags)
+                await enrolled()
                 assert source not in {row["guid"] for row in await page(guest, character)}
                 rejected = await ask("action", *guest, drop.RECLAIM, "--target", operation, success=False)
                 assert rejected["error"] == "native_guest_stack_drop_already_reclaimed", rejected

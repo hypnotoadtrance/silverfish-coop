@@ -23,7 +23,7 @@ def _name(value: str) -> bool:
 
 
 def _verify_game(game: Path, work: Path) -> str:
-    marker = game / "silverfish-coop-stage.json"
+    marker = runtime.stage_manifest(game)
     install_stock._ordinary(marker)
     metadata = runtime.read_json(marker)
     if type(metadata.get("schema")) is not int or metadata["schema"] != 1:

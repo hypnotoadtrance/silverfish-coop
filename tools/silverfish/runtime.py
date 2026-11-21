@@ -229,6 +229,15 @@ def content_root(work: Path) -> Path:
     return installed[1] if installed is not None and installed[0] == work else work / "stage"
 
 
+STAGE_MANIFEST = Path("silverfish-coop-stage.json")
+PORTABLE_STAGE_MANIFEST = Path("SilverFish") / STAGE_MANIFEST
+
+
+def stage_manifest(game: Path) -> Path:
+    portable = game / PORTABLE_STAGE_MANIFEST
+    return portable if os.path.lexists(portable) else game / STAGE_MANIFEST
+
+
 def has_native_death_patch(work: Path) -> bool:
     packs = content_root(work) / PAKS
     files = {suffix: packs / (DEATH_PATCH + suffix) for suffix in DEATH_PATCH_HASHES}
@@ -246,7 +255,7 @@ def has_native_death_patch(work: Path) -> bool:
 def native_death_backend(work: Path, metadata: dict | None = None) -> str | None:
     stage = content_root(work)
     if metadata is None:
-        metadata = read_json(stage / "silverfish-coop-stage.json")
+        metadata = read_json(stage_manifest(stage))
     overlay = has_native_death_patch(work)
     native = metadata.get("cpp_death_lab")
     binaries = (stage / SHIPPING).parent
@@ -264,7 +273,7 @@ def native_death_backend(work: Path, metadata: dict | None = None) -> str | None
 
 
 def qualified_authored_routes(work: Path) -> bool:
-    metadata = read_json(content_root(work) / "silverfish-coop-stage.json")
+    metadata = read_json(stage_manifest(content_root(work)))
     return (metadata.get("game_build") == "8682dc057e1b38738862760a8c3b848a837c81d72c0e6ddffa3b7f963960374d"
             and native_death_backend(work, metadata) == "cpp")
 
@@ -272,7 +281,7 @@ def qualified_authored_routes(work: Path) -> bool:
 def staged_script(work: Path, name: str, marker: str | None = None) -> bool:
     stage = content_root(work)
     if _installed_layout.get() is not None:
-        inventory = read_json(stage / "silverfish-coop-stage.json").get("lua_files")
+        inventory = read_json(stage_manifest(stage)).get("lua_files")
         if isinstance(inventory, dict) and name not in inventory:
             return False
     path = (stage / SHIPPING).parent / MOD_SCRIPTS / name
@@ -329,7 +338,7 @@ def _code_fingerprint(directory: Path, extension: str, inventory: dict | None = 
 
 def verify_installed_lua(work: Path) -> None:
     stage = content_root(work)
-    metadata = read_json(stage / "silverfish-coop-stage.json")
+    metadata = read_json(stage_manifest(stage))
     if "lua_files" in metadata:
         if not isinstance(metadata["lua_files"], dict):
             raise ValueError("The co-op Lua file list is invalid")
@@ -338,7 +347,7 @@ def verify_installed_lua(work: Path) -> None:
 
 def staged_build(work: Path) -> str:
     stage = content_root(work)
-    metadata = read_json(stage / "silverfish-coop-stage.json")
+    metadata = read_json(stage_manifest(stage))
     if metadata.get("schema") != 1 or not (stage / SHIPPING).is_file():
         raise ValueError("Stage is missing or incompatible")
     game_build = metadata.get("game_build")

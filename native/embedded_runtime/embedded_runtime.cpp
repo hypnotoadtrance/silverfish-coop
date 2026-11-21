@@ -142,6 +142,12 @@ namespace
         return mod / (L"runtime-" + std::wstring(prefix.begin(), prefix.end()));
     }
 
+    fs::path stage_manifest(const fs::path& game)
+    {
+        const auto portable = game / L"SilverFish/silverfish-coop-stage.json";
+        return exists_on_disk(portable) ? portable : game / L"silverfish-coop-stage.json";
+    }
+
     bool profile_name(std::wstring_view name)
     {
         auto alphanumeric = [](wchar_t ch) {
@@ -212,7 +218,7 @@ namespace
         if ((!installed && stage.filename() != L"stage") ||
             !windows_path_equal(image, stage / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
             !windows_path_equal(addon, mod / L"dlls/main.dll") ||
-            !exact_path(stage / L"silverfish-coop-stage.json", false) ||
+            !exact_path(stage_manifest(stage), false) ||
             (installed && !(exact_path(mod / install_config, false) ||
                             exact_path(mod / portable_config, false)))) return {};
 
@@ -464,7 +470,7 @@ namespace
         if (!exact_path(image, false) ||
             !windows_path_equal(mod, binaries / L"ue4ss" / L"Mods" / mod_name) ||
             !windows_path_equal(image, game / L"SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe") ||
-            !exact_path(game / L"silverfish-coop-stage.json", false)) return std::nullopt;
+            !exact_path(stage_manifest(game), false)) return std::nullopt;
         auto configured = load_boot_config(mod);
         if (!configured) return std::nullopt;
         const auto& config = *configured;

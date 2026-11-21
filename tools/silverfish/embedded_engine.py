@@ -160,7 +160,7 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
         startup.environment.get(key) != value for key, value in required_env.items()
     ):
         raise ValueError("The embedded worker lacks its staged role environment")
-    metadata = runtime.read_json(_exact_existing(game / "silverfish-coop-stage.json", directory=False))
+    metadata = runtime.read_json(_exact_existing(runtime.stage_manifest(game), directory=False))
     fingerprint = metadata.get("game_build")
     if metadata.get("schema") != 1 or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
         raise ValueError("The embedded worker's game stage is unrecognized")

@@ -83,6 +83,17 @@ class StageBackendTests(unittest.TestCase):
         script.unlink()
         self.assertNotEqual(runtime.staged_build(self.work), build)
 
+    def test_portable_manifest_overrides_an_older_root_manifest(self):
+        expected = runtime.staged_build(self.work)
+        portable = self.stage / runtime.PORTABLE_STAGE_MANIFEST
+        runtime.write_json(portable, self.metadata)
+        runtime.write_json(self.manifest, {"schema": 1, "game_build": "b" * 64})
+        self.assertEqual(runtime.stage_manifest(self.stage), portable)
+        self.assertEqual(runtime.staged_build(self.work), expected)
+        portable.unlink()
+        self.assertEqual(runtime.stage_manifest(self.stage), self.manifest)
+        self.assertNotEqual(runtime.staged_build(self.work), expected)
+
     def test_portable_update_fingerprints_only_its_current_lua_files(self):
         expected = runtime.staged_build(self.work)
         main = self.scripts / "main.lua"

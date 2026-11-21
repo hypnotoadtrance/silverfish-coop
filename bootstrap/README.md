@@ -2,7 +2,7 @@
 
 ## Installed resident title
 
-Close Project Silverfish. In Steam, choose **Manage → Browse local files** and extract the ZIP into the folder containing `SilverFish.exe`. Use the archive with UE4SS for a first install without the loader, or the mod-only archive for updates with the supported UE4SS v4.0.0 loader and Silverfish signature already in place. Merge folders and replace the co-op files when prompted. Updates use the existing co-op workspace. The default location is `%LOCALAPPDATA%\SilverfishCoop\Resident`.
+Close Project Silverfish. In Steam, choose **Manage → Browse local files**. Copy the ZIP's `SilverFish` folder into the folder containing `SilverFish.exe` and merge it with the existing `SilverFish` folder. Use the archive with UE4SS for a first install without the loader, or the mod-only archive for updates with the supported UE4SS v4.0.0 loader and Silverfish signature already in place. Replace the co-op files when prompted. Updates use the existing co-op workspace. The default location is `%LOCALAPPDATA%\SilverfishCoop\Resident`.
 
 Launch the game through Steam after extraction. The first screen offers **Singleplayer** and **Multiplayer**. Choose **Host** to create a save through the stock character creator or load an existing save. Choose **Join by Direct IP** to connect to a host. Run `python -m bootstrap.resident_drop --help` for the matched artifacts required to build the archives. Steam launch against the original installation and two-PC play remain pending. [Drag-and-drop packager](resident_drop.py) · [Portable cold-start test](../tests/live_portable_title_smoke.py)
 
