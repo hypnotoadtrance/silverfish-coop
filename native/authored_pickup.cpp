@@ -250,7 +250,7 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3"),
             STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"),
-            -19989.96202763854, -1402.687676772569, -202.34374719406702, 1, 1, true,
+            -19989.96202763854, -1402.687676772569, -202.34374719406702, 1, 1,
         },
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"

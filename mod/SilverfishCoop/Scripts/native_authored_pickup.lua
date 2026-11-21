@@ -205,6 +205,7 @@ local profiles = {
         path = city .. ".City_01_P:PersistentLevel.Item_CannedBeans_C_1",
         class = canned_beans,
         name = "Item_CannedBeans_C",
+        explicit_source = true,
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
     {
@@ -213,6 +214,7 @@ local profiles = {
         path = crash_site .. ".CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1",
         class = canned_beans,
         name = "Item_CannedBeans_C",
+        explicit_source = true,
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
     {
@@ -221,6 +223,7 @@ local profiles = {
         path = crossroads .. ".CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3",
         class = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C",
         name = "Item_BrownMushroom_C",
+        explicit_source = true,
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }
@@ -284,12 +287,18 @@ function pickup.update(state, phase)
         binding = {pawn = pawn, world = state.world, host = host, placements = placements}
         report = nil
     end
-    local active, reason = {}, nil
+    local active, unavailable, reason = {}, {}, nil
     for _, profile in ipairs(placements) do
         local ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source)
-        if ok == true then active[profile.source] = profile else reason = detail end
+        if ok == true then
+            active[profile.source] = profile
+        elseif type(detail) == "string" then
+            unavailable[profile.source] = detail
+            reason = detail
+        end
     end
     binding.active = active
+    binding.unavailable = unavailable
     return next(active) ~= nil, reason
 end
 
@@ -297,7 +306,8 @@ local function select_profile(requested)
     if requested == nil then
         local sole
         for _, profile in ipairs(binding.placements) do
-            if not profile.fixture_only and not profile.stock_supply and not profile.stock_cash and not profile.quest_source then
+            if not profile.explicit_source and not profile.fixture_only and not profile.stock_supply
+                and not profile.stock_cash and not profile.quest_source then
                 if sole then sole = nil; break end
                 sole = profile.source
             end
@@ -305,7 +315,7 @@ local function select_profile(requested)
         requested = sole
     end
     local profile = binding.active[requested]
-    if not profile then error("authored_pickup_exact_source_required", 0) end
+    if not profile then error(binding.unavailable[requested] or "authored_pickup_exact_source_required", 0) end
     return profile
 end
 
