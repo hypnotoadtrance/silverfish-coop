@@ -187,11 +187,12 @@ local function page(fields)
         end
         local droppable = options == "drop" or options == "split,drop"
         local drop_profile = drop_items.profiles[class]
-        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or not drop_profile or quantity > drop_profile.maximum) then
+        if droppable and (not drop_maps[fields[4]] or source ~= "backpack" or not drop_items.stock_actor_class(class)
+            or quantity > (drop_profile and drop_profile.maximum or 200)) then
             error("The authenticated inventory drop row did not qualify", 0)
         end
         if usable then name = consumable end
-        if droppable then name = drop_profile.label end
+        if droppable and drop_profile then name = drop_profile.label end
         records[#records + 1] = {guid = guid, class = class, equippable = equippable, usable = usable,
             droppable = droppable, name = name, quantity = quantity, splittable = splittable,
             label = string.format("%s   %d x %s", sources[source], quantity, name)}
@@ -211,8 +212,8 @@ local function show()
     if row.pending_offset then
         lines[#lines + 1] = "Loading inventory page. End closes."
     elseif row.drop_state == "confirming" then
-        local description = drop_items.profiles[selected.class].stackable
-            and string.format("all %d rounds of %s", selected.quantity, selected.name) or selected.name
+        local description = selected.quantity > 1
+            and string.format("%d × %s", selected.quantity, selected.name) or selected.name
         lines[#lines + 1] = "Drop " .. description .. "? Home confirms. End cancels."
     elseif row.drop_state == "dropping" then
         lines[#lines + 1] = "Drop pending"

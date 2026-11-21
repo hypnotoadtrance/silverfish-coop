@@ -1,4 +1,5 @@
 #include "inventory_census.hpp"
+#include "drop_item_class.hpp"
 
 #include <algorithm>
 #include <array>
@@ -106,6 +107,7 @@ namespace
         Unreal::UScriptStruct* type = find<Unreal::UScriptStruct>(item_struct_path);
         Unreal::FClassProperty* item_class = field<Unreal::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
         Unreal::FIntProperty* ammo = field<Unreal::FIntProperty>(type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+        Unreal::FBoolProperty* never_drop = field<Unreal::FBoolProperty>(type, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
         Unreal::FStructProperty* guid = field<Unreal::FStructProperty>(type, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
         std::array<Unreal::FIntProperty*, 4> guid_words{};
         Unreal::FArrayProperty* backpack{};
@@ -127,7 +129,7 @@ namespace
             armor = field<Unreal::FStructProperty>(snapshot, STR("PlayerArmor"));
             helmet = field<Unreal::FStructProperty>(snapshot, STR("PlayerHelmet"));
             if (!base || !type || !item_class || item_class->GetMetaClass().Get() != base || !ammo ||
-                !guid || !guid_type || guid->GetStruct().Get() != guid_type || !backpack || !equipment ||
+                !never_drop || !guid || !guid_type || guid->GetStruct().Get() != guid_type || !backpack || !equipment ||
                 !same_type(backpack->GetInner()) || !same_type(equipment->GetInner()) ||
                 !same_type(armor) || !same_type(helmet)) return false;
 
@@ -169,6 +171,7 @@ namespace
         bool stackable{};
         bool important{};
         bool cannot_keep{};
+        bool drop_class{};
 
         bool read(Unreal::UClass* type)
         {
@@ -184,6 +187,7 @@ namespace
             stackable = stacks->GetPropertyValueInContainer(defaults);
             important = importance->GetPropertyValueInContainer(defaults);
             cannot_keep = retention->GetPropertyValueInContainer(defaults);
+            drop_class = silverfish::drop_item_class::stacks(type).has_value();
             return true;
         }
     };
@@ -210,9 +214,11 @@ namespace
             const std::int32_t quantity = stock.stackable ? inventory.ammo->GetPropertyValueInContainer(value) : 1;
             if (quantity <= 0) return "native_inventory_census_invalid_stack_quantity";
 
-            std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\n",
+            const bool droppable = source == "backpack" && stock.drop_class &&
+                !inventory.never_drop->GetPropertyValueInContainer(value);
+            std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\t{:d}\n",
                            identity[0], identity[1], identity[2], identity[3], source, index, stock.path, quantity,
-                           stock.stackable, stock.important, stock.cannot_keep);
+                           stock.stackable, stock.important, stock.cannot_keep, droppable);
             return {};
         }
 

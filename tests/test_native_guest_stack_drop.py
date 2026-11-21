@@ -93,6 +93,12 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(magnum[drop.KEY]["class_path"], "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C")
         self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_9mm_AP_BP"), NEW_GUID]))
 
+        stock_class = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"
+        stock_actor = actor.replace("Ammo_Pistol_BP", "Item_PocketWatch")
+        generic = [*row[:5], "1", *row[6:8], stock_actor, NEW_GUID, "1", "2", "3", stock_class]
+        self.assertEqual(snapshot(generic)[drop.KEY]["class_path"], stock_class)
+        self.assertIsNone(snapshot([*generic[:-1], stock_class.replace("PocketWatch", "CopperWire")]))
+
     def make_host(self):
         profile = Path(self.enterContext(TemporaryDirectory()))
         file = native_host_save.slot_path(profile, SLOT)

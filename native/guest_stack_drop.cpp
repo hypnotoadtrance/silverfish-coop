@@ -1,4 +1,5 @@
 #include "guest_stack_drop.hpp"
+#include "drop_item_class.hpp"
 #include "guest_drop_items.hpp"
 #include "guest_drop_maps.hpp"
 #include "guest_regen.hpp"
@@ -42,9 +43,6 @@ namespace
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto game_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
-    constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
-    constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
-    constexpr auto weapon_tick_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveTick");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto row_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto spawn_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:SpawnItemActor");
@@ -301,7 +299,7 @@ namespace
     {
         U::FWeakObjectPtr game, world, actor;
         U::UClass* type{};
-        U::UFunction *spawn{}, *weapon_tick{};
+        U::UFunction *spawn{}, *item_tick{};
         U::FObjectProperty* newborn{};
         U::FFrame* frame{};
         bool active{}, saw_stock_frame{};
@@ -320,7 +318,7 @@ namespace
         static const U::FName store{STR("PutInInventory")};
         static const U::FName pickup{STR("PickUp_Object")};
         static const U::FName add{STR("AddItemToInventory")};
-        if ((receiver == guarded && (name == interact || name == store || name == pickup || function == scope.weapon_tick)) ||
+        if ((receiver == guarded && (name == interact || name == store || name == pickup || function == scope.item_tick)) ||
             (receiver == scope.game.Get() && name == add && args &&
              function == find<U::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:AddItemToInventory")) &&
              object_value(parameter<U::FObjectProperty>(function, STR("Item"), 0), args) == guarded))
@@ -369,22 +367,6 @@ namespace
         return fn && owner && fn->GetOuterPrivate() == owner && fn->GetNumParms() == count &&
             !fn->GetReturnProperty() && fn->GetParmsSize() <= sizeof(Arguments::storage) &&
             !fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net);
-    }
-
-    U::UFunction* exact_pistol_tick(U::UClass* pistol)
-    {
-        auto* weapon = find<U::UClass>(weapon_base_path);
-        auto* equipment = find<U::UClass>(equipment_base_path);
-        auto* base = find<U::UClass>(item_path);
-        auto* begin = find<U::UFunction>(weapon_begin_path);
-        auto* tick = find<U::UFunction>(weapon_tick_path);
-        if (!weapon || !equipment || !base || pistol->GetSuperStruct() != weapon ||
-            weapon->GetSuperStruct() != equipment || equipment->GetSuperStruct() != base ||
-            !stock_function(begin, weapon, 0) || begin->GetParmsSize() != 0 ||
-            !stock_function(tick, weapon, 1) || !parameter<U::FFloatProperty>(tick, STR("DeltaSeconds"), 0) ||
-            pistol->GetFunctionByNameInChain(begin->GetFName()) != begin ||
-            pistol->GetFunctionByNameInChain(tick->GetFName()) != tick) return nullptr;
-        return tick;
     }
 
     using Position = std::array<double, 3>;
@@ -510,38 +492,32 @@ namespace
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
         const auto* row = inventory.exact_row(owner.frozen, id);
         namespace items = silverfish::native_guest_drop_items;
-        auto* candidate = object_value(inventory.klass, row);
-        const auto* display = candidate ? items::find_stack(candidate->GetPathName()) : nullptr;
-        auto* type = find<U::UClass>(display ? display->path : items::pistol);
-        const bool stack = display != nullptr;
-        const bool nine_mm = display == &items::stacks.front();
-        const bool food = stack && display->kind == items::StackKind::food;
-        if (!type || candidate != type || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
+        auto* type = U::Cast<U::UClass>(object_value(inventory.klass, row));
+        const auto stacks = silverfish::drop_item_class::stacks(type);
+        if (!stacks || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
             inventory.never_drop->GetPropertyValueInContainer(row))
             return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
-        auto* defaults = type->GetClassDefaultObject().Get();
-        if (!defaults || defaults->GetClassPrivate() != type ||
-            !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), stack) ||
-            !boolean(defaults, STR("DespawnIfPlayerOwns"), false) || !boolean(defaults, STR("bReplicates"), false))
-        {
-            if (food) return reply(lua, false, "native_guest_stack_drop_stock_food_default_flags_unqualified");
-            return reply(lua, false, stack ? (nine_mm ? "native_guest_stack_drop_stock_9mm_default_flags_unqualified" :
-                "native_guest_stack_drop_stock_ammo_default_flags_unqualified") :
-                "native_guest_stack_drop_stock_pistol_default_flags_unqualified");
-        }
+        const bool stack = *stacks;
+        const auto* display = items::find_stack(type->GetPathName());
+        const bool nine_mm = display == &items::stacks.front();
+        const bool food = display && display->kind == items::StackKind::food;
         const auto stored = inventory.quantity->GetPropertyValueInContainer(row);
-        if (stack && stored != count)
+        auto* defaults = type->GetClassDefaultObject().Get();
+        if ((stack && stored != count) || (!stack && count != 1))
             return reply(lua, false, food ? "native_guest_stack_drop_stock_food_row_unqualified" :
-                nine_mm ? "native_guest_stack_drop_stock_9mm_row_unqualified" : "native_guest_stack_drop_stock_ammo_row_unqualified");
-        U::UFunction* weapon_tick{};
-        if (!stack)
-        {
-            auto* magazine = field<U::FIntProperty>(defaults, STR("MagSize"));
-            const auto capacity = magazine ? magazine->GetPropertyValueInContainer(defaults) : 0;
-            if (count != 1 || capacity < 1 || capacity > max_rounds || stored < 0 || stored > capacity ||
-                !field<U::FIntProperty>(defaults, STR("Ammo")) || !(weapon_tick = exact_pistol_tick(type)))
-                return reply(lua, false, "native_guest_stack_drop_stock_pistol_row_unqualified");
-        }
+                nine_mm ? "native_guest_stack_drop_stock_9mm_row_unqualified" :
+                display ? "native_guest_stack_drop_stock_ammo_row_unqualified" :
+                "native_guest_stack_drop_stock_item_row_unqualified");
+        auto* weapon = find<U::UClass>(weapon_base_path);
+        auto* magazine = weapon && type->IsChildOf(weapon) ? field<U::FIntProperty>(defaults, STR("MagSize")) : nullptr;
+        const auto capacity = magazine ? magazine->GetPropertyValueInContainer(defaults) : 0;
+        if (capacity > 0 && (stack || capacity > max_rounds || stored < 0 || stored > capacity ||
+            !field<U::FIntProperty>(defaults, STR("Ammo"))))
+            return reply(lua, false, "native_guest_stack_drop_stock_weapon_row_unqualified");
+        auto* tick = type->GetFunctionByNameInChain(U::FName(STR("ReceiveTick")));
+        if (tick && (!stock_function(tick, U::Cast<U::UClass>(tick->GetOuterPrivate()), 1) ||
+                     !parameter<U::FFloatProperty>(tick, STR("DeltaSeconds"), 0)))
+            return reply(lua, false, "native_guest_stack_drop_stock_tick_unqualified");
 
         std::array<Value, 4> stock_before;
         auto stores = inventory.stores();
@@ -605,7 +581,9 @@ namespace
         Scene before;
         if (!before.collect(type, owner.world) || before.count == before.actors.size())
             return reply(lua, false, "native_guest_stack_drop_scene_bounds");
-        scope = {owner.game, owner.world, {}, type, spawn, weapon_tick, newborn, nullptr, true, false};
+        scope = {owner.game, owner.world, {}, type, spawn, tick, newborn, nullptr, true, false};
+        const auto release_scope = [](ProbeScope* active) { *active = {}; };
+        const std::unique_ptr<ProbeScope, decltype(release_scope)> guard(&scope, release_scope);
         owner.game->ProcessEvent(spawn, buffer);
         scope.frame = nullptr;
 
@@ -634,11 +612,11 @@ namespace
             object(spawned, STR("Instigator")) || !byte(spawned, STR("Item_RespawnMode"), 0) ||
             !boolean(spawned, STR("Stacks"), stack) || !boolean(spawned, STR("Physics"), true) || !boolean(spawned, STR("bReplicates"), false))
             qualification = "native_guest_stack_drop_stock_actor_flags_unqualified";
-        if (qualification.empty() && !stack)
+        if (qualification.empty() && capacity > 0)
         {
             auto* ammo_property = field<U::FIntProperty>(spawned, STR("Ammo"));
             if (!ammo_property || ammo_property->GetPropertyValueInContainer(spawned) != stored)
-                qualification = "native_guest_stack_drop_stock_pistol_magazine_changed";
+                qualification = "native_guest_stack_drop_stock_weapon_magazine_changed";
         }
         auto reflected = qualification.empty() ? converted(inventory, spawned, owner.pawn) : Value{};
         const auto fresh = reflected ? inventory.identity(reflected.get()) : Guid{};
@@ -673,13 +651,22 @@ namespace
         lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", fresh[0], fresh[1], fresh[2], fresh[3]));
         lua.set_integer(count);
         for (auto axis : location) lua.set_number(axis);
-        return 8;
+        lua.set_string(RC::to_utf8_string(type->GetPathName()));
+        return 9;
+    }
+
+    int generic_drop_capability(const Lua& lua)
+    {
+        lua.set_bool(lua.get_stack_size() == 0);
+        return 1;
     }
 }
 
 void silverfish::native_guest_stack_drop::register_lua(Lua& lua)
 {
-    if (enabled()) lua.register_function("SilverfishProbeNativeGuestStackDrop", probe);
+    if (!enabled()) return;
+    lua.register_function("SilverfishProbeNativeGuestStackDrop", probe);
+    lua.register_function("SilverfishNativeGenericInventoryDrop", generic_drop_capability);
 }
 
 void silverfish::native_guest_stack_drop::uninstall_hooks()

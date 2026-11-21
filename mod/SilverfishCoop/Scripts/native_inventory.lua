@@ -74,7 +74,7 @@ function inventory.command(fields, state, phase)
         if seen > offset and seen <= offset + page_size then
             local fields = {}
             for value in line:gmatch("[^\t]+") do fields[#fields + 1] = value end
-            if #fields ~= 8 then error("The stock inventory census row is incomplete", 0) end
+            if #fields ~= 8 and #fields ~= 9 then error("The stock inventory census row is incomplete", 0) end
             rows[#rows + 1] = fields
         end
     end

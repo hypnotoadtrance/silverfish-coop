@@ -60,9 +60,14 @@ end
 local function stock_payload(item, quantity)
     if not item then return end
     local class, ammo = item[item_class], math.tointeger(item[item_count])
-    if ammo == quantity and same(class, StaticFindObject(drop_items.ammo)) then return class, ammo end
-    if quantity == 1 and ammo and ammo >= 0 and same(class, StaticFindObject(drop_items.pistol)) then
-        return class, ammo, true
+    local path = valid(class) and class:GetFullName():match("^%S+ (/Game/%S+)$")
+    if not drop_items.stock_actor_class(path) or not ammo then return end
+    local defaults = class:GetCDO()
+    if not valid(defaults) or not same(defaults:GetClass(), class) or defaults.Important ~= false then return end
+    if defaults.Stacks == true and ammo == quantity then return class, ammo end
+    if defaults.Stacks == false and quantity == 1 then
+        local capacity = defaults.MagSize
+        return class, ammo, type(capacity) == "number" and capacity > 0
     end
 end
 

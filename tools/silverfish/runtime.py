@@ -1854,6 +1854,9 @@ class Bridge:
                     if native_guest_stack_drop.KEY in data:
                         raise ValueError("Duplicate isolated stack drop report")
                     data[native_guest_stack_drop.KEY] = native_guest_stack_drop.parse(fields, data.get("state"), data.get("map"))
+                elif (fields == ["native-generic-inventory-drop", "1"] and data.get("state") == "hosting"
+                        and native_guest_drop_record.supported_map(data.get("map"))):
+                    data[native_guest_drop_record.GENERIC_CAPABILITY] = 1
                 elif fields[0] == native_guest_stack_drop.SETTLE:
                     if native_guest_stack_drop.SETTLE_KEY in data:
                         raise ValueError("Duplicate isolated stack drop settlement")
@@ -2068,12 +2071,17 @@ class Bridge:
                         "slot": fields[1], "map": fields[2], "total": int(fields[3]), "offset": int(fields[4]),
                         "count": int(fields[5]), "items": [],
                     }
-                elif fields[0] == "native-inventory-census-item" and len(fields) == 9 and "native_inventory_census" in data:
-                    data["native_inventory_census"]["items"].append({
+                elif fields[0] == "native-inventory-census-item" and len(fields) in (9, 10) and "native_inventory_census" in data:
+                    row = {
                         "guid": fields[1], "source": fields[2], "index": int(fields[3]), "class_path": fields[4],
                         "quantity": int(fields[5]), "stackable": fields[6] == "1",
                         "important": fields[7] == "1", "cannot_keep": fields[8] == "1",
-                    })
+                    }
+                    if len(fields) == 10:
+                        if fields[9] not in {"0", "1"}:
+                            raise ValueError("Invalid stock inventory drop eligibility")
+                        row["droppable"] = fields[9] == "1"
+                    data["native_inventory_census"]["items"].append(row)
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
                         "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],

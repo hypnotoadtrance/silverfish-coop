@@ -29,12 +29,19 @@ for blueprint, label in pairs({
     drop_items.profiles[class] = { actor = actor, label = label, maximum = 200, stackable = true }
 end
 
+function drop_items.stock_actor_class(class)
+    if type(class) ~= "string" or #class > 256
+        or not class:match("^/Game/Classes/[%w_/%-]+%.[%w_%-]+_C$") then return end
+    local asset, actor = class:match("/([%w_%-]+)%.([%w_%-]+_C)$")
+    if asset and actor == asset .. "_C" then return actor end
+end
+
 function drop_items.actor_path(class, area, leaf, name)
-    local profile = drop_items.profiles[class]
-    if not profile or type(name) ~= "string" then return end
-    local prefix = profile.actor .. " " .. area .. "." .. leaf .. ":PersistentLevel." .. profile.actor .. "_"
+    local actor = drop_items.stock_actor_class(class)
+    if not actor or type(name) ~= "string" then return end
+    local prefix = actor .. " " .. area .. "." .. leaf .. ":PersistentLevel." .. actor .. "_"
     if name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^%d+$") then
-        return name:sub(#profile.actor + 2)
+        return name:sub(#actor + 2)
     end
 end
 

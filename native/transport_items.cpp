@@ -1,6 +1,6 @@
 #include "transport_items.hpp"
+#include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
-#include "guest_drop_items.hpp"
 
 #include <algorithm>
 #include <array>
@@ -905,9 +905,9 @@ namespace
         const auto candidate = card_item(card);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if (candidate.panel != panel || !item_class) return;
-        const auto class_path = item_class->GetPathName();
-        const bool stack = silverfish::native_guest_drop_items::find_stack(class_path) != nullptr;
-        if (!stack && class_path != silverfish::native_guest_drop_items::pistol) return;
+        const auto stacks = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class));
+        if (!stacks) return;
+        const bool stack = *stacks;
 
         // Suppress stock TakeCard even when the selected row is stale or a request is already pending.
         iteration.PreventOriginalFunctionCall();
@@ -933,7 +933,7 @@ namespace
         if (!fields.valid() || !count_field) return;
         const Guid guid = fields.read(candidate.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
-        if (guid == Guid{} || saved_ammo < (stack ? 1 : 0) || saved_ammo > max_drop_ammo ||
+        if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
         const auto count = stack ? saved_ammo : 1;
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,

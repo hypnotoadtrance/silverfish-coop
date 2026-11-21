@@ -86,3 +86,13 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         report = [record.VIEW_ROW, "5", MAP, PAWN, GUID, record.ITEM, "dropping", "201"]
         with self.assertRaises(ValueError):
             record.parse_view(report, "connected", MAP)
+
+    def test_native_eligibility_replaces_the_list_for_stock_backpack_items(self):
+        stock = "/Game/Classes/Items/Item_PocketWatch.Item_PocketWatch_C"
+        row = dict(guid=GUID, class_path=stock, quantity=1, source="backpack",
+                   stackable=False, important=False, droppable=True)
+        self.assertFalse(drop.droppable(row))
+        self.assertTrue(drop.droppable(row, generic=True))
+        for changes in ({"droppable": False}, {"important": True}, {"quantity": 2}, {"source": "armor"},
+                        {"class_path": "/Game/Classes/Items/Item_PocketWatch.Different_C"}):
+            self.assertFalse(drop.droppable({**row, **changes}, generic=True))

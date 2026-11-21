@@ -14,6 +14,7 @@ from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
 STATE = "native_guest_stack_drops"
 PICKUP_ACTION = "native-guest-stack-reclaim"
 CAPABILITY = "native_guest_stack_drop_capability"
+GENERIC_CAPABILITY = "native_generic_inventory_drop"
 VIEW = "native_guest_inventory_drop_view"
 VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
@@ -29,6 +30,7 @@ MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
 _RECORD_FIELDS = {"owner", "guid", "quantity", "class_path", "map", "location", "claim_id"}
+_CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z")
 
 
 def valid_id(value) -> bool:
@@ -62,14 +64,24 @@ def actor_class_path(area, name) -> str | None:
         return next((path for path, names in _ACTOR_PATHS.items() if names[area].fullmatch(name)), None)
 
 
-def actor_matches(area, name) -> bool:
-    return actor_class_path(area, name) is not None
+def actor_matches(area, name, class_path=None) -> bool:
+    if class_path is None:
+        return actor_class_path(area, name) is not None
+    if not supported_map(area) or not isinstance(name, str) or not valid_class(class_path):
+        return False
+    actor = class_path.rsplit(".", 1)[1]
+    prefix = f"{actor} {area}.{MAPS[area]}:PersistentLevel.{actor}_"
+    return name.startswith(prefix) and re.fullmatch(r"[0-9]{1,10}", name[len(prefix):]) is not None
+
+
+def valid_class(path) -> bool:
+    return isinstance(path, str) and len(path) <= 256 and _CLASS.fullmatch(path) is not None
 
 
 def valid_quantity(path, count) -> bool:
-    if not isinstance(path, str) or path not in STACKABLE or type(count) is not int:
+    if not valid_class(path) or type(count) is not int:
         return False
-    return 1 <= count <= (MAX_QUANTITY if STACKABLE[path] else 1)
+    return 1 <= count <= (MAX_QUANTITY if STACKABLE.get(path, True) else 1)
 
 
 def parse_view(fields: list[str], state: str, area: str) -> dict:

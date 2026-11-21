@@ -23,21 +23,19 @@ from tools.silverfish.native_guest_weapon import FIRE_CLASSES
 
 EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
-PISTOL = FIRE_CLASSES["light-pistol"]
-UNSUPPORTED_PISTOL = FIRE_CLASSES["light-pistol-suppressed"]
 
 
 async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
-                 host_origin_menu=None, light_pistol=False):
+                 host_origin_menu=None, pistol_kind=None):
     host_origin = host_origin or host_origin_menu is not None
-    claimant = "teammate" if light_pistol and not host_origin else claimant
+    claimant = "teammate" if pistol_kind and not host_origin else claimant
     mode = (f"host-menu-{host_origin_menu}" if host_origin_menu else
-            "host-origin" if host_origin else "light-pistol" if light_pistol else claimant)
-    if light_pistol and host_origin:
-        mode += "-light-pistol"
-    item_class, quantity = (PISTOL, 1) if light_pistol else (record.ITEM, 9)
+            "host-origin" if host_origin else pistol_kind or claimant)
+    if pistol_kind and host_origin:
+        mode += f"-{pistol_kind}"
+    item_class, quantity = (FIRE_CLASSES[pistol_kind], 1) if pistol_kind else (record.ITEM, 9)
     actor_class = item_class.rsplit(".", 1)[1]
-    name = f"manual-stack-drop-{mode}-" + uuid.uuid4().hex[:8]
+    name = f"drop-{mode}-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     run = campaign / "run"
     run.mkdir(parents=True)
@@ -111,7 +109,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             await action(owner, *key, "down")
         confirmation = (await action(owner, *key, "drop"))[record.VIEW]
         assert (confirmation["state"], confirmation["guid"], confirmation["class_path"], confirmation["count"]) == (
-            "confirming", guid, PISTOL, 1), confirmation
+            "confirming", guid, item_class, 1), confirmation
         pending = (await action(owner, *key, "confirm"))[record.VIEW]
         assert pending == {**confirmation, "state": "dropping"}, pending
         result = await wait(viewer, lambda state: (view := state.get("game", {}).get(record.VIEW, {})).get("sequence")
@@ -270,7 +268,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get(probe.CAPABILITY) == 1)
         invite = await command("invite", *host, "--name", "Drop owner", "--character", "Drop owner")
         owner_id = invite["character_id"]
-        owner_flags = ("--native-guest-inventory-view",) if light_pistol else ()
+        owner_flags = ("--native-guest-inventory-view",) if pistol_kind else ()
         player = await start("owner", "join", owner, "--invite", invite["invite_file"], "--headless", "--native-zones",
                              *owner_flags)
         initial = await bound(1)
@@ -286,12 +284,9 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         host_items = await inventory(host, "host")
         if other in clients:
             other_items = await inventory(other, other_id)
-        if light_pistol:
-            unsupported = uuid.uuid4().hex.upper()
-            await action(host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", unsupported,
-                         "--kind", "light-pistol-suppressed")
+        if pistol_kind:
             await action(host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", source,
-                         "--kind", "light-pistol")
+                         "--kind", pistol_kind)
             evidence["loaded_source"] = await inspect_loaded_pistol(owner, source)
         else:
             await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", source)
@@ -299,15 +294,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         typed, = (item for item in initial_items if item["guid"] == source)
         assert (typed["source"], typed["class_path"], typed["quantity"]) == ("backpack", item_class, quantity), typed
         drop_site = await place(owner_id, "near")
-        if light_pistol:
-            excluded, = (item for item in initial_items if item["guid"] == unsupported)
-            assert (excluded["source"], excluded["class_path"], excluded["quantity"]) == (
-                "backpack", UNSUPPORTED_PISTOL, 1), excluded
-            refused = await action(owner, drop.DROP, "--target", f"{unsupported}|1", success=False)
+        if pistol_kind:
+            refused = await action(owner, drop.DROP, "--target", f"{source}|2", success=False)
             assert refused["error"] == "native_guest_stack_drop_stock_item_row_unqualified", refused
             assert await inventory(owner, owner_id) == initial_items
             assert not saved()
-            evidence["unsupported_selection"] = {"item": excluded, "requested_quantity": 1, "error": refused["error"]}
+            evidence["wrong_drop_quantity"] = {"item": typed, "requested_quantity": 2, "error": refused["error"]}
 
             dropped = await drop_pistol_from_overlay(source, initial_items)
             attempt = dropped["drop_id"]
@@ -330,7 +322,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
         if host_origin:
             bootstrap = await collect(host, "host", "host", host_items, dropped, committed, typed, drop_site["lane"])
-            evidence["host_stock_pistol_setup" if light_pistol else "host_stock_ammo_setup"] = bootstrap
+            evidence["host_stock_pistol_setup" if pistol_kind else "host_stock_ammo_setup"] = bootstrap
             guest_before = await inventory(owner, owner_id)
             assert guest_before == [item for item in initial_items if item["guid"] != source]
             host_before = await inventory(host, "host")
@@ -339,7 +331,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             if host_origin_menu:
                 await wait(run, lambda state: state.get("game", {}).get(host_drop_input.SCOPE) is not None)
                 fixture = await action(host, host_drop_input.FIXTURE, "--target", f"{source}|{quantity}|{host_origin_menu}")
-                if light_pistol:
+                if pistol_kind:
                     assert fixture["stored_ammo"] == 7, fixture
                     evidence["loaded_host"] = {"guid": source, "stored_ammo": fixture["stored_ammo"]}
                 await wait(run, lambda state: any(row.get("owner") == "host" and row.get("guid") == source
@@ -369,7 +361,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert "escrow" in host_escrow and host_escrow["claim_id"] is None and "actor" not in host_escrow, host_escrow
             evidence["host_drop_pickup"] = await collect(
                 owner, owner_id, "guest", guest_before, host_drop, host_escrow, host_stack, drop_site["lane"])
-            if light_pistol:
+            if pistol_kind:
                 evidence["loaded_recipient"] = await inspect_loaded_pistol(owner, source)
             duplicate = await action(host, drop.HOST_RECLAIM, "--target", host_drop_id, success=False)
             assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
@@ -389,7 +381,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             assert await inventory(owner, owner_id) == [item for item in initial_items if item["guid"] != source]
             if recipient != host:
                 assert await inventory(host, "host") == host_items
-            if light_pistol:
+            if pistol_kind:
                 evidence["loaded_recipient"] = await inspect_loaded_pistol(recipient, source)
             duplicate = await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id, success=False)
             assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
@@ -492,14 +484,17 @@ if __name__ == "__main__":
     origin.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
     origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu"),
                         help="drop through the selected stock host inventory route, then pick up the item as the guest")
-    parser.add_argument("--light-pistol", action="store_true",
-                        help="drop a loaded pistol from the guest inventory overlay, then verify the selected pickup and host route")
+    pistol = parser.add_mutually_exclusive_group()
+    pistol.add_argument("--light-pistol", dest="pistol_kind", action="store_const", const="light-pistol",
+                        help="drop a loaded pistol from the guest inventory, then verify the pickup and host route")
+    pistol.add_argument("--suppressed-pistol", dest="pistol_kind", action="store_const", const="light-pistol-suppressed",
+                        help="verify the same workflow for the suppressed pistol")
     settings = parser.parse_args()
     if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
         parser.error("host-origin tests run separately from claimant-only tests")
-    if settings.light_pistol and (settings.visible_projection or settings.claimant == "host"):
-        parser.error("--light-pistol verifies stock Interact pickup by a second guest")
+    if settings.pistol_kind and (settings.visible_projection or settings.claimant == "host"):
+        parser.error("Loaded pistol tests use a second guest or a host-to-guest round trip")
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
                        visible_projection=settings.visible_projection, claimant=settings.claimant,
                        host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu,
-                       light_pistol=settings.light_pistol))
+                       pistol_kind=settings.pistol_kind))

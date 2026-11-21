@@ -55,13 +55,18 @@ def _near(host, character: str, row: dict) -> bool:
 
 
 def _qualified_item(row: dict, guid: str, count: int, item: str) -> bool:
-    return (row.get("guid"), row.get("quantity"), row.get("class_path"), row.get("source"),
-            row.get("stackable"), row.get("important")) == (guid, count, item, "backpack", record.STACKABLE[item], False)
+    stackable = row.get("stackable")
+    return ((row.get("guid"), row.get("quantity"), row.get("class_path"), row.get("source"))
+            == (guid, count, item, "backpack") and row.get("important") is False
+            and type(stackable) is bool and stackable == record.STACKABLE.get(item, stackable)
+            and (stackable or count == 1))
 
 
-def droppable(row: dict) -> bool:
+def droppable(row: dict, *, generic=False) -> bool:
     guid, count, item = row.get("guid"), row.get("quantity"), row.get("class_path")
-    return valid_guid(guid) and record.valid_quantity(item, count) and _qualified_item(row, guid, count, item)
+    return (valid_guid(guid) and record.valid_quantity(item, count)
+            and (row.get("droppable") is True if generic else item in record.STACKABLE)
+            and _qualified_item(row, guid, count, item))
 
 
 def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
@@ -91,7 +96,9 @@ async def service_view(client, active: bool) -> None:
         if offset is None:
             raise ValueError("The stock inventory drop confirmation expired")
         page = await native_inventory.read_view_page(client, operation, offset)
-        if not any(_qualified_item(row, guid, count, item) for row in page["items"]):
+        generic = client.gameplay.get(record.GENERIC_CAPABILITY) == 1
+        if not any(row.get("guid") == guid and row.get("class_path") == item and row.get("quantity") == count
+                   and droppable(row, generic=generic) for row in page["items"]):
             raise ValueError("The selected item is no longer on your authenticated backpack page")
         current = client.bridge.snapshot() or {}
         if (view_identity(client, sequence, area, pawn) != identity or not client.transport.game_access

@@ -51,7 +51,7 @@ async def verify_owner_frame(profile, saved: dict, character: str) -> dict:
 def parse(fields: list[str], state: str, area: str) -> dict:
     if fields[:1] == [SETTLE]:
         return parse_settlement(fields, state, area)
-    if (len(fields) not in (10, 13) or fields[0] not in (ACTION, BIRTH) or state != "hosting"
+    if (len(fields) not in (10, 13, 14) or fields[0] not in (ACTION, BIRTH) or state != "hosting"
             or not native_guest_drop_record.supported_map(area) or (fields[0] == ACTION and area != OBSERVATORY)
             or fields[1] != area):
         raise ValueError("Invalid isolated stock stack drop report")
@@ -61,7 +61,8 @@ def parse(fields: list[str], state: str, area: str) -> dict:
             or flag not in ("0", "1") or not _STATUS.fullmatch(status)):
         raise ValueError("Invalid stock stack drop identity or quantity")
     ok = flag == "1"
-    item = native_guest_drop_record.actor_class_path(area, actor) if ok else None
+    item = (fields[13] if len(fields) == 14 and native_guest_drop_record.actor_matches(area, actor, fields[13])
+            else native_guest_drop_record.actor_class_path(area, actor) if len(fields) != 14 else None)
     if ok and (status != SUCCESS or not native_guest_drop_record.valid_quantity(item, int(raw_count))
                or not valid_guid(new_guid) or new_guid == guid):
         raise ValueError("The stock actor or stock-converted GUID was not verified")
@@ -69,10 +70,10 @@ def parse(fields: list[str], state: str, area: str) -> dict:
         raise ValueError("Invalid isolated stock stack drop refusal")
     proof = dict(map=map_name, pawn=pawn, slot=slot, guid=guid, quantity=int(raw_count), ok=ok, status=status,
                  actor=actor if ok else None, new_guid=new_guid if ok else None)
-    if ok and fields[0] == BIRTH:
+    if ok and (fields[0] == BIRTH or len(fields) == 14):
         proof["class_path"] = item
-    if len(fields) == 13:
-        location = list(map(float, fields[10:]))
+    if len(fields) >= 13:
+        location = list(map(float, fields[10:13]))
         if not ok or not native_guest_drop_record.valid_position(location):
             raise ValueError("Invalid exact stack drop placement")
         proof["location"] = location
@@ -140,9 +141,9 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
                 raise party.RuleError(reason)
             raise RuntimeError(reason or "The stock stack drop actor retirement was unverified")
         actor = proof.get("actor")
-        item = native_guest_drop_record.actor_class_path(area, actor)
+        item = proof.get("class_path") or (native_guest_drop_record.actor_class_path(area, actor) if fixture else None)
         if (proof.get("status") != SUCCESS or not native_guest_drop_record.valid_quantity(item, count)
-                or not fixture and item != proof.get("class_path")
+                or not native_guest_drop_record.actor_matches(area, actor, item)
                 or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid):
             raise RuntimeError("The stock stack drop actor and typed conversion did not verify")
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)

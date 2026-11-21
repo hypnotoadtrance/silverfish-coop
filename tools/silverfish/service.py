@@ -760,6 +760,8 @@ class Host:
         if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
             view[native_guest_drop_record.CAPABILITY] = 1
             view[native_guest_drop_record.STATE] = native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
+            if self.last_game.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1:
+                view[native_guest_drop_record.GENERIC_CAPABILITY] = 1
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
@@ -4616,12 +4618,13 @@ class Client:
                       and self.last_game.get("native_inventory_split_view_capability") is True)
             drops = (self.gameplay.get(native_guest_drop_record.CAPABILITY) == 1
                      and native_guest_drop_record.supported_map(area))
+            generic_drop = self.gameplay.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1
             entries = []
             for row in items:
                 options = []
                 if splits and native_inventory.splittable(row):
                     options.append("split")
-                if drops and native_guest_drop.droppable(row):
+                if drops and native_guest_drop.droppable(row, generic=generic_drop):
                     options.append("drop")
                 entry = f"{row['guid']}|{row['source']}|{row['index']}|{row['quantity']}|{row['class_path']}"
                 entries.append(entry + ("|" + ",".join(options) if options else ""))

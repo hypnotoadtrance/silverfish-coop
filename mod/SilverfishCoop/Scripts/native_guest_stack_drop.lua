@@ -117,17 +117,19 @@ function stack_drop.command(fields, state, phase)
     local statics = StaticFindObject(settings)
     local frozen = valid(statics) and statics:LoadGameFromSlot(slot, 0)
     if not valid(frozen) then error("native_guest_stack_drop_frozen_frame_unavailable", 0) end
-    local called, ok, status, actor, new_guid, actual_count, x, y, z = pcall(SilverfishProbeNativeGuestStackDrop,
+    local called, ok, status, actor, new_guid, actual_count, x, y, z, class = pcall(SilverfishProbeNativeGuestStackDrop,
         pawn:GetAddress(), save:GetAddress(), frozen:GetAddress(), guid, count)
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$") then
         error("mutation_unverified_native_guest_stack_drop_receipt", 0)
     end
     if ok then
-        local qualified
-        for class, profile in pairs(drop_items.profiles) do
-            if count <= profile.maximum and drop_items.actor_path(class, state.map, maps[state.map], actor) then
-                qualified = true
-                break
+        local qualified = class and drop_items.actor_path(class, state.map, maps[state.map], actor)
+        if not class then
+            for known_class, profile in pairs(drop_items.profiles) do
+                if count <= profile.maximum and drop_items.actor_path(known_class, state.map, maps[state.map], actor) then
+                    qualified = true
+                    break
+                end
             end
         end
         if not qualified or status ~= "stock_spawn_verified_and_retired" or actual_count ~= count
@@ -136,18 +138,24 @@ function stack_drop.command(fields, state, phase)
         end
     end
     observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,
-        actor = ok and actor or "-", new_guid = ok and new_guid or "-", location = ok and {x, y, z}}
+        actor = ok and actor or "-", new_guid = ok and new_guid or "-", location = ok and {x, y, z},
+        class = ok and class or nil}
     return "isolated stock inventory drop probe reported"
 end
 
 function stack_drop.rows(state, phase, status_row)
     if not hosting_map(state, phase) or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
     local rows = {status_row(birth .. "-capability", 1)}
+    if type(SilverfishNativeGenericInventoryDrop) == "function" and SilverfishNativeGenericInventoryDrop() then
+        rows[#rows + 1] = status_row("native-generic-inventory-drop", 1)
+    end
     if fixtures and state.map == observatory then rows[#rows + 1] = status_row(action .. "-capability", 1) end
     local row = observation
     if row then
+        local details = row.location and {table.unpack(row.location)} or {}
+        if row.class then details[#details + 1] = row.class end
         rows[#rows + 1] = status_row(row.command, row.map, row.pawn, row.slot, row.guid, row.count, row.ok and 1 or 0, row.status,
-            row.actor, row.new_guid, table.unpack(row.location or {}))
+            row.actor, row.new_guid, table.unpack(details))
     end
     if settlement then
         local proof = settlement

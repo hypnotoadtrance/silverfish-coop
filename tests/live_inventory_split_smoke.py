@@ -23,15 +23,17 @@ from tools.silverfish import native_world_loot as drop_projection
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 DROP_AMMO = {ammo.symbol: ammo for ammo in STOCK_AMMO}
 DROP_FOOD = (pickup.BOROUGH_MRE, pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.CROSSROADS_MUSHROOM)
+DROP_ITEMS = (pickup.POCKET_WATCH, pickup.CITY_WIRE, pickup.SOURCE)
 
 
 async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, stock_drop_probe: bool = False,
                  manual_drop: bool = False, *, crossroads_drop: bool = False, drop_map=None, ammo=NINE_MM_BALL,
-                 food_source=None, multiple_drops=False):
+                 food_source=None, multiple_drops=False, authored_item=None):
+    item_source = food_source or authored_item
     item_class = ammo.item_path
     expected_quantity = ammo.fixture_units
-    if food_source:
-        drop_map, source_actor, item_class = pickup.SOURCES[food_source]
+    if item_source:
+        drop_map, source_actor, item_class = pickup.SOURCES[item_source]
         expected_quantity = 1
     area = drop_map or (drop_record.CROSSROADS if crossroads_drop else OBSERVATORY)
     manual_drop = manual_drop or crossroads_drop or drop_map is not None or multiple_drops
@@ -93,7 +95,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
     def quantities(rows, tracked):
         matching = [row for row in rows if row["guid"] in tracked]
         assert all(row["source"] == "backpack" and row["class_path"] == item_class
-                   and row["stackable"] is True and row["important"] is False for row in matching), matching
+                   and (item_source is not None or row["stackable"] is True)
+                   and row["important"] is False for row in matching), matching
         exact = {row["guid"]: row["quantity"] for row in matching}
         assert exact == tracked, (exact, tracked)
         return exact
@@ -111,16 +114,18 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
             weapon = uuid.uuid4().hex.upper()
             seeded_weapon = await ask("action", *host, "native-guest-weapon-seed", "--item-guid", weapon)
             assert seeded_weapon["native_guest_weapon"]["guid"] == weapon, seeded_weapon
-        if food_source:
-            await ask("action", *host, pickup.APPROACH, "--target", "guest", "--pickup-source", food_source)
-            await wait(guest_run, lambda state: state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(food_source, {})
+        if item_source:
+            if authored_item:
+                await ask("action", *host, pickup.APPROACH, "--target", "host", "--pickup-source", item_source)
+            await ask("action", *host, pickup.APPROACH, "--target", "guest", "--pickup-source", item_source)
+            await wait(guest_run, lambda state: state.get("game", {}).get(pickup.SOURCES_KEY, {}).get(item_source, {})
                        .get("state") == "available")
-            await ask("action", *guest, "native-authored-pickup-stock-fixture", "--pickup-source", food_source)
-            collected = await wait(run, lambda state: food_source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
-            claim = collected["gameplay"][pickup.STATE_KEY][food_source]
+            await ask("action", *guest, "native-authored-pickup-stock-fixture", "--pickup-source", item_source)
+            collected = await wait(run, lambda state: item_source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
+            claim = collected["gameplay"][pickup.STATE_KEY][item_source]
             assert (claim["owner"], claim["actor"], claim["class_path"]) == (character, source_actor, item_class), claim
             source = claim["guid"]
-            evidence["authored_food_pickup"] = claim
+            evidence["authored_food_pickup" if food_source else "authored_stock_pickup"] = claim
         else:
             if ammo != NINE_MM_BALL:
                 weapon = uuid.uuid4().hex.upper()
@@ -228,8 +233,8 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 identity = drop_projection.player_drop_identity(operation)
                 frame = await wait(run, lambda state: identity in state.get("game", {}).get(drop_projection.KEY, {}))
                 before = frame["game"][drop_projection.KEY][identity]
-                assert drop_record.actor_class_path(area, before["actor"]) == item_class, before
-                if food_source:
+                assert drop_record.actor_matches(area, before["actor"], item_class), before
+                if item_source:
                     await ask("action", *host, "native-world-loot-approach", "--target", f"host@{identity}")
                 press = (await ask("action", *host, drop_projection.FIXTURE, "--target", identity))[drop_projection.KEY][identity]
                 assert press["sequence"] > before["sequence"] and press == {**before, "sequence": press["sequence"]}
@@ -405,6 +410,7 @@ if __name__ == "__main__":
     modes.add_argument("--multiple-drops", action="store_true", help="verify both peers see two drops from the same player")
     modes.add_argument("--campaign-drop-map", help="verify a guest drop and host pickup after restart on this campaign map")
     modes.add_argument("--campaign-food-source", choices=DROP_FOOD, help="verify sharing an authored food pickup")
+    modes.add_argument("--campaign-authored-item", choices=DROP_ITEMS, help="verify class-driven drops with a placed item")
     parser.add_argument("--ammo", choices=DROP_AMMO, default=NINE_MM_BALL.symbol)
     settings = parser.parse_args()
     if ((settings.campaign_drop_map and not drop_record.supported_map(settings.campaign_drop_map))
@@ -413,4 +419,5 @@ if __name__ == "__main__":
     asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(), settings.sort_backpack,
                        settings.stock_drop_probe, settings.manual_drop, crossroads_drop=settings.crossroads_drop,
                        drop_map=settings.campaign_drop_map, ammo=DROP_AMMO[settings.ammo],
-                       food_source=settings.campaign_food_source, multiple_drops=settings.multiple_drops))
+                       food_source=settings.campaign_food_source, multiple_drops=settings.multiple_drops,
+                       authored_item=settings.campaign_authored_item))
