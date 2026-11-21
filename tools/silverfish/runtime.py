@@ -24,7 +24,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
-from . import native_inventory
+from . import native_inventory, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
 from . import native_host_stack_drop
@@ -2079,7 +2079,30 @@ class Bridge:
                         "slot": fields[1], "map": fields[2], "total": int(fields[3]), "offset": int(fields[4]),
                         "count": int(fields[5]), "items": [],
                     }
-                elif fields[0] == "native-inventory-census-item" and len(fields) in (9, 10) and "native_inventory_census" in data:
+                elif (fields[0] == "native-stash-setting" and len(fields) == 3 and data.get("state") == "hosting"
+                        and data.get("map") == fields[1] and fields[2] in {"0", "1"}):
+                    data[native_stash.SETTING] = fields[2] == "1"
+                elif (fields[0] == "native-stash-site" and len(fields) == 7 and data.get("state") == "hosting"
+                        and data.get("map") == fields[1] and valid_guid(fields[2])
+                        and native_stash.valid_site(fields[1], fields[3])):
+                    sites = data.setdefault(native_stash.SITES, {})
+                    if fields[2] in sites:
+                        raise ValueError("Duplicate live stash identity")
+                    location = list(map(_finite, fields[4:7]))
+                    if not native_guest_drop_record.valid_position(location):
+                        raise ValueError("Invalid live stash position")
+                    sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
+                elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
+                    if (fields[1] != data.get("map") or not SLOT.fullmatch(fields[3]) or not valid_guid(fields[4])
+                            or fields[5] not in {"0", "1"} or not 0 <= int(fields[6]) <= 4096
+                            or not 0 <= int(fields[7]) <= 4096 or not 0 <= int(fields[8]) <= 16):
+                        raise ValueError("Invalid stash census")
+                    data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
+                        combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
+                elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10):
+                    key = fields[0].removesuffix("-item").replace("-", "_")
+                    if key not in data:
+                        raise ValueError("Item report without an inventory census")
                     row = {
                         "guid": fields[1], "source": fields[2], "index": int(fields[3]), "class_path": fields[4],
                         "quantity": int(fields[5]), "stackable": fields[6] == "1",
@@ -2089,7 +2112,7 @@ class Bridge:
                         if fields[9] not in {"0", "1"}:
                             raise ValueError("Invalid stock inventory drop eligibility")
                         row["droppable"] = fields[9] == "1"
-                    data["native_inventory_census"]["items"].append(row)
+                    data[key]["items"].append(row)
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {
                         "destination": fields[1], "actor": fields[2], "location": [_finite(value) for value in fields[3:6]],

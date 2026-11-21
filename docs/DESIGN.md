@@ -24,11 +24,11 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 9. **Shared wallet.** Every player draws from the same money pool. The host owns the balance and validates changes to it.
 
-10. **Independent inventories.** Each character has their own inventory. The host tracks and saves it with that character. Any nearby party member can collect an item deliberately dropped in the world. The host settles the first valid pickup exactly once and saves the item with the recipient.
+10. **Independent inventories.** Each character has their own inventory and private rest-site stash contents. The host tracks and saves both with that character. Players use the same physical stash box at a rest site and each sees only their character's items. With the host's combined-stash setting enabled, each character can access the same private contents from every rest site. With it disabled, their contents are stored separately for each stock stash ID. Any nearby party member can collect an item deliberately dropped in the world. The host settles the first valid pickup exactly once and saves the item with the recipient.
 
 11. **Host-only zone transitions.** Only the host can initiate zone transitions. Zone boundaries block guests. Interacting with a transition door is also host-only. The host still has to meet the door's normal requirements. The host is blocked when any active character is more than 15 meters from the host. Party travel follows rule 18.
 
-12. **Shared, trait-aware loot.** The host rolls loot from a container or dead enemy using the traits of the player who opened it or was credited with the kill. For a container, the first accepted open establishes the opener. The host synchronizes the same rolled pool to the party. A stack can be claimed once, and reopening or reconnecting preserves the original roll.
+12. **Shared, trait-aware loot.** The host rolls loot from a container or dead enemy using the traits of the player who opened it or was credited with the kill. For a container, the first accepted open establishes the opener. The host synchronizes the same rolled pool to the party. A stack can be claimed once, and reopening or reconnecting preserves the original roll until the host's stock game replenishes that source.
 
 13. **Permanent character ownership.** Each character has a persistent owner within the host campaign. Guests see and control their own characters. Each participant controls one character at a time, and each character has one active controller. Verified Steam identity and host-recognized Direct IP credentials can identify the same participant and character roster. The host checks game and mod compatibility before admitting a player.
 

@@ -57,6 +57,7 @@ local native_nothing_return = require("native_nothing_return")
 local native_kill_volume = require("native_kill_volume")
 local native_world_view = require("native_world_view")
 local native_inventory = require("native_inventory")
+local native_stash = require("native_stash")
 local native_inventory_view = require("native_inventory_view")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_guest_stack_drop = require("native_guest_stack_drop")
@@ -945,6 +946,7 @@ local function run_command(fields, state, current_phase)
         or native_kill_volume.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
+        or native_stash.command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
         or native_bag_projection.command(fields, state, current_phase)
         or native_authored_pickup.command(fields, state, current_phase)
@@ -1119,6 +1121,7 @@ local function write_status(state, current_phase, failure)
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stash.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_bag_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_authored_pickup.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1379,6 +1382,7 @@ local function tick()
         native_guest_weapon.reset()
         native_loot_actions.reset()
         native_inventory.reset()
+        native_stash.reset()
         native_wipe_inventory.reset()
         native_guest_stack_drop.reset()
         last_authored_arrival = nil

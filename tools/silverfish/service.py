@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
-               native_guest_weapon, native_host_save, native_host_stack_drop, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
+               native_guest_weapon, native_host_save, native_host_stack_drop, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_stash, native_wire_quest,
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
@@ -71,7 +71,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
-                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, "native-loot-inspect", "native-loot-open", "native-loot-claim",
+                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST,
+                        "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -748,6 +749,9 @@ class Host:
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
+        if type(self.last_game.get(native_stash.SETTING)) is bool:
+            view[native_stash.SETTING] = self.last_game[native_stash.SETTING]
+            view[native_stash.SITES] = self.last_game.get(native_stash.SITES, {})
         if native_mindcore._ready(self.last_game, 2) and native_mosby_tape.instructions_download_unlocked(self.party):
             view["host_world"][native_mosby_station_view.DOWNLOAD_READY] = True
         carry = getattr(self, "mindcore_carry", None)
@@ -1765,6 +1769,8 @@ class Host:
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
                     raise party.RuleError("invalid_inventory_offset")
                 result = await native_inventory.inspect(self, bridge, character, int(offset))
+            elif action == native_stash.LIST:
+                result = await native_stash.inspect(self, bridge, character, target)
             elif action == native_inventory.SPLIT:
                 result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"])
             elif action in native_guest_drop.ACTIONS:
@@ -2638,6 +2644,24 @@ class Host:
                     character = self.roles().get(request.get("target") or "host")
                     offset = request.get("amount")
                     result = await native_inventory.inspect(self, bridge, character, 0 if offset is None else offset)
+                elif action == native_stash.LIST:
+                    result = await native_stash.inspect(self, bridge, "host", request.get("target"))
+                elif action in {"native-stash-approach-fixture", "native-stash-setting-fixture"} and self.fixtures:
+                    target = request.get("target") or ""
+                    if action == "native-stash-approach-fixture":
+                        role, _, site = target.partition("@")
+                        character = self.roles().get(role)
+                        pawn = native_loot._scope(self, character)
+                        if not pawn or site not in self.last_game.get(native_stash.SITES, {}):
+                            raise party.RuleError("native_stash_fixture_unavailable")
+                        arguments = (pawn, site)
+                    else:
+                        if target not in {"0", "1"}:
+                            raise party.RuleError("native_stash_fixture_unavailable")
+                        arguments = (target,)
+                    self.last_game = await bridge.command(action, *arguments, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {native_stash.SETTING: self.last_game.get(native_stash.SETTING)}
                 elif action == native_guest_stack_drop.ACTION:
                     character = self.roles().get(request.get("target") or "guest")
                     result = await native_guest_stack_drop.perform(self, bridge, character, request.get("item_guid"),

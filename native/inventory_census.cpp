@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -32,6 +33,7 @@ namespace
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto item_struct_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto guid_struct_path = STR("/Script/CoreUObject.Guid");
+    constexpr auto stash_struct_path = STR("/Game/Classes/Libraries/Structs/Stash_Struct.Stash_Struct");
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr int max_array_rows = 4096; // Matches the frozen planner and native guest inventory scanner.
     constexpr std::size_t max_class_path = 512;
@@ -142,14 +144,15 @@ namespace
             return true;
         }
 
-        Guid identity(const void* item) const
+        Guid read_guid(const void* data) const
         {
             Guid identity{};
-            const auto* data = guid->ContainerPtrToValuePtr<void>(item);
             for (std::size_t index = 0; index < identity.size(); ++index)
                 identity[index] = static_cast<std::uint32_t>(guid_words[index]->GetPropertyValueInContainer(data));
             return identity;
         }
+
+        Guid identity(const void* item) const { return read_guid(guid->ContainerPtrToValuePtr<void>(item)); }
     };
 
     bool asset_path(std::string_view path)
@@ -222,7 +225,7 @@ namespace
             return {};
         }
 
-        std::string_view array(Unreal::FArrayProperty* property, const Unreal::UObject* snapshot, std::string_view source)
+        std::string_view array(Unreal::FArrayProperty* property, const void* snapshot, std::string_view source)
         {
             Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(snapshot));
             if (rows.Num() < 0 || rows.Num() > max_array_rows) return "native_inventory_census_array_out_of_bounds";
@@ -256,12 +259,78 @@ namespace
         lua.set_integer(static_cast<std::int64_t>(census.seen.size()));
         return 4;
     }
+
+    Guid stash_identity(std::string_view hex)
+    {
+        if (hex.size() != 32) return {};
+        Guid words{};
+        for (auto& word : words)
+        {
+            const auto [end, error] = std::from_chars(hex.data(), hex.data() + 8, word, 16);
+            if (error != std::errc{} || end != hex.data() + 8) return {};
+            hex.remove_prefix(8);
+        }
+        return words;
+    }
+
+    int read_stash(const Lua& lua)
+    {
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_string(3))
+            return result(lua, false, "native_stash_census_scope_unavailable");
+        const auto input = lua.get_integer();
+        const bool combined = lua.get_bool();
+        const auto target = stash_identity(lua.get_string());
+        auto* snapshot = input > 0 ? isolated_snapshot(static_cast<Address>(input)) : nullptr;
+        if (!snapshot || target == Guid{}) return result(lua, false, "native_stash_census_exact_save_and_site_required");
+        Inventory inventory;
+        auto* storage = field<Unreal::FArrayProperty>(snapshot, STR("Stashes"));
+        auto* entry = storage ? Unreal::CastField<Unreal::FStructProperty>(storage->GetInner()) : nullptr;
+        auto* type = find<Unreal::UScriptStruct>(stash_struct_path);
+        auto* guid = field<Unreal::FStructProperty>(type, STR("Stash_ID_6_90081F6E44D7BFA5FA8C15887774759B"));
+        auto* contents = field<Unreal::FArrayProperty>(type, STR("Contents_9_134977CA456AB05C7AE11DAAF3F758BE"));
+        if (!inventory.bind(snapshot) || !type || !entry || entry->GetStruct().Get() != type ||
+            !guid || guid->GetStruct().Get() != find<Unreal::UScriptStruct>(guid_struct_path) ||
+            !contents || !inventory.same_type(contents->GetInner()))
+            return result(lua, false, "native_stash_census_schema_unavailable");
+
+        Unreal::FScriptArrayHelper stashes(storage, storage->ContainerPtrToValuePtr<void>(snapshot));
+        if (stashes.Num() < 0 || stashes.Num() > max_array_rows)
+            return result(lua, false, "native_stash_census_array_out_of_bounds");
+        const void* selected = nullptr;
+        if (combined && stashes.Num() > 0)
+        {
+            selected = stashes.GetRawPtr(0);
+        }
+        else if (!combined)
+        {
+            for (int index = 0; index < stashes.Num(); ++index)
+            {
+                const auto* row = stashes.GetRawPtr(index);
+                if (inventory.read_guid(guid->ContainerPtrToValuePtr<void>(row)) != target) continue;
+                if (selected) return result(lua, false, "native_stash_census_duplicate_site");
+                selected = row;
+            }
+        }
+        Census census{inventory};
+        if (selected)
+        {
+            if (const auto error = census.array(contents, selected, "stash"); !error.empty())
+                return result(lua, false, error);
+        }
+        result(lua, true, "complete");
+        lua.set_string(census.lines);
+        lua.set_integer(static_cast<std::int64_t>(census.seen.size()));
+        return 4;
+    }
 }
 
 namespace silverfish::inventory_census
 {
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
-        if (enabled()) lua.register_function("SilverfishReadNativeInventoryCensus", read_census);
+        if (!enabled()) return;
+        lua.register_function("SilverfishReadNativeInventoryCensus", read_census);
+        lua.register_function("SilverfishReadNativeStashCensus", read_stash);
     }
 }
