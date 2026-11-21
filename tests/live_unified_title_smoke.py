@@ -47,7 +47,8 @@ async def start_pair(host, guest, character_name, *, on_join=None):
     await host.bridge.command(host_form, "port", str(host.port))
     await host.bridge.command(host_form, "submit")
     hosted = await wait(host_run, lambda frame: frame.get("state") == "hosting")
-    assert hosted["pid"] == host_pid and owns_udp_port(host_pid, host.port)
+    assert hosted["pid"] == host_pid
+    verify_loopback_socket(host_pid, host.port)
     assert hosted["game"]["save_scope"] == uuid.UUID(hosted["campaign"]["campaign_id"]).hex
 
     async def join(*args):

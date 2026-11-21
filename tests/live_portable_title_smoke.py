@@ -93,7 +93,7 @@ def qualify_release(game: Path, legacy_work: Path | None) -> PortableRelease:
         raise ValueError("The DLL must pin exactly one qualified versioned embedded runtime")
     package, digest = pinned[0]
 
-    boot = {"schema": 1, "campaign": "default", "bind": "0.0.0.0", "port": 7777}
+    boot = {"schema": 1, "campaign": "default", "bind": "127.0.0.1", "port": 7777}
     seat_name = "local"
     if legacy_work is None:
         if activation[descriptor] is not None:

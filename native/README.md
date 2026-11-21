@@ -20,6 +20,8 @@ $sfCppAddon = Join-Path $sfConfig 'SilverfishCoopNative\main.dll'
 
 Select a new workspace for `$sfCppLab`. The stage manifest records both DLL hashes and gives the C++ lab a distinct compatibility fingerprint. Use the UE4SS release folder and Silverfish signatures described in the main README for the loader package and configuration.
 
+Keep two dedicated executable paths for repeated Windows release tests. Reuse those replicas and give each run its own isolated save workspace. Windows Firewall's app rules apply to the executable path, so a new replica can raise a new prompt. The isolated portable title runs its Direct IP listener on `127.0.0.1`.
+
 ```powershell
 & $sfPython -m tools.silverfish --work $sfCppLab stage --source $sfGame --ue4ss $sfUe4ss --signatures $sfSignatures --cpp-runtime $sfCppRuntime --cpp-addon $sfCppAddon
 & $sfPython tests/live_smoke.py --work $sfCppLab --native-damage --native-backend cpp --vanilla-saved "$env:LOCALAPPDATA\SilverFish\Saved"

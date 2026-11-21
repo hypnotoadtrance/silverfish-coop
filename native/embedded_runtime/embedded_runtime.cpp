@@ -452,7 +452,7 @@ namespace
                 config.shipping_sha256 = defaults.shipping_sha256;
                 config.seat = "local";
                 config.campaign = "default";
-                config.bind = "0.0.0.0";
+                config.bind = config.isolated ? "127.0.0.1" : "0.0.0.0";
                 config.port = 7777;
             }
             config.features = std::move(defaults.features);
