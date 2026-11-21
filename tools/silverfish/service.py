@@ -39,6 +39,7 @@ from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_stock_door
+from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
@@ -2507,6 +2508,9 @@ class Host:
                     result = await native_guest_npc.host_fixture(self, bridge, action, request.get("target"))
                 elif action == native_enemy_loot.BANK:
                     result = await native_enemy_loot.bank(self, bridge, request.get("target"))
+                elif action == native_stock_enemy_drops.FIXTURE and self.fixtures:
+                    self.last_game, result = await native_stock_enemy_drops.escrow_fixture(bridge, self.last_game, request.get("target"))
+                    self.last_seen = time.monotonic()
                 elif action == native_enemy_loot.APPROACH:
                     result = await native_enemy_loot.approach(self, bridge, request.get("target"))
                 elif action == native_enemy_loot.CLAIM:

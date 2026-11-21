@@ -79,7 +79,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    require_damage: bool, enemy_loot: bool, original_save: Path | None,
                    enemy_bounty: bool = False, shared_enemy_loot: bool = False, dead_bridge_cqc: bool = False,
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
-                   restart_unclaimed_shells: bool = False, refinery_cqc: bool = False) -> dict:
+                   restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -354,6 +354,27 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert shots and observed["hits"] > 0 and observed["loot_calls"] == 1 and observed["bounty_calls"] > 0, observed
             assert observed["hp_before"] > 0 >= observed["hp_after"] and observed["projectile"].startswith(f"{projectile} "), observed
             proof_log["enemy_loot_from_exact_guest_projectile"] = observed
+            if stock_drop_census:
+                from tools.silverfish.native_stock_enemy_drops import FIXTURE, KEY, PROOF_KEY
+
+                def same_kill(frame):
+                    return [item for item in frame.get("game", {}).get(KEY, {}).values()
+                            if (item["source"], item["killer"]) == (target, exact_pawn)]
+
+                receipt = await wait(run, lambda frame: any(item["class_path"] == SHELLS for item in same_kill(frame))
+                                     and any(item["class_path"].startswith("/Game/Classes/Weapons/") for item in same_kill(frame)),
+                                     timeout=8)
+                reports = same_kill(receipt)
+                assert len({item["roll"] for item in reports}) == 1, reports
+                assert sum(item["actor"] == observed["ammo_actor"] for item in reports) == 1, reports
+                assert all(item["live_at_capture"] for item in reports if item["class_path"] != SHELLS), reports
+                proof_log["stock_drop_census"] = reports
+                weapon = next(item for item in reports if item["class_path"].startswith("/Game/Classes/Weapons/"))
+                converted = accepted("round-trip the dropped weapon payload",
+                                     await combat_action(run, FIXTURE, weapon["actor"]))[PROOF_KEY]
+                assert (converted["sequence"], converted["class_path"], converted["actor"]) == (
+                    weapon["sequence"], weapon["class_path"], weapon["actor"]), converted
+                proof_log["stock_dropped_weapon_payload"] = converted
             bounty = actor_proof(resolved, "native_enemy_bounty", target)
             if bounty:
                 proof_log["stock_enemy_bounty_scope"] = bounty
@@ -545,15 +566,22 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             sibling = actor_proof(status(guest_run), "native_enemy_loot_death_view", second_target)
             assert (sibling.get("state"), sibling.get("actor")) == ("present", second_target), sibling
             _, second_observed = await fight(second_target, encounters[second_target], remaining)
-            await share(first_target, encounters[first_target], first_observed)
-            await share(second_target, encounters[second_target], second_observed, defer_until_restart=restart_unclaimed_shells)
-            first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (first_target, second_target))
-            assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
-            final = status(run)["gameplay"]["native_enemy_loot_rolls"]
-            assert final == {first["guid"]: first, second["guid"]: second}, final
+            if stock_drop_census:
+                first_drops = encounters[first_target]["stock_drop_census"]
+                second_drops = encounters[second_target]["stock_drop_census"]
+                assert first_drops[0]["roll"] != second_drops[0]["roll"]
+                assert {item["actor"] for item in first_drops}.isdisjoint(item["actor"] for item in second_drops)
+            if not stock_drop_census or stock_shell_input:
+                await share(first_target, encounters[first_target], first_observed)
+                await share(second_target, encounters[second_target], second_observed, defer_until_restart=restart_unclaimed_shells)
+                first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (first_target, second_target))
+                assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
+                final = status(run)["gameplay"]["native_enemy_loot_rolls"]
+                assert final == {first["guid"]: first, second["guid"]: second}, final
         elif enemy_loot:
             _, observed = await fight(target, evidence, remaining)
-            await share(target, evidence, observed)
+            if not stock_drop_census or stock_shell_input:
+                await share(target, evidence, observed)
     finally:
         for process, controller in reversed(processes):
             if process.returncode is None:
@@ -582,7 +610,7 @@ async def main(args) -> None:
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
                        automatic_cqc_loot=args.automatic_cqc_loot, both_cqc=args.both_cqc,
                        stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells,
-                       refinery_cqc=args.refinery_cqc)
+                       refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census)
 
 
 if __name__ == "__main__":
@@ -604,11 +632,15 @@ if __name__ == "__main__":
     parser.add_argument("--both-cqc", action="store_true", help="defeat and claim from both placed CQC in one native visit")
     parser.add_argument("--stock-shell-input", choices=("host", "guest"), help="claim visible shells through stock Interact")
     parser.add_argument("--restart-unclaimed-shells", action="store_true", help="restart before claiming the second stock shell stack")
+    parser.add_argument("--stock-drop-census", action="store_true",
+                        help="verify observed ammunition and weapon payloads; add --stock-shell-input to test shell pickup too")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
     if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
         parser.error("--refinery-cqc requires --both-cqc and its own encounter")
     placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
+    if args.stock_drop_census and not args.automatic_cqc_loot:
+        parser.error("--stock-drop-census requires --automatic-cqc-loot")
     if args.both_cqc and not args.automatic_cqc_loot:
         parser.error("--both-cqc requires --automatic-cqc-loot")
     if args.stock_shell_input and not args.automatic_cqc_loot:

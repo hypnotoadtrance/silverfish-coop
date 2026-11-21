@@ -27,6 +27,7 @@ from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
+from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_host_stack_drop
 from . import native_black_box
@@ -1550,6 +1551,14 @@ class Bridge:
                     fresh.update(zip(seeds_and_counters, map(int, fields[6:14])))
                     fresh.update(zip(("armor", "rest_level", "proof"), fields[14:]))
                     data["native_fresh_campaign"] = fresh
+                elif fields[0] == native_stock_enemy_drops.TAG:
+                    report = native_stock_enemy_drops.parse(fields, data.get("state"), data.get("map"))
+                    drops = data.setdefault(native_stock_enemy_drops.KEY, {})
+                    if len(drops) >= 128 or report["actor"] in drops:
+                        raise ValueError("Repeated or oversized stock enemy drop observation")
+                    drops[report["actor"]] = report
+                elif fields[0] == native_stock_enemy_drops.PROOF_TAG:
+                    data[native_stock_enemy_drops.PROOF_KEY] = native_stock_enemy_drops.parse_escrow(fields, data)
                 elif fields[0] == "native-enemy-loot" and len(fields) == 18 and fields[13] in ("0", "1"):
                     _enemy_row(data, "native_enemy_loot", fields[2], {"map": fields[1], "bandit": fields[2], "state": fields[3], "hits": int(fields[4]),
                                                  "killer_role": fields[5], "killer_pawn": fields[6], "projectile": fields[7],

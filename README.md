@@ -69,6 +69,8 @@ Action responses have an `id` and an `ok` flag. Events carry the session generat
 
 On native campaign stages, `native-inventory-list` reads an exact stock inventory page. Run it against a guest profile to read that character. On the host, the same action reads the host's inventory or the enrolled role selected with `--target`. Use `next_offset` to advance the page. The guest passes the offset through `--target`. The host uses `--amount`.
 
+The host's `game.native_stock_enemy_drops` status reports recent item actors from stock NPC deaths in the current world. Items from the same death share a roll number. The record includes the stock source NPC, the party pawn credited by the game when available, and each item's class and actor identity.
+
 Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Use Page Up or Page Down to select a row, Home twice to equip a supported weapon, and End to cancel or close. Pass `--native-guest-primary-input` and `--native-guest-reload-input` to route a stock primary press or short reload press to the host for the qualified guest SMG and Light Pistol.
 
 At a locked vehicle trunk, equip a blowtorch and press primary fire, or equip a crowbar and tap Mode Toggle. For local automation, `native-guest-vehicle-blowtorch` and `native-guest-vehicle-crowbar` accept `--target "TOOL_GUID@VEHICLE_FULL_NAME"`. The response includes the tool result and the authoritative loot roll. The blowtorch uses one fuel charge per successful pry.

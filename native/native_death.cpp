@@ -59,6 +59,7 @@
 #include "guest_sickness.hpp"
 #include "loot_crate_input.hpp"
 #include "enemy_loot.hpp"
+#include "stock_enemy_drops.hpp"
 #include "fresh_clock.hpp"
 #include "quest_rewards.hpp"
 #include "borough_barter.hpp"
@@ -1465,6 +1466,7 @@ namespace
             silverfish::native_guest_consumable::uninstall_hooks();
             silverfish::native_loot_crate_input::uninstall_hooks();
             silverfish::native_enemy_loot::uninstall_hooks();
+            silverfish::stock_enemy_drops::uninstall_hooks();
             silverfish::native_shop_view::uninstall_hooks();
             silverfish::native_nothing_return::uninstall_hooks();
             silverfish::native_kill_volume::uninstall_hooks();
@@ -1517,6 +1519,7 @@ namespace
             silverfish::native_guest_consumable::install_hooks();
             silverfish::native_loot_crate_input::install_hooks();
             silverfish::native_enemy_loot::install_hooks();
+            silverfish::stock_enemy_drops::install_hooks();
             silverfish::native_shop_view::install_hooks();
             silverfish::native_nothing_return::install_hooks();
             silverfish::native_kill_volume::install_hooks();
@@ -1613,6 +1616,7 @@ namespace
             silverfish::native_guest_sickness::register_lua(lua);
             silverfish::native_loot_crate_input::register_lua(lua);
             silverfish::native_enemy_loot::register_lua(lua);
+            silverfish::stock_enemy_drops::register_lua(lua);
             silverfish::native_fresh_clock::register_lua(lua);
             silverfish::native_quest_rewards::register_lua(lua);
             silverfish::borough_barter::register_lua(lua);

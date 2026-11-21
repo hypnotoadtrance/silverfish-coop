@@ -1,4 +1,5 @@
 #include "loot_escrow.hpp"
+#include "stock_enemy_drops.hpp"
 #include "enemy_loot.hpp"
 #include "shared_loot.hpp"
 #include "stock_cash.hpp"
@@ -452,6 +453,41 @@ namespace
         return result(lua, true, "identical");
     }
 
+    int capture_stock_enemy_drop(const Lua& lua)
+    {
+        std::array<Address, 4> args{};
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != args.size() ||
+            !read_addresses(lua, args, args.size())) return result(lua, false, "stock_enemy_escrow_capture_unavailable");
+        Owner owner;
+        Unreal::UObject* actor{};
+        if (!silverfish::stock_enemy_drops::verify_live_drop(args[0], args[2], args[3], owner, actor))
+            return result(lua, false, "stock_enemy_escrow_actor_unverified");
+        Inventory inventory;
+        if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
+        std::string_view failure;
+        auto* scratch = isolated_save(args[1], inventory, failure);
+        if (!scratch) return result(lua, false, failure);
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(scratch));
+        if (rows.Num() != 0 || !qualified_escrow(inventory, scratch, rows, 1))
+            return result(lua, false, "native_loot_blank_escrow_required");
+        auto item = convert(inventory, owner.pawn, actor);
+        if (!item) return result(lua, false, "native_loot_stock_actor_conversion_unverified");
+        AddedRows append{rows};
+        const auto index = rows.AddValue();
+        if (index != 0 || rows.Num() != 1) return result(lua, false, "native_loot_escrow_append_unverified");
+        auto* destination = rows.GetRawPtr(index);
+        inventory.row->CopyCompleteValue(destination, item.get());
+        Unreal::UObject* confirmed{};
+        if (!inventory.identical(destination, item.get()) || !qualified_escrow(inventory, scratch, rows, 1) ||
+            !silverfish::stock_enemy_drops::verify_live_drop(args[0], args[2], args[3], owner, confirmed) || confirmed != actor)
+            return result(lua, false, "native_loot_escrow_payload_unverified");
+        append.committed = true;
+        result(lua, true, "captured");
+        lua.set_string(print_guid(inventory.identity(item.get())));
+        lua.set_integer(inventory.ammo->GetPropertyValueInContainer(item.get()));
+        return 4;
+    }
+
     struct Match
     {
         int count{};
@@ -765,6 +801,7 @@ namespace silverfish::loot_escrow
         lua.register_function("SilverfishVerifyNativeLootEscrow", verify_escrow);
         lua.register_function("SilverfishClaimNativeLootEscrow", claim<false>);
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
+        lua.register_function("SilverfishCaptureStockEnemyDrop", capture_stock_enemy_drop);
         lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);
     }
 }

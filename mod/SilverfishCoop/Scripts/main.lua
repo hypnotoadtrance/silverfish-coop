@@ -28,6 +28,7 @@ local native_mindcore = require("native_mindcore")
 local native_datasilo_lift = require("native_datasilo_lift")
 local native_datasilo_door = require("native_datasilo_door")
 local native_stock_door = require("native_stock_door")
+local native_stock_enemy_drops = require("native_stock_enemy_drops")
 local native_cistern_lockpick = require("native_cistern_lockpick")
 local native_mindcore_carry = require("native_mindcore_carry")
 local native_mindcore_carry_view = require("native_mindcore_carry_view")
@@ -1013,6 +1014,7 @@ local function run_command(fields, state, current_phase)
         or native_turret_photo_quest.command(fields, state, current_phase)
         or native_roster_spawn.command(fields, state, current_phase)
         or native_enemy_loot.command(fields, state, current_phase)
+        or native_stock_enemy_drops.command(fields, state, current_phase)
         or native_enemy_shell_view.command(fields, state, current_phase)
         or native_broker_input.command(fields, state, current_phase)
         or native_wipe_view.command(fields, state, current_phase)
@@ -1189,6 +1191,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_subway_valve.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_turret_photo_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_loot.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stock_enemy_drops.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_enemy_shell_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_broker_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wipe_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

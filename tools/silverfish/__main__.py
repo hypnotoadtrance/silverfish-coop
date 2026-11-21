@@ -248,6 +248,7 @@ def parser() -> argparse.ArgumentParser:
         "native-stock-door-interact", "native-stock-door-fixture", "native-stock-door-input-fixture",
         "native-stock-door-stage-fixture",
         "native-stock-door-trace",
+        "native-stock-enemy-escrow-fixture",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",
         "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-capture-fixture", "native-turret-photo-shutter",
         "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",
