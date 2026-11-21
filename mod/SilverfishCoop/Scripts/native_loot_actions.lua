@@ -3,6 +3,8 @@ local loot = require("native_loot")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+    and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, placement, daily_update
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
@@ -92,8 +94,8 @@ function actions.command(fields, state, phase)
     if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
         error("The exact stock crate operation is unavailable", 0)
     end
-    if (action == "seed" or action == "approach" or fixture_nonempty)
-        and (not fixtures or fixture_nonempty and os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1") then
+    if (action == "seed" and not fixtures) or (action == "approach" and not (fixtures or title_fixtures))
+        or (fixture_nonempty and (not fixtures or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1")) then
         error("The exact stock crate operation is unavailable", 0)
     end
     observation = { action = action, map = state.map, crate = crate, pawn = pawn,

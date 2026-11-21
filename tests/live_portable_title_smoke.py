@@ -19,8 +19,10 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    embedded_startup, native_guest_consumable, native_guest_drop, native_inventory, native_loose_pickup, native_world_loot, runtime,
+    embedded_startup, native_guest_consumable, native_guest_drop, native_host_save, native_inventory, native_loose_pickup,
+    native_loot, native_world_loot, runtime,
 )
+from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
@@ -359,6 +361,63 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
                if stock_drop_proof else {})}
 
 
+async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    game = await host.bridge.wait_for(lambda frame: frame.get("state") == "hosting")
+    area = game["map"]
+    crate, = [name for name in GUARANTEED_CRATES if native_loot.CRATES[name] == area
+              and name.startswith("LootCrate_Small_BP_C ")]
+    host_pawn = game["pawns"]["local"]["name"]
+    await host.bridge.command("native-loot-approach", host_pawn, crate, timeout=5)
+    opened = await submit(host_run, "native-loot-open", target=crate)
+    assert opened["ok"], opened
+    roll = opened["native_loot_roll"]
+    item = next((row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES), None)
+    assert item is not None and "ammo" in item, roll
+    identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll['id']}:{item['guid']}").hex
+    await host.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {}))
+    approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+    assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+    seen = await guest.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {})
+        and math.dist(frame["pawns"]["local"]["location"], item["transform"]["position"]) < 225)
+    actor = seen[native_world_loot.KEY][identity]["actor"].split(" ", 1)[1]
+    host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=actor)
+    assert clicked["ok"] and clicked["proof"].startswith("stock Nearby Items card requested"), clicked
+
+    def settled(state):
+        rows = state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate, {}).get("items", ())
+        return identity not in state.get("game", {}).get(native_world_loot.KEY, {}) and any(
+            row["guid"] == item["guid"] and row.get("claimed_by") for row in rows)
+
+    await wait(host_run, settled)
+    await wait(guest_run, settled)
+    display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{item['guid']}")
+    assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
+    inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+    received, = [row for row in inventory["items"] if row["guid"] == item["guid"]]
+    assert received["class_path"] == item["class_path"], received
+    if received["stackable"]:
+        assert received["quantity"] == item["ammo"], received
+        if received["quantity"] > 1:
+            assert clicked["proof"] == f"stock Nearby Items card requested x{received['quantity']}", clicked
+    assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
+    duplicate = await submit(host_run, "native-loot-claim", target=f"{item['guid']}@{crate}")
+    assert duplicate.get("error") == "native_loot_already_claimed", duplicate
+    saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+    native_host_save.verify_checkpoint(host.profile, saved)
+    durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
+    committed, = [row for row in durable["items"] if row["guid"] == item["guid"]]
+    assert committed == {**item, "claimed_by": inventory["owner"]}, committed
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+    return {"crate": crate, "roll": roll["id"], "item": committed, "rendered": clicked["proof"], "received": received,
+            "duplicate": duplicate["error"]}
+
+
 async def create_stock_drop_character(guest, join, name):
     await join("create-editor", name)
     await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
@@ -380,7 +439,8 @@ async def create_stock_split_character(guest, join, name):
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
-                 stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False) -> None:
+                 stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
+                 container_nearby: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -409,7 +469,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
-        if stock_drop or stock_split or stock_equip or stock_nearby:
+        if stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
@@ -448,8 +508,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
         first, second = seats
         async def check_gameplay(host, guest, pawn):
-            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
-                                         stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
+            evidence = await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
+                                             stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
+            if container_nearby:
+                evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
+            return evidence
         create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                   create_character=create))
@@ -497,6 +560,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-nearby", action="store_true", help="pick up a loose actor from the guest's stock Nearby Items panel")
     parser.add_argument("--projected-nearby", action="store_true", help="reclaim a player drop through stock Nearby Items")
+    parser.add_argument("--container-nearby", action="store_true", help="pick up live stock container loot through Nearby Items")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -506,4 +570,5 @@ if __name__ == "__main__":
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
-                       stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby))
+                       stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
+                       container_nearby=args.container_nearby))
