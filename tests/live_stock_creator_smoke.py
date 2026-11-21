@@ -76,14 +76,18 @@ async def creator_action(seat: Seat, operation: str) -> str:
     deadline = asyncio.get_running_loop().time() + 15
     while asyncio.get_running_loop().time() < deadline:
         ticket = uuid.uuid4().hex
-        answer.unlink(missing_ok=True)
+        try:
+            answer.unlink(missing_ok=True)
+        except PermissionError:  # Windows can still have the previous reply open during its replacement.
+            await asyncio.sleep(.08)
+            continue
         runtime.write_text(request, f"1\t{ticket}\t{operation}\n", newline="")
         while asyncio.get_running_loop().time() < deadline:
             if seat.bridge.process.poll() is not None:
                 raise RuntimeError(f"Stock creator process exited during {operation}: {seat.bridge.process.returncode}")
             try:
                 row = answer.read_text(encoding="utf-8").rstrip("\n").split("\t", 3)
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
                 row = ()
             if len(row) == 4 and row[:2] == ["1", ticket]:
                 state, latest = row[2:]
