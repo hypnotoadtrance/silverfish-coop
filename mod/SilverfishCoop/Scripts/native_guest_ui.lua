@@ -114,7 +114,10 @@ local function capture(state, phase, pawn_name, path)
         or not character or not pawn or pawn:GetFullName() ~= pawn_name then
         error("The co-op view requires an authenticated guest save and host Journal", 0)
     end
-    local rows = {table.concat({state.map, character}, "\t")}
+    local pack_size, equipment_size = count(save.PlayerBackpack), count(save.PlayerEquipment)
+    local selected = integer(save.PlayerEquipIndex, -1, math.max(equipment_size - 1, 0))
+    local rows = {table.concat({state.map, character}, "\t"),
+        table.concat({"inventory-layout", pack_size, equipment_size, selected}, "\t")}
     local checked, character_row = pcall(function()
         local character = save.Character
         local name = character[creator.name_field]:ToString()
@@ -204,6 +207,7 @@ local function project(state, phase, character, path)
     if not exact(view, save_class) then error("The stock co-op view could not be allocated", 0) end
     local processed, items, note_count, quest_count = 0, 0, 0, 0
     local completed, attachments, reputation = 0, 0, nil
+    local layout, item_positions = nil, {backpack = {}, equipment = {}}
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
         if processed > max_rows then error("The co-op view contains too many rows", 0) end
@@ -211,6 +215,12 @@ local function project(state, phase, character, path)
         for field in (line .. "\t"):gmatch("([^\t]*)\t") do row[#row+1] = field end
         if processed == 1 then
             if #row ~= 2 or row[1] ~= state.map or row[2] ~= character then error("The co-op view is stale", 0) end
+        elseif row[1] == "inventory-layout" and #row == 4 and not layout and processed == 2 then
+            layout = {
+                backpack = integer(row[2], 0, max_rows),
+                equipment = integer(row[3], 0, max_rows),
+            }
+            layout.selected = integer(row[4], -1, math.max(layout.equipment - 1, 0))
         elseif row[1] == "character" and #row == 4 then
             local name = decode(row[2]):ToString()
             creator.install(view, row[4], name)
@@ -228,8 +238,11 @@ local function project(state, phase, character, path)
             local entry = item_row(row)
             local name = slots[row[2]]
             if row[2] == "backpack" or row[2] == "equipment" then
-                local array = view[name]
-                array[array:GetArrayNum()+1] = entry
+                if not layout then error("The co-op inventory layout is unavailable", 0) end
+                local index = integer(row[3], 1, layout[row[2]])
+                local positions = item_positions[row[2]]
+                if positions[index] then error("The co-op inventory slot is duplicated", 0) end
+                positions[index] = entry
             else
                 view[name] = entry
             end
@@ -268,10 +281,19 @@ local function project(state, phase, character, path)
             error("Invalid co-op Journal row", 0)
         end
     end
-    if processed == 0 or count(view.JournalEntries) ~= note_count or #view.ActiveQuests ~= quest_count then
+    if not layout or count(view.JournalEntries) ~= note_count or #view.ActiveQuests ~= quest_count then
         error("The stock co-op Journal view failed readback", 0)
     end
+    for key, positions in pairs(item_positions) do
+        local name = slots[key]
+        view[name] = {}
+        local array = view[name]
+        for index = 1, layout[key] do array[index] = positions[index] or {} end
+        if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
+    end
     for _, name in pairs(slots) do old[name] = view[name] end
+    old.PlayerEquipIndex = layout.selected
+    if old.PlayerEquipIndex ~= layout.selected then error("The stock co-op equipped slot failed readback", 0) end
     if view.Character[creator.name_field]:ToString() ~= "" then
         local old_voice, old_pitch = creator.voice(old.Character)
         local voice, pitch = creator.voice(view.Character)
