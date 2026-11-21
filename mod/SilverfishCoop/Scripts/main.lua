@@ -449,9 +449,15 @@ local function run_command(fields, state, current_phase)
         if #fields ~= 4 or not resident_title or role ~= "idle" then error("stock_creator_unavailable", 0) end
         return native_stock_creator.begin(state, current_phase, argument, math.tointeger(tonumber(fields[4])),
             function(target)
+                if target and supported_map(target) then return target end
+                local match
                 for map in pairs(zone_maps) do
-                    if supported_map(map) and (target == map or target == map:match("([^/]+)$")) then return map end
+                    if supported_map(map) and target == map:match("([^/]+)$") then
+                        if match then return nil end
+                        match = map
+                    end
                 end
+                return match
             end,
             function(destination, port)
                 role, expected_map, host_listen_port = "host", destination, port

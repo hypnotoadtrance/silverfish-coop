@@ -2,6 +2,7 @@ local creator = {}
 local title = require("native_title_entry")
 local save_scope = require("native_save_scope")
 
+local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local editor_map = "/Game/Classes/Maps/CharacterSelect_Map_P"
 local widget_path = "/Game/Classes/GUI/SubWidgets/NewGame_SubWidget.NewGame_SubWidget_C"
 local game_instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
@@ -35,7 +36,7 @@ local function route_open_level(_, context, name, absolute, options)
     local world = valid(source) and source:GetWorld()
     if not world_is(world, editor_map) or not same(world.OwningGameInstance, record.instance) then return end
     local target = text(name:get())
-    if leaf(target) == leaf(title.MAP) then return end
+    if leaf(target) == leaf(main_menu) then return end
     local destination = record.resolve(target)
     local save = record.instance.SaveSlot_Ref
     local statics = StaticFindObject(statics_path)
@@ -47,7 +48,7 @@ local function route_open_level(_, context, name, absolute, options)
         or SilverfishArmNativeListenPort(record.port, world:GetAddress(),
             editor_map .. "." .. leaf(editor_map), destination) ~= true then
         record.state = "failed"
-        name:set(FName(title.MAP))
+        name:set(FName(main_menu))
         return
     end
     name:set(FName(destination))
@@ -93,8 +94,8 @@ function creator.rows(state, phase, row)
     if not record then return {} end
     if record.state == "opening" and world_is(state.world, editor_map) then
         record.state = "creating"
-    elseif record.state == "creating" and state.map == title.MAP and phase == "ready" then
-        record.state = "cancelled"
+    elseif record.state == "creating" and state.map ~= editor_map and phase == "ready" then
+        record.state = state.map == main_menu and "cancelled" or "failed"
     elseif record.state == "travelling" and phase == "hosting" and state.map == record.destination and state.local_pawn then
         local pawn = state.local_pawn.pawn
         if pawn:HasAuthority() and same(pawn.Save, record.save) and same(record.instance.SaveSlot_Ref, record.save)

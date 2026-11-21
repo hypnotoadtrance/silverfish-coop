@@ -364,7 +364,10 @@ class TitleSession:
                         break
                     child_generation = status["generation"]
                 if verified and status.get("active") is True and status.get("state") in _PROGRESS:
+                    game = status.get("game")
                     if (self._resident and claim.action == "host" and status["state"] == "character_creation"
+                            and isinstance(game, dict) and isinstance(game.get("native_stock_creator"), dict)
+                            and game["native_stock_creator"].get("state") == "creating"
                             and 0 <= time.time() - status["updated_unix"] <= 5):
                         deadline = max(deadline, now + self._stall_timeout)
                     if (claim.action == "join" and status["state"] == "waiting_for_host"
@@ -374,7 +377,6 @@ class TitleSession:
                             deadline = max(deadline, now + NATIVE_RUNTIME_RETIREMENT_WAIT + 20)
                             runtime_wait_started = True
                         last_progress = now
-                    game = status.get("game")
                     sequence = game.get("sequence") if isinstance(game, dict) else None
                     observed = status["generation"], status["state"], sequence, status.get("wait_reason")
                     if progress != observed:
