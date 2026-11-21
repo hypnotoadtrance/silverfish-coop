@@ -7,6 +7,9 @@ local body_path = "/Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.
 local head_path = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/SM_Head_UV_01.SM_Head_UV_01"
 local head_class = "/Script/Engine.StaticMeshComponent"
 local scene_class = "/Script/Engine.SceneComponent"
+local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
+local crouched_idle = "Crouching_Idle"
+local crouched_walk = "Crouched_Walking"
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -131,6 +134,33 @@ local function position_head(entry)
     entry.head:K2_SetRelativeLocation(offset, false, {}, true)
 end
 
+local function restore_locomotion(entry)
+    if entry.crouch_animation and valid(entry.body) then
+        entry.body:SetAnimationMode(entry.animation_mode, true)
+        entry.crouch_animation, entry.crouch_mesh = nil, nil
+    end
+end
+
+local function apply_locomotion(entry)
+    if entry.pawn.bIsCrouched ~= true then
+        restore_locomotion(entry)
+        return
+    end
+    local velocity = entry.pawn:GetVelocity()
+    local name = velocity.X^2 + velocity.Y^2 > 20^2 and crouched_walk or crouched_idle
+    local mesh = entry.body.SkinnedAsset
+    if not valid(mesh) then return end
+    if entry.crouch_animation == name and entry.crouch_mesh == mesh:GetAddress() then return end
+    local animation = asset(animation_root .. name .. "." .. name)
+    if not valid(animation) or not valid(animation.Skeleton) or not valid(mesh.Skeleton)
+        or animation.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then return end
+
+    -- The stock first-person AnimBP reads the replicated crouch flag but its
+    -- pose keeps the visible remote body upright. Use the stock full-body clip.
+    entry.body:PlayAnimation(animation, true)
+    entry.crouch_animation, entry.crouch_mesh = name, mesh:GetAddress()
+end
+
 local function remove(entry)
     weapon_view.clear(entry)
     character_view.clear(entry)
@@ -144,6 +174,7 @@ local function remove(entry)
         entry.head_pivot:K2_DestroyComponent(entry.pawn)
     end
     if entry.installed_body and valid(entry.body) then
+        restore_locomotion(entry)
         character_view.clear_body(entry)
         if entry.material_override then entry.body:SetMaterial(0, nil) end
         entry.body:SetVisibility(entry.visible, false)
@@ -182,6 +213,7 @@ local function create(entry)
         error("Stock avatar assets were unavailable")
     end
     entry.visible, entry.hidden = body.bVisible, body.bHiddenInGame
+    entry.animation_mode = body.AnimationMode
     entry.default_asset, entry.default_head = body_asset, head_asset
     entry.collision, entry.overlap = body:GetCollisionEnabled(), body:GetGenerateOverlapEvents()
     entry.installed_body = true
@@ -291,6 +323,7 @@ function avatar.sync(state, phase)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
+                            apply_locomotion(entry)
                             aim_head(entry)
                         end
                         weapon_view.apply(entry, outfit and outfit.weapon or "-")

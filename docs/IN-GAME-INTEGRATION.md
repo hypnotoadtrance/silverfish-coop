@@ -124,3 +124,7 @@ The guest damage guard now covers the simulated copies of the other players as w
 The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.
 
 A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.
+
+The packaged title test opened the stock Inventory screen with the guest's isolated backpack and verified the item cards from both seats. The ordinary co-op inventory binding still opens its existing item-action view while stock menu actions are integrated.
+
+In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.

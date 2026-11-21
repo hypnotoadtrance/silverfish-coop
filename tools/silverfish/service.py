@@ -1912,7 +1912,11 @@ class Host:
         except (OSError, RuntimeError, ValueError) as error:
             result = {"ok": False, "error": str(error)}
         if not future.done():
-            future.set_result({"ok": True, **result})
+            reply = {"ok": True, **result}
+            if reply["ok"] and (cue := self.pickup_audio.frame(
+                    self.last_game, self.zone_epoch, operation=request["operation_id"])):
+                reply[native_pickup_audio.KEY] = cue
+            future.set_result(reply)
 
     async def read_quest_catalog(self, bridge: Bridge) -> dict:
         if self.last_game.get("state") != "hosting" or self.transitioning or self.stopping:
@@ -4759,6 +4763,11 @@ class Client:
         reply = await self.transport.request(request, timeout=timeout)
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
+        cue = reply.pop(native_pickup_audio.KEY, None)
+        if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
+            if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:
+                self.last_game = await self.pickup_playback.sync(
+                    self.bridge, self.control, self.last_game, cue, self.zone_epoch, self.host_session)
         return {key: value for key, value in reply.items() if key != "ok"}
 
     async def service_reload_input(self, active: bool) -> None:

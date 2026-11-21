@@ -53,7 +53,9 @@ function audio.command(fields, state, phase)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         local package, export
         if path and #path <= 256 then package, export = path:match("^(/Game/Classes/[%w_/%-]+)%.([%w_%-]+)_C$") end
-        if token(id) and not seen[id] and package and package:match("([^/]+)$") == export and x and y and z
+        if token(id) and seen[id] then
+            heard[#heard + 1] = id
+        elseif token(id) and package and package:match("([^/]+)$") == export and x and y and z
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2 then
             local ok, played = pcall(cue_at, path, pawn, { X = x, Y = y, Z = z })
             if ok and played then

@@ -32,12 +32,13 @@ class PickupAudio:
             self.cues.append((time.monotonic() + CUE_LIFETIME, game.get("map"), epoch,
                               [operation, class_path, [round(axis, 2) for axis in location]]))
 
-    def frame(self, game, epoch):
+    def frame(self, game, epoch, *, operation=None):
         area = game.get("map")
         now = time.monotonic()
         while self.cues and self.cues[0][0] <= now:
             self.cues.popleft()
-        cues = [cue for _, source, visit, cue in self.cues if (source, visit) == (area, epoch)]
+        cues = [cue for _, source, visit, cue in self.cues
+                if (source, visit) == (area, epoch) and (operation is None or cue[0] == operation)]
         return {"map": area, "epoch": epoch, "cues": cues} if cues else None
 
 
@@ -68,10 +69,11 @@ class Playback:
             if (not valid_id(operation) or operation in self.seen or operation in asked or not valid_class(class_path)
                     or not valid_position(location)):
                 continue
-            self.seen.append(operation)
             if math.dist(origin, location) <= AUDIBLE_RADIUS:
                 asked.add(operation)
                 args.append("|".join((operation, class_path, *map(str, location))))
+            else:
+                self.seen.append(operation)
         if not args:
             return game
         try:
@@ -81,5 +83,6 @@ class Playback:
             return game
         played = snapshot.get("ack", {}).get("message", "").split(",")
         for operation in sorted(asked.intersection(played)):
+            self.seen.append(operation)
             control.event("native_pickup_sound_played", operation_id=operation, map=area)
         return snapshot
