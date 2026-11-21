@@ -1,6 +1,7 @@
 #include "transport_items.hpp"
 #include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
+#include "guest_weapon_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -45,6 +46,7 @@ namespace
     constexpr auto panel_path = STR("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C");
     constexpr auto equipment_slot_path = STR("/Game/Classes/GUI/New/Components/ItemSlot.ItemSlot_C");
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
+    constexpr auto split_popup_path = STR("/Game/Classes/GUI/New/Components/SplitStackPopup.SplitStackPopup_C");
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
@@ -139,6 +141,8 @@ namespace
         Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName sort_items{STR("SortItems")};
+        Unreal::FName final_split{STR("FinalSplitStack")};
+        Unreal::FName position_split{STR("PositionSplitStackPopup")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
@@ -217,6 +221,7 @@ namespace
         Clock::time_point expires;
         Unreal::FWeakObjectPtr manager, screen, panel;
         std::string_view entry;
+        std::int32_t expected{};
     };
 
     std::optional<Entries> entries;
@@ -1046,6 +1051,66 @@ namespace
                                             manager, screen, panel, "sort"};
     }
 
+    void intercept_backpack_split(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
+                                  const void* parameters)
+    {
+        if (!qualified_drop_seat(false) || !exact_class(manager, manager_path) ||
+            function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        auto* save = canonical_host_save();
+        if (!exact_drop_screen(manager, screen, panel) || !host_drop_scope_matches(save)) return;
+
+        if (function->GetNamePrivate() == entries->position_split)
+        {
+            std::array<char, 2> flag{};
+            std::size_t size{};
+            if (function->GetNumParms() == 0 &&
+                getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_HEADLESS") == 0 &&
+                size == flag.size() && flag[0] == '1') iteration.PreventOriginalFunctionCall();
+            return;
+        }
+
+        auto* amount = field<Unreal::FIntProperty>(function, STR("AmountToTake"));
+        if (function->GetNumParms() != 1 || function->GetParmsSize() != sizeof(std::int32_t) || !amount ||
+            amount->GetOffset_Internal() != 0 || !amount->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            amount->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm)) return;
+        iteration.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
+        auto* splitting = field<Unreal::FBoolProperty>(manager, STR("IsSplittingStack"));
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
+        auto* popup = object_field(manager, STR("SplitStackPopup"));
+        if (!iteration.OriginalFunctionCallPrevented() || !parameters || now >= host_drop_scope.expires ||
+            (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
+            !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) || !splitting ||
+            !splitting->GetPropertyValueInContainer(manager) || !held_class || object_value(held_class, held.value) ||
+            !exact_class(popup, split_popup_path) || !same_widget_player(popup)) return;
+
+        const auto take = amount->GetPropertyValueInContainer(parameters);
+        auto* count = field<Unreal::FIntProperty>(popup, STR("Count"));
+        auto* card = object_field(popup, STR("ItemCard"));
+        if (take < 1 || !count || count->GetPropertyValueInContainer(popup) != take ||
+            !exact_class(card, card_path) || !same_widget_player(card) ||
+            object_field(card, STR("ItemManager")) != manager || !array_has_widget(panel, STR("Cards"), card, false)) return;
+        const auto candidate = card_item(card);
+        const GuidFields fields(candidate.structure);
+        auto* units = field<Unreal::FIntProperty>(candidate.structure, item_ammo_name);
+        auto* type = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
+        if (candidate.panel != panel || !fields.valid() || !units || !type) return;
+        namespace profiles = silverfish::guest_weapon_profiles;
+        const auto path = type->GetPathName();
+        if (path != profiles::nine_mm_ball.item && path != profiles::forty_five_ball.item &&
+            path != profiles::twelve_gauge_buck.item) return;
+        const auto guid = fields.read(candidate.value);
+        const auto expected = units->GetPropertyValueInContainer(candidate.value);
+        if (guid == Guid{} || take >= expected || !exact_canonical_drop_row(save, candidate, guid, expected, type)) return;
+        host_drop_request = HostDropRequest{guid, take, ++host_drop_sequence, false, now + request_lease,
+                                            manager, screen, panel, "split", expected};
+    }
+
     void intercept_backpack_action(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
                                    bool from_menu, std::string_view use = {})
     {
@@ -1288,6 +1353,11 @@ namespace
         if (name == entries->sort_items)
         {
             intercept_backpack_sort(iteration, context, function);
+            return;
+        }
+        if (name == entries->final_split || name == entries->position_split)
+        {
+            intercept_backpack_split(iteration, context, function, parameters);
             return;
         }
         const bool manager = name == entries->action_use || name == entries->quick_move ||
@@ -1610,6 +1680,11 @@ namespace
         lua.set_string({guid.data(), guid.size()});
         lua.set_integer(request.count);
         lua.set_string(request.entry);
+        if (request.entry == "split")
+        {
+            lua.set_integer(request.expected);
+            return 5;
+        }
         return 4;
     }
 
@@ -1637,6 +1712,12 @@ namespace
         auto* panel = completed.panel.Get();
         if (!exact_drop_screen(manager, completed.screen.Get(), panel))
             return finish(true, "screen_closed");
+        if (completed.entry == "split")
+        {
+            auto* cancel = stock_no_args(manager, Unreal::FName(STR("CancelSplitStack")));
+            if (!cancel) return finish(false, "refresh_unavailable");
+            manager->ProcessEvent(cancel, nullptr);
+        }
         if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" ||
             completed.entry.starts_with("use-"))
         {

@@ -683,6 +683,17 @@ namespace
             return value->GetPropertyValueInContainer(row) == units * unit_value &&
                 weight->GetPropertyValueInContainer(row) == units * unit_weight;
         }
+
+        bool source_totals_match(Unreal::UClass* item_class, const void* row, std::int32_t units) const
+        {
+            if (totals_match(row, units)) return true;
+            // MakeDefaultItem copies unit totals for a fresh stock stack,
+            // including ammo in a character preset. Accept that exact stock
+            // representation and calculate the totals of both resulting rows.
+            auto* defaults = item_class->GetClassDefaultObject().Get();
+            auto* default_ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+            return default_ammo && default_ammo->GetPropertyValueInContainer(defaults) == units && totals_match(row, 1);
+        }
     };
 
     int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class,
@@ -1860,7 +1871,7 @@ namespace
         if (!never_drop || never_drop->GetPropertyValueInContainer(inventory.item) ||
             !payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")) ||
             !stack.read(item_class, inventory) || !stack.qualifies(split.expected) ||
-            !stack.totals_match(inventory.item, split.expected))
+            !stack.source_totals_match(item_class, inventory.item, split.expected))
             return result(lua, false, "native_inventory_split_refused_stock_stack");
 
         auto distinct = context;

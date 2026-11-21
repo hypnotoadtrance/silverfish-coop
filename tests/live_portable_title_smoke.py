@@ -124,7 +124,8 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         return await native_mailbox(root, process)
 
 
-async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False) -> dict:
+async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
+                          stock_split: bool = False) -> dict:
     def qualified(game):
         return (game.get("native_enemy_loot_cqc_version") == 3
                 and game.get("native_guest_regen", {}).get(pawn, {}).get("state") in {"applied", "anchored", "paused_game_clock"}
@@ -207,6 +208,31 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             remaining = [row["quantity"] for row in contents["native_inventory"]["items"]
                          if row["guid"] == selected["guid"]]
             assert remaining == ([proof["quantity_after"]] if proof["quantity_after"] else []), contents
+    split_proof = None
+    if stock_split:
+        before = await submit(guest_run, "native-inventory-list")
+        host_run = host.campaign / "run"
+        host_before = await submit(host_run, "native-inventory-list")
+        assert before["ok"] and host_before["ok"], (before, host_before)
+        inventory = before["native_inventory"]
+        stack = next((row for row in inventory["items"] if native_inventory.splittable(row)), None)
+        assert stack is not None, inventory
+        guid, quantity = stack["guid"], stack["quantity"]
+        take = min(2, quantity - 1)
+        stale = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity + 1}")
+        assert not stale["ok"] and "stack changed" in stale["error"], stale
+        assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == inventory
+        split = await submit(guest_run, native_guest_drop.STOCK_SPLIT_FIXTURE, target=f"{guid}|{take}|{quantity}")
+        assert split["ok"] and re.fullmatch(r"verified two stock stacks in an open backpack with \d+ cards",
+                                           split.get("stock_inventory_proof", "")), split
+        split_proof = split[native_inventory.SPLIT_KEY]
+        after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        by_guid = {row["guid"]: row for row in after["items"]}
+        new_guid = split_proof["new_guid"]
+        assert (by_guid[guid]["quantity"], by_guid[new_guid]["quantity"]) == (quantity - take, take), after
+        assert by_guid[guid]["class_path"] == by_guid[new_guid]["class_path"] == stack["class_path"], after
+        assert len(after["items"]) == len(inventory["items"]) + 1, after
+        assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -216,6 +242,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
+            **({"guest_stock_menu_split": split_proof} if split_proof else {}),
             **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs,
                 "guest_stock_menu_sort": stock_sort_proof}
                if stock_drop_proof else {})}
@@ -230,8 +257,18 @@ async def create_stock_drop_character(guest, join, name):
     await offered(guest)
 
 
+async def create_stock_split_character(guest, join, name):
+    await join("create-editor", name)
+    await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
+    assert await creator_action(guest, "preset") == "page=4"
+    assert (await creator_action(guest, "veteran")).startswith("class=Veteran;")
+    assert await creator_action(guest, "next") == "page=3"
+    await creator_action(guest, "finish")
+    await offered(guest)
+
+
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
-                 second_legacy_work: Path | None = None, *, stock_drop: bool = False) -> None:
+                 second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -260,7 +297,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
-        if stock_drop:
+        if stock_drop or stock_split:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
@@ -299,8 +336,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
         first, second = seats
         async def check_gameplay(host, guest, pawn):
-            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop)
-        create = create_stock_drop_character if stock_drop else None
+            return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split)
+        create = create_stock_split_character if stock_split else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                   create_character=create))
         proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
@@ -343,10 +380,11 @@ if __name__ == "__main__":
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
+    parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
-                       stock_drop=args.stock_drop))
+                       stock_drop=args.stock_drop, stock_split=args.stock_split))
