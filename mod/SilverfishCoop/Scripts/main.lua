@@ -1230,7 +1230,7 @@ local function write_status(state, current_phase, failure, fields)
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_cistern_lockpick.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1517,6 +1517,7 @@ end
 
 players.start(bridge)
 native_loot_crate_input.start()
+native_stock_door.start()
 native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
 native_stash_view.start(players.is_downed)

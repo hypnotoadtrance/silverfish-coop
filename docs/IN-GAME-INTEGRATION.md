@@ -119,6 +119,8 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 
 The muted two-seat loopback reproduced the Crossroads hitch. In the first 12-second sample, 36 host frames and 38 guest frames exceeded 33 ms. After distributing container inspection across game ticks, the counts were 22 and 2, and median bridge work fell from 40 to 25 ms on the host and from 36 to 17 ms on the guest. These measurements used the headless renderer. Internet latency and foreground frame timing still need a playtest.
 
+Sampling hinged doors across game ticks reduced the worst measured Crossroads door-status pass from 32 to 5 ms on the host and from 4 to 3 ms on the guest. Exact door commands still read back the affected doors before acknowledgment. In these 10-second headless samples, Crossroads frames over 33 ms numbered 11 and 6 before the change and 13 and 7 afterward. The Crossroads tests verified guest Interact on wooden and metal doors, matching hinge positions and collision, the guest's blowtorch cost, and persistence on reload. [Stock door test](../tests/live_stock_door_smoke.py)
+
 The guest damage guard now covers the simulated copies of the other players as well as the guest's own pawn. A focused loopback test forced the guest-side damage and death wrappers on the host's replica, verified that both pawns stayed alive, and then verified ordinary host-authoritative downing and revival separately.
 
 The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.

@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
 from live_ai_smoke import wait
@@ -18,6 +19,7 @@ if str(REPO) not in sys.path:
 
 from tools.silverfish import native_stock_door as doors
 from tools.silverfish import native_host_save
+from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS
 
 WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
@@ -79,9 +81,10 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
                 attempts.append(approach)
                 continue
             await asyncio.sleep(.7)
-            result = await command("action", *guest, action, "--target", actor, expected=None)
+            started = time.monotonic()
+            result = await submit(grun, action, target=actor)
             if result.get("ok"):
-                return result
+                return result, started
             attempts.append(result)
         raise RuntimeError(f"No fixture approach reached the stock door knob: {attempts}")
 
@@ -146,7 +149,8 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
                 assert too_strong["error"] == "stock_crowbar_lock_too_strong", too_strong
                 pry_evidence["stronger_lock"] = too_strong["error"]
             await wait(grun, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == tool_guid)
-            stock = (await approach_and_input("native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+            result, _ = await approach_and_input("native-guest-primary-input-fixture")
+            stock = result["native_guest_primary_fixture"]
             await wait(grun, lambda _: tool_event(stock["sequence"]) is not None)
             applied = tool_event(stock["sequence"])
             assert applied["event"] == f"native_guest_door_{tool}_input", applied
@@ -157,8 +161,8 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
             snapshot = json.loads((campaign_dir / "save" / "campaign.json").read_bytes())
             native_host_save.verify_checkpoint(campaign_dir / "game-user", snapshot)
             receipts = snapshot["world"]["party"]["receipts"][invite["character_id"]]
-            assert any(receipt["id"] == applied["operation_id"] and receipt["result"] == {doors.PRY_RESULT: row}
-                       for receipt in receipts)
+            [saved_receipt] = [receipt for receipt in receipts if receipt["id"] == applied["operation_id"]]
+            assert saved_receipt["result"] == {doors.PRY_RESULT: row, doors.DELTA: applied[doors.DELTA]}
             pry_evidence.update(stock_tool=stock, tool_transaction=applied, out_of_range=out_of_range["error"])
         else:
             await command("action", *host, doors.FIXTURE, "--target", actor)
@@ -167,11 +171,18 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
         await wait(grun, lambda state: doors.matches(door(state), door(unlocked)))
         assert not await panel_blocks(host, trace) and not await panel_blocks(guest, trace)
 
-        await approach_and_input(doors.INPUT_FIXTURE)
+        _, input_started = await approach_and_input(doors.INPUT_FIXTURE)
 
-        closed = await wait(hrun, lambda state: door(state).get("open") is False
-                            and changed_angle(door(state), door(original_host)) < .05)
-        closed_peer = await wait(grun, lambda state: doors.matches(door(state), door(closed)))
+        def is_closed(state):
+            row = door(state)
+            return row.get("open") is False and changed_angle(row, door(original_host)) < .05
+
+        async def observe_close(run):
+            state = await wait(run, is_closed)
+            return state, round((time.monotonic() - input_started) * 1000)
+
+        (closed, host_ms), (closed_peer, guest_ms) = await asyncio.gather(observe_close(hrun), observe_close(grun))
+        assert doors.matches(door(closed_peer), door(closed))
         actions = (await command("events", *guest, "--tail", "100", expected=None))["events"]
         [receipt] = [event for event in actions if event.get(doors.RESULT, {}).get("actor") == actor
                      and event.get("event") == "local_interaction"]
@@ -199,7 +210,7 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
         if tool:
             again = await command("action", *guest, doors.PRY_ACTIONS[tool], "--target", f"{tool_guid}@{actor}",
                                   "--operation-id", applied["operation_id"])
-            assert again[doors.PRY_RESULT] == row
+            assert again[doors.PRY_RESULT] == row and again[doors.DELTA] == applied[doors.DELTA]
             inventory = (await command("action", *guest, weapon + "-inspect", "--target", tool_guid))["native_guest_weapon"]
             assert inventory["kind"] == tool and inventory["stored_ammo"] == after, inventory
             pry_evidence["restored_tool"] = inventory
@@ -207,6 +218,7 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
         (hrun / "stock-door-verification.json").write_text(json.dumps({
             "door": actor, "initial": door(original_host), "pried": door(unlocked), "closed_host": door(closed),
             "closed_guest": door(closed_peer), "guest_stock_input": receipt,
+            "guest_fixture_to_closed_observed_ms": {"host": host_ms, "guest": guest_ms},
             "panel_blocks_trace": {"initial": [True, True], "open": [False, False], "closed": [True, True]},
             "restored_guest": door(restored_peer), "original_files_verified": len(originals), **pry_evidence,
         }, indent=2), encoding="utf-8")

@@ -6,7 +6,8 @@ local statics_path = "/Script/Engine.Default__GameplayStatics"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local guest_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
-local active_world, scanned_at, actors, door_parts
+local active_world, active_phase, scanned_at, actors, door_parts
+local sampler
 local trace_report
 local tool_report
 
@@ -45,10 +46,13 @@ end
 
 local function census(state, phase)
     if (phase ~= "hosting" and phase ~= "connected") or not state.listening or not valid(state.world)
-        or state.server ~= (phase == "connected") or not available() then return {} end
+        or state.server ~= (phase == "connected") or not available() then
+        active_world, active_phase, scanned_at, actors, door_parts, sampler = nil, nil, nil, nil, nil, nil
+        return {}
+    end
     local now = os.time()
-    if not same(active_world, state.world) or scanned_at ~= now then
-        active_world, scanned_at, actors, door_parts = state.world, now, {}, {}
+    if not same(active_world, state.world) or active_phase ~= phase or scanned_at ~= now then
+        active_world, active_phase, scanned_at, actors, door_parts = state.world, phase, now, {}, {}
         local base, statics = StaticFindObject(base_path), StaticFindObject(statics_path)
         if not valid(base) or not valid(statics) then return actors end
         local found = {}
@@ -127,28 +131,86 @@ local function project(fields, state, phase)
     return "stock door flags and hinge transform synchronized"
 end
 
-function doors.rows(state, phase, status_row)
+local function sample_door(scan, name)
+    local actor, parts = scan.actors[name], door_parts[name]
+    if not valid(actor) or actor:IsActorBeingDestroyed() or not parts
+        or not valid(parts[1]) or not valid(parts[2]) or not valid(parts[3]) then return end
+    local arrow, panel, knob = table.unpack(parts)
+    local value = pose(actor, arrow)
+    if not value then return end
+    local center, grip = panel:K2_GetComponentLocation(), knob:K2_GetComponentLocation()
+    local collision = math.tointeger(panel:GetCollisionEnabled())
+    if center and grip and collision and collision >= 0 and collision <= 5 then
+        return scan.row("native-stock-door", scan.map, name,
+            value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
+            string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
+            string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
+            string.format("%.3f", center.X), string.format("%.3f", center.Y), string.format("%.3f", center.Z),
+            string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z), collision)
+    end
+end
+
+local function sample_slice(scan)
+    local started = os.clock()
+    for _ = 1, math.ceil(#scan.names / 12) do
+        local name = scan.names[scan.next]
+        scan.readings[name] = sample_door(scan, name)
+        scan.next = scan.next % #scan.names + 1
+        if os.clock() - started >= .002 then break end
+    end
+end
+
+function doors.start()
+    if type(SilverfishStockDoorGuardAvailable) ~= "function" then return end
+    LoopInGameThreadWithDelay(16, function()
+        local scan = sampler
+        if scan and #scan.names > 12 and scan.actors == actors and same(scan.world, active_world)
+            and not pcall(sample_slice, scan) then sampler = nil end
+    end)
+end
+
+local function sample_command(scan, fields)
+    if not fields then return end
+    local action = fields[2]
+    if action == "native-stock-door-project" then
+        for index = 4, math.min(#fields, 27) do
+            local name = fields[index]:match("^([^|]+)|")
+            if name and scan.actors[name] then scan.readings[name] = sample_door(scan, name) end
+        end
+    elseif action and action:sub(1, 18) == "native-stock-door-" then
+        local name = fields[action == "native-stock-door-fixture" and 4 or 3]
+        if name and scan.actors[name] then scan.readings[name] = sample_door(scan, name) end
+    end
+end
+
+function doors.rows(state, phase, status_row, fields)
+    local known = census(state, phase)
     local result = {}
-    for name, actor in pairs(census(state, phase)) do
-        if #result >= 240 then break end
-        local parts = door_parts[name]
-        local arrow, panel, knob
-        if valid(actor) and not actor:IsActorBeingDestroyed() and parts
-            and valid(parts[1]) and valid(parts[2]) and valid(parts[3]) then
-            arrow, panel, knob = table.unpack(parts)
+    if not active_world then return result end
+    if not sampler or sampler.actors ~= known or sampler.phase ~= phase then
+        local previous = sampler
+        sampler = {actors = known, world = state.world, phase = phase, map = state.map, row = status_row,
+            names = {}, readings = {}, next = 1}
+        for name, actor in pairs(known) do
+            if #sampler.names >= 240 then break end
+            if actor then
+                sampler.names[#sampler.names + 1] = name
+                if previous and previous.phase == phase and same(previous.world, state.world)
+                    and same(previous.actors[name], actor) then
+                    sampler.readings[name] = previous.readings[name]
+                end
+            end
         end
-        local value = arrow and pose(actor, arrow)
-        local center = panel and panel:K2_GetComponentLocation()
-        local grip = knob and knob:K2_GetComponentLocation()
-        local collision = panel and math.tointeger(panel:GetCollisionEnabled())
-        if value and center and grip and collision and collision >= 0 and collision <= 5 then
-            result[#result + 1] = status_row("native-stock-door", state.map, name,
-                value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
-                string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
-                string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
-                string.format("%.3f", center.X), string.format("%.3f", center.Y), string.format("%.3f", center.Z),
-                string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z), collision)
-        end
+    end
+    local scan = sampler
+    if #scan.names <= 12 then
+        for _, name in ipairs(scan.names) do scan.readings[name] = sample_door(scan, name) end
+    else
+        -- Read a command's exact doors before acknowledging it to the coordinator.
+        sample_command(scan, fields)
+    end
+    for _, name in ipairs(scan.names) do
+        if scan.readings[name] then result[#result + 1] = scan.readings[name] end
     end
     if trace_report and active_world and same(trace_report.world, state.world) and trace_report.phase == phase then
         result[#result + 1] = status_row("native-stock-door-trace", state.map, trace_report.actor,
@@ -286,7 +348,11 @@ local function trace(fields, state, phase)
         return {X = x, Y = y, Z = z}
     end
     local hit, color = {}, {R = 0, G = 0, B = 0, A = 1}
-    local found = api:LineTraceSingle(actor, endpoint(5), endpoint(8), query, true, {}, 0, hit, false, color, color, 0)
+    local ignored = {}
+    for _, details in ipairs(state.pawns) do
+        if valid(details.pawn) then ignored[#ignored + 1] = details.pawn end
+    end
+    local found = api:LineTraceSingle(actor, endpoint(5), endpoint(8), query, true, ignored, 0, hit, false, color, color, 0)
     hit = hit.OutHit or hit
     local component = hit.Component and hit.Component:Get()
     trace_report = {world = state.world, phase = phase, actor = fields[3], query = query,
