@@ -13,6 +13,8 @@ local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local savlo_estate = "/Game/Classes/Maps/Maps_OverWorld/SavloEstate_P"
 local city = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
+local crash_site = "/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P"
+local canned_beans = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
@@ -195,6 +197,30 @@ local profiles = {
         path = city .. ".City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
         class = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C",
         name = "Item_CannedPeaches_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = city,
+        source = "city-canned-beans",
+        path = city .. ".City_01_P:PersistentLevel.Item_CannedBeans_C_1",
+        class = canned_beans,
+        name = "Item_CannedBeans_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = crash_site,
+        source = "crash-site-canned-beans",
+        path = crash_site .. ".CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1",
+        class = canned_beans,
+        name = "Item_CannedBeans_C",
+        approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+    },
+    {
+        map = crossroads,
+        source = "crossroads-brown-mushroom",
+        path = crossroads .. ".CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3",
+        class = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C",
+        name = "Item_BrownMushroom_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }

@@ -5,9 +5,10 @@ import time
 
 from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
-from .authored_supply import BY_SOURCE as STOCK_SUPPLIES
+from .authored_supply import BY_SOURCE as STOCK_SUPPLIES, CRASH_SITE
 from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
+from .native_guest_consumable import BROWN_MUSHROOM_CLASS, CANNED_BEANS_CLASS
 from .travel import BOROUGH, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
 
 
@@ -17,6 +18,9 @@ ITEM_CLASS = "/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C"
 CITY_WIRE = "city-copper-wire"
 CITY_BRANDY = "city-paladin-brandy"
 CITY_PEACHES = "city-canned-peaches"
+CITY_BEANS = "city-canned-beans"
+CRASH_SITE_BEANS = "crash-site-canned-beans"
+CROSSROADS_MUSHROOM = "crossroads-brown-mushroom"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
 DEPOT_DOCUMENTS = "railyard-depot-documents"
@@ -47,6 +51,11 @@ SOURCES = {
                   "/Game/Classes/Items/Item_VintageWine.Item_VintageWine_C"),
     CITY_PEACHES: (CITY, f"Item_CannedPeaches_C {CITY}.City_01_P:PersistentLevel.Item_CannedPeaches_C_1",
                    "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
+    CITY_BEANS: (CITY, f"Item_CannedBeans_C {CITY}.City_01_P:PersistentLevel.Item_CannedBeans_C_1", CANNED_BEANS_CLASS),
+    CRASH_SITE_BEANS: (CRASH_SITE, f"Item_CannedBeans_C {CRASH_SITE}.CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1",
+                      CANNED_BEANS_CLASS),
+    CROSSROADS_MUSHROOM: (CROSSROADS, f"Item_BrownMushroom_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3",
+                          BROWN_MUSHROOM_CLASS),
     COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
     DEPOT_DOCUMENTS: (RAIL_YARD, f"Documents_DepotOffice_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
@@ -106,7 +115,8 @@ FIXTURE_ENTRIES = {FIXTURE: "fixture", STOCK_FIXTURE: "stock"}
 def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
-        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK)
+        defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK,
+                                                                 CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM)
                     and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]

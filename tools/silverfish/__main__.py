@@ -15,6 +15,7 @@ import uuid
 from .control import Control, select_run, status, submit
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS
 from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
+from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
 from .native_guest_weapon import SEED_KINDS
 from .native_host_save import STOCK_START_MODES
 from .runtime import REPO, prepare_game
@@ -214,7 +215,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-melee-canary-equip", "native-guest-melee-canary", "native-guest-melee-damage-canary",
         "native-guest-melee-aim-fixture", "native-guest-melee-swing",
         "native-guest-reload-input-fixture", "native-guest-primary-input-fixture", "native-guest-weapon-seed-light-pistol",
-        "native-guest-bandage", "native-guest-mre", "native-guest-canned-peaches", "native-guest-mre-fixture",
+        *GUEST_CONSUMABLE_ACTIONS, "native-guest-mre-fixture",
         "native-inventory-view-key-fixture", "native-guest-clock-fixture",
         "native-enemy-loot-watch", "native-enemy-loot-clear", "native-bandit-aim-fixture", "native-bandit-shot-fixture", "native-quest-list",
         "native-enemy-loot-bank", "native-enemy-loot-claim", "native-enemy-loot-approach", "native-enemy-shell-input-fixture",

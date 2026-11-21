@@ -231,6 +231,27 @@ namespace
             STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"),
             -670.2554344659196, 4487.914807500511, 41.21247972722806, 1, 1, true,
         },
+        Profile{
+            "city-canned-beans",
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/City_01_P.City_01_P:PersistentLevel.Item_CannedBeans_C_1"),
+            STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"),
+            -2872.6649813452254, 4277.220818581784, 331.53292892615934, 1, 1, true,
+        },
+        Profile{
+            "crash-site-canned-beans",
+            STR("/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P.CrashSite_01_P"),
+            STR("/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P.CrashSite_01_P:PersistentLevel.Item_CannedBeans_C_1"),
+            STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"),
+            12444.932956609755, 1960.3141652888612, 158.15586974916707, 1, 1, true,
+        },
+        Profile{
+            "crossroads-brown-mushroom",
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Item_BrownMushroom_C_3"),
+            STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"),
+            -19989.96202763854, -1402.687676772569, -202.34374719406702, 1, 1, true,
+        },
 #include "authored_cash_profiles.inc"
 #include "authored_supply_profiles.inc"
     };

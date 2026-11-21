@@ -43,6 +43,8 @@ namespace
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
     constexpr auto mre_path = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
     constexpr auto canned_peaches_path = STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C");
+    constexpr auto canned_beans_path = STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C");
+    constexpr auto brown_mushroom_path = STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C");
     constexpr auto gain_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GainHealth");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
     constexpr auto intox_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Apply_PlayerIntox");
@@ -55,10 +57,13 @@ namespace
         const Unreal::TCHAR* path;
         int value;
         double weight, regen_gain, food;
+        bool can_cook{};
     };
     constexpr Consumable bandage{bandage_path, 15, 0.05, 45.0, 0.0};
     constexpr Consumable mre{mre_path, 25, 0.65, 10.0, 30.0};
     constexpr Consumable canned_peaches{canned_peaches_path, 8, 0.4, 0.0, 12.0};
+    constexpr Consumable canned_beans{canned_beans_path, 14, 0.4, 0.0, 14.0, true};
+    constexpr Consumable brown_mushroom{brown_mushroom_path, 1, 0.05, 0.0, 3.5, true};
 
     bool opt_in(const char* name)
     {
@@ -322,7 +327,7 @@ namespace
                 !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0) ||
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
-            if (&profile == &canned_peaches && !read_bool(defaults, STR("CanCook"), false)) return false;
+            if (profile.food > 0.0 && !read_bool(defaults, STR("CanCook"), profile.can_cook)) return false;
             return units > 0 && units <= INT32_MAX / profile.value &&
                    weight->GetPropertyValueInContainer(row) == units * profile.weight &&
                    value->GetPropertyValueInContainer(row) == units * profile.value &&
@@ -978,6 +983,8 @@ namespace
 
     int use_mre(const Lua& lua) { return use_meal(lua, mre, "mre"); }
     int use_canned_peaches(const Lua& lua) { return use_meal(lua, canned_peaches, "canned_peaches"); }
+    int use_canned_beans(const Lua& lua) { return use_meal(lua, canned_beans, "canned_beans"); }
+    int use_brown_mushroom(const Lua& lua) { return use_meal(lua, brown_mushroom, "brown_mushroom"); }
 }
 
 void silverfish::native_guest_consumable::install_hooks()
@@ -1002,6 +1009,8 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
         lua.register_function("SilverfishPrepareNativeGuestMre", prepare_food);
         lua.register_function("SilverfishUseNativeGuestMre", use_mre);
         lua.register_function("SilverfishUseNativeGuestCannedPeaches", use_canned_peaches);
+        lua.register_function("SilverfishUseNativeGuestCannedBeans", use_canned_beans);
+        lua.register_function("SilverfishUseNativeGuestBrownMushroom", use_brown_mushroom);
         if (opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeGuestMreFixture", seed_mre_test);
     }

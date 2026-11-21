@@ -6,11 +6,28 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local headless_test = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"
 local meals = {
-    ["native-guest-mre"] = {kind = "mre", helper = "SilverfishUseNativeGuestMre", food = 30, gain = 10, detox = 3},
+    ["native-guest-mre"] = {
+        kind = "mre", helper = "SilverfishUseNativeGuestMre", blueprint = "Item_MRE", label = "MRE", food = 30, gain = 10,
+    },
     ["native-guest-canned-peaches"] = {
-        kind = "canned_peaches", helper = "SilverfishUseNativeGuestCannedPeaches", food = 12, gain = 0, detox = 1,
+        kind = "canned_peaches", helper = "SilverfishUseNativeGuestCannedPeaches", blueprint = "Item_CannedPeaches",
+        label = "Canned Peaches", food = 12, gain = 0,
+    },
+    ["native-guest-canned-beans"] = {
+        kind = "canned_beans", helper = "SilverfishUseNativeGuestCannedBeans", blueprint = "Item_CannedBeans",
+        label = "Canned Beans", food = 14, gain = 0,
+    },
+    ["native-guest-brown-mushroom"] = {
+        kind = "brown_mushroom", helper = "SilverfishUseNativeGuestBrownMushroom", blueprint = "Item_BrownMushroom",
+        label = "Brown Mushroom", food = 3.5, gain = 0,
     },
 }
+local labels = {}
+for _, meal in pairs(meals) do
+    labels[string.format("/Game/Classes/Items/%s.%s_C", meal.blueprint, meal.blueprint)] = meal.label
+end
+function mre.label(class) return labels[class] end
+
 local observation, fixture, ready
 
 local function valid(object) return object ~= nil and object ~= false and object:IsValid() end
@@ -98,7 +115,7 @@ function mre.command(fields, state, phase)
         or type(trait) ~= "boolean"
         or regen_after ~= math.min(math.max(regen_before + meal.gain * (trait and 0.6 or 1), 25), maximum)
         or math.type(intox_before) ~= "integer" or not bounded(intox_before, 0, 100)
-        or math.type(intox_after) ~= "integer" or intox_after ~= math.max(intox_before - meal.detox, 0)
+        or math.type(intox_after) ~= "integer" or intox_after ~= math.max(intox_before - math.floor(meal.food / 10), 0)
         or math.type(host_intox) ~= "integer" or not bounded(host_intox, 0, 100) then
         error(unverified .. "proof", 0)
     end

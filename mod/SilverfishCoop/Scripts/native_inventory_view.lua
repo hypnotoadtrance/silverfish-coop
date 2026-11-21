@@ -14,10 +14,7 @@ local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTe
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
-local meals = {
-    ["/Game/Classes/Items/Item_MRE.Item_MRE_C"] = "MRE",
-    ["/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"] = "Canned Peaches",
-}
+local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local body_armor = require("native_guest_armor")
@@ -182,7 +179,7 @@ local function page(fields)
                     and cqc[fields[4]] ~= nil)))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = item:gsub("_", " ")
-        local consumable = class == bandage_path and "Bandage" or mre_enabled and meals[class]
+        local consumable = class == bandage_path and "Bandage" or mre_enabled and meals.label(class)
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
         local splittable = options == "split" or options == "split,drop"
         if splittable and (source ~= "backpack" or not split_ammo[class] or quantity <= 1) then

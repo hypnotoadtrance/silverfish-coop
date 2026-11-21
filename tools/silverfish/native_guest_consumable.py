@@ -15,17 +15,26 @@ MRE = "native-guest-mre"
 MRE_CLASS = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
 CANNED_PEACHES = "native-guest-canned-peaches"
 CANNED_PEACHES_CLASS = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"
+CANNED_BEANS = "native-guest-canned-beans"
+CANNED_BEANS_CLASS = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
+BROWN_MUSHROOM = "native-guest-brown-mushroom"
+BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
 
 
 @dataclass(frozen=True)
 class Meal:
     class_path: str
-    food: int
+    food: float
     gain: int
     unit_value: int
 
 
-MEALS = {MRE: Meal(MRE_CLASS, 30, 10, 25), CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8)}
+MEALS = {
+    MRE: Meal(MRE_CLASS, 30, 10, 25),
+    CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8),
+    CANNED_BEANS: Meal(CANNED_BEANS_CLASS, 14, 0, 14),
+    BROWN_MUSHROOM: Meal(BROWN_MUSHROOM_CLASS, 3.5, 0, 1),
+}
 COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()}}
 RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 

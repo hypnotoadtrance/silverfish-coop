@@ -1,4 +1,4 @@
-"""Verify the City's stock Canned Peaches pickup, backpack use and isolated restart."""
+"""Verify an authored stock food pickup, backpack use, and isolated restart."""
 
 import argparse
 import asyncio
@@ -17,11 +17,16 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_guest_consumable as consumable, native_host_save
 from tools.silverfish.control import submit
-from tools.silverfish.travel import CITY
+
+FOOD_SOURCES = (pickup.CITY_PEACHES, pickup.CITY_BEANS, pickup.CRASH_SITE_BEANS, pickup.CROSSROADS_MUSHROOM)
 
 
-async def verify(work: Path, original: Path):
-    name = "city-peaches-" + uuid.uuid4().hex[:8]
+async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES):
+    name = source + "-" + uuid.uuid4().hex[:8]
+    area, actor, item_class = pickup.SOURCES[source]
+    use_action = consumable.COMMANDS[item_class]
+    expected = consumable.MEALS[use_action]
+    result_key = consumable.RESULT[use_action]
     root = work / "campaigns" / name
     host_run, guest_run = root / "run", work / "clients" / name / "run"
     host_run.mkdir(parents=True)
@@ -82,7 +87,7 @@ async def verify(work: Path, original: Path):
         assert view["next_offset"] is None, view
         return {row["guid"]: row for row in view["items"]}
 
-    async def eat_peaches(item):
+    async def eat(item):
         guid = item["guid"]
         await action(guest_run, "native-inventory-view-fixture")
         state = await wait(guest_run, lambda s: s.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -97,25 +102,21 @@ async def verify(work: Path, original: Path):
         assert (confirming["state"], confirming["guid"]) == ("confirming", guid), confirming
         pressed = (await action(guest_run, key, target="confirm"))["native_guest_inventory_use_view"]
         assert (pressed["state"], pressed["guid"]) == ("using", guid), pressed
-        result_key = consumable.RESULT[consumable.CANNED_PEACHES]
         receipt = await wait_event(guest_run, "native_guest_inventory_used", lambda event: event.get("view_sequence") ==
                                   pressed["sequence"] and event.get(result_key, {}).get("guid") == guid)
         proof = receipt[result_key]
         assert (proof["class_path"], proof["quantity_before"], proof["quantity_after"]) == (
             item["class_path"], item["quantity"], item["quantity"] - 1), proof
-        assert proof["food_after"] == min(proof["food_before"] + 12, 200) > proof["food_before"], proof
+        assert proof["food_after"] == min(proof["food_before"] + expected.food, 200) > proof["food_before"], proof
         assert proof["health_before"] == proof["health_after"] and proof["regen_after"] == max(25, proof["regen_before"]), proof
-        assert proof["intox_after"] == max(proof["intox_before"] - 1, 0), proof
+        assert proof["intox_after"] == max(proof["intox_before"] - int(expected.food / 10), 0), proof
         assert proof["host_intox_before"] == proof["host_intox_after"], proof
         await wait(guest_run, lambda s: s.get("game", {}).get("native_guest_inventory_use_view", {}) ==
                    dict(pressed, state="used"))
         await action(guest_run, key, target="back")
         return receipt
 
-    async def verify_city_peaches(authority, guest, invitation, paired_city):
-        source = pickup.CITY_PEACHES
-        area, actor, item_class = pickup.SOURCES[source]
-        assert (area, item_class) == (CITY, consumable.CANNED_PEACHES_CLASS)
+    async def verify_food(authority, guest, invitation, initial):
         approach = await action(host_run, pickup.APPROACH, target="guest", pickup_source=source)
         assert approach["actor"] == actor, approach
 
@@ -126,20 +127,22 @@ async def verify(work: Path, original: Path):
         assert (projected(available)["actor"], projected(available)["class_path"]) == (actor, item_class), available
         interaction = (await action(guest_run, "native-authored-pickup-stock-fixture",
                                     pickup_source=source))["native_authored_pickup_interaction"]
-        assert (interaction["map"], interaction["source"], interaction["entry"]) == (CITY, source, "stock"), interaction
+        assert (interaction["map"], interaction["source"], interaction["entry"]) == (area, source, "stock"), interaction
         claimed = await wait(host_run, lambda state: source in state.get("gameplay", {}).get(pickup.STATE_KEY, {}))
         claim = claimed["gameplay"][pickup.STATE_KEY][source]
-        assert (claim["map"], claim["actor"], claim["owner"], claim["class_path"]) == (CITY, actor, character, item_class), claim
+        assert (claim["map"], claim["actor"], claim["owner"], claim["class_path"]) == (area, actor, character, item_class), claim
         guid = claim["guid"]
         item = (await inventory(guest_run))[guid]
         assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (
             item_class, 1, "backpack", True
         ), item
-        assert guid not in await inventory(host_run), claim
+        host_inventory = await inventory(host_run)
+        assert guid not in host_inventory, claim
         evidence["stock_pickup"] = {"source": projected(available), "interaction": interaction, "receipt": claim, "item": item}
-        consumed = await eat_peaches(item)
-        evidence["stock_peaches_used"] = consumed
+        consumed = await eat(item)
+        evidence["stock_food_used"] = consumed
         assert guid not in await inventory(guest_run)
+        assert await inventory(host_run) == host_inventory
 
         await stop(host_run, authority)
         await stop(guest_run, guest)
@@ -148,37 +151,36 @@ async def verify(work: Path, original: Path):
         member = checkpoint["characters"][character]["state"]["native_guest_save"]
         guest_frame = native_host_save.guest_record(root / "game-user", member, character)
         assert host_frame and guest_frame and host_frame["slot"] != guest_frame["slot"], (host_frame, guest_frame)
-        assert host_frame["map"] == guest_frame["map"] == CITY, (host_frame, guest_frame)
+        assert host_frame["map"] == guest_frame["map"] == area, (host_frame, guest_frame)
         record = checkpoint["world"]["party"]
         assert record[pickup.STATE_KEY][source] == claim, record[pickup.STATE_KEY]
         assert any(row["id"] == consumed["operation_id"] for row in record["receipts"][character]), record["receipts"]
 
-        port = paired_city["endpoint"]["port"]
+        port = initial["endpoint"]["port"]
         await launch(host_run, "restart-host", "host", *team, "--port", str(port), *host_flags)
         restarted = await wait(host_run, lambda state: state.get("state") == "hosting"
-                               and state.get("generation") != paired_city["generation"] and state.get("game", {}).get("map") == CITY)
+                               and state.get("generation") != initial["generation"] and state.get("game", {}).get("map") == area)
         renewed = await action(host_run, "refresh-invite", target=invitation["guest_id"])
         assert restarted["endpoint"]["port"] == port and renewed["character_id"] == character, restarted
         await launch(guest_run, "restart-guest", "join", *player, "--invite", renewed["invite_file"], *guest_flags)
-        await paired(CITY, paired_city["zone_epoch"])
+        await paired(area, initial["zone_epoch"])
         claimed_again = await wait(guest_run, lambda state: projected(state).get("state") == "claimed")
         assert (projected(claimed_again)["actor"], projected(claimed_again)["class_path"]) == (actor, item_class), claimed_again
-        replay = await action(guest_run, consumable.CANNED_PEACHES, target=guid, operation_id=consumed["operation_id"])
-        key = consumable.RESULT[consumable.CANNED_PEACHES]
-        assert replay[key] == consumed[key] and guid not in await inventory(guest_run), replay
+        replay = await action(guest_run, use_action, target=guid, operation_id=consumed["operation_id"])
+        assert replay[result_key] == consumed[result_key] and guid not in await inventory(guest_run), replay
         repeated = await action(guest_run, pickup.ACTION, target=source, expected=False)
         assert repeated["error"] == "native_authored_pickup_already_claimed", repeated
-        evidence.update(verified=True, restart={"map": CITY, "port": port, "host_slot": host_frame["slot"],
-                                                "guest_slot": guest_frame["slot"], "replayed_use": replay[key],
+        evidence.update(verified=True, restart={"map": area, "port": port, "host_slot": host_frame["slot"],
+                                                "guest_slot": guest_frame["slot"], "replayed_use": replay[result_key],
                                                 "repeated_pickup": repeated["error"]})
 
     try:
-        authority = await launch(host_run, "host", "host", *team, "--port", "0", "--start-zone", CITY, *host_flags)
+        authority = await launch(host_run, "host", "host", *team, "--port", "0", "--start-zone", area, *host_flags)
         await wait(host_run, lambda state: state.get("state") == "hosting")
         invitation = await initial_invite()
         character = invitation["character_id"]
         guest = await launch(guest_run, "guest", "join", *player, "--invite", invitation["invite_file"], *guest_flags)
-        await verify_city_peaches(authority, guest, invitation, await paired(CITY))
+        await verify_food(authority, guest, invitation, await paired(area))
     except BaseException as error:
         evidence.update(verified=False, failure=f"{type(error).__name__}: {error}")
         raise
@@ -193,7 +195,8 @@ async def verify(work: Path, original: Path):
                         await asyncio.wait_for(process.wait(), 15)
         evidence["original_saves_verified"] = saved_hashes(original) == originals
         evidence["original_file_count"] = len(originals)
-        (host_run / "live-city-peaches-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        proof = "live-city-peaches-verification.json" if source == pickup.CITY_PEACHES else f"live-{source}-verification.json"
+        (host_run / proof).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         assert evidence["original_saves_verified"], "The original single-player files changed during the smoke"
 
@@ -202,5 +205,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--source", choices=FOOD_SOURCES, default=pickup.CITY_PEACHES)
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.source))

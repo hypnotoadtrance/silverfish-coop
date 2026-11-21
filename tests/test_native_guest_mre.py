@@ -66,6 +66,19 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
             status.write_text(prefix + "\t".join(peaches) + "\n", encoding="utf-8")
             self.assertEqual(bridge.snapshot()["native_guest_canned_peaches"], expected)
 
+    def test_stock_beans_and_mushroom_keep_exact_food_and_intoxication(self):
+        for action, food_after, intox_after in ((consume.CANNED_BEANS, "31", "41"),
+                                                (consume.BROWN_MUSHROOM, "20.5", "42")):
+            with self.subTest(action=action):
+                frame = [action, "used", BOROUGH, PAWN, GUID, "1", "0", "17", food_after,
+                         "230", "230", "210", "250", "42", intox_after, "4", "0"]
+                proof = consume.parse_meal(frame)
+                self.assertEqual(consume.COMMANDS[proof["class_path"]], action)
+                self.assertEqual((proof["food_after"], proof["intox_after"]), (float(food_after), int(intox_after)))
+                frame[14] = "40"
+                with self.assertRaises(ValueError):
+                    consume.parse_meal(frame)
+
     async def test_opt_in_transaction_requires_exact_written_guest_frame_and_accepts_replay(self):
         state = {"players": {"guest": {"downed": False, "native_inventory": {GUID: {"quantity": 2}}}},
                  "wipe": None, "pending_spawns": {}, "receipts": {}}

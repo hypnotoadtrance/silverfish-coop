@@ -27,6 +27,7 @@ from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
 from .udp_ownership import verify_loopback_socket
 
 __all__ = [
@@ -61,8 +62,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-finite-shop-buy": 15.0,
     "native-finite-shop-sale-quote": 15.0,
     "native-finite-shop-sell": 15.0,
-    "native-guest-bandage": 15.0,
-    "native-guest-canned-peaches": 15.0,
+    **dict.fromkeys(GUEST_CONSUMABLE_ACTIONS, 15.0),
     "native-guest-armor-equip": 20.0,
     "native-guest-helmet-equip": 20.0,
     "native-guest-melee-swing": 20.0,
