@@ -273,6 +273,8 @@ def parser() -> argparse.ArgumentParser:
         "native-host-stack-reclaim",
         "native-host-stack-drop-menu-fixture", "native-host-stack-drop-menu-close-fixture",
         "native-guest-drop-projection-fixture",
+        "native-world-loot-fixture",
+        "native-world-loot-approach",
         "native-bandit-spawn", "native-bandit-position", "native-bandit-client-spawner-probe",
         "native-shop-approach", "native-shop-buy", "native-finite-shop-list", "native-finite-shop-buy",
         "native-finite-shop-sale-quote", "native-finite-shop-sell",

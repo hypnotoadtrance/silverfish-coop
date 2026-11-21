@@ -89,6 +89,7 @@ namespace
     };
 
     std::array<Projection, 65> projections;
+    std::size_t active_projection_slots{};
 
     std::int64_t sequence{};
     std::array callbacks{Hooks::ERROR_ID, Hooks::ERROR_ID, Hooks::ERROR_ID};
@@ -252,18 +253,19 @@ namespace
         if (!ready()) return;
         if (retire_requested.exchange(false, std::memory_order_acquire))
         {
-            for (auto& entry : projections) clear(entry);
-            return;
+            for (auto& entry : std::span{projections}.first(active_projection_slots)) clear(entry);
         }
         const auto now = Clock::now();
         if (now < next_check) return;
         next_check = now + std::chrono::milliseconds(100);
-        for (auto& entry : projections)
+        for (auto& entry : std::span{projections}.first(active_projection_slots))
         {
             if (!entry.actor.object.Get()) continue;
             if (!same_scene(entry.lease) || now >= entry.lease.expiry + hidden_retention) clear(entry);
             else if (!scope_current(entry.lease)) conceal(entry);
         }
+        while (active_projection_slots && !projections[active_projection_slots - 1].actor.object.Get())
+            --active_projection_slots;
     }
 
     bool near_source(const Lease& lease, U::UObject* pawn)
@@ -679,6 +681,8 @@ namespace
             actor->HasAnyFlags(U::RF_WasLoaded)) return "stock_drop_projection_deferred_actor_unavailable";
 
         projection.object = actor;
+        const auto slot = static_cast<std::size_t>(&entry - projections.data());
+        active_projection_slots = std::max(active_projection_slots, slot + 1);
         actor->SetFlags(U::RF_Transient);
         actor->SetActorEnableCollision(false);
         actor->SetActorHiddenInGame(true);
@@ -771,7 +775,9 @@ namespace
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         auto* driver = object(world, STR("NetDriver"));
         auto* connection = object(driver, STR("ServerConnection"));
-        if (!pawn || !live(world) || !silverfish::native_guest_drop_maps::contains(world) || !live(driver) ||
+        if (!pawn || !live(world) || !live(driver) ||
+            !(stock_loot ? silverfish::native_guest_drop_maps::stock_map(world) :
+                silverfish::native_guest_drop_maps::contains(world)) ||
             (connection && !live(connection)) ||
             !id_valid(epoch) || !id_valid(id) || !std::ranges::all_of(source, coordinate) ||
             !coordinate(visual) || visual > source[2] + 18 || visual < source[2] - 145)
@@ -863,7 +869,7 @@ namespace
         const auto address = static_cast<std::uintptr_t>(lua.get_integer());
         auto* pawn = input::current_local_pawn(address);
         if (!pawn) return 0;
-        for (auto& entry : projections)
+        for (auto& entry : std::span{projections}.first(active_projection_slots))
         {
             auto& lease = entry.lease;
             if (!lease.intent || Clock::now() >= lease.intent_expiry ||
@@ -893,11 +899,15 @@ namespace silverfish::native_guest_drop_projection
         constexpr auto owner = STR("SilverfishCoopNative");
         callbacks[0] = Hooks::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* actor, U::UFunction* function, void* args) {
-                for (auto& entry : projections) intercept(entry, call, actor, function, args, nullptr);
+                if (!ready()) return;
+                for (auto& entry : std::span{projections}.first(active_projection_slots))
+                    intercept(entry, call, actor, function, args, nullptr);
             }, {false, false, owner, STR("Guard one native guest drop projection")});
         callbacks[1] = Hooks::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* actor, U::FFrame& frame, void*) {
-                for (auto& entry : projections) intercept(entry, call, actor, frame.Node(), frame.Locals(), &frame);
+                if (!ready()) return;
+                for (auto& entry : std::span{projections}.first(active_projection_slots))
+                    intercept(entry, call, actor, frame.Node(), frame.Locals(), &frame);
             }, {false, false, owner, STR("Guard Blueprint interaction with one native guest drop projection")});
         callbacks[2] = Hooks::RegisterEngineTickPreCallback(
             [](Iteration&, U::UEngine*, float, bool) { tick(); },
@@ -938,6 +948,6 @@ namespace silverfish::native_guest_drop_projection
             retire_requested.store(true, std::memory_order_release);
             return;
         }
-        for (auto& entry : projections) clear(entry);
+        for (auto& entry : std::span{projections}.first(active_projection_slots)) clear(entry);
     }
 }

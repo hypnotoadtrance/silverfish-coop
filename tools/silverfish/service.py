@@ -2429,6 +2429,15 @@ class Host:
                     self.last_game = await self.world_loot.fixture(bridge, self.last_game, request.get("target"))
                     self.last_seen = time.monotonic()
                     result = {native_world_loot.KEY: self.last_game.get(native_world_loot.KEY, {})}
+                elif action == native_world_loot.APPROACH and self.fixtures:
+                    role, _, identity = (request.get("target") or "").partition("@")
+                    character = self.roles().get(role)
+                    pawn = native_loot._scope(self, character)
+                    if not pawn or identity not in self.last_game.get(native_world_loot.KEY, {}):
+                        raise party.RuleError("world_loot_fixture_scope_unavailable")
+                    self.last_game = await bridge.command(action, identity, pawn, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {native_world_loot.KEY: self.last_game.get(native_world_loot.KEY, {})}
                 elif action in (native_host_stack_drop.FIXTURE, native_host_stack_drop.CLOSE_FIXTURE) and self.fixtures:
                     result = await native_host_stack_drop.fixture(self, bridge, action, request.get("target"))
                 elif action == native_kill_volume.FIXTURE and self.fixtures:

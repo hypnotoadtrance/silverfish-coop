@@ -1798,6 +1798,7 @@ async def smoke():
                             assert all(shown["native_world_loot_items"][key]["class_path"] == row["class_path"]
                                        for key, row in visible.items()), shown["native_world_loot_items"]
                         identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{loot_roll['id']}:{loot_guid}").hex
+                        await command(*stock, "native-world-loot-approach", "--target", f"guest@{identity}")
                         press = await command("action", "--profile", profile, "native-world-loot-fixture", "--target", identity)
                         assert press["native_world_loot_items"][identity]["sequence"] > 0, press
                         for directory in (run, client_run):

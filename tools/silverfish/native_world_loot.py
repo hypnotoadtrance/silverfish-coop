@@ -8,15 +8,17 @@ import uuid
 from . import native_loot, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
-from .native_guest_drop_record import pawn_matches, valid_position
+from .native_guest_drop_record import valid_position
 
 
 KEY = "native_world_loot_items"
 ROW = "native-world-loot-item"
 FRAME = "native-world-loot-frame"
 FIXTURE = "native-world-loot-fixture"
+APPROACH = "native-world-loot-approach"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})\Z")
 _CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+\.([A-Za-z0-9_-]+_C)\Z")
+_AREA = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/]+/([A-Za-z0-9_-]+)\Z")
 _MAX_VISIBLE = 64
 _VISIBILITY_RADIUS = 1800
 
@@ -24,6 +26,14 @@ _VISIBILITY_RADIUS = 1800
 def target_parts(target):
     match = _TARGET.fullmatch(target) if isinstance(target, str) else None
     return match.groups() if match else None
+
+
+def pawn_matches(area, pawn):
+    match = _AREA.fullmatch(area) if isinstance(area, str) else None
+    if not match or not isinstance(pawn, str):
+        return False
+    prefix = f"Player_FP_C {area}.{match[1]}:PersistentLevel.Player_FP_C_"
+    return pawn.startswith(prefix) and re.fullmatch(r"[0-9]{1,10}", pawn[len(prefix):]) is not None
 
 
 def parse(fields, phase, area):

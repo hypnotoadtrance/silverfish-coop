@@ -404,6 +404,14 @@ function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     approach_clear_sight(state, pawn, actor, box, label, distances, office_desk and bearing + 90 or bearing, true, false)
 end
 
+function input.approach_world_loot(state, phase, pawn, actor, box)
+    if not approach_scope(state, phase, pawn, actor, state.map)
+        or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
+        error("world_loot_fixture_scope_unavailable", 0)
+    end
+    approach_clear_sight(state, pawn, actor, box, "world_loot_fixture", {65, 95, 125, 155}, nil, true, false)
+end
+
 local function restored(camera, original)
     local current = rotation(camera.RelativeRotation)
     if not current then return false end

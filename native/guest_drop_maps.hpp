@@ -31,6 +31,18 @@ namespace silverfish::native_guest_drop_maps
         return campaign && U::UObjectGlobals::StaticFindObject<U::UWorld*>(nullptr, nullptr, path.c_str()) == world;
     }
 
+    inline bool stock_map(U::UWorld* world)
+    {
+        if (!world) return false;
+        const auto path = world->GetPathName();
+        const auto leaf = path.find_last_of(STR("/"));
+        const auto separator = path.find_last_of(STR("."));
+        if (!path.starts_with(STR("/Game/Classes/Maps/")) || separator == path.npos || leaf == path.npos ||
+            separator <= leaf + 1 || path.substr(leaf + 1, separator - leaf - 1) != path.substr(separator + 1))
+            return false;
+        return U::UObjectGlobals::StaticFindObject<U::UWorld*>(nullptr, nullptr, path.c_str()) == world;
+    }
+
     inline bool persistent_actor(U::AActor* actor, U::UWorld* world)
     {
         if (!actor || actor->GetWorld() != world) return false;

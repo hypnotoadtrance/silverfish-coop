@@ -702,6 +702,7 @@ class Bridge:
             if (target is not None and decoded != native_subway_valve.INPUT
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
+                    and not native_world_loot.target_parts(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,

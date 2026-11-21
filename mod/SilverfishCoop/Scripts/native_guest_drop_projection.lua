@@ -1,6 +1,7 @@
 local projection = {}
 local maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
+local pickup_fixture = require("native_authored_pickup_input_fixture")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -25,7 +26,7 @@ local function coordinate(value)
 end
 
 local function local_pawn(state, phase)
-    local leaf = maps[state.map]
+    local leaf = type(state.map) == "string" and state.map:match("^/Game/Classes/Maps/[%w_/%-]*/([%w_%-]+)$")
     local active = (phase == "connected" and state.server == true) or (phase == "hosting" and state.server == false)
     if not enabled or not active or not leaf or state.listening ~= true then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -219,6 +220,26 @@ function projection.command(fields, state, phase)
     local command = fields[2]
     if command == "native-world-loot-frame" then
         return item_frame(fields, state, phase)
+    elseif command == "native-world-loot-approach" then
+        local id, pawn_name = fields[3], fields[4]
+        local item, pawn = world_items[id]
+        if not item or #fields ~= 4 or not same(state.world, item.world) then
+            error("world_loot_fixture_scope_unavailable", 0)
+        end
+        for _, member in ipairs(state.pawns) do
+            if member.name == pawn_name and valid(member.pawn) and member.pawn:GetFullName() == pawn_name then
+                pawn = member.pawn
+                break
+            end
+        end
+        local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(item.slot)
+        local path = active and epoch == item.epoch and exact == id and name:match("^%S+ (/Game/[%w_./:%-]+)$")
+        local actor = path and StaticFindObject(path)
+        if not valid(pawn) or not valid(actor) or actor:GetFullName() ~= name then
+            error("world_loot_fixture_scope_unavailable", 0)
+        end
+        pickup_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box)
+        return "stock loot height and line of sight verified"
     elseif command == "native-world-loot-fixture" then
         local pawn, id = local_pawn(state, phase), fields[3]
         local item = world_items[id]
