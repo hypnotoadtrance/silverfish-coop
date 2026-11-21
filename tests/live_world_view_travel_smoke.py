@@ -29,7 +29,7 @@ DAY_ACTORS = {
 WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
 
 
-async def validate(work: Path, vanilla_saved: Path | None, forest: bool) -> None:
+async def validate(work: Path, vanilla_saved: Path | None, forest: bool, runtime_listener: bool = False) -> None:
     name = "world-view-" + uuid.uuid4().hex[:8]
     host_run = work / "campaigns" / name / "run"
     client_run = work / "clients" / name / "run"
@@ -38,7 +38,13 @@ async def validate(work: Path, vanilla_saved: Path | None, forest: bool) -> None
     authority = ("action", "--campaign", name)
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     processes = []
-    evidence = {}
+    evidence = {"runtime_listener": runtime_listener}
+    host_cli = cli
+    if runtime_listener:
+        source = ("import runpy; from functools import partial; from tools.silverfish import service; "
+                  "service.launch = partial(service.launch, runtime_listener=True); "
+                  "runpy.run_module('tools.silverfish', run_name='__main__')")
+        host_cli = [sys.executable, "-B", "-u", "-c", source, "--work", str(work)]
 
     async def command(*arguments):
         process = await asyncio.create_subprocess_exec(
@@ -56,7 +62,8 @@ async def validate(work: Path, vanilla_saved: Path | None, forest: bool) -> None
     async def start(kind, target, *arguments):
         with (host_run / (kind + ".txt")).open("wb") as log:
             process = await asyncio.create_subprocess_exec(
-                *cli, kind, *target, *arguments, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW,
+                *(host_cli if kind == "host" else cli), kind, *target, *arguments,
+                stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW,
             )
         processes.append((process, target))
 
@@ -176,6 +183,18 @@ async def validate(work: Path, vanilla_saved: Path | None, forest: bool) -> None
             evidence["original_files_verified"] = len(original)
         print(host_run, flush=True)
 
+    if runtime_listener:
+        campaign = host_run.parent
+        checkpoint = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+        world = checkpoint["world"]
+        saved = world["native_host_save"]
+        assert checkpoint["revision"] >= host["campaign"]["revision"]
+        assert saved["map"] == world["map"] == CISTERN
+        hashes = saved_hashes(campaign / "game-user" / "Saved" / "SaveGames")
+        assert hashes[saved["slot"] + ".sav"] == saved["sha256"]
+        evidence["checkpoint"] = {"revision": checkpoint["revision"], "map": saved["map"],
+                                  "native_save_sha256": saved["sha256"]}
+
     (host_run / "live-world-view-travel-verification.json").write_text(
         json.dumps(evidence, indent=2) + "\n", encoding="utf-8",
     )
@@ -187,5 +206,6 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path)
     parser.add_argument("--forest", action="store_true", help="begin in the authored Forest scene and take its stock exit")
+    parser.add_argument("--runtime-listener", action="store_true", help="open the host listener after startup")
     arguments = parser.parse_args()
-    asyncio.run(validate(arguments.work.resolve(), arguments.vanilla_saved, arguments.forest))
+    asyncio.run(validate(arguments.work.resolve(), arguments.vanilla_saved, arguments.forest, arguments.runtime_listener))

@@ -1,5 +1,6 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if not bridge or bridge == "" then return end
+local runtime_listen_port = math.tointeger(tonumber(os.getenv("SILVERFISH_COOP_RUNTIME_LISTEN_PORT")))
 
 local guest_save = require("guest_save")
 local loot = require("loot")
@@ -327,6 +328,14 @@ local function open_level(context, level, options)
         error("GameplayStatics is unavailable", 0)
     end
 
+    if options == "listen" and runtime_listen_port then
+        local world = context:GetWorld()
+        local source = valid(world) and world:GetFullName():match("^World (.+)$")
+        if not source or type(SilverfishArmNativeListenPort) ~= "function"
+            or SilverfishArmNativeListenPort(runtime_listen_port, world:GetAddress(), source, level) ~= true then
+            error("The game could not reserve the requested private co-op listener", 0)
+        end
+    end
     statics:OpenLevel(context, FName(level), true, options)
 end
 

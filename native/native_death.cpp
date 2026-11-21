@@ -33,6 +33,7 @@
 #include "host_dig.hpp"
 #include "host_invitation_clipboard.hpp"
 #include "session_exit_input.hpp"
+#include "listener_bind.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
 #include "guest_stack_drop.hpp"
@@ -1439,6 +1440,7 @@ namespace
             silverfish::native_transport::uninstall_hooks();
             silverfish::native_stock_rest::uninstall_hooks();
             silverfish::native_session_exit_input::uninstall_hooks();
+            silverfish::native_listener_bind::uninstall_hooks();
             silverfish::native_datasilo_door::uninstall_hooks();
             silverfish::native_datasilo_lift::uninstall_hooks();
             silverfish::native_mindcore_carry::uninstall_hooks();
@@ -1487,6 +1489,7 @@ namespace
             silverfish::native_transport::install_hooks();
             silverfish::native_stock_rest::install_hooks();
             silverfish::native_session_exit_input::install_hooks();
+            silverfish::native_listener_bind::install_hooks();
             silverfish::native_mindcore_carry::install_hooks();
             silverfish::native_datasilo_lift::install_hooks();
             silverfish::native_datasilo_door::install_hooks();
@@ -1570,6 +1573,7 @@ namespace
             silverfish::native_transport::register_lua(lua);
             silverfish::native_guest_item::register_lua(lua);
             silverfish::native_guest_armor::register_lua(lua);
+            silverfish::native_listener_bind::register_lua(lua);
             silverfish::native_guest_melee::register_lua(lua);
             silverfish::native_host_landmine::register_lua(lua);
             silverfish::native_host_dig::register_lua(lua);
