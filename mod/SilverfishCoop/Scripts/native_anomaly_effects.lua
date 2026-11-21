@@ -9,12 +9,15 @@ local assets = {
     vortex = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
         "/Game/Assets/Sounds/CUEs/Blast_Cues/ObserverAbsorb_Cue.ObserverAbsorb_Cue",
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
+    electrode = {"/Game/Assets/PFX/FX_Blast_PulseGrenade_Converted.FX_Blast_PulseGrenade_Converted",
+        "/Game/Assets/Sounds/MetaSounds/MS_ElectricBlast.MS_ElectricBlast",
+        "/Game/Assets/Sounds/SoundClasses/Weapon_ShortRange_Attenuation.Weapon_ShortRange_Attenuation"},
 }
-local audio_range = {charge = 4000, blast = 500100, vortex = 500100}
-local blasts = {starburst = "blast", vortex = "vortex"}
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100}
+local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
-local captured = {charge = 0, blast = 0, vortex = 0}
+local captured = {charge = 0, blast = 0, vortex = 0, electrode = 0}
 local charging = {}
 
 local function valid(object) return object and object:IsValid() end
@@ -47,18 +50,18 @@ function effects.retire_charges(point)
     end
 end
 
-local function record(kind, point, scale)
+local function record(kind, point, scale, volume)
     serial = serial + 1
     captured[kind] = captured[kind] + 1
     local now = os.clock()
-    pending[#pending + 1] = {serial, kind, point.X, point.Y, point.Z, scale, expires = now + 1.25}
+    pending[#pending + 1] = {serial, kind, point.X, point.Y, point.Z, scale, volume or 1, expires = now + 1.25}
     if #pending > 12 then table.remove(pending, 1) end
 end
 
 function effects.clear()
     for index = #charging, 1, -1 do remove_charge(index) end
     history, pending, seen, visit = {}, {}, {}, nil
-    captured = {charge = 0, blast = 0, vortex = 0}
+    captured = {charge = 0, blast = 0, vortex = 0, electrode = 0}
 end
 
 function effects.observe_charge(entry)
@@ -74,9 +77,10 @@ function effects.observe_blast(actor, active)
     if not actor:HasAuthority() then return end
     local ignored, pfx, sfx = actor["Actors to Ignore"], actor.PFX, actor.SFX
     local count = ignored and ignored:GetArrayNum() or 0
-    local scale = actor["PFX Scale"]
+    local scale, volume = actor["PFX Scale"], actor["SFX Vol"]
     if count < 1 or count > 8 or not valid(pfx) or not valid(sfx)
-        or type(scale) ~= "number" or not (scale > 0 and scale <= 10) then return end
+        or type(scale) ~= "number" or not (scale > 0 and scale <= 10)
+        or type(volume) ~= "number" or not (volume >= 0 and volume <= 10) then return end
     for index = 1, count do
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
@@ -85,7 +89,7 @@ function effects.observe_blast(actor, active)
             and pfx:GetFullName() == "NiagaraSystem " .. assets[cue][1]
             and sfx:GetFullName():match("^%S+ (.+)$") == assets[cue][2] then
             if cue == "blast" then entry.charged = true end
-            record(cue, actor:K2_GetActorLocation(), scale)
+            record(cue, actor:K2_GetActorLocation(), scale, volume)
             return
         end
     end
@@ -94,21 +98,21 @@ end
 function effects.rows(row)
     local now = os.clock()
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex)}
+    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode)}
     for _, entry in ipairs(pending) do
         rows[#rows + 1] = row("native-anomaly-cue", table.unpack(entry))
     end
     return rows
 end
 
-local function play(pawn, origin, kind, point, scale)
+local function play(pawn, origin, kind, point, scale, volume)
     local profile = assets[kind]
     local particle, sound, attenuation = asset(profile[1]), asset(profile[2]), asset(profile[3])
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
         or kind ~= "charge" and not valid(attenuation) then return false end
-    if kind ~= "vortex" then effects.retire_charges(point) end
+    if kind == "charge" or kind == "blast" then effects.retire_charges(point) end
     local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
     local component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
         {X = scale, Y = scale, Z = scale}, true, true, 0, true)
@@ -119,7 +123,7 @@ local function play(pawn, origin, kind, point, scale)
         end
         statics:PlaySoundAtLocation(pawn, sound, point, rotation, 1, 1, 0, nil, nil, nil, nil)
     else
-        local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, 1, 1, 0, attenuation, nil, true)
+        local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, true)
         if valid(audio) then
             audio:SetFloatParameter(FName("Distance"), math.sqrt(distance_squared(origin, point)))
         end
@@ -140,12 +144,13 @@ function effects.command(args, state, phase, animate_vortex)
     end
     local origin, played = pawn:K2_GetActorLocation(), {}
     for index = 5, #args do
-        local id, kind, x, y, z, scale = args[index]:match("^(%d+)|(%l+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
-        x, y, z, scale = tonumber(x), tonumber(y), tonumber(z), tonumber(scale)
+        local id, kind, x, y, z, scale, volume = args[index]:match("^(%d+)|(%l+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+        x, y, z, scale, volume = tonumber(x), tonumber(y), tonumber(z), tonumber(scale), tonumber(volume)
         if id and #id <= 15 and not seen[id] and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
+            and volume and volume >= 0 and volume <= 10
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= audio_range[kind]^2 then
             local point = {X = x, Y = y, Z = z}
-            local accepted, particles = play(pawn, origin, kind, point, scale)
+            local accepted, particles = play(pawn, origin, kind, point, scale, volume)
             if accepted then
                 local animated = false
                 if kind == "vortex" then

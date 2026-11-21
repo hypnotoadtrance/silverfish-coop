@@ -17,16 +17,17 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.control import submit
-from tools.silverfish.travel import CROSSROADS, LAB_E206
+from tools.silverfish.travel import CROSSROADS, EAST_WING, LAB_E206
 
 PLACED = {
     "lab-e206": (LAB_E206, "burner", "BurnerTrap_BP_C_1", 2),
     "perdition": ("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P", "starburst", "Starburst_BP_C_5", 5),
     "funnel": ("/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P", "vortex", "VortexTrap_BP_C_9", 12),
+    "lab-east-wing": (EAST_WING, "electrode", "Electrode_BP_C_9", 11),
 }
 
 
-async def verify(work, vanilla, activate, placed, generated_vortex):
+async def verify(work, vanilla, activate, placed, generated):
     name = f"anomaly-field-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -65,6 +66,11 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
     def vortex_sensor(status):
         return next((sensor for sensor in sensors(status) if math.dist(sensor["root"], traps["vortex"]["location"]) < 3), None)
 
+    def electrode_phase(status, phase, *, rendered=False):
+        return next((row for row in status.get("game", {}).get("native_electrode_phases", [])
+                     if row["phase"] == phase and math.dist(row["location"], traps["electrode"]["location"]) < 3
+                     and (not rendered or row["particles_active"])), None)
+
     def projected(status, trap):
         return next((row for row in positions(status) if row["kind"] == trap["kind"]
                      and math.dist(row["location"], trap["location"]) < 3), None)
@@ -82,8 +88,10 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
             x, y, z = traps[kind]["location"]
             # Stock Starburst cues originate at its sphere, 200 units above the actor root.
             source = [x, y, z + 200]
-        else:
+        elif kind == "vortex":
             source = proof["host_vortex_sensor"]["visual"]
+        else:
+            source = proof["host_electrode_armed"]["center"]
         return [event for line in text[:text.rfind("\n")].splitlines()
                 if (event := json.loads(line)).get("event") == f"native_{kind}_effect_played"
                 and math.dist(event["location"], source) < 5]
@@ -116,7 +124,7 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
             proof["placed_host_paths"] = authored
         else:
             # Generate the stock fields before admission to verify hot join receives their placement.
-            for kind in (("vortex",) if generated_vortex else ("starburst", "burner")):
+            for kind in ((generated,) if generated else ("starburst", "burner")):
                 earlier = {tuple(entry["location"]) for entry in positions(initial) if entry["kind"] == kind}
                 result = await submit(host, "native-anomaly-field-fixture", target=kind)
                 assert result["ok"], result
@@ -171,7 +179,8 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
         for target in targets.values():
             result = await submit(guest, fixture, target=target)
             assert result["ok"], result
-        vetoed = await wait(guest, lambda row: scene(row).get(counter, 0) >= prior + len(traps))
+        expected_vetoes = 3 if placed and "electrode" in traps else len(traps)
+        vetoed = await wait(guest, lambda row: scene(row).get(counter, 0) >= prior + expected_vetoes)
         assert scene(vetoed)["live"] == scene(peer)["live"], vetoed
         proof[counter] = scene(vetoed)[counter] - prior
         assert (await submit(guest, "drop-link"))["ok"]
@@ -189,6 +198,11 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
             guest_health = first["game"]["pawns"]["guest"]["health"]
             assert health > 0 and guest_health > 0, first["game"]["pawns"]
             for kind, target in targets.items():
+                if kind == "electrode":
+                    armed = await wait(host, lambda row: electrode_phase(row, 1))
+                    proof["host_electrode_armed"] = electrode_phase(armed, 1)
+                    shown = await wait(guest, lambda row: electrode_phase(row, 1, rendered=True))
+                    proof["guest_electrode_armed"] = electrode_phase(shown, 1, rendered=True)
                 triggered = await submit(host, "native-anomaly-trigger-fixture", target=target)
                 assert triggered["ok"], triggered
                 if kind == "starburst":
@@ -201,6 +215,11 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
                     cue, = played_cues(kind)
                     assert cue["particles"] and cue["animated"], cue
                     proof["vortex_cue"] = cue
+                elif kind == "electrode":
+                    await wait(guest, lambda _: len(played_cues(kind)) >= 3, timeout=14)
+                    cues = played_cues(kind)
+                    assert len(cues) == 3 and all(event["particles"] for event in cues), cues
+                    proof["electrode_cues"] = cues
                 else:
                     burning = await wait(host, lambda row: jet(row, traps[kind]["location"], 250), timeout=16)
                     host_jet = jet(burning, traps[kind]["location"], 250)
@@ -225,6 +244,20 @@ async def verify(work, vanilla, activate, placed, generated_vortex):
                     assert not copy["collision"] and math.dist(copy["location"], traps[kind]["location"]) < 3, copy
                     assert sum(math.dist(row["location"], copy["location"]) < 3 for row in positions(nearby)) == 1, copy
                     proof["placed_active_guest"] = copy
+                if kind == "electrode":
+                    await wait(guest, lambda row: electrode_phase(row, 1, rendered=True), timeout=16)
+                    proof["electrode_rearmed"] = True
+                    assert (await submit(host, "native-electrode-retire-fixture", target=target))["ok"]
+                    await wait(host, lambda row: not projected(row, traps[kind]))
+                    await wait(guest, lambda row: not projected(row, traps[kind]))
+                    if placed:
+                        await wait(host, lambda row: electrode_phase(row, 2))
+                        assert (await submit(guest, "drop-link"))["ok"]
+                        await wait(guest, lambda row: row.get("reconnect_suspended") and not row.get("link_connected"))
+                        assert (await submit(guest, "reconnect", timeout=35))["resumed"]
+                        await wait(guest, lambda row: row.get("state") == "connected"
+                                   and placed_traps(row).keys() == authored.keys() - {target})
+                    proof["electrode_retired"] = True
             after = await wait(host, lambda row: row.get("game", {}).get("pawns", {}).get("local", {}).get("health") is not None)
             assert after["game"]["pawns"]["local"]["health"] == health, after["game"]["pawns"]
             proof["host_health_preserved"] = health
@@ -257,5 +290,7 @@ if __name__ == "__main__":
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--placed", choices=PLACED)
     selection.add_argument("--generated-vortex", action="store_true")
+    selection.add_argument("--generated-electrode", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed, args.generated_vortex))
+    generated = "vortex" if args.generated_vortex else "electrode" if args.generated_electrode else None
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed, generated))

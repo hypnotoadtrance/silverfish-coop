@@ -1,15 +1,18 @@
 local fields = {}
 local effects = require("native_anomaly_effects")
+local electrodes = require("native_electrode_view")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
     burner = "/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C",
     vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
+    electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
 }
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
 local overlap = "BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
+local electrode_overlap = "BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -135,7 +138,10 @@ function fields.start(role)
         if kind then placed, local_copy = placement(actor) end
         if seat == "host" and not actor:HasAuthority()
             or seat == "client" and not local_copy and not replica(actor) then return end
-        if seat == "client" then actor:SetActorEnableCollision(false) end
+        if seat == "client" then
+            actor:SetActorEnableCollision(false)
+            if kind == "electrode" then electrodes.suspend(actor) end
+        end
         local address = actor:GetAddress()
         if class == fire_jet then
             if seat == "client" or in_world(actor, world) and burner_source(actor) then pending_fires[address] = actor end
@@ -144,6 +150,20 @@ function fields.start(role)
             if seat == "host" and fixture_kind == kind then fixtures[kind] = actor end
         end
     end)
+    if type(RegisterEndPlayPreHook) == "function" then
+        RegisterEndPlayPreHook(function(context, reason)
+            local seat = role()
+            if seat ~= "host" and seat ~= "client" then return end
+            local actor = context:get()
+            if not valid(actor) then return end
+            local address = actor:GetAddress()
+            local entry = active[address]
+            if seat == "host" and entry and entry.kind == "electrode" and reason:get() == 0 then
+                electrodes.retire(entry)
+            end
+            active[address], pending[address], fires[address], pending_fires[address] = nil, nil, nil, nil
+        end)
+    end
 end
 
 function fields.guest(enabled)
@@ -152,9 +172,12 @@ end
 
 function fields.command(args, state, phase)
     if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
+    local electrode = electrodes.command(args, state, phase, world, active)
+    if electrode ~= nil then return electrode end
     local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
-    if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture" then
+    if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
+        or args[2] == "native-electrode-retire-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
         local trap = fixtures[args[3]]
         local kind = trap and args[3]
@@ -173,8 +196,19 @@ function fields.command(args, state, phase)
                 or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
                 error("Placed trap guest overlap probe unavailable", 0)
             end
-            trap[overlap](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
+            trap[kind == "electrode" and electrode_overlap or overlap](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
+            if kind == "electrode" then
+                trap:ReceiveBeginPlay()
+                trap:Burst(2)
+            end
             return "Stock placed trap guest overlap invoked"
+        end
+        if args[2] == "native-electrode-retire-fixture" then
+            if not host_fixture or phase ~= "hosting" or kind ~= "electrode" or not trap:HasAuthority() then
+                error("Electrode removal probe unavailable", 0)
+            end
+            trap:K2_DestroyActor()
+            return "The stock Electrode was destroyed on the host"
         end
         local guest = #state.guests == 1 and state.guests[1].pawn
         if not host_fixture or phase ~= "hosting" or not in_world(guest, state.world)
@@ -222,6 +256,7 @@ function fields.rows(state, phase, row)
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
+        electrodes.clear()
     end
     for address, entry in pairs(pending) do
         local actor = entry.actor
@@ -262,7 +297,7 @@ function fields.rows(state, phase, row)
     local rows, live = {}, 0
     for address, entry in pairs(active) do
         local actor = entry.actor
-        if valid(actor) and not actor:IsActorBeingDestroyed() then
+        if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
@@ -282,8 +317,11 @@ function fields.rows(state, phase, row)
                     rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", position.X, position.Y, position.Z,
                         relative.X, relative.Y, relative.Z, center.X, center.Y, center.Z, visual.X, visual.Y, visual.Z)
                 end
+            elseif entry.kind == "electrode" then
+                rows[#rows + 1] = electrodes.observe(entry, phase, row, position)
             end
         else
+            if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end
             active[address] = nil
         end
     end
@@ -303,6 +341,7 @@ function fields.rows(state, phase, row)
     end
     if phase == "hosting" then
         for _, cue in ipairs(effects.rows(row)) do rows[#rows + 1] = cue end
+        for _, electrode in ipairs(electrodes.retired_rows(row)) do rows[#rows + 1] = electrode end
     else
         effects.retire_charges()
     end

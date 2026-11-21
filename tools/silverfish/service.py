@@ -1725,6 +1725,12 @@ class Host:
                 gameplay[native_anomaly_effects.VORTEX_SENSORS] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "sensors": sensors,
                 }
+            electrodes = self.last_game.get(native_anomaly_effects.ELECTRODE_PHASES)
+            if electrodes:
+                gameplay[native_anomaly_effects.ELECTRODE_PHASES] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch,
+                    "electrodes": [[row["path"], row["location"], row["phase"]] for row in electrodes],
+                }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
@@ -3226,7 +3232,7 @@ class Host:
                     result = {"native_friendly_fire": snapshot.get("native_friendly_fire")}
                 elif action in ("native-hazard-position", "native-hazard-start", "native-hazard-return"):
                     result = await self.native_hazard(bridge, action)
-                elif action in {"native-anomaly-field-fixture", "native-anomaly-trigger-fixture"} and self.fixtures:
+                elif action in {"native-anomaly-field-fixture", "native-anomaly-trigger-fixture", "native-electrode-retire-fixture"} and self.fixtures:
                     snapshot = await bridge.command(action, request.get("target") or "-", timeout=4)
                     result = {"native_anomaly_field": snapshot.get("native_anomaly_field", {})}
                 elif action == "native-fall-position" and self.native_guest and self.fixtures:
@@ -4837,8 +4843,13 @@ class Client:
                         hidden.append(path)
             if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()):
                 await self.cancel_gameplay_snapshot()
-                native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
-                                               area, epoch, target.rsplit("@", 1)[-1])
+                delta = native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
+                                                       area, epoch, target.rsplit("@", 1)[-1])
+                if delta and not self.needs_travel and not self.server_transitioning:
+                    try:
+                        self.last_game = await native_stock_door.project(self.bridge, self.last_game, delta, epoch)
+                    except (OSError, RuntimeError, TimeoutError) as error:
+                        self.control.event("native_stock_door_projection_deferred", reason=str(error))
         cue = reply.pop(native_pickup_audio.KEY, None)
         if isinstance(cue, dict) and isinstance(rows := cue.get("cues"), list) and len(rows) == 1:
             if isinstance(rows[0], list) and len(rows[0]) == 3 and rows[0][0] == operation_id:
@@ -5240,6 +5251,8 @@ class Client:
                         self.zone_epoch, self.host_session)
                     self.last_game = await native_anomaly_effects.project_sensors(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.VORTEX_SENSORS), self.zone_epoch)
+                    self.last_game = await native_anomaly_effects.project_electrodes(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ELECTRODE_PHASES), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)

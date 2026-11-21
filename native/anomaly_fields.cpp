@@ -28,13 +28,16 @@ namespace
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
-    constexpr std::array<std::wstring_view, 3> replicated_classes{
+    constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
+    constexpr std::array<std::wstring_view, 4> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
         STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"),
+        electrode_class,
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
-    U::FName spawn_field, overlap;
+    U::FName spawn_field, overlap, electrode;
+    std::array<U::FName, 6> electrode_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
     thread_local std::int64_t skipped{}, blocked_triggers{};
@@ -101,13 +104,23 @@ namespace
     {
         if (!guest_session || !actor || !function) return;
         const auto name = function->GetFName();
-        if ((name != spawn_field && name != overlap) || !U::IsInGameThreadRaw() ||
+        if ((name != spawn_field && name != overlap &&
+             std::find(electrode_events.begin(), electrode_events.end(), name) == electrode_events.end()) ||
+            !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type || function->GetOuterPrivate() != type) return;
         const bool field = name == spawn_field;
-        if (field ? type->GetPathName() != field_class || function->GetNumParms() != 0 || !replicated_field(actor)
-                  : function->GetNumParms() != 6 || !trap_class(type)) return;
+        if (field)
+        {
+            if (type->GetPathName() != field_class || function->GetNumParms() != 0 || !replicated_field(actor)) return;
+        }
+        else if (type->GetFName() == electrode)
+        {
+            // Keep arming, blast creation, and queued graph continuations on the host.
+            if (type->GetPathName() != electrode_class) return;
+        }
+        else if (function->GetNumParms() != 6 || !trap_class(type)) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (!guest_world(world)) return;
 
@@ -173,6 +186,15 @@ namespace silverfish::native_anomaly_fields
         if (installed()) return;
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
         overlap = U::FName{trap_overlap, U::FNAME_Add};
+        electrode = U::FName{STR("Electrode_BP_C"), U::FNAME_Add};
+        electrode_events = {
+            U::FName{STR("BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
+            U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Electrode_BP"), U::FNAME_Add},
+            U::FName{STR("Burst"), U::FNAME_Add},
+            U::FName{STR("EMP"), U::FNAME_Add},
+            U::FName{STR("Shock"), U::FNAME_Add},
+        };
         const auto script = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void*) {
             intercept(call, actor, frame.Node());
         };

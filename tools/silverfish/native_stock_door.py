@@ -93,6 +93,9 @@ def accept_delta(gameplay, delta, area, epoch, actor):
         gameplay[KEY] = delta
     elif sequence > previous.get("sequence", 0):
         gameplay[KEY] = dict(delta, doors=previous["doors"] | doors)
+    else:
+        return
+    return delta
 
 
 def matches(report, desired):

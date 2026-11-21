@@ -145,6 +145,10 @@ Starbursts and Burner Traps loaded directly from a map use the same co-op author
 
 Vortex Traps also use the host's trigger offset. The stock scanner reads that sphere's world position, which can differ from the actor origin. The mod replicates the sphere component for generated traps and applies its host-relative offset to matching placed actors, including copies outside ordinary replication range. The muted trials matched a generated Crossroads trigger and all 12 placed Funnel triggers through reconnect. In each trial, the guest played the stock singularity effect and animation and took damage while the host's health stayed unchanged. [Vortex trap tests](../tests/live_anomaly_fields_smoke.py)
 
+The host runs the stock Electrode arming timer, overlap, and damage bursts. Guests display the host's sparks, burst particles, and positional audio calls. The muted Crossroads and Lab East Wing trials saw all three stock bursts on the guest and verified guest damage with unchanged host health. The Lab test also verified that a destroyed placed Electrode stayed absent after reconnect. [Electrode tests](../tests/live_anomaly_fields_smoke.py)
+
+Stock door interactions now apply the exact host receipt on the initiating guest as soon as it arrives. The normal world snapshot still reconciles doors on both peers. Stock stash discovery caches site positions for status reporting between censuses. Transfers still check the participant's current distance from the live stash.
+
 The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.
 
 A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.

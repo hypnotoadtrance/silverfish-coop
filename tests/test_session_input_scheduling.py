@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import runtime, service
+from tools.silverfish import native_stock_door, runtime, service
 
 
 class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +49,26 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await client.refresh_gameplay(project=False, wait=False)
         self.assertEqual(client.gameplay, {})
         self.assertIsNone(client.snapshot_request)
+
+    async def test_stock_door_receipt_projects_before_the_next_world_snapshot(self):
+        door = native_stock_door
+        area = "/Game/Classes/Maps/Observatory_P"
+        actor = f"Door_BP_C {area}.Observatory_P:PersistentLevel.Door_BP_C_1"
+        epoch = "c" * 32
+        closed = dict(locked=False, broken=False, open=False, pitch=0, yaw=0, roll=0, x=0, y=0, z=0)
+        opened = dict(closed, open=True, yaw=90)
+        delta = {"map": area, "epoch": epoch, "sequence": 10, "doors": {actor: opened}}
+        request = AsyncMock(return_value={"ok": True, door.DELTA: delta})
+        client = self.guest(request)
+        client.transport.connected = True
+        client.zone_epoch = epoch
+        client.last_game = {"state": "connected", "map": area, door.KEY: {actor: closed}}
+        client.bridge.command = AsyncMock(return_value={**client.last_game, door.KEY: {actor: opened}})
+        await client.gameplay_action(door.ACTION, "a" * 32, actor)
+        client.bridge.command.assert_awaited_once_with(door.TAG + "-project", area, f"{actor}|0|0|1|0|90|0|0|0|0", timeout=4)
+        self.assertEqual(client.last_game[door.KEY][actor], opened)
+        await client.gameplay_action(door.ACTION, "a" * 32, actor)
+        self.assertEqual(client.bridge.command.await_count, 1)
 
     async def test_bridge_idle_wait_wakes_for_a_host_request_without_local_input(self):
         with TemporaryDirectory() as temporary:

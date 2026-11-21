@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish.native_anomaly_effects import Playback, VORTEX_SENSORS, project_sensors
+from tools.silverfish.native_anomaly_effects import ELECTRODE_PHASES, Playback, VORTEX_SENSORS, project_electrodes, project_sensors
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -17,15 +17,18 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
             [4, "blast", [0, 0, 0], float("inf")],
             [5, "unknown", [0, 0, 0], 1],
             [6, "vortex", [100, 0, 0], 1],
+            [8, "electrode", [200, 0, 0], 1.5, .65],
+            [9, "electrode", [200, 0, 0], 1, float("inf")],
         ]}
-        snapshot = {**game, "ack": {"message": "1:1:0,3:1:0,3:1:0,6:1:1,7:0:0"}}
+        snapshot = {**game, "ack": {"message": "1:1:0,3:1:0,3:1:0,8:1:0,6:1:1,7:0:0"}}
         bridge = Mock(command=AsyncMock(return_value=snapshot))
         control = Mock()
         self.assertIs(await playback.sync(bridge, control, game, frame, epoch, "host"), snapshot)
         bridge.command.assert_awaited_once_with(
-            "native-anomaly-play-cues", game["map"], epoch, "1|charge|100|0|0|1", "3|blast|4100|0|0|1", "6|vortex|100|0|0|1", timeout=1.5,
+            "native-anomaly-play-cues", game["map"], epoch, "1|charge|100|0|0|1|1", "3|blast|4100|0|0|1|1",
+            "6|vortex|100|0|0|1|1", "8|electrode|200|0|0|1.5|0.65", timeout=1.5,
         )
-        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [1, 3, 6])
+        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [1, 3, 8, 6])
         self.assertTrue(all(call.kwargs["particles"] for call in control.event.call_args_list))
         self.assertTrue(control.event.call_args.kwargs["animated"])
         await playback.sync(bridge, control, game, frame, epoch, "host")
@@ -47,3 +50,22 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_not_awaited()
         await project_sensors(bridge, game, frame, epoch)
         bridge.command.assert_awaited_once_with("native-vortex-apply-sensors", "Funnel", epoch, "Trap1|0|0|185", timeout=1.5)
+
+    async def test_electrode_phases_address_placed_and_unique_generated_actors(self):
+        epoch = "b" * 32
+        game = {"state": "connected", "map": "Lab", ELECTRODE_PHASES: [
+            {"path": "Destroyed", "location": [10, 0, 0], "phase": 1},
+            {"path": None, "location": [20, 0, 0], "phase": 0},
+            {"path": None, "location": [30, 0, 0], "phase": 0},
+            {"path": None, "location": [31, 0, 0], "phase": 0},
+        ]}
+        frame = {"map": "Lab", "epoch": epoch, "electrodes": [
+            ["Destroyed", [10, 0, 0], 2], [None, [20, 0, 0], 1],
+            [None, [30, 0, 0], 1], [None, [20, 0, 0], 2], ["Missing", [40, 0, 0], 1],
+        ]}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_electrodes(bridge, game, frame, "a" * 32)
+        bridge.command.assert_not_awaited()
+        await project_electrodes(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-electrode-apply-phase", "Lab", epoch, "Destroyed|10|0|0|2", "-|20|0|0|1", timeout=1.5)

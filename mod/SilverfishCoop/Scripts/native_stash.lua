@@ -45,7 +45,8 @@ local function selected_sites(state, phase)
                     local path = name:match("^%S+ (/Game/%S+)$")
                     local id = identifier(actor.Stash_ID)
                     if id and path and path:sub(1, #prefix) == prefix then
-                        sites[id] = sites[id] == nil and {id = id, name = name, actor = actor} or false
+                        sites[id] = sites[id] == nil
+                            and {name = name, actor = actor, position = actor:K2_GetActorLocation()} or false
                     end
                 end
             end
@@ -211,11 +212,9 @@ function stash.rows(state, phase, row)
         rows[#rows + 1] = row("native-stash-live-census", 1)
     end
     for id, site in pairs(available) do
-        if site and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
-            local position = site.actor:K2_GetActorLocation()
-            if position then
-                rows[#rows + 1] = row("native-stash-site", state.map, id, site.name, position.X, position.Y, position.Z)
-            end
+        if site and site.position and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
+            local position = site.position
+            rows[#rows + 1] = row("native-stash-site", state.map, id, site.name, position.X, position.Y, position.Z)
         end
     end
     if report and report.map == state.map then
