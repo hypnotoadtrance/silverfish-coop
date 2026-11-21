@@ -130,3 +130,5 @@ The packaged title test opened the stock Inventory screen with the guest's isola
 In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.
 
 The bat's stock first-person mesh carries an offset that put the replica beside the player's shin. The remote weapon view now aligns the bat handle to the hand socket. The rendered Observatory check used an actual equipped bat and verified the grip from the guest's view.
+
+The host now asks the stock AI to choose a new threat when its current target is downed and another party member is standing. A stock boar fixture confirmed that it switched from the downed guest to the standing host already in its threat list.

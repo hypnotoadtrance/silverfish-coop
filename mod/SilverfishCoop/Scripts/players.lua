@@ -1,4 +1,5 @@
 local players = {}
+local native_downed_ai = require("native_downed_ai")
 local native_bag_projection = require("native_bag_projection")
 local native_guest_drop_projection = require("native_guest_drop_projection")
 local native_authored_pickup = require("native_authored_pickup")
@@ -726,6 +727,7 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    pcall(native_downed_ai.sync, state, phase, desired)
     sync_local_input(state, phase)
     sync_location_markers(state, phase)
     sync_native_interact(phase)
