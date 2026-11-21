@@ -185,15 +185,9 @@ local function stock_sight(trace, pawn, box, eye, point, limit, ignored)
     return false, valid(component) and "interact:" .. component_name(component) or obstruction or "interact:-"
 end
 
-function input.authority_sight(state, phase, profile, pawn, actor)
-    local cash = cash_sources[profile.source] == profile
-    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
-        or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
-        or profile.source == crossroads_lockpick)
-        and profile.map == sources[profile.source] and profile.authority_sight == true)
-        or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
-    if (not cash and not sight_profile and supplies[profile.source] ~= profile) or phase ~= "hosting" or not state.listening or state.server ~= false
-        or state.map ~= profile.map or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
+function input.loose_sight(state, phase, profile, pawn, actor)
+    if phase ~= "hosting" or not state.listening or state.server ~= false or state.map ~= profile.map
+        or not same(pawn:GetWorld(), state.world) or not pawn:HasAuthority()
         or not valid(actor) or not same(actor:GetWorld(), state.world) or not actor:HasAuthority()
         or actor:GetFullName() ~= profile.name .. " " .. profile.path or pawn.Dead ~= false then return false end
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
@@ -212,6 +206,17 @@ function input.authority_sight(state, phase, profile, pawn, actor)
         if stock_sight(trace, pawn, box, eye, point, limit, ignored) then return true end
     end
     return false
+end
+
+function input.authority_sight(state, phase, profile, pawn, actor)
+    local cash = cash_sources[profile.source] == profile
+    local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
+        or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
+        or profile.source == crossroads_lockpick)
+        and profile.map == sources[profile.source] and profile.authority_sight == true)
+        or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
+    return (cash or sight_profile or supplies[profile.source] == profile)
+        and input.loose_sight(state, phase, profile, pawn, actor)
 end
 
 local function restore_position(pawn, origin, facing)

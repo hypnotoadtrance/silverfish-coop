@@ -27,6 +27,7 @@ from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
+from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_host_stack_drop
@@ -706,7 +707,7 @@ class Bridge:
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)
-                    and not native_stock_door.target_actor(decoded)
+                    and not native_stock_door.target_actor(decoded) and not native_loose_pickup.target_path(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
@@ -2008,6 +2009,20 @@ class Bridge:
                     if native_dead_drop.KEY in data:
                         raise ValueError("Repeated stock CrossRoads Dead Drop report")
                     data[native_dead_drop.KEY] = native_dead_drop.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
+                    data[native_loose_pickup.CAPABILITY] = int(fields[1])
+                    data["native_loose_pickup_count"] = int(fields[2])
+                elif fields[0] == native_loose_pickup.ROW:
+                    placed = native_loose_pickup.parse(fields, data.get("state"), data.get("map"))
+                    data.setdefault(native_loose_pickup.KEY, {})[placed["actor"]] = placed
+                elif fields[0] == native_loose_pickup.CLAIM:
+                    data[native_loose_pickup.PROOF] = native_loose_pickup.parse_claim(fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_loose_pickup.CHECK_ROW and len(fields) == 4:
+                    _, area, actor, available = fields
+                    if (data.get("state"), data.get("map"), native_loose_pickup.actor_map(actor)) != (
+                            "hosting", area, area) or available not in ("0", "1"):
+                        raise ValueError("Invalid placed stock pickup availability")
+                    data.setdefault(native_loose_pickup.CHECK_KEY, {})[actor] = available == "1"
                 elif fields[0] == "native-authored-pickup" and len(fields) in (6, 7):
                     source, area, actor, item_class, state = fields[1:6]
                     placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})

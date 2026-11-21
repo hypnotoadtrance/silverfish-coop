@@ -58,6 +58,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-mindcore-upload": 35.0,
     "native-pump-tape-convert": 20.0,
     "native-authored-pickup-claim": 20.0,
+    "native-loose-pickup-claim": 24.0,
     "native-finite-shop-list": 15.0,
     "native-finite-shop-buy": 15.0,
     "native-finite-shop-sale-quote": 15.0,

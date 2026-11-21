@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
-from tools.silverfish import native_host_save, native_loot, party, runtime
+from tools.silverfish import native_host_save, native_loose_pickup, native_loot, party, runtime
 from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
                                            SMALL_CABINET, full_name, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
@@ -59,6 +59,33 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
         self.assertIn("0x449, 4, false, true};", native)
         self.assertIn('-205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}, true', native)
         self.assertIn("salt = -205206528, replenish_mode = 2, office_desk = true, guarantee_spawn = true", lua)
+
+
+class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporary_item_reappears_only_after_stock_item_returns(self):
+        loose = native_loose_pickup
+        old_epoch, new_epoch = "a" * 32, "b" * 32
+        temporary = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_1"
+        permanent = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_2"
+        per_visit = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_3"
+        game = {"state": "hosting", "map": CROSSROADS, loose.CAPABILITY: 1}
+        ledger = {path: dict(map=CROSSROADS, epoch=old_epoch, mode=mode)
+                  for mode, path in enumerate((per_visit, temporary, permanent))}
+        host = SimpleNamespace(last_game=game, zone_epoch=old_epoch, party={loose.STATE: ledger},
+                               transitioning=False, native_checkpoint_unsafe=False)
+        view = loose.Visibility()
+        self.assertEqual(set(view.hidden(host)), {temporary, permanent, per_visit})
+        host.zone_epoch = new_epoch
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            dict(game, **{loose.CHECK_KEY: {temporary: False}}),
+            dict(game, **{loose.CHECK_KEY: {temporary: True}}),
+        ]))
+        await view.refresh(host, bridge)
+        self.assertEqual(set(view.hidden(host)), {temporary, permanent})
+        view.next_check = 0
+        await view.refresh(host, bridge)
+        self.assertEqual(view.hidden(host), [permanent])
+        self.assertEqual(bridge.command.await_args_list, [call(loose.CHECK, temporary, timeout=4)] * 2)
 
 
 class NativeLootTests(unittest.IsolatedAsyncioTestCase):

@@ -39,6 +39,7 @@ from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_stock_door
+from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
@@ -79,7 +80,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
-                        native_authored_pickup.ACTION, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
+                        native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
@@ -237,6 +238,7 @@ class Host:
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.world_loot = native_world_loot.Projection()
+        self.loose_pickups = native_loose_pickup.Visibility()
         self.last_stock_enemy_drop_sequence = 0
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.native_zone_walls = native_zone_walls
@@ -771,6 +773,8 @@ class Host:
             if self.last_game.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1:
                 view[native_guest_drop_record.GENERIC_CAPABILITY] = 1
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
+        if hidden := self.loose_pickups.hidden(self):
+            view[native_loose_pickup.STATE] = hidden
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
@@ -1855,6 +1859,8 @@ class Host:
                 result = await native_inventory_death.recover(self, bridge, character, target, request["operation_id"])
             elif action in native_finite_shop.ACTIONS:
                 result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
+            elif action == native_loose_pickup.CLAIM:
+                result = await native_loose_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_stock_enemy_drops.CLAIM:
@@ -2408,6 +2414,26 @@ class Host:
                     result = {"pawn": pawn, "distance": distance}
                 elif action == "native-pickup-spawn" and self.native_guest and self.fixtures:
                     result = await self.native_pickup.spawn(self, bridge)
+                elif action == native_loose_pickup.CLAIM:
+                    result = await native_loose_pickup.claim(self, bridge, "host", request.get("target"),
+                                                           request.get("operation_id") or path.stem)
+                elif action == native_loose_pickup.APPROACH and self.fixtures:
+                    role, _, selected = (request.get("target") or "").partition("@")
+                    actor = native_loose_pickup.target_path(selected)
+                    character = self.roles().get(role)
+                    pawn = native_loot._scope(self, character) if character else None
+                    if not actor or not pawn:
+                        raise party.RuleError("loose_pickup_fixture_scope_unavailable")
+                    self.last_game = await bridge.command(action, actor, pawn, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {"actor": actor, "pawn": pawn}
+                elif action == native_loose_pickup.FIXTURE and self.fixtures:
+                    actor = native_loose_pickup.target_path(request.get("target"))
+                    if not actor:
+                        raise party.RuleError("loose_pickup_fixture_scope_unavailable")
+                    self.last_game = await bridge.command(action, actor, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {"actor": actor}
                 elif action == native_authored_pickup.ACTION:
                     result = await native_authored_pickup.claim(self, bridge, "host", request.get("target"),
                                                                request.get("operation_id") or path.stem)
@@ -3534,6 +3560,10 @@ class Host:
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             await native_stock_enemy_drops.observe(self, bridge)
+            try:
+                await self.loose_pickups.refresh(self, bridge)
+            except (OSError, RuntimeError) as error:
+                self.control.event("native_loose_pickup_replenishment_unavailable", reason=str(error))
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
             world_items = world_version >= 1
             shared_pickups = world_version >= native_world_loot.SHARED_PICKUPS_VERSION
@@ -3648,6 +3678,9 @@ class Host:
                     elif stack_drop := native_guest_drop_projection.target_parts(target):
                         async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                             result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif native_loose_pickup.target_path(target):
+                        result = await native_loose_pickup.claim(self, bridge, "host", target, operation_id)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                     elif target in native_authored_pickup.SOURCES:
                         await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
@@ -4568,6 +4601,8 @@ class Client:
             raise RuntimeError("game_connection_unavailable")
         if action == native_authored_pickup.ACTION:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
+        elif action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target):
+            target = f"{target}@{self.zone_epoch}"
         elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION
@@ -4933,6 +4968,7 @@ class Client:
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
                     await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
+                    await native_loose_pickup.project(self, self.bridge, self.gameplay.get(native_loose_pickup.STATE))
                     await native_dust_cabinet.project_client(self)
                     await native_savlo_locker.project_client(self)
                     await native_flood_jammer.project_client(self)
@@ -5099,6 +5135,12 @@ class Client:
                 elif action == "native-bag-projection-fixture":
                     self.last_game = await self.bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": self.last_game.get("native_bag_projection_interaction", {})}
+                elif action == native_loose_pickup.FIXTURE:
+                    actor = native_loose_pickup.target_path(request.get("target"))
+                    if not actor:
+                        raise party.RuleError("loose_pickup_fixture_scope_unavailable")
+                    self.last_game = await self.bridge.command(action, actor, timeout=5)
+                    result = {"actor": actor}
                 elif action in native_authored_pickup.FIXTURE_ENTRIES:
                     source = native_authored_pickup.select_source(self.last_game.get("map"), request.get("pickup_source"))
                     self.last_game = await self.bridge.command(action, source, timeout=5)
@@ -5374,6 +5416,7 @@ class Client:
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES
+                                  else native_loose_pickup.CLAIM if native_loose_pickup.target_path(target)
                                   else native_subway_valve.ACTIVATE if target == native_subway_valve.INPUT
                                   else native_enemy_loot.CLAIM if native_enemy_shells.target_parts(target)
                                   else "native-wipe-recover" if target else "interact")

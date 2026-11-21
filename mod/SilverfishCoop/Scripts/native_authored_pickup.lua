@@ -227,8 +227,9 @@ local profiles = {
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
 }
-local map_profiles = {}
+local map_profiles, empty_map, cash_limits = {}, {}, {}
 for _, profile in ipairs(require("authored_cash_catalog")) do
+    cash_limits[profile.class] = {profile.cash_min, profile.cash_max}
     profiles[#profiles + 1] = profile
 end
 for _, profile in ipairs(require("authored_supply_catalog")) do
@@ -243,7 +244,7 @@ for _, profile in ipairs(profiles) do
     end
 end
 
-local binding, report
+local binding, report, loose_check
 
 local function valid(value)
     return value and value:IsValid()
@@ -267,7 +268,7 @@ local function guid(value)
 end
 
 function pickup.clear()
-    binding, report = nil, nil
+    binding, report, loose_check = nil, nil, nil
     if enabled and type(SilverfishClearNativeAuthoredPickup) == "function" then SilverfishClearNativeAuthoredPickup() end
 end
 
@@ -275,8 +276,8 @@ function pickup.update(state, phase)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
     local host = phase == "hosting" and state.server == false
-    local placements = map_profiles[state.map]
-    if not enabled or not placements or not state.listening or not valid(pawn)
+    local placements = map_profiles[state.map] or empty_map
+    if not enabled or not state.listening or not valid(pawn)
         or (not host and (phase ~= "connected" or state.server ~= true))
         or type(SilverfishSetNativeAuthoredPickupScope) ~= "function" then
         if binding then pickup.clear() end
@@ -285,8 +286,10 @@ function pickup.update(state, phase)
     if not binding or binding.placements ~= placements or binding.host ~= host
         or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
         binding = {pawn = pawn, world = state.world, host = host, placements = placements}
-        report = nil
+        report, loose_check = nil, nil
     end
+    binding.loose_count = type(SilverfishDiscoverLoosePickups) == "function"
+        and SilverfishDiscoverLoosePickups(pawn:GetAddress(), host) or nil
     local active, unavailable, reason = {}, {}, nil
     for _, profile in ipairs(placements) do
         local ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source)
@@ -299,7 +302,7 @@ function pickup.update(state, phase)
     end
     binding.active = active
     binding.unavailable = unavailable
-    return next(active) ~= nil, reason
+    return next(active) ~= nil or binding.loose_count ~= nil, reason
 end
 
 local function select_profile(requested)
@@ -317,6 +320,38 @@ local function select_profile(requested)
     local profile = binding.active[requested]
     if not profile then error(binding.unavailable[requested] or "authored_pickup_exact_source_required", 0) end
     return profile
+end
+
+local function loose_profile(path, state)
+    if not binding or not binding.loose_count or type(path) ~= "string" or #path > 384
+        or type(SilverfishDescribeLoosePickup) ~= "function" then return end
+    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
+    local actor = class and StaticFindObject(path)
+    local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
+    local leaf = path:match(":PersistentLevel%.([%w_]+)$")
+    local area_name = state.map:match("([^/]+)$")
+    local limits = class and cash_limits[class]
+    if not name or not leaf or not area_name or (cash and not limits)
+        or not same(actor:GetWorld(), state.world) then return end
+    return {loose = true, source = path, path = path, name = name, class = class, map = state.map,
+        mode = mode, claimed = claimed, stock_cash = cash, cash_min = limits and limits[1], cash_max = limits and limits[2],
+        cash_flag = leaf .. "-" .. area_name .. "-"}
+end
+
+local function verify_stock_mark(profile, actor)
+    if profile.mode == 0 then return true end
+    local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
+    if not valid(library) then return false end
+    local result = {}
+    if profile.mode == 1 then
+        library:Find_ActorOnTempActivations(actor, actor, result)
+        return result.Found == true
+    end
+    local statics = StaticFindObject(statics_path)
+    local instance = valid(statics) and statics:GetGameInstance(actor)
+    if not valid(instance) then return false end
+    instance:Check_SaveFlag(FName(profile.cash_flag), result, result)
+    return result.Found == true and result.Value == 1
 end
 
 local function owner(state, phase, name)
@@ -340,13 +375,14 @@ local function claim(fields, state, phase, profile)
     if phase ~= "hosting" or not exact_slot(slot) then
         error("authored_pickup_claim_arguments", 0)
     end
-    report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false}
+    report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false, loose = profile.loose and profile}
     local pawn, save, statics = owner(state, phase, name)
+    local sight = profile.loose and stock_input_fixture.loose_sight or stock_input_fixture.authority_sight
     if profile.stock_cash then
         local cash = SilverfishClaimNativeAuthoredCash
         local actor = StaticFindObject(profile.path)
         if type(cash) ~= "function" or not valid(pawn) or not valid(actor)
-            or not stock_input_fixture.authority_sight(state, phase, profile, pawn, actor) then
+            or not sight(state, phase, profile, pawn, actor) then
             report.status = "authored_cash_exact_authority_sight_required"
             return "authored cash pickup refused"
         end
@@ -381,8 +417,8 @@ local function claim(fields, state, phase, profile)
             return "authored loose pickup reported"
         end
     end
-    if profile.stock_supply or profile.authority_sight then
-        local checked, visible = pcall(stock_input_fixture.authority_sight, state, phase, profile, pawn, StaticFindObject(profile.path))
+    if profile.stock_supply or profile.authority_sight or profile.loose then
+        local checked, visible = pcall(sight, state, phase, profile, pawn, StaticFindObject(profile.path))
         if not checked or visible ~= true then
             report.status = "authored_pickup_exact_authority_sight_required"
             return "authored loose pickup reported"
@@ -430,6 +466,15 @@ local function claim(fields, state, phase, profile)
     report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
     report.ok = applied == true and status == "recovered" and count == 1
     report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(status))
+    if report.ok and profile.loose then
+        local actor = StaticFindObject(profile.path)
+        if not valid(actor) then error("mutation_unverified_loose_pickup_source_lost", 0) end
+        actor:ResolveSaveMode()
+        if not verify_stock_mark(profile, actor) then error("mutation_unverified_loose_pickup_stock_persistence", 0) end
+        if not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
+            error("mutation_unverified_loose_pickup_retirement", 0)
+        end
+    end
     if drill_before then
         local checked, after = pcall(drill_head.read, state, phase, true)
         if not checked or not drill_head.unchanged(drill_before, after) then
@@ -474,6 +519,64 @@ function pickup.command(fields, state, phase)
         local cleared, status = SilverfishClearNativeCrossroadsDeadDrop()
         if cleared ~= true then error(status, 0) end
         return "cleared local stock Dead Drop presentation"
+    end
+    if action == "native-loose-pickup-claim" then
+        pickup.update(state, phase)
+        local profile = #fields == 5 and loose_profile(fields[5], state)
+        if not profile or profile.claimed then error("loose_pickup_source_unavailable", 0) end
+        return claim(fields, state, phase, profile)
+    end
+    if action == "native-loose-pickup-check" then
+        pickup.update(state, phase)
+        if phase ~= "hosting" or not binding or not binding.loose_count or #fields < 3 or #fields > 66 then
+            error("loose_pickup_check_arguments", 0)
+        end
+        loose_check = {}
+        for index = 3, #fields do
+            local profile = loose_profile(fields[index], state)
+            loose_check[#loose_check + 1] = {fields[index], profile and not profile.claimed and 1 or 0}
+        end
+        return "stock loose pickup availability verified"
+    end
+    if action == "native-loose-pickup-project" then
+        pickup.update(state, phase)
+        if #fields < 3 or #fields > 66 then error("loose_pickup_projection_arguments", 0) end
+        for index = 3, #fields do
+            local profile = loose_profile(fields[index], state)
+            if profile and not profile.claimed and not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
+                error("loose_pickup_projection_unverified", 0)
+            end
+        end
+        return "shared level item visibility synchronized"
+    end
+    if action == "native-loose-pickup-approach" or action == "native-loose-pickup-fixture" then
+        pickup.update(state, phase)
+        local approach = action == "native-loose-pickup-approach"
+        local profile = #fields == (approach and 4 or 3) and loose_profile(fields[3], state)
+        if not profile or profile.claimed or not fixtures
+            or (approach and (phase ~= "hosting" or not host_fixtures))
+            or (phase == "hosting" and not host_fixtures) then
+            local diagnose = SilverfishDiagnoseLoosePickup
+            local reason = fixtures and type(diagnose) == "function" and diagnose(fields[3]) or "scope"
+            error("loose_pickup_fixture_scope_unavailable:" .. reason, 0)
+        end
+        local actor = StaticFindObject(profile.path)
+        local pawn
+        if approach then
+            pawn = owner(state, phase, fields[4])
+        else
+            pawn = state.local_pawn and state.local_pawn.pawn
+        end
+        if not valid(pawn) or not valid(actor) then error("loose_pickup_fixture_scope_unavailable", 0) end
+        if approach then
+            stock_input_fixture.approach_world_loot(state, phase, pawn, actor, actor.Box)
+            return "shared level pickup approach verified"
+        end
+        return stock_input_fixture.press_world_loot(state, pawn, actor, actor.Box, function()
+            local ok, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            if not ok or reason ~= "stock_started_consumed" then error("loose_pickup_fixture_input_unverified", 0) end
+            return reason
+        end)
     end
     local count = arguments[action]
     if not count then return end
@@ -532,6 +635,9 @@ function pickup.take_press(pawn)
     if not binding or not same(pawn, binding.pawn) or type(SilverfishTakeNativeAuthoredPickupPress) ~= "function" then return end
     local source = SilverfishTakeNativeAuthoredPickupPress(pawn:GetAddress())
     if binding.active[source] then return source end
+    if type(source) == "string" and source:match("^/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+$") then
+        return "loose:" .. source
+    end
 end
 
 function pickup.rows(state, phase, status_row)
@@ -571,7 +677,30 @@ function pickup.rows(state, phase, status_row)
             end
         end
     end
-    if report and phase == "hosting" then
+    if binding.loose_count then
+        rows[#rows + 1] = status_row("native-loose-pickup-capability", 1, binding.loose_count)
+        local list = SilverfishNearbyLoosePickups()
+        if type(list) == "string" then
+            for entry in list:gmatch("[^\n]+") do
+                local path, class, mode, availability, x, y, z = entry:match(
+                    "^([^|]+)|([^|]+)|([012])|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+                if path then
+                    rows[#rows + 1] = status_row("native-loose-pickup", state.map, path, class, mode, availability, x, y, z)
+                end
+            end
+        end
+    end
+    if loose_check and phase == "hosting" then
+        for _, checked in ipairs(loose_check) do
+            rows[#rows + 1] = status_row("native-loose-pickup-check-result", state.map, checked[1], checked[2])
+        end
+    end
+    if report and phase == "hosting" and report.loose then
+        local profile, cash = report.loose, report.cash
+        rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
+            profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
+            report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0)
+    elseif report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
         if report.stack then

@@ -180,6 +180,7 @@ Run the commands below on the PC with the targeted launcher. Use `--campaign` fo
 ```
 
 - `status` reports the launcher state, `link_connected`, and an Unreal snapshot under `game`. Check `active`, `stale`, and both connection layers before acting. On the guest, check `gameplay_fresh` before treating the host's replicated party state as current. `game.pawns` includes positions and health where measurable. A `null` health value indicates an unavailable or shared stock field.
+- `game.native_loose_pickups` reports nearby level items with their stock class, location, and pickup target. Use Interact or pass the reported target to `native-loose-pickup-claim --target`. The host validates the stock source and reach before saving the transfer.
 - `gameplay.native_stock_enemy_loot` lists nearby shared enemy drops by item GUID. `game.native_world_loot_items` shows the physical actors present in the local world. Use the stock Interact action or `native-stock-enemy-loot-claim --target GUID`. The host checks reach and sight and returns the same receipt if the original operation ID is replayed.
 - `game.native_downed_markers` reports the visible markers in the current zone epoch, keyed by character ID. `game.player_local_input` reports the exact local pawn's verified input mappings and stock inventory state.
 - `game.native_zone_regroup` on the host identifies the nearest blocked exit and lists each out-of-range character's role, name, and distance in meters.

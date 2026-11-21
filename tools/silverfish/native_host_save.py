@@ -249,6 +249,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     if type(bags) is not dict or any(type(bag) is not dict for bag in bags.values()):
         raise CampaignFormatError("The campaign's stock backpack records are invalid")
     try:
+        from .native_loose_pickup import validate_records as validate_loose_pickups
+        validate_loose_pickups(party, checkpoint["characters"])
         manual_drops = stack_drop_frames(party, checkpoint["characters"])
         stock_enemy_drops = native_stock_enemy_drops.active_frames(party, checkpoint["characters"])
         dug_package = dig_escrow_frames(party, checkpoint["characters"])

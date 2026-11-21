@@ -19,10 +19,13 @@
 #include <cstdlib>
 #include <format>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -62,6 +65,7 @@ namespace
         bool stock_cash{};
         bool dead_drop{};
         bool stock_bandage{};
+        bool discovered{};
 
         bool stacked_supply() const { return stock_ammo || stock_bandage; }
     };
@@ -421,6 +425,17 @@ namespace
     };
 
     std::array<Scope, profiles.size()> scopes{};
+    struct LooseSource
+    {
+        RC::StringType world, actor, item_class;
+        Profile profile{};
+        Scope scope{};
+    };
+    std::map<std::string, LooseSource, std::less<>> loose_sources;
+    U::FWeakObjectPtr loose_pawn{}, loose_world{};
+    bool loose_host{};
+    Clock::time_point loose_rescan{};
+
     std::uint64_t sequence{};
     Scope* fixture_scope{};
     struct DropProjection
@@ -476,7 +491,9 @@ namespace
         if (source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
             env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))) return nullptr;
         const auto match = std::ranges::find_if(profiles, [&source](const Profile& profile) { return profile.source == source; });
-        return match == profiles.end() ? nullptr : &scopes[static_cast<std::size_t>(match - profiles.begin())];
+        if (match != profiles.end()) return &scopes[static_cast<std::size_t>(match - profiles.begin())];
+        const auto loose = loose_sources.find(source);
+        return loose == loose_sources.end() ? nullptr : &loose->second.scope;
     }
 
     bool stock_ammo_matches(U::UObject* actor, const Profile& profile)
@@ -591,10 +608,47 @@ namespace
         return read(table, payload) == stock_table && row->GetPropertyValueInContainer(payload) == blank;
     }
 
+    U::FByteProperty* loose_respawn_mode(U::UObject* actor)
+    {
+        auto* mode = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        return mode && mode->GetPropertyValueInContainer(actor) <= 2 ? mode : nullptr;
+    }
+
+    const char* generic_payload_fault(U::UObject* actor, bool cash)
+    {
+        auto* base = find<U::UClass>(base_class);
+        if (!base || !actor->IsA(base) || !actor->HasAnyFlags(U::RF_WasLoaded)) return "not_placed_stock_item";
+        if (!boolean(actor, STR("bReplicates"), false)) return "replicated_item";
+        auto* held = field<U::FBoolProperty>(actor, STR("HeldByPlayer"));
+        if ((held && held->GetPropertyValueInContainer(actor)) || exact(object(actor, STR("Owner")), pawn_path))
+            return "held_item";
+        auto* item_type = field<U::FByteProperty>(actor, STR("ItemType"));
+        if (!item_type || item_type->GetPropertyValueInContainer(actor) > 11 || !loose_respawn_mode(actor))
+            return "unqualified_item_type_or_respawn";
+        auto* pickup = field<U::FMulticastInlineDelegateProperty>(actor, STR("Item_PickedUp"));
+        if (!pickup || pickup->GetSize() != sizeof(U::FMulticastScriptDelegate)
+            || pickup->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(actor)->IsBound())
+            return "custom_pickup_delegate";
+        auto* type = actor->GetClassPrivate();
+        if (type->GetFunctionByNameInChain(U::FName{STR("SendInteractionToActor")}) !=
+                find<U::UFunction>(cash ? money_interact : interact_path)
+            || type->GetFunctionByNameInChain(U::FName{STR("ResolveSaveMode")}) != find<U::UFunction>(resolve_save_mode)
+            || (!cash && type->GetFunctionByNameInChain(U::FName{STR("PutInInventory")}) !=
+                find<U::UFunction>(STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:PutInInventory"))))
+            return "custom_pickup_function";
+        return cash && loose_cash_value(actor) <= 0 ? "unqualified_stock_cash" : nullptr;
+    }
+
     const char* source_fault(U::UObject* actor, U::UObject* world, const Profile& profile, bool require_placement = true)
     {
         if (!exact(actor, profile.item_class) || actor->GetPathName() != profile.actor ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return "authored_pickup_stock_actor_identity_unqualified";
+        if (profile.discovered)
+        {
+            auto* item = static_cast<U::AActor*>(actor);
+            return item->GetWorld() == world && item->GetLevel() == object(world, STR("PersistentLevel"))
+                && !generic_payload_fault(actor, profile.stock_cash) ? nullptr : "loose_pickup_stock_actor_changed";
+        }
         if (!boolean(actor, STR("Physics"), profile.physics)) return "authored_pickup_stock_physics_unqualified";
         if (!boolean(actor, STR("Stacks"), profile.stock_cash || profile.stack_units.has_value()))
             return "authored_pickup_stock_stacking_unqualified";
@@ -765,7 +819,19 @@ namespace
     {
         if (!actor) return nullptr;
         const auto match = std::ranges::find_if(scopes, [actor](const Scope& scope) { return scope.actor.Get() == actor; });
-        if (match == scopes.end() || !local_scope(*match)) return nullptr;
+        if (match == scopes.end())
+        {
+            if (loose_sources.empty() || !actor->HasAnyFlags(U::RF_WasLoaded)) return nullptr;
+            if (auto found = loose_sources.find(RC::to_utf8_string(actor->GetPathName())); found != loose_sources.end())
+            {
+                auto& loose = found->second.scope;
+                if (actor == loose.actor.Get() && local_scope(loose) &&
+                    exact_source(actor, loose.world.Get(), *loose.profile) && source_box(actor) == loose.box.Get())
+                    return &loose;
+            }
+            return nullptr;
+        }
+        if (!local_scope(*match)) return nullptr;
         if ((match->profile->stacked_supply() || match->profile->stock_cash || match->profile->dead_drop) &&
             (!exact_source(actor, match->world.Get(), *match->profile, !match->claimed) ||
              source_box(actor) != match->box.Get())) return nullptr;
@@ -840,6 +906,11 @@ namespace
         drop_settled_actor.Reset();
         drop_settles_at = {};
         for (auto& scope : scopes) clear(scope);
+        for (auto& [_, loose] : loose_sources) clear(loose.scope);
+        loose_sources.clear();
+        loose_pawn.Reset();
+        loose_world.Reset();
+        loose_rescan = {};
     }
 
     bool admit_input(const Scope& scope, U::UObject* pawn, U::UObject* hit)
@@ -1645,6 +1716,148 @@ namespace
             "mutation_unverified_stone_maze_tape_copy");
     }
 
+    bool authored_path(std::basic_string_view<U::TCHAR> path)
+    {
+        if (path == STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"))
+            return true;
+        return std::ranges::any_of(profiles, [path](const Profile& profile) {
+            if (profile.source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
+                env("SILVERFISH_COOP_NATIVE_FIXTURES") && env("SILVERFISH_COOP_HEADLESS"))) return false;
+            return path == profile.actor;
+        });
+    }
+
+    int discover_loose(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        const auto requested = static_cast<Address>(lua.get_integer());
+        auto* pawn = address(loose_pawn.Get()) == requested ? loose_pawn.Get() : live_address(requested, find<U::UClass>(pawn_path));
+        const bool host = lua.get_bool();
+        auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+        if (!live(world)) return 0;
+        const auto world_path = world->GetPathName();
+        if (!world_path.starts_with(STR("/Game/Classes/Maps/"))) return 0;
+        const Profile seat_profile{.world = world_path.c_str()};
+        Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &seat_profile, host};
+        if (!local_scope(seat)) return 0;
+        if (loose_pawn.Get() != pawn || loose_world.Get() != world || loose_host != host)
+        {
+            for (auto& [_, loose] : loose_sources) clear(loose.scope);
+            loose_sources.clear();
+            loose_pawn = pawn;
+            loose_world = world;
+            loose_host = host;
+            loose_rescan = {};
+        }
+        const auto now = Clock::now();
+        if (now >= loose_rescan)
+        {
+            loose_rescan = now + std::chrono::seconds(5);
+            auto* base = find<U::UClass>(base_class);
+            auto* level = object(world, STR("PersistentLevel"));
+            if (!base || !level) return 0;
+            U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+                if (!live(candidate) || candidate->GetOuterPrivate() != level || !candidate->IsA(base) ||
+                    !candidate->HasAnyFlags(U::RF_WasLoaded) || !boolean(candidate, STR("bActorIsBeingDestroyed"), false))
+                    return RC::LoopAction::Continue;
+                auto* actor = static_cast<U::AActor*>(candidate);
+                auto* box = source_box(actor);
+                if (!box || !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
+                    return RC::LoopAction::Continue;
+                const auto path = actor->GetPathName();
+                const auto class_path = actor->GetClassPrivate()->GetPathName();
+                if (authored_path(path) || !class_path.starts_with(STR("/Game/Classes/")))
+                    return RC::LoopAction::Continue;
+                const bool cash = silverfish::stock_cash::is_family(actor->GetClassPrivate());
+                if (generic_payload_fault(actor, cash)) return RC::LoopAction::Continue;
+                auto [entry, inserted] = loose_sources.try_emplace(RC::to_utf8_string(path));
+                if (!inserted && entry->second.scope.actor.Get() == actor)
+                    return RC::LoopAction::Continue;
+                auto& loose = entry->second;
+                loose.world = world_path;
+                loose.actor = path;
+                loose.item_class = class_path;
+                loose.profile = {.source = entry->first, .world = loose.world.c_str(), .actor = loose.actor.c_str(),
+                    .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true};
+                loose.scope = {world, pawn, actor, box, seat.controller.Get(), seat.driver.Get(), &loose.profile,
+                    host, false, true, false};
+                return RC::LoopAction::Continue;
+            });
+        }
+
+        lua.set_integer(static_cast<std::int64_t>(loose_sources.size()));
+        return 1;
+    }
+
+    int describe_loose(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 1) return 0;
+        auto* scope = select_source(lua);
+        if (!scope || !scope->profile || !scope->profile->discovered || !local_scope(*scope)) return 0;
+        auto* actor = scope->actor.Get();
+        auto* mode = loose_respawn_mode(actor);
+        if (!mode || (!scope->claimed && !available(*scope))) return 0;
+        lua.set_string(RC::to_utf8_string(scope->profile->item_class));
+        lua.set_integer(mode->GetPropertyValueInContainer(actor));
+        lua.set_bool(scope->claimed);
+        lua.set_bool(scope->profile->stock_cash);
+        return 4;
+    }
+
+    int diagnose_loose(const Lua& lua)
+    {
+        if (!ready() || !headless() || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        const auto path = RC::to_wstring(lua.get_string());
+        if (!path.starts_with(STR("/Game/Classes/Maps/")) || path.size() > 384) return 0;
+        auto* source = find<U::UObject>(path.c_str());
+        auto* actor_type = find<U::UClass>(STR("/Script/Engine.Actor"));
+        const auto report = [&](const char* fault) { lua.set_string(fault); return 1; };
+        if (!live(source) || !actor_type || !source->IsA(actor_type) || !boolean(source, STR("bActorIsBeingDestroyed"), false))
+            return report("actor_absent");
+        auto* actor = static_cast<U::AActor*>(source);
+        auto* world = loose_world.Get();
+        if (!live(world) || actor->GetWorld() != world || actor->GetLevel() != object(world, STR("PersistentLevel")))
+            return report("different_level");
+        if (authored_path(path)) return report("dedicated_pickup_route");
+        if (!source_box(actor)) return report("unqualified_root");
+        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) return report("hidden_or_disabled");
+        if (const auto* reason = generic_payload_fault(actor, silverfish::stock_cash::is_family(actor->GetClassPrivate())))
+            return report(reason);
+        return report("stock_item_available");
+    }
+
+    int nearby_loose(const Lua& lua)
+    {
+        auto* pawn = loose_pawn.Get();
+        if (!ready() || !live(pawn) || lua.get_stack_size() != 0) return 0;
+        auto center = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
+        std::vector<std::pair<double, const Scope*>> nearby;
+        for (const auto& [_, loose] : loose_sources)
+        {
+            auto* actor = loose.scope.actor.Get();
+            if (!live(actor) || !loose_respawn_mode(actor)) continue;
+            auto at = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
+            const auto distance = dx * dx + dy * dy + dz * dz;
+            if (std::isfinite(distance) && distance <= 1800.0 * 1800.0)
+                nearby.emplace_back(distance, &loose.scope);
+        }
+        std::ranges::sort(nearby, {}, &std::pair<double, const Scope*>::first);
+        std::string rows;
+        for (const auto& [_, scope] : nearby | std::views::take(48))
+        {
+            if (!scope->claimed && !available(*scope)) continue;
+            auto* actor = scope->actor.Get();
+            auto at = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            rows += std::format("{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}\n", scope->profile->source,
+                RC::to_utf8_string(scope->profile->item_class), loose_respawn_mode(actor)->GetPropertyValueInContainer(actor),
+                scope->claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());
+        }
+        lua.set_string(rows);
+        return 1;
+    }
+
     int set_scope(const Lua& lua)
     {
         if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_bool(2))
@@ -1652,7 +1865,8 @@ namespace
         const auto ptr = static_cast<Address>(lua.get_integer());
         const auto host = lua.get_bool();
         auto* selected = select_source(lua);
-        if (!selected) return result(lua, false, "authored_pickup_source_unknown");
+        if (!selected || (selected->profile && selected->profile->discovered))
+            return result(lua, false, "authored_pickup_source_unknown");
         auto& scope = *selected;
         if (address(scope.pawn.Get()) == ptr && host == scope.host && local_scope(scope))
             return result(lua, true, "authored_pickup_scope_bound");
@@ -1695,12 +1909,13 @@ namespace
         const auto pawn = static_cast<Address>(lua.get_integer());
         const auto now = Clock::now();
         Scope* selected{};
-        for (auto& scope : scopes)
-        {
+        const auto consider = [&](Scope& scope) {
             if (!scope.observed.input_pending || now >= scope.observed.expires || address(scope.pawn.Get()) != pawn ||
-                !available(scope)) continue;
+                !available(scope)) return;
             if (!selected || scope.observed.sequence < selected->observed.sequence) selected = &scope;
-        }
+        };
+        for (auto& scope : scopes) consider(scope);
+        for (auto& [_, loose] : loose_sources) consider(loose.scope);
         if (!selected) return 0;
         selected->observed.input_pending = false;
         lua.set_string(selected->profile->source);
@@ -2074,6 +2289,9 @@ namespace silverfish::native_authored_pickup
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
+        lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
+        lua.register_function("SilverfishDescribeLoosePickup", describe_loose);
+        lua.register_function("SilverfishNearbyLoosePickups", nearby_loose);
         lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);
         lua.register_function("SilverfishProjectNativeAuthoredPickup", project);
         lua.register_function("SilverfishReadNativeAuthoredPickup", status);
@@ -2089,7 +2307,11 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishExchangeDrillTestResultsTape", exchange_tape<drill_test_results_tape>);
         lua.register_function("SilverfishExchangeDrillInstructionsTape", exchange_tape<drill_instructions_tape>);
         lua.register_function("SilverfishClearNativeAuthoredPickup", reset);
-        if (headless()) lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
+        if (headless())
+        {
+            lua.register_function("SilverfishProbeNativeAuthoredPickup", probe);
+            lua.register_function("SilverfishDiagnoseLoosePickup", diagnose_loose);
+        }
     }
 
     void clear_scope()
