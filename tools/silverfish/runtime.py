@@ -524,7 +524,7 @@ def launch(work: Path, profile: Path, bridge: Path, headless: bool, port: int | 
     if runtime_listener and (type(port) is not int or not 1 <= port <= 65535):
         raise ValueError("The runtime listener requires a private UDP port")
     resident_host = options.get("resident_title") and options.get("native_events")
-    if not runtime_listener and not resident_host:
+    if not runtime_listener and not options.get("resident_title"):
         arguments += " -MULTIHOME=127.0.0.1"
         if port is not None:
             arguments += f" -port={port}"

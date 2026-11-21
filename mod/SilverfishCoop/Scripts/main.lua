@@ -1,5 +1,6 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if not bridge or bridge == "" then return end
+local resident_title = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
 
 local guest_save = require("guest_save")
 local loot = require("loot")
@@ -860,6 +861,14 @@ local function run_command(fields, state, current_phase)
         end
         if role == "host" or state.server or leaving then
             error("Leave the current session before joining", 0)
+        end
+        if resident_title then
+            local world = state.world
+            local source = valid(world) and world:GetFullName():match("^World (.+)$")
+            if not source or type(SilverfishArmNativeGuestSocket) ~= "function"
+                or SilverfishArmNativeGuestSocket(world:GetAddress(), source) ~= true then
+                error("The game could not arm the private co-op guest socket", 0)
+            end
         end
         native_death.clear_client()
         if #fields == 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end

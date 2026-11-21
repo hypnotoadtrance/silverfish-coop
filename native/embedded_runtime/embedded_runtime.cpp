@@ -135,7 +135,7 @@ namespace
         ~CommandArguments() { if (values) LocalFree(values); }
     };
 
-    bool matches_command_line(const fs::path& image, const fs::path& profile, bool guest)
+    bool matches_command_line(const fs::path& image, const fs::path& profile, bool legacy_loopback)
     {
         const CommandArguments arguments;
         if (!arguments.values || arguments.count < 2 ||
@@ -160,7 +160,7 @@ namespace
             }
             if (windows_equal(name, L"-port")) return false;
         }
-        return userdir && (loopback == guest);
+        return userdir && (loopback == legacy_loopback);
     }
 
     fs::path qualify_startup(HMODULE module, std::wstring_view nonce, const wchar_t*& state)
@@ -196,7 +196,8 @@ namespace
             if (!exact_path(path, true)) return {};
 
         state = L"startup_scope_arguments_refused";
-        if (!matches_command_line(image, profile, guest)) return {};
+        const bool resident = environment(L"SILVERFISH_COOP_RESIDENT_TITLE") == L"1";
+        if (!matches_command_line(image, profile, guest && !resident)) return {};
         return mod / L"runtime";
     }
 

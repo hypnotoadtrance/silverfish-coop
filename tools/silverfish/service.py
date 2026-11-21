@@ -5062,6 +5062,7 @@ class Client:
             self.control.status(active=not self.stopping, role="client",
                                 state="connected" if active else "reconnecting",
                                 link_connected=self.transport.connected, reconnect_suspended=self.suspended,
+                                unreal_local_port=self.transport.unreal_local_port,
                                 character_id=self.invite["character_id"], host_session=self.host_session,
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
@@ -5155,7 +5156,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                 process, bridge = embedded, embedded.bridge
                 await embedded.select_save_scope(
                     native_host_save.SaveScope(directory / "game-user", uuid.UUID(invite["character_id"]).hex))
-                transport = await link.start_client()
+                transport = await link.start_client(game_pid=process.pid if resident_engine is not None else None)
             else:
                 transport = await link.start_client()
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex

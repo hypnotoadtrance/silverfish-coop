@@ -27,6 +27,8 @@ from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from .udp_ownership import verify_loopback_socket
+
 __all__ = [
     "ClientLink", "HostLink", "LinkError", "ServerIdentity",
     "checkpoint_action_timeout", "load_server_identity", "make_server_identity", "start_client", "start_host",
@@ -1109,10 +1111,11 @@ async def direct_request(host: str, port: int, request: Admission, *, certificat
 class ClientLink:
     """Runs a local UDP tunnel and preserves its address across QUIC reconnects."""
 
-    def __init__(self, *, catalog_only: bool = False) -> None:
+    def __init__(self, *, catalog_only: bool = False, game_pid: int | None = None) -> None:
         self._lock = asyncio.Lock()
         self._closed = False
         self._catalog_only = catalog_only
+        self._game_pid = game_pid
         self._runtime_id = None if catalog_only else secrets.token_hex(16)
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _ClientProtocol | None = None
@@ -1127,6 +1130,12 @@ class ClientLink:
     def runtime_id(self) -> str | None:
         """Identify this game process across reconnects of its QUIC link."""
         return self._runtime_id
+
+    @property
+    def unreal_local_port(self) -> int | None:
+        if self._game_endpoint is None or self._game_pid is None:
+            return None
+        return self._game_endpoint[1]
 
     @property
     def address(self) -> Address:
@@ -1223,6 +1232,11 @@ class ClientLink:
         protocol = self._protocol
         if protocol is not None and self.game_access:
             if self._game_endpoint is None:
+                if self._game_pid is not None:
+                    try:
+                        verify_loopback_socket(self._game_pid, address[1])
+                    except (OSError, RuntimeError):
+                        return
                 self._game_endpoint = address
             if self._game_endpoint == address:
                 protocol.forward_game_packet(data)
@@ -1286,10 +1300,10 @@ class ClientLink:
 
 
 async def start_client(
-    local_host: str = "127.0.0.1", local_port: int = 0, *, catalog_only: bool = False,
+    local_host: str = "127.0.0.1", local_port: int = 0, *, catalog_only: bool = False, game_pid: int | None = None,
 ) -> ClientLink:
     """Open a client, optionally without an Unreal loopback relay socket."""
-    client = ClientLink(catalog_only=catalog_only)
+    client = ClientLink(catalog_only=catalog_only, game_pid=game_pid)
     if not catalog_only:
         if not _is_loopback(local_host):
             raise ValueError("client Unreal endpoint must be a loopback address")

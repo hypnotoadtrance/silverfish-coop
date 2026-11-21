@@ -166,7 +166,9 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     requested_directory = Path(options.get("userdir", ""))
     if not requested_directory.is_absolute() or requested_directory.resolve(strict=True) != profile:
         raise ValueError("The engine was not started with its isolated user directory")
-    if "port" in options or options.get("multihome") != ("127.0.0.1" if role == "client" else None):
+    resident = required_env.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
+    expected_bind = "127.0.0.1" if role == "client" and not resident else None
+    if "port" in options or options.get("multihome") != expected_bind:
         raise ValueError("The engine startup network options do not match its staged role")
     assert_private_saved_tree(profile)
     return profile / "Saved", bridge

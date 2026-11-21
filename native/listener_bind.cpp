@@ -48,10 +48,21 @@ namespace
     };
     thread_local SocketScope load;
     H::GlobalCallbackId pre = H::ERROR_ID, post = H::ERROR_ID;
+    H::GlobalCallbackId construct = H::ERROR_ID, tick_end = H::ERROR_ID;
     Bind system_bind{};
     GetOption socket_option{};
     SetError socket_error{};
     PVOID volatile* import_slot{};
+    struct ClientRequest
+    {
+        U::FWeakObjectPtr world;
+        U::FWeakObjectPtr pending_game;
+        const U::UClass* pending_class{};
+        const U::UClass* driver_class{};
+        ULONGLONG expires{};
+    } client;
+    thread_local bool client_binding{};
+    thread_local bool client_opened{};
 
     PVOID volatile* find_bind_import(HMODULE image)
     {
@@ -90,7 +101,7 @@ namespace
 
     int WSAAPI route_bind(SOCKET socket, const sockaddr* address, int length)
     {
-        if (!load.context || !address) return system_bind(socket, address, length);
+        if ((!load.context && !client_binding) || !address) return system_bind(socket, address, length);
         int type{}, bytes = sizeof(type);
         if (socket_option(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &bytes) != 0)
             return SOCKET_ERROR;
@@ -98,6 +109,19 @@ namespace
         const auto* incoming = length == sizeof(sockaddr_in) && address->sa_family == AF_INET
             ? reinterpret_cast<const sockaddr_in*>(address) : nullptr;
         constexpr auto loopback = std::byteswap(static_cast<std::uint32_t>(INADDR_LOOPBACK));
+        if (client_binding)
+        {
+            if (!incoming || incoming->sin_port != 0 || client_opened)
+            {
+                socket_error(WSAEACCES);
+                return SOCKET_ERROR;
+            }
+            auto local = *incoming;
+            local.sin_addr.s_addr = loopback;
+            const auto result = system_bind(socket, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+            client_opened = result == 0;
+            return result;
+        }
         if (incoming && incoming->sin_port != std::byteswap(load.stock_port) && incoming->sin_addr.s_addr == loopback)
             return system_bind(socket, address, length);
         if (!incoming || incoming->sin_port != std::byteswap(load.stock_port) || load.opened)
@@ -128,6 +152,7 @@ namespace
     {
         exchange(reinterpret_cast<PVOID>(route_bind), reinterpret_cast<PVOID>(system_bind));
         load = {};
+        client_binding = client_opened = false;
     }
 
     void before_load(H::TCallbackIterationData<bool>& result, U::UEngine*, U::FWorldContext& context,
@@ -185,6 +210,45 @@ namespace
         lua.set_bool(true);
         return 1;
     }
+
+    void on_construct(H::TCallbackIterationData<U::UObject*>& result, const U::FStaticConstructObjectParameters& params)
+    {
+        if (!U::IsInGameThreadRaw() || !client.expires || GetTickCount64() > client.expires
+            || !client.world.Get() || result.OriginalFunctionCallPrevented() ||
+            (params.SetFlags & (U::RF_ClassDefaultObject | U::RF_ArchetypeObject))) return;
+        if (params.Class == client.pending_class)
+        {
+            client.pending_game = result.GetCurrentResolvedReturnValue();
+            return;
+        }
+        if (params.Class != client.driver_class || !client.pending_game.Get() || !result.GetCurrentResolvedReturnValue())
+            return;
+        client = {};
+        if (!load.context && !client_binding)
+            client_binding = exchange(reinterpret_cast<PVOID>(system_bind), reinterpret_cast<PVOID>(route_bind));
+    }
+
+    int arm_client(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2)
+            || construct == H::ERROR_ID || tick_end == H::ERROR_ID || !import_slot
+            || *import_slot != reinterpret_cast<PVOID>(system_bind)) return 0;
+        const auto source_name = package(lua.get_string(2), true);
+        const auto address = static_cast<std::uintptr_t>(lua.get_integer(1));
+        if (source_name.empty()) return 0;
+        auto* world = U::UObjectGlobals::StaticFindObject<U::UWorld*>(nullptr, nullptr, source_name.c_str());
+        if (!world || reinterpret_cast<std::uintptr_t>(world) != address || world->GetPathName() != source_name) return 0;
+        auto* pending_class = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, STR("/Script/Engine.PendingNetGame"));
+        auto* driver_class = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, STR("/Script/OnlineSubsystemUtils.IpNetDriver"));
+        if (!pending_class || !driver_class) return 0;
+        client = {};
+        client.world = world;
+        client.pending_class = pending_class;
+        client.driver_class = driver_class;
+        client.expires = GetTickCount64() + 5000;
+        lua.set_bool(true);
+        return 1;
+    }
 }
 
 void silverfish::native_listener_bind::install_hooks()
@@ -203,17 +267,28 @@ void silverfish::native_listener_bind::install_hooks()
            U::UPendingNetGame*, U::FString&) {
             if (load.context == &context) restore();
         }, {false, false, mod_name, STR("Restore Winsock after opening the co-op listener")});
+    construct = H::RegisterStaticConstructObjectPostCallback(on_construct,
+        {false, false, mod_name, STR("Bind the armed co-op guest net driver to loopback")});
+    tick_end = H::RegisterEngineTickPostCallback(
+        [](H::TCallbackIterationData<void>&, U::UEngine*, float, bool) {
+            if (client_binding) restore();
+            if (client.pending_game.Get() || (client.expires && GetTickCount64() > client.expires)) client = {};
+        }, {false, false, mod_name, STR("Restore Winsock after opening the co-op guest socket")});
 }
 
 void silverfish::native_listener_bind::uninstall_hooks()
 {
     if (pre != H::ERROR_ID) H::UnregisterCallback(pre);
     if (post != H::ERROR_ID) H::UnregisterCallback(post);
+    if (construct != H::ERROR_ID) H::UnregisterCallback(construct);
+    if (tick_end != H::ERROR_ID) H::UnregisterCallback(tick_end);
     pending = {};
-    if (load.context) restore();
+    client = {};
+    if (load.context || client_binding) restore();
 }
 
 void silverfish::native_listener_bind::register_lua(Lua& lua)
 {
     lua.register_function("SilverfishArmNativeListenPort", arm);
+    lua.register_function("SilverfishArmNativeGuestSocket", arm_client);
 }

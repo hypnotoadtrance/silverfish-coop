@@ -17,7 +17,7 @@ from tools.silverfish.service import (
 from tools.silverfish.title_handoff import _isolated_stock_title
 from tools.silverfish.title_session import STATUS_FILE
 from tools.silverfish.travel import OBSERVATORY
-from tools.silverfish.udp_ownership import owns_udp_port
+from tools.silverfish.udp_ownership import owns_udp_port, verify_loopback_socket
 from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 from live_native_runtime_rejoin_smoke import _events
@@ -121,6 +121,7 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         guest_process = runtime.launch(work, guest_profile, guest_mailbox, True, embedded_engine=True,
                                        embedded_startup=guest_nonce, resident_title=True, title_fixture=True,
                                        pause_fixture=True, resident_direct_join=direct, **guest_options)
+        assert "-multihome" not in guest_process.args.casefold() and "-port=" not in guest_process.args.casefold()
         guest_bridge = runtime.Bridge(guest_mailbox, guest_process)
 
         async def form(operation, *args):
@@ -165,6 +166,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         else:
             await guest_bridge.command("native-title-panel-press-fixture", "join")
         joined = await wait(guest_run, lambda value: value.get("state") == "connected")
+        first_guest_port = joined["unreal_local_port"]
+        verify_loopback_socket(guest_process.pid, first_guest_port)
         guest_scope = uuid.UUID(character).hex
         assert joined["pid"] == guest_process.pid and joined["game"]["save_scope"] == guest_scope
         paired = await wait(host_run, lambda value: value.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
@@ -178,12 +181,14 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
             row.get("character_id") == character and row.get("state") == "active"
             for row in value.get("campaign", {}).get("leases", ())))
         assert rejoined["game"]["native_guest_save"]["pawn"] == pawn
+        verify_loopback_socket(guest_process.pid, first_guest_port)
         await guest_bridge.wait_for(lambda frame: frame.get("stock_pause_exit", {}).get("state") == "armed")
         for operation in ("open", "prompt", "confirm"):
             await stock_pause(guest_bridge, operation)
         guest_stopped = await wait(guest_run, lambda value: value.get("state") == "stopped")
         assert guest_stopped["pid"] == guest_process.pid and guest_stopped["stop_reason"] == "guest_left"
         await offer(guest_bridge, guest_profile, "join")
+        assert not owns_udp_port(guest_process.pid, first_guest_port)
         await wait(host_run, lambda value: value.get("state") == "hosting" and not value["campaign"]["leases"])
         detached = paired_checkpoint(campaign, character)["guest_save"]["slot"]
         if direct:
@@ -198,6 +203,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
                                   and value.get("generation") != joined["generation"])
         assert joined_again["pid"] == guest_process.pid and joined_again["game"]["save_scope"] == guest_scope
         assert joined_again["character_id"] == character and guest_process.poll() is None
+        second_guest_port = joined_again["unreal_local_port"]
+        verify_loopback_socket(guest_process.pid, second_guest_port)
         await wait(host_run, lambda value: any(row.get("character_id") == character and row.get("state") == "active"
                                               for row in value.get("campaign", {}).get("leases", ())))
         assert any(row["event"] == "native_guest_save_restored" and row["slot"] == detached
@@ -206,9 +213,11 @@ async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
         guest_final = await wait(guest_run, lambda value: value.get("state") == "stopped")
         assert guest_final["pid"] == guest_process.pid and guest_final["stop_reason"] == "host_session_ended"
         await offer(guest_bridge, guest_profile, "join")
-        assert guest_process.poll() is None
+        assert guest_process.poll() is None and not owns_udp_port(guest_process.pid, second_guest_port)
         evidence["guest"] = {"title_pid": guest_process.pid, "joined_twice": True,
                              "reconnected_to_original_pawn": True, "restored_slot": detached,
+                             "runtime_loopback_ports": [first_guest_port, second_guest_port],
+                             "loopback_ports_released": True, "no_startup_bind_or_port": True,
                              "scope_released_after_host_stop": True}
         save = checkpoint["world"]["native_host_save"]
         assert checkpoint["characters"][character]["state"]["native_guest_save"]
