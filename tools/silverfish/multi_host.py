@@ -210,6 +210,8 @@ class MultiHost(Host):
                 frame = state.get("native_guest_save")
                 if frame:
                     member.restore["native_guest_save"] = frame
+                elif appearance := state.get("creator_appearance"):
+                    member.restore["creator_appearance"] = appearance
                 health = prior.get(member.role, {}).get("health")
                 if health is not None:
                     member.restore["health"] = health
@@ -364,6 +366,8 @@ class MultiHost(Host):
         if frame := saved.get("native_guest_save"):
             generation = native_host_save.guest_record(self.native_profile, frame, member.character_id)
             request += (generation["slot"],)
+        elif appearance := saved.get("creator_appearance"):
+            request += ("-", *appearance.split("|"))
         snapshot = await bridge.command("native-guest-bind-exact", *request, timeout=7)
         scope = snapshot.get("native_guest_save_members", {}).get(binding.pawn, {})
         if scope.get("state") != "bound" or scope.get("pawn") != binding.pawn:

@@ -1565,6 +1565,15 @@ class Bridge:
                     }
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
+                elif fields[0] == "native-guest-stock-creator" and len(fields) == 4:
+                    creator_state, attempt, appearance = fields[1:]
+                    if (creator_state not in {"opening", "creating", "returning", "captured", "cancelled", "failed"}
+                            or not re.fullmatch(r"[a-f0-9]{32}", attempt)
+                            or (creator_state == "captured" and not native_player_avatar.character_appearance(appearance))
+                            or (creator_state != "captured" and appearance != "-")):
+                        raise ValueError("Invalid guest character creator receipt")
+                    data["native_guest_stock_creator"] = {"state": creator_state, "attempt": attempt,
+                                                          "appearance": None if appearance == "-" else appearance}
                 elif fields[0] == "native-stock-creator" and len(fields) == 4:
                     creator_state, area, slot = fields[1:]
                     if (creator_state not in {"opening", "creating", "cancelled", "failed", "travelling", "verified"}

@@ -104,6 +104,45 @@ local function checked_asset(path, index, asset)
     if valid(loaded) and loaded:IsA(StaticFindObject(asset_fields[index][2])) then return loaded end
 end
 
+function view.install(character, model)
+    local cosmetics = view.decode(model)
+    if not character or not cosmetics then error("Invalid stock guest character appearance", 0) end
+    local assets = {}
+    for index, path in ipairs(cosmetics.assets) do
+        if path then
+            assets[index] = checked_asset(path, index, function(name)
+                local object = StaticFindObject(name)
+                if not valid(object) then
+                    LoadAsset(name)
+                    object = StaticFindObject(name)
+                end
+                return object
+            end)
+            if not assets[index] then error("Stock guest character mesh or texture is unavailable", 0) end
+        end
+    end
+    for index, object in pairs(assets) do character[asset_fields[index][1]] = object end
+    -- The stock creator modes can omit one or both tail meshes or plumage.
+    for _, index in ipairs({2, 4, 5}) do
+        if not assets[index] then character[asset_fields[index][1]] = nil end
+    end
+    for index, color in pairs(cosmetics.colors) do
+        local property = character[color_fields[index]]
+        property.R, property.G, property.B, property.A = color.R, color.G, color.B, color.A
+    end
+    if cosmetics.eye then character[eye_field] = cosmetics.eye end
+    local installed = view.observe(character)
+    local expected = {}
+    for field in (model .. "|"):gmatch("([^|]*)|") do expected[#expected + 1] = field end
+    local index = 0
+    for field in (installed .. "|"):gmatch("([^|]*)|") do
+        index = index + 1
+        if expected[index] ~= "-" and expected[index] ~= field then
+            error("Stock guest character appearance failed readback", 0)
+        end
+    end
+end
+
 local function set_mesh(component, mesh, skeletal)
     if skeletal then component:SetSkeletalMeshAsset(mesh) else component:SetStaticMesh(mesh) end
     local installed = skeletal and component.SkinnedAsset or component.StaticMesh

@@ -168,18 +168,31 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
     await join("port", str(host.port))
     await click(guest, "connect")
     await catalog(0)
-    await join("create", "Tutorial Scout")
+    await join("create-editor", "Tutorial Scout")
+    await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
+    assert await creator_action(guest, "observe") == "page=0"
+    face, plumage = (await creator_action(guest, "gueststyle")).split("|")
+    await creator_action(guest, "finish")
+    await offered(guest)
     await catalog(1)
-    character, = campaign(host)["characters"]
+    characters = campaign(host)["characters"]
+    character, = characters
+    appearance = characters[character]["state"]["creator_appearance"]
+    assert appearance.split("|")[:2] == [face, plumage]
     await click(guest, "character:1", "confirm")
     joined = await wait(guest.client / "run", lambda frame: frame.get("state") == "connected"
                         and frame.get("gameplay_fresh") is True)
     assert joined["pid"] == guest.bridge.process.pid and joined["character_id"] == character
     assert joined["game"]["map"] == TUTORIAL and joined["game"]["save_scope"] == uuid.UUID(character).hex
     verify_loopback_socket(joined["pid"], joined["unreal_local_port"])
-    await wait(host.campaign / "run",
-               lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-    return joined
+    authoritative = await host.bridge.wait_for(
+        lambda frame: frame.get("native_guest_save", {}).get("state") == "bound" and any(
+            outfit.get("appearance") == appearance
+            and outfit.get("pawn") == frame["native_guest_save"]["pawn"]
+            for outfit in frame.get("native_avatar_outfits", {}).values()))
+    pawn = authoritative["native_guest_save"]["pawn"]
+    await host.bridge.wait_for(lambda frame: frame.get("native_player_avatars", {}).get(pawn, {}).get("head_roll") == 0)
+    return joined, appearance
 
 
 async def leave_tutorial(seat: Seat) -> dict:
@@ -304,8 +317,9 @@ async def drive_creator(title: Seat, guest: Seat, evidence: dict) -> None:
                     campaign_revision=checkpoint["revision"], live_replenish_loot=0, checkpoint_replenish_loot=0)
     print("Stock Veteran and Custom settings committed to the authoritative tutorial host", flush=True)
 
-    joined = await join_created_campaign(seat, guest)
-    evidence.update(guest_pid=joined["pid"], guest_character=joined["character_id"], direct_ip_joined=True)
+    joined, appearance = await join_created_campaign(seat, guest)
+    evidence.update(guest_pid=joined["pid"], guest_character=joined["character_id"], direct_ip_joined=True,
+                    guest_face_and_plumage=appearance.split("|")[:2], guest_avatar_head_roll=0)
     print("Second stock title joined the created campaign over Direct IP", flush=True)
     stopped = await leave_tutorial(seat)
     guest_stopped = await wait(guest.client / "run", lambda frame: frame.get("state") == "stopped")
@@ -315,6 +329,7 @@ async def drive_creator(title: Seat, guest: Seat, evidence: dict) -> None:
     saved = campaign(seat)
     assert saved["revision"] > checkpoint["revision"]
     assert saved["characters"][joined["character_id"]]["state"]["native_guest_save"]
+    assert saved["characters"][joined["character_id"]]["state"]["creator_appearance"] == appearance
     evidence["stock_pause_returned_both_titles"] = True
 
     sibling, sibling_attempt = await enter_creator(title)

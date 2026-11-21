@@ -557,7 +557,8 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
     def status():
         return runtime.read_json(directory / "run" / "status.json")
 
-    settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify, timeout=18)
+    settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify,
+                                 timeout=18, saved=saved)
 
     def resolve(claim):
         if claim.join_settings is None:

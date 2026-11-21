@@ -449,10 +449,11 @@ local function run_command(fields, state, current_phase)
             native_save_scope.select(argument)
             return "selected co-op save scope"
         end
+        if native_stock_creator.guest_busy() then error("Finish returning from the co-op guest creator first", 0) end
         native_save_scope.release(argument)
         native_title_entry.refresh_singleplayer(context)
         native_fresh_campaign.clear()
-        native_stock_creator.clear()
+        native_stock_creator.clear_host()
         return "released co-op save scope"
     end
 
@@ -473,6 +474,12 @@ local function run_command(fields, state, current_phase)
             function(destination, port)
                 role, expected_map, host_listen_port = "host", destination, port
             end)
+    end
+
+    if command == "native-guest-stock-creator" or command == "native-guest-stock-creator-clear" then
+        if #fields ~= 3 or not resident_title or role ~= "idle" then error("guest_stock_creator_unavailable", 0) end
+        if command == "native-guest-stock-creator" then return native_stock_creator.begin_guest(state, current_phase, argument) end
+        return native_stock_creator.clear_guest(state, current_phase, argument)
     end
 
     if command == "travel-party" then
@@ -893,7 +900,7 @@ local function run_command(fields, state, current_phase)
         if (#fields ~= 3 and #fields ~= 6) or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
         end
-        if role == "host" or state.server or leaving then
+        if role == "host" or state.server or leaving or native_stock_creator.guest_busy() then
             error("Leave the current session before joining", 0)
         end
         if resident_title then

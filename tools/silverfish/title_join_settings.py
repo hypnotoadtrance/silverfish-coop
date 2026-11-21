@@ -16,6 +16,7 @@ from uuid import UUID
 from . import direct_ip
 from .embedded_engine import _assert_no_reparse, _exact_existing
 from .embedded_startup import INVITE_LIMIT, _read_file
+from .native_player_avatar import character_appearance
 from .title_handoff import TOKEN
 
 
@@ -53,10 +54,11 @@ class _Request:
     action: str
     payload: bytes = field(repr=False)
     name: str | None = None
+    appearance: str | None = None
 
     @property
-    def fingerprint(self) -> tuple[str, str, str | None]:
-        return self.action, sha256(self.payload).hexdigest(), self.name
+    def fingerprint(self) -> tuple[str, str, str | None, str | None]:
+        return self.action, sha256(self.payload).hexdigest(), self.name, self.appearance
 
 
 def _parse(operation_id: str, fields: bytes) -> _Request:
@@ -75,16 +77,18 @@ def _parse(operation_id: str, fields: bytes) -> _Request:
     if action == b"direct" and not body:
         _endpoint(tail)
         return _Request(operation_id, "direct", tail)
-    if action == b"create" and not body:
+    if action == b"create":
         identifier, separator, raw_name = tail.partition(b"\t")
         try:
             text = raw_name.decode("utf-8")
             import_id = identifier.decode("ascii")
+            appearance = body.decode("ascii") if body else None
         except UnicodeError:
             raise _DraftError("invalid_request") from None
         name = text.strip()
-        if separator and _token(import_id) and len(raw_name) <= 256 and 1 <= len(name) <= 64 and text.isprintable():
-            return _Request(operation_id, "create", identifier, name)
+        if (separator and _token(import_id) and len(raw_name) <= 256 and 1 <= len(name) <= 64 and text.isprintable()
+                and (appearance is None or character_appearance(appearance))):
+            return _Request(operation_id, "create", identifier, name, appearance)
     raise _DraftError("invalid_request")
 
 
@@ -159,7 +163,7 @@ class _Direct:
 
 @dataclass
 class _Operation:
-    fingerprint: tuple[str, str, str | None]
+    fingerprint: tuple[str, str, str | None, str | None]
     result: bytes | None = None
     import_id: str | None = None
 
@@ -181,7 +185,8 @@ class TitleJoinSettings:
     """
 
     def __init__(self, work: Path, bridge: Path, *, catalog: Catalog | None = None, timeout: float = 25,
-                 direct_profile: Path | None = None, qualify_connection: Callable[[dict], None] | None = None):
+                 direct_profile: Path | None = None, qualify_connection: Callable[[dict], None] | None = None,
+                 saved: Path | None = None):
         self._work, self._bridge = _exact_existing(work), _exact_existing(bridge)
         if bridge == work or not bridge.is_relative_to(work):
             raise ValueError("The title Join mailbox must be inside the private co-op workspace")
@@ -203,6 +208,27 @@ class TitleJoinSettings:
         self._paths, self._retired = set(), set()
         self._pending = self._outbox = None
         self._closed = False
+        self._creator_directory = None
+        self._creator_file = bridge / "title-join-creator-scope.txt"
+        if saved is not None and direct_profile is not None:
+            from . import native_host_save, runtime
+
+            identifier = secrets.token_hex(16)
+            scope = native_host_save.SaveScope(saved.parent, identifier)
+            directory = native_host_save.directory(scope)
+            directory.mkdir(parents=True)
+            self._creator_directory = directory
+            runtime.write_text(self._creator_file, identifier + "\n", newline="\n")
+
+    def resume_creator(self, generation):
+        """Keep the selected authenticated catalog over the stock editor's map travel."""
+        if (self._creator_directory is None or self._generation is None or generation == self._generation
+                or self._pending is not None):
+            return
+        self._generation = generation
+        self._operations.clear()
+        self._outbox = None
+        _remove(self.response_path)
 
     def _forget_task(self, task):
         self._retired.discard(task)
@@ -249,15 +275,15 @@ class TitleJoinSettings:
     def _error(self, operation_id, code):
         self._outbox = f"1\t{self._generation}\t{operation_id}\terror\t{code}\t0\n".encode("ascii")
 
-    async def _fetch(self, draft, name, operation_id):
-        async def request(name, operation_id, refusal):
+    async def _fetch(self, draft, name, operation_id, appearance=None):
+        async def request(name, operation_id, refusal, **creation):
             draft.verify()
             try:
                 if isinstance(draft, _Direct):
                     from .service import _character_catalog
-                    reply = await _character_catalog(draft.connection.session(), name, operation_id)
+                    reply = await _character_catalog(draft.connection.session(), name, operation_id, **creation)
                 else:
-                    reply = await self._catalog(self._work, draft.path, name, operation_id)
+                    reply = await self._catalog(self._work, draft.path, name, operation_id, **creation)
             except ValueError:
                 raise _DraftError("invalid_invite") from None
             draft.verify()
@@ -270,7 +296,8 @@ class TitleJoinSettings:
         async with asyncio.timeout(self._timeout):
             created = None
             if name is not None:
-                reply = await request(name, operation_id, "create_refused")
+                creation = {"appearance": appearance} if appearance is not None else {}
+                reply = await request(name, operation_id, "create_refused", **creation)
                 created = _character(reply.get("character"))
                 if created[1] != name:
                     raise _DraftError("catalog_invalid")
@@ -359,7 +386,7 @@ class TitleJoinSettings:
                 return self._error(operation_id, "unknown_import")
             if len(draft.characters) >= MAX_CHARACTERS:
                 return self._error(operation_id, "create_refused")
-        task = asyncio.create_task(self._fetch(draft, request.name, operation_id))
+        task = asyncio.create_task(self._fetch(draft, request.name, operation_id, request.appearance))
         self._pending = _Pending(task, operation_id, draft, created_file)
 
     def _complete(self):
@@ -452,3 +479,9 @@ class TitleJoinSettings:
                 await asyncio.gather(*self._retired, return_exceptions=True)
         finally:
             _remove(self.request_path)
+            _remove(self._creator_file)
+            if self._creator_directory is not None:
+                try:
+                    self._creator_directory.rmdir()
+                except OSError:
+                    pass

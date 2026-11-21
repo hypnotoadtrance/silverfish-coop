@@ -4,6 +4,8 @@ local scope = require("native_save_scope")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
+local texture_class = "/Script/Engine.Texture2D"
+local quest_photos = "/Game/Classes/GUI/GUI_Elements/QuestPhotos/"
 local item = {
     class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81",
     ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788",
@@ -15,19 +17,24 @@ local item = {
 local notes = {
     header = "Header_2_F519DEE247621F4BFF89E2BF92B4DE49",
     body = "Body_6_0085FFB14DEABEFA900A46A1A53AC532",
+    image = "Image_9_00979C944126E5FE0A030B93256AD50A",
 }
 local quest = {
     name = "DisplayName_2_7285E7CE446EB084E06391BFCE927182",
     giver = "QuestGiver_37_600BE36F48EDD8652F17A2B41BEFDEA0",
     kind = "QuestType_47_1031681D471E9929E30B17985E174BBE",
     descriptions = "Descriptions_ByStep_20_CE78450B4708786A5D7D71BFE2D3DE0B",
+    icon = "Icon_91_1888AD0747DA23F500530E9AAC14D830",
+    images = "Images_ByStep_92_0AB9A29B482457A8FB719ABB327DDD56",
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
     final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B",
+    track_flag = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774",
 }
 local slots = { backpack = "PlayerBackpack", equipment = "PlayerEquipment",
     armor = "PlayerArmor", helmet = "PlayerHelmet" }
 local axes = {"A", "B", "C", "D"}
 local max_size, max_rows = 20000, 128
+local min_int32, max_int32, completed_step = -2147483648, 2147483647, -10
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -64,6 +71,37 @@ local function fields(array, wrap)
     return result
 end
 
+local function photo_name(texture)
+    if not exact(texture, texture_class) then return "-" end
+    local path = texture:GetFullName():match("^Texture2D (.+)$")
+    if not path or path:sub(1, #quest_photos) ~= quest_photos then return "-" end
+    local package, name = path:sub(#quest_photos + 1):match("^([%w_%-]+)%.([%w_%-]+)$")
+    return package and package == name and #name <= 96 and name or "-"
+end
+
+local function photo(name)
+    if name == "-" then return nil end
+    if #name > 96 or not name:match("^[%w_%-]+$") then error("Invalid co-op Journal image", 0) end
+    local path = quest_photos .. name .. "." .. name
+    local object = StaticFindObject(path)
+    if not valid(object) then
+        LoadAsset(path)
+        object = StaticFindObject(path)
+    end
+    if exact(object, texture_class) then return object end
+end
+
+local function tracked_step(save, entry)
+    local step = entry[quest.step]
+    if step <= 0 then return step end
+    -- The stock Journal updates only active quests from this canonical flag.
+    local flag = entry[quest.track_flag]
+    if flag:ToString() ~= "None" and save.Flags:Contains(flag) then
+        return save.Flags:Find(flag):get()
+    end
+    return step
+end
+
 local function capture(state, phase, pawn_name, path)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
@@ -93,14 +131,17 @@ local function capture(state, phase, pawn_name, path)
     end
     for i = 1, count(canonical.JournalEntries) do
         local entry = canonical.JournalEntries[i]
-        rows[#rows+1] = table.concat({"note", encode(entry[notes.header]), table.unpack(fields(entry[notes.body], encode))}, "\t")
+        rows[#rows+1] = table.concat({"note", encode(entry[notes.header]), photo_name(entry[notes.image]),
+            table.unpack(fields(entry[notes.body], encode))}, "\t")
     end
     local quests = {}
     canonical.ActiveQuests:ForEach(function(key, value)
         local id, entry = key:get():ToString(), value:get()
         if not id:match("^[A-Za-z0-9_]+$") or #id > 96 then error("Invalid co-op quest identifier", 0) end
-        quests[#quests+1] = table.concat({"quest", id, entry[quest.kind], entry[quest.step], entry[quest.final],
-            encode(entry[quest.name]), encode(entry[quest.giver]), table.unpack(fields(entry[quest.descriptions], encode))}, "\t")
+        local images = fields(entry[quest.images], photo_name)
+        quests[#quests+1] = table.concat({"quest", id, entry[quest.kind], tracked_step(canonical, entry), entry[quest.final],
+            encode(entry[quest.name]), encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ","),
+            table.unpack(fields(entry[quest.descriptions], encode))}, "\t")
     end)
     table.sort(quests)
     for _, row in ipairs(quests) do rows[#rows+1] = row end
@@ -142,6 +183,7 @@ local function project(state, phase, character, path)
     local view = api:CreateSaveGameObject(class)
     if not exact(view, save_class) then error("The stock co-op view could not be allocated", 0) end
     local processed, items, note_count, quest_count = 0, 0, 0, 0
+    local completed, attachments = 0, 0
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
         if processed > max_rows then error("The co-op view contains too many rows", 0) end
@@ -159,19 +201,35 @@ local function project(state, phase, character, path)
                 view[name] = entry
             end
             items = items + 1
-        elseif row[1] == "note" and #row >= 2 then
+        elseif row[1] == "note" and #row >= 3 then
             note_count = note_count + 1
             local journal = view.JournalEntries
-            journal[note_count] = {[notes.header] = decode(row[2])}
+            local image = photo(row[3])
+            journal[note_count] = {[notes.header] = decode(row[2]), [notes.image] = image}
+            if image then attachments = attachments + 1 end
             local body = journal[note_count][notes.body]
-            for i = 3, #row do body[i - 2] = decode(row[i]) end
-        elseif row[1] == "quest" and #row >= 7 and #row[2] <= 96 and row[2]:match("^[A-Za-z0-9_]+$") then
+            for i = 4, #row do body[i - 3] = decode(row[i]) end
+        elseif row[1] == "quest" and #row >= 9 and #row[2] <= 96 and row[2]:match("^[A-Za-z0-9_]+$") then
             local key, quests = FName(row[2]), view.ActiveQuests
+            local step = integer(row[4], min_int32, max_int32)
+            local icon = photo(row[8])
             quests:Add(key, {[quest.name] = decode(row[6]), [quest.giver] = decode(row[7]),
-                [quest.kind] = integer(row[3], 0, 255), [quest.step] = integer(row[4], -1, 100000),
-                [quest.final] = integer(row[5], 0, 100000)})
-            local descriptions = quests:Find(key):get()[quest.descriptions]
-            for i = 8, #row do descriptions[i - 7] = decode(row[i]) end
+                [quest.kind] = integer(row[3], 0, 255), [quest.step] = step,
+                [quest.final] = integer(row[5], 0, max_int32), [quest.icon] = icon})
+            if step == completed_step then completed = completed + 1 end
+            if icon then attachments = attachments + 1 end
+            local entry = quests:Find(key):get()
+            local descriptions, images = entry[quest.descriptions], entry[quest.images]
+            for i = 10, #row do descriptions[i - 9] = decode(row[i]) end
+            if row[9] ~= "" then
+                local index = 0
+                for name in (row[9] .. ","):gmatch("([^,]*),") do
+                    index = integer(index + 1, 1, max_rows)
+                    local image = photo(name)
+                    images[index] = image
+                    if image then attachments = attachments + 1 end
+                end
+            end
             quest_count = quest_count + 1
         else
             error("Invalid co-op Journal row", 0)
@@ -186,7 +244,8 @@ local function project(state, phase, character, path)
     if count(old.JournalEntries) ~= note_count or #old.ActiveQuests ~= quest_count then
         error("The attached co-op Journal view failed readback", 0)
     end
-    return ("stock co-op inventory and Journal projected %d %d %d"):format(items, note_count, quest_count)
+    return ("stock co-op inventory and Journal projected %d %d %d %d %d"):format(
+        items, note_count, quest_count, completed, attachments)
 end
 
 function guest_ui.command(fields, state, phase, bridge)

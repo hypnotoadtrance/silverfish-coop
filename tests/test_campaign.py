@@ -224,6 +224,24 @@ class CampaignStoreTests(unittest.TestCase):
             self.assertEqual(verify_checkpoint.call_args.args[0]["characters"][character["character_id"]]["state"],
                              {"health": 37})
 
+    def test_linked_character_creation_appearance_survives_checkpoint_and_retry(self):
+        appearance = "-|-|-|-|-|-|0.12500,0.50000,0.25000,1.00000|-|-|3"
+        with self.open_store() as store:
+            identity = store.issue_guest("Scout")
+            guest_id = identity["guest_id"]
+            operation = "7" * 32
+            created = store.create_linked_character(guest_id, "Scout", operation, appearance=appearance)
+            lease = store.activate(character_id=created["character_id"], **identity)
+            store.save_character(lease["lease_id"], {"health": 37})
+            self.assertEqual(store.create_linked_character(guest_id, "Scout", operation, appearance=appearance), created)
+            with self.assertRaises(CharacterError):
+                store.create_linked_character(guest_id, "Scout", operation, appearance=appearance[:-1] + "4")
+            with self.assertRaises(CharacterError):
+                store.create_linked_character(guest_id, "Scout", "8" * 32, appearance={"item": "invalid"})
+        with self.open_store() as store:
+            character, = store.list_characters(**identity)
+            self.assertEqual(character["state"], {"health": 37, "creator_appearance": appearance})
+
     def test_failed_primary_replace_leaves_committed_revision(self):
         with self.open_store() as store:
             store.save_world({"day": 1})

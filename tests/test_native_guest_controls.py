@@ -115,6 +115,22 @@ class NativeGuestUIOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(returned, {key: value for key, value in first.items() if key != "payload"})
             self.assertEqual(list(directory.iterdir()), [])
 
+    async def test_projection_reports_settled_quests_and_stock_attachments(self):
+        character = str(uuid.uuid4())
+        response = {"ack": {"message": "stock co-op inventory and Journal projected 1 1 2 1 3"}}
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            bridge = SimpleNamespace(directory=directory, command=AsyncMock(return_value=response))
+            client = SimpleNamespace(bridge=bridge, control=Mock())
+
+            await native_guest_ui.GuestView().project(client, character, "fixture\n")
+
+            self.assertIs(client.last_game, response)
+            client.control.event.assert_called_once_with(
+                "native_guest_ui_projected", items=1, notes=1, quests=2, completed=1, attachments=3,
+            )
+            self.assertEqual(list(directory.iterdir()), [])
+
 
 class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

@@ -15,7 +15,7 @@ from . import party, runtime
 ACTION = "native-guest-ui-read"
 MAX_BYTES = 20_000
 _DIGEST = re.compile(r"[0-9a-f]{64}")
-_READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+)")
+_READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)")
 
 
 def validate(contents: bytes, area: str, character: str) -> str:
@@ -121,9 +121,10 @@ class GuestView:
             receipt = _READY.fullmatch(response.get("ack", {}).get("message", ""))
             if not receipt:
                 raise RuntimeError("The isolated guest inventory and Journal did not verify")
-            items, notes, quests = map(int, receipt.groups())
+            items, notes, quests, completed, attachments = map(int, receipt.groups())
             client.last_game = response
-            client.control.event("native_guest_ui_projected", items=items, notes=notes, quests=quests)
+            client.control.event("native_guest_ui_projected", items=items, notes=notes, quests=quests,
+                                 completed=completed, attachments=attachments)
         finally:
             with contextlib.suppress(FileNotFoundError, PermissionError):
                 path.unlink()

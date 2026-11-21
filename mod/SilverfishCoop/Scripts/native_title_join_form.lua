@@ -219,8 +219,9 @@ local function publish(draft, id, kind, payload)
     return false
 end
 
-local function queue(draft, state, phase, kind, value)
+local function queue(draft, state, phase, kind, value, appearance)
     local retried = kind == "create" and draft.retry and draft.retry.name == value and draft.retry.import == draft.import
+        and draft.retry.appearance == appearance
     local id = retried and draft.retry.id or draft.new_id()
     if not token(id) then return false, "title_join_form_request_id_unavailable" end
     local payload
@@ -229,17 +230,24 @@ local function queue(draft, state, phase, kind, value)
     elseif kind == "direct" then
         payload = table.concat({draft.address, draft.port, value}, "\t") .. "\n"
     else
-        payload = draft.import .. "\t" .. value .. "\n"
+        payload = draft.import .. "\t" .. value .. "\n" .. (appearance or "")
     end
     if not publish(draft, id, kind, payload) then
         render(draft, state, phase, draft.screen, "Could not send. Try again.", kind ~= "direct" and value or nil)
         return false, "title_join_form_request_unavailable"
     end
-    if kind == "create" then draft.retry = {name = value, import = draft.import, id = id} end
+    if kind == "create" then
+        draft.retry = {name = value, import = draft.import, id = id, appearance = appearance}
+    end
     draft.pending = {kind = kind, id = id, expires = os.time() + 20}
     draft.failure = nil
     render(draft, state, phase, "waiting")
     return true
+end
+
+function form.resume_creation(draft, state, phase, name, appearance, hint)
+    if appearance then return queue(draft, state, phase, "create", name, appearance) end
+    render(draft, state, phase, "name", hint, name)
 end
 
 function form.poll(draft, state, phase)
@@ -404,7 +412,15 @@ function form.press(draft, action, state, phase)
     end
     if screen == "name" and ok then
         value = value:match("^ *(.-) *$")
-        if #value > 0 and utf8.len(value) <= 64 then return queue(draft, state, phase, "create", value) end
+        if #value > 0 and utf8.len(value) <= 64 then
+            if draft.direct and draft.view then
+                if draft.retry and draft.retry.name == value and draft.retry.appearance then
+                    return queue(draft, state, phase, "create", value, draft.retry.appearance)
+                end
+                return true, nil, nil, value
+            end
+            return queue(draft, state, phase, "create", value)
+        end
     end
     if screen == "profile" and ok and (value == "" or value:match("^[A-Za-z0-9][A-Za-z0-9_-]*$")) then
         if not token(draft.import) or not character_id(draft.character) then return false, "title_join_form_selection_unavailable" end
@@ -454,11 +470,13 @@ function form.fixture(draft, operation, value, state, phase)
         end
         return false, "title_join_form_fixture_character_unavailable"
     end
-    if operation == "create" and draft.screen == "catalog" and #value <= 64 and value:match("^[A-Za-z0-9][A-Za-z0-9 _-]*$") then
+    if (operation == "create" or operation == "create-editor") and draft.screen == "catalog"
+        and #value <= 64 and value:match("^[A-Za-z0-9][A-Za-z0-9 _-]*$") then
         draft.index = #draft.characters + 1
         form.press(draft, "host", state, phase)
         write_field(draft, "character", value, state, phase)
-        return form.press(draft, "host", state, phase)
+        if operation == "create-editor" then return true end
+        return queue(draft, state, phase, "create", value)
     end
     if operation == "profile" and draft.screen == "profile" and #value <= 64
         and value:match("^[A-Za-z0-9][A-Za-z0-9_-]*$") then

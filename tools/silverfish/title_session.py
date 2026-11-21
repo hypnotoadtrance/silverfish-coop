@@ -257,6 +257,7 @@ class TitleSession:
         initial_frame = None
         title_deadline = time.monotonic() + min(self._startup_timeout, 45)
         actions = [action for action in ACTIONS if action in self._plans]
+        creator_trip = False
         try:
             while self._bridge.process.poll() is None:
                 snapshot = self._bridge.snapshot()
@@ -285,7 +286,12 @@ class TitleSession:
                         await asyncio.sleep(self._poll_interval)
                         continue
                 if self._join_settings is not None:
-                    self._join_settings.poll(self._handoff.generation if offered else None)
+                    creator_trip = creator_trip or bool(snapshot and snapshot.get("native_guest_stock_creator"))
+                    if offered and creator_trip:
+                        self._join_settings.resume_creator(self._handoff.generation)
+                        creator_trip = False
+                    if offered or not creator_trip:
+                        self._join_settings.poll(self._handoff.generation if offered else None)
                 self._poll_control(snapshot)
                 claim = self._handoff.poll(snapshot)
                 self._selected(claim)

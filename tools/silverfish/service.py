@@ -402,7 +402,8 @@ class Host:
             return {"accepted": False, "reason": "guest_or_character_unavailable"}
         saved = active["character"]["state"]
         if request["character_id"] in self.expired_characters:
-            saved = {key: saved[key] for key in ("health", "native_guest_save") if key in saved} if self.native_guest else {}
+            saved = {key: saved[key] for key in ("health", "native_guest_save", "creator_appearance")
+                     if key in saved} if self.native_guest else {}
         self.guest = {
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
             "character_id": active["character"]["character_id"], "disconnected": None,
@@ -1701,9 +1702,11 @@ class Host:
             return {"ok": False, "error": reason}
         if request == {"action": "characters"}:
             return {"ok": True, "characters": self.store.linked_character_catalog(guest_id)}
-        if request.get("action") == "create-character" and set(request) == {"action", "name", "operation_id"}:
+        if request.get("action") == "create-character" and set(request) in (
+                {"action", "name", "operation_id"}, {"action", "name", "operation_id", "appearance"}):
             try:
-                created = self.store.create_linked_character(guest_id, request["name"], request["operation_id"])
+                created = self.store.create_linked_character(guest_id, request["name"], request["operation_id"],
+                                                             appearance=request.get("appearance"))
             except CampaignError as error:
                 return {"ok": False, "error": str(error)}
             return {"ok": True, "character": created}
@@ -2320,6 +2323,8 @@ class Host:
                 binding = self.enrollment.assignments.get(self.guest["guest_id"])
                 if not binding or binding.pawn != pawn["name"] or binding.character_id != self.guest["character_id"]:
                     raise RuntimeError("The authenticated native guest save scope is unavailable")
+                if not frame and (appearance := self.guest["restore"].get("creator_appearance")):
+                    arguments = ("-", *appearance.split("|"))
                 snapshot = await bridge.command("native-guest-bind-exact", binding.pawn, binding.controller,
                                                 binding.connection, binding.character_id, health, *arguments, timeout=7)
             else:
@@ -4416,9 +4421,9 @@ async def open_admission(transport, invite: dict, request: dict, *, timeout: flo
 
 
 async def character_catalog(work: Path, invitation: Path, name: str | None,
-                            operation_id: str | None) -> dict:
+                            operation_id: str | None, *, appearance: str | None = None) -> dict:
     invite = load_invite(invitation, staged_build(work))
-    return await _character_catalog(invite, name, operation_id)
+    return await _character_catalog(invite, name, operation_id, appearance=appearance)
 
 
 async def direct_catalog(work: Path, profile: Path, host: str, port: int, password: str,
@@ -4429,7 +4434,8 @@ async def direct_catalog(work: Path, profile: Path, host: str, port: int, passwo
     return await _character_catalog(invite, name, operation_id)
 
 
-async def _character_catalog(invite: dict, name: str | None, operation_id: str | None) -> dict:
+async def _character_catalog(invite: dict, name: str | None, operation_id: str | None, *,
+                             appearance: str | None = None) -> dict:
     admission = {key: invite[key] for key in ("guest_id", "credential", "character_id", "game_build") if key in invite}
     admission.update({"protocol_version": PROTOCOL, "catalog": True})
     client = await link.start_client(catalog_only=True)
@@ -4439,8 +4445,10 @@ async def _character_catalog(invite: dict, name: str | None, operation_id: str |
             return {"ok": False, "error": "The host declined character catalog access"}
         if name is None:
             return await client.request({"action": "characters"})
-        return await client.request({"action": "create-character", "name": name,
-                                     "operation_id": operation_id or uuid.uuid4().hex})
+        request = {"action": "create-character", "name": name, "operation_id": operation_id or uuid.uuid4().hex}
+        if appearance is not None:
+            request["appearance"] = appearance
+        return await client.request(request)
     finally:
         await client.close()
 

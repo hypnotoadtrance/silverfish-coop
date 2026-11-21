@@ -450,10 +450,15 @@ class CampaignStore:
                 if character["guest_id"] == guest_id
             ]
 
-    def create_linked_character(self, guest_id, name, operation_id):
+    def create_linked_character(self, guest_id, name, operation_id, *, appearance=None):
         """Create once for the owner of an authenticated application session."""
         if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
             raise CharacterError("Invalid character creation operation ID.")
+        if appearance is not None:
+            from .native_player_avatar import character_appearance
+
+            if not character_appearance(appearance):
+                raise CharacterError("Invalid stock character appearance.")
         with self._mutex:
             self._require_open()
             if guest_id not in self._data["guests"]:
@@ -462,11 +467,13 @@ class CampaignStore:
             character_id = str(uuid.uuid5(uuid.UUID(guest_id), operation_id))
             existing = self._data["characters"].get(character_id)
             if existing is not None:
-                if existing["guest_id"] != guest_id or existing["name"] != name:
+                if (existing["guest_id"] != guest_id or existing["name"] != name
+                        or existing["state"].get("creator_appearance") != appearance):
                     raise CharacterError("Character creation operation ID is already in use.")
             else:
                 candidate = copy.deepcopy(self._data)
-                self._add_character(candidate, guest_id, name, {}, character_id)
+                state = {"creator_appearance": appearance} if appearance is not None else {}
+                self._add_character(candidate, guest_id, name, state, character_id)
                 self._commit(candidate, verify_content=False)
             return {"character_id": character_id, "name": name}
 
@@ -570,12 +577,19 @@ class CampaignStore:
                 if character_id in leased or character_id not in candidate["characters"]:
                     raise LeaseError("The character is leased or no longer exists.")
                 _validate_state(state)
-                candidate["characters"][character_id]["state"] = copy.deepcopy(state)
+                self._update_character_state(candidate["characters"][character_id], state)
         for lease_id, state in character_states.items():
             lease = self._get_lease(lease_id)
             _validate_state(state)
-            candidate["characters"][lease.character_id]["state"] = copy.deepcopy(state)
+            self._update_character_state(candidate["characters"][lease.character_id], state)
         return self._commit(candidate)
+
+    @staticmethod
+    def _update_character_state(character, state):
+        appearance = character["state"].get("creator_appearance")
+        character["state"] = copy.deepcopy(state)
+        if appearance is not None:
+            character["state"]["creator_appearance"] = appearance
 
     def checkpoint(self, world, character_states, *, unleased_states=None):
         """Save a campaign and its exact character snapshots in one revision."""

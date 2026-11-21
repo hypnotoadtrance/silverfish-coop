@@ -11,6 +11,7 @@ local actions = {
 local bridge_path, session_path, request_path, loop, current, session, report
 local dismissed, submitted
 local singleplayer_title
+local guest_creation
 local dispatch
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
@@ -372,14 +373,64 @@ local function handle_join_form(action, state, phase, context)
         return true
     end
     if form.role ~= "join" then return false, "title_join_form_unavailable" end
-    local accepted, failure, values = form.api.press(form.draft, action, state, phase)
+    local accepted, failure, values, name = form.api.press(form.draft, action, state, phase)
     if values then return choose("join", title.probe(state, phase), values) end
+    if name then
+        local file = io.open(bridge_path .. "/title-join-creator-scope.txt", "rb")
+        local contents = file and file:read(34)
+        if file then file:close() end
+        local scope_id = contents and contents:match("^([0-9a-f]+)\n$")
+        local attempt = request_id()
+        if not scope_id or #scope_id ~= 32 or not attempt then
+            return form.api.resume_creation(form.draft, state, phase, name, nil, "Character creation is unavailable.")
+        end
+        local scope = require("native_save_scope")
+        local creator = require("native_stock_creator")
+        local opened = pcall(function()
+            scope.select(scope_id)
+            creator.begin_guest(state, phase, attempt)
+        end)
+        if not opened then
+            if scope.selected() == scope_id and not creator.guest_busy() then scope.release(scope_id) end
+            return form.api.resume_creation(form.draft, state, phase, name, nil, "Could not open character creation.")
+        end
+        guest_creation = {form = form, name = name, scope = scope_id, attempt = attempt}
+        remove_display()
+        report = nil
+        return true
+    end
     if failure == "title_join_form_back_to_title" then
         close_form(session)
         multiplayer(offer)
         return true
     end
     return accepted, failure
+end
+
+local function resume_guest_creation(context, offer, state, phase)
+    local trip = guest_creation
+    local creator = require("native_stock_creator")
+    local result, appearance = creator.guest_result(trip.attempt)
+    if result ~= "captured" and result ~= "cancelled" and result ~= "failed" then return end
+    local scope = require("native_save_scope")
+    if scope.selected() == trip.scope then
+        scope.release(trip.scope)
+        title.refresh_singleplayer(context)
+    end
+    if not offer or not actions[offer.choices].join then return end
+    creator.clear_guest(state, phase, trip.attempt)
+    guest_creation = nil
+    mount(context, offer)
+    local owner = session
+    present(nil)
+    local form = trip.form
+    owner.form = form
+    local draft = form.draft
+    draft.context, draft.generation = context, offer.generation
+    draft.on_action = function(key) if session == owner then dispatch(key) end end
+    local hint = result == "failed" and "Could not save the character. Try again." or nil
+    form.api.resume_creation(draft, state, phase, trip.name, appearance, hint)
+    report = {state = "ready", choices = offer.choices}
 end
 
 local function fixture_enabled()
@@ -491,7 +542,7 @@ end
 local function join_form_fixture_command(fields, state, phase)
     if not fixture_enabled() then error("title_join_form_fixture_unavailable", 0) end
     local operation, value = fields[3], fields[4]
-    local has_value = operation == "select" or operation == "create" or operation == "profile"
+    local has_value = operation == "select" or operation == "create" or operation == "create-editor" or operation == "profile"
         or operation == "address" or operation == "port"
     if #fields ~= (has_value and 4 or 3) then error("title_join_form_fixture_arguments", 0) end
     local context = title.probe(state, phase)
@@ -516,6 +567,10 @@ local function join_form_fixture_command(fields, state, phase)
     if operation == "observe" then form.api.poll(form.draft, state, phase) end
     local accepted, failure = form.api.fixture(form.draft, operation, value, state, phase)
     if not accepted then error(failure, 0) end
+    if operation == "create-editor" then
+        local opened, reason = handle_join_form("host", state, phase, context)
+        if not opened then error(reason, 0) end
+    end
     if operation == "observe" then return accepted end
     return "title_join_form_" .. operation .. "_accepted"
 end
@@ -676,6 +731,13 @@ function panel.sync(state, phase)
     local context = title.probe(state, phase)
     if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
     local offer = context and read_offer()
+    if guest_creation then
+        if context then
+            current = {state = state, phase = phase}
+            resume_guest_creation(context, offer, state, phase)
+        end
+        return
+    end
     if not offer then
         remove_display()
         report = nil

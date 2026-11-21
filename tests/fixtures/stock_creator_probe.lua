@@ -34,7 +34,8 @@ local function editor()
     end
     local instance = statics:GetGameInstance(controller)
     local slot = exact(instance, instance_class) and value_text(instance.CurrentSaveSlot)
-    if type(slot) ~= "string" or #slot ~= 43 or not slot:match("^SFCoopLive_[0-9a-f]+$") then
+    if type(slot) ~= "string" or not (#slot == 43 and slot:match("^SFCoopLive_[0-9a-f]+$")
+        or #slot == 51 and slot:match("^SFCoopGuestCreator_[0-9a-f]+$")) then
         return nil, "stock_creator_scoped_save_unavailable"
     end
     local stack = controller.MenuStack
@@ -59,7 +60,8 @@ local function control(page, widget, class)
         if not valid(ancestor) then break end
         ancestor = ancestor:GetParent()
     end
-    error("stock_creator_control_outside_active_page", 0)
+    error(("stock_creator_control_outside_active_page: %s in %s"):format(widget:GetFName():ToString(),
+        page:GetFName():ToString()), 0)
 end
 
 local function click(menu, page, field, handler)
@@ -146,6 +148,33 @@ function actions.finish(menu, switch, page)
     page_is(switch, 3)
     click(menu, page, "Button_Confirm", "BndEvt__DifficultySelect_Widget_Button_Select_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature")
     return "stock_finish_invoked"
+end
+
+function actions.gueststyle(menu, switch, page)
+    page_is(switch, 0)
+    click(menu, page, "Button_Class_1", "BndEvt__Character_Editor_Widget_Button_Class_1_K2Node_ComponentBoundEvent_45_Pressed__DelegateSignature")
+    page_is(switch, 1)
+    local head, hair = menu.Setting_Selector_FaceType, menu.Setting_Selector_Plumage
+    for _, field in ipairs({{head, selector_class}, {hair, selector_class}, {menu.Button_Confirm_1, stock_button_class}}) do
+        local widget = field[1]
+        assert(exact(widget, field[2]) and widget:GetIsEnabled() and widget:IsVisible()
+            and valid(widget:GetOuter()) and same(widget:GetOuter():GetOuter(), menu),
+            "guest_stock_creator_widget_unavailable")
+    end
+    local selected = menu.Selected_ClassStruct
+    local head_field = "Mesh_Head_60_630BB776410363C64BE2C89A3F72B1C5"
+    local hair_field = "Mesh_Plumage_80_4B6C3DD94D27DEC901D6829472D5F546"
+    local prior = selected[head_field]
+    pick(head, (head.IndexOutput + 1) % head.Settings:GetArrayNum())
+    pick(hair, (hair.IndexOutput + 1) % hair.Settings:GetArrayNum())
+    selected = menu.Selected_ClassStruct
+    assert(valid(selected[head_field]) and not same(selected[head_field], prior), "guest_stock_creator_head_did_not_change")
+    local head_name = selected[head_field]:GetFullName():match("^StaticMesh (.+)$")
+    local hair_name = valid(selected[hair_field]) and selected[hair_field]:GetFullName():match("^StaticMesh (.+)$") or "-"
+    assert(head_name and hair_name, "guest_stock_creator_stock_option_unavailable")
+    menu:BndEvt__Character_Editor_Widget_Button_Confirm_1_K2Node_ComponentBoundEvent_35_Pressed__DelegateSignature()
+    page_is(switch, 3)
+    return head_name .. "|" .. hair_name
 end
 
 function actions.cancel(menu, switch, page)

@@ -1,6 +1,7 @@
 local creator = {}
 local title = require("native_title_entry")
 local save_scope = require("native_save_scope")
+local appearance = require("native_avatar_character_view")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local editor_map = "/Game/Classes/Maps/CharacterSelect_Map_P"
@@ -29,20 +30,75 @@ local function world_is(world, map)
     return valid(world) and world:GetFullName() == "World " .. map .. "." .. leaf(map)
 end
 
+local function terminal(state)
+    return state == "captured" or state == "cancelled" or state == "failed"
+end
+
+local function authorizes(record)
+    return exact(record.save, save_path) and same(record.instance.SaveSlot_Ref, record.save)
+        and text(record.instance.CurrentSaveSlot) == record.slot
+end
+
+local function clean_guest(record)
+    if save_scope.selected() ~= record.scope then return false end
+    local statics = StaticFindObject(statics_path)
+    if not valid(statics) then return false end
+    if statics:DoesSaveGameExist(record.slot, 0) and not statics:DeleteGameInSlot(record.slot, 0) then return false end
+    local instance = record.instance
+    instance.SaveSlot_Ref = valid(record.previous_save) and record.previous_save or nil
+    instance.CurrentSaveSlot = record.previous_slot
+    instance.SaveAfterTransition = record.previous_autosave
+    return (same(instance.SaveSlot_Ref, record.previous_save)
+            or not valid(instance.SaveSlot_Ref) and not valid(record.previous_save))
+        and text(instance.CurrentSaveSlot) == record.previous_slot
+        and instance.SaveAfterTransition == record.previous_autosave
+        and statics:DoesSaveGameExist(record.slot, 0) == false
+end
+
+local function guest_departure(target, absolute, options)
+    if record.state == "returning" then return end
+    record.result, record.model = "failed", nil
+    if save_scope.selected() == record.scope then
+        if leaf(target) == leaf(main_menu) then
+            record.result = "cancelled"
+        elseif absolute == true and options == "" and authorizes(record) and leaf(target) == text(record.save.Level) then
+            local statics = StaticFindObject(statics_path)
+            if valid(statics) and statics:DoesSaveGameExist(record.slot, 0) == true then
+                local ok, model = pcall(appearance.observe, record.save.Character)
+                if ok and model ~= "-" and appearance.decode(model) then
+                    record.result, record.model = "captured", model
+                end
+            end
+        end
+    end
+    record.state = "returning"
+    -- Remove the working slot before the returning title scans for Continue candidates.
+    local checked, clean = pcall(clean_guest, record)
+    if not checked or not clean then record.result, record.model = "failed", nil end
+end
+
 local function route_open_level(_, context, name, absolute, options)
-    if not record or (record.state ~= "opening" and record.state ~= "creating")
-        or save_scope.selected() ~= record.scope then return end
+    if not record then return end
     local source = context:get()
     local world = valid(source) and source:GetWorld()
     if not world_is(world, editor_map) or not same(world.OwningGameInstance, record.instance) then return end
     local target = text(name:get())
+    if record.attempt then
+        -- Replace every departure from the guest editor, including a duplicate submit.
+        local target_absolute, target_options = absolute:get(), text(options:get())
+        name:set(FName(main_menu))
+        absolute:set(true)
+        options:set("")
+        guest_departure(target, target_absolute, target_options)
+        return
+    end
+    if (record.state ~= "opening" and record.state ~= "creating") or save_scope.selected() ~= record.scope then return end
     if leaf(target) == leaf(main_menu) then return end
     local destination = record.resolve(target)
     local save = record.instance.SaveSlot_Ref
     local statics = StaticFindObject(statics_path)
     if not destination or absolute:get() ~= true or text(options:get()) ~= ""
-        or not exact(save, save_path) or not same(save, record.save)
-        or text(record.instance.CurrentSaveSlot) ~= record.slot or text(save.Level) ~= leaf(destination)
+        or not authorizes(record) or text(save.Level) ~= leaf(destination)
         or not valid(statics) or statics:DoesSaveGameExist(record.slot, 0) ~= true
         or type(SilverfishArmNativeListenPort) ~= "function"
         or SilverfishArmNativeListenPort(record.port, world:GetAddress(),
@@ -57,13 +113,10 @@ local function route_open_level(_, context, name, absolute, options)
     record.on_departure(destination, record.port)
 end
 
-function creator.begin(state, phase, slot, port, resolve, on_departure)
+local function open_editor(state, phase, slot, new_record)
     local context = title.probe(state, phase)
     local scope = save_scope.selected()
-    if not context or not scope or record or type(slot) ~= "string" or #slot ~= 43
-        or not slot:match("^SFCoopLive_[0-9a-f]+$") or not port or port < 1 or port > 65535 then
-        error("stock_creator_requires_a_scoped_title", 0)
-    end
+    if not context or not scope or record then error("stock_creator_requires_a_scoped_title", 0) end
     local instance = context.world.OwningGameInstance
     local class = StaticFindObject(widget_path)
     local widgets = StaticFindObject(widgets_path)
@@ -77,8 +130,12 @@ function creator.begin(state, phase, slot, port, resolve, on_departure)
     local widget = widgets:Create(context.menu, class, context.controller)
     if not exact(widget, widget_path) then error("stock_creator_new_game_widget_unavailable", 0) end
     local before = instance.SaveSlot_Ref
-    record = {state = "opening", scope = scope, slot = slot, port = port, instance = instance,
-              resolve = resolve, on_departure = on_departure}
+    new_record.state, new_record.scope, new_record.slot, new_record.instance = "opening", scope, slot, instance
+    if new_record.attempt then
+        new_record.previous_save, new_record.previous_slot = before, text(instance.CurrentSaveSlot)
+        new_record.previous_autosave = instance.SaveAfterTransition
+    end
+    record = new_record
     widget:NewGame()
     local save = instance.SaveSlot_Ref
     if not exact(save, save_path) or same(save, before) then
@@ -90,8 +147,63 @@ function creator.begin(state, phase, slot, port, resolve, on_departure)
     return "opened stock character creator"
 end
 
+function creator.begin(state, phase, slot, port, resolve, on_departure)
+    if type(slot) ~= "string" or #slot ~= 43 or not slot:match("^SFCoopLive_[0-9a-f]+$")
+        or not port or port < 1 or port > 65535 then
+        error("stock_creator_requires_a_scoped_title", 0)
+    end
+    return open_editor(state, phase, slot, {port = port, resolve = resolve, on_departure = on_departure})
+end
+
+function creator.begin_guest(state, phase, attempt)
+    if type(attempt) ~= "string" or #attempt ~= 32 or not attempt:match("^[0-9a-f]+$") then
+        error("guest_stock_creator_attempt_invalid", 0)
+    end
+    return open_editor(state, phase, "SFCoopGuestCreator_" .. attempt, {attempt = attempt})
+end
+
+function creator.clear_guest(state, phase, attempt)
+    local scope = save_scope.selected()
+    if not record or record.attempt ~= attempt or scope and scope ~= record.scope then
+        error("guest_stock_creator_attempt_invalid", 0)
+    end
+    if terminal(record.state) and title.probe(state, phase) then
+        record = nil
+        return "cleared stock guest character creator"
+    end
+    if scope ~= record.scope or record.state ~= "creating" or not world_is(state.world, editor_map) or not valid(state.controller)
+        or not same(state.world.OwningGameInstance, record.instance) then error("guest_stock_creator_not_ready_to_cancel", 0) end
+    local statics = StaticFindObject(statics_path)
+    if not valid(statics) then error("guest_stock_creator_cannot_return", 0) end
+    statics:OpenLevel(state.controller, FName(main_menu), true, "")
+    return "returning from stock guest character creator"
+end
+
+function creator.guest_busy()
+    return record and record.attempt and not terminal(record.state)
+end
+
+function creator.guest_result(attempt)
+    if record and record.attempt == attempt then
+        return record.state, record.state == "captured" and record.model or nil
+    end
+end
+
 function creator.rows(state, phase, row)
     if not record then return {} end
+    if record.attempt then
+        if record.state == "opening" and world_is(state.world, editor_map) then
+            record.state = "creating"
+        elseif (record.state == "returning" or record.state == "creating") and title.probe(state, phase) then
+            -- The stock Back action can return without calling the intercepted OpenLevel.
+            local result = record.state == "creating" and "cancelled" or record.result
+            local checked, clean = pcall(clean_guest, record)
+            record.state = checked and clean and result or "failed"
+            if record.state ~= "captured" then record.model = nil end
+        end
+        return {row("native-guest-stock-creator", record.state, record.attempt,
+            record.state == "captured" and record.model or "-")}
+    end
     if record.state == "opening" and world_is(state.world, editor_map) then
         record.state = "creating"
     elseif record.state == "creating" and state.map ~= editor_map and phase == "ready" then
@@ -106,8 +218,8 @@ function creator.rows(state, phase, row)
     return {row("native-stock-creator", record.state, record.destination or "-", record.slot)}
 end
 
-function creator.clear()
-    record = nil
+function creator.clear_host()
+    if record and not record.attempt then record = nil end
 end
 
 return creator
