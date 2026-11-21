@@ -1,5 +1,17 @@
 # Stock title bootstrap
 
+## Installed resident title
+
+The embedded runtime can start Host and Direct IP Join from the installed game process. Use a matched checkout and a supported game layout with the verified content manifest, the active UE4SS gameplay modules, and the pinned embedded runtime already installed. Disable the older `SilverfishCoopBootstrap` entry for this configuration.
+
+```powershell
+python -m bootstrap.resident_boot_config --game $game --work $workspace
+```
+
+The helper verifies the stock executable and packages, checks the installed runtime, and writes the native startup descriptor. The workspace holds the co-op session records and must be separate from the game. The default mode retains the normal Windows player profile. The `--isolated` option is for headless replicas with a dedicated Unreal user directory. The installed path has passed direct cold starts in stock-layout replicas. The trial ZIP below still uses the older coordinator, and the new startup has yet to be tested through Steam on the original installation. [Installed cold-start test](../tests/live_installed_title_smoke.py)
+
+## Legacy coordinator
+
 This opt-in UE4SS Lua mod presents **Open Co-op** on the stock Project Silverfish title. It needs the exact standalone title with its normal menu mounted and in front. On a packaged coordinator offer, a fresh F7 press submits a one-use request. The title shows **Coordinator unavailable** until a compatible coordinator supplies a valid offer.
 
 The bootstrap only reads the title and adds its own passive text widget. The coordinator will own isolated game startup and the handoff.

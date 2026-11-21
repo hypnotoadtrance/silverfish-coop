@@ -174,6 +174,27 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.profile, profile)
         self.assertEqual(engine.bridge.directory, self.bridge_path(role))
 
+    def test_installed_title_qualifies_the_stock_profile_without_launcher_arguments(self):
+        game = Path(self.enterContext(TemporaryDirectory())).resolve()
+        image = game / runtime.SHIPPING
+        image.parent.mkdir(parents=True)
+        image.touch()
+        runtime.write_json(game / "silverfish-coop-stage.json", {"schema": 1, "game_build": "b" * 64})
+        title = self.work / "titles" / "Player"
+        bridge = self.bridge_path(title)
+        bridge.mkdir(parents=True)
+        profile = self.work / "account" / "SilverFish"
+        (profile / "Saved").mkdir(parents=True)
+        flags = {embedded.UNIFIED_ENV: "1", embedded.INSTALLED_ENV: "1", "SILVERFISH_COOP_RESIDENT_TITLE": "1"}
+        startup = embedded._Startup(os.getpid(), image, (str(image),), {
+            **flags, embedded.BRIDGE_ENV: str(bridge), embedded.OPT_IN_ENV: "1",
+        })
+        with runtime.installed_content(self.work, game), patch.object(embedded, "_stock_profile", return_value=profile):
+            self.assertEqual(embedded._qualify(startup, self.work, title, "title", flags), (profile / "Saved", bridge))
+            override = replace(startup, argv=(str(image), f"-userdir={self.campaign / 'game-user'}"))
+            with self.assertRaisesRegex(ValueError, "stock player directory"):
+                embedded._qualify(override, self.work, title, "title", flags)
+
     async def test_effective_directory_other_than_os_userdir_fails_closed(self):
         self.frames = [self.frame(1, self.client)]
         with self.assertRaisesRegex(ValueError, "effective Unreal save directory"):
