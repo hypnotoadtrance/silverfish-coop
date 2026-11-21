@@ -95,10 +95,15 @@ Keep stages, saves, host identity keys, invitations, and extracted assets outsid
 
 ## Tests
 
-For day-to-day changes, run the affected test module first. Reuse the staged loader and native add-ons when their source and pins still match. For a live gameplay change, start from a copied campaign checkpoint near the affected scene and run that mechanic's smoke test. Run the full suite and rebuild the Windows ZIP when preparing a trial build.
+For day-to-day changes and incremental release candidates, run the tests that cover the changed behavior and affected callers. Reuse the staged loader and native add-ons when their source and pins still match. For a live gameplay change, start from a copied campaign checkpoint near the affected scene and run that mechanic's smoke test. Reserve the full suite for major releases or an explicit request.
 
 ```powershell
-& $sfPython -m unittest tests.test_runtime -q
+& $sfPython -m unittest discover -s tests -p 'test_runtime.py' -v
+```
+
+The major-release check runs the complete suite.
+
+```powershell
 & $sfPython -m unittest discover -s tests -v
 ```
 
