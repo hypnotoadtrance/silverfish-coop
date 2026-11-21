@@ -344,28 +344,27 @@ namespace
         return Unreal::UObjectGlobals::StaticFindObject<Object*>(nullptr, nullptr, path);
     }
 
-    bool live_game_roster(const Scope& current)
+    const char* game_roster_failure(const Scope& current)
     {
         const auto& roster = current.roster;
         auto* world = current.world.Get();
         auto* driver = roster.driver.Get();
-        if (!world || !live_object(driver) || read_object(roster.world_driver, world) != driver ||
-            (read_object(roster.server_connection, driver) != nullptr) == current.host)
-        {
-            return false;
-        }
-        if (!current.host) return true;
+        if (!world || !live_object(driver) || read_object(roster.world_driver, world) != driver)
+            return "Waiting for the current world network driver";
+        if ((read_object(roster.server_connection, driver) != nullptr) == current.host)
+            return "The network driver role does not match the co-op session";
+        if (!current.host) return nullptr;
 
         const auto players = roster.players();
         Unreal::FScriptArrayHelper clients(roster.client_connections, roster.client_connections->ContainerPtrToValuePtr<void>(driver));
-        if (clients.Num() != static_cast<int>(players.size())) return false;
+        if (clients.Num() != static_cast<int>(players.size())) return "The connected Unreal roster differs from the co-op roster";
         std::array<Unreal::UObject*, max_remote_players> connections{};
         for (int index = 0; index < clients.Num(); ++index)
         {
             auto* connection = read_object(roster.connection_entry, clients.GetRawPtr(index));
             if (!live_object(connection) || std::find(connections.begin(), connections.end(), connection) != connections.end())
             {
-                return false;
+                return "An Unreal client connection is unavailable or duplicated";
             }
             connections[static_cast<std::size_t>(index)] = connection;
         }
@@ -379,36 +378,37 @@ namespace
                 read_object(roster.pawn_controller, pawn) != controller || read_object(roster.controller_pawn, controller) != pawn ||
                 read_object(roster.controller_player, controller) != connection)
             {
-                return false;
+                return "A remote pawn no longer matches its controller and client connection";
             }
             const auto match = std::find(connections.begin(), connections.end(), connection);
-            if (match == connections.end()) return false;
+            if (match == connections.end()) return "A remote pawn's connection is absent from the current driver";
             *match = nullptr;
         }
-        return true;
+        return nullptr;
     }
 
-    bool bind_game_roster(Scope& scope)
+    const char* bind_game_roster(Scope& scope)
     {
         auto& roster = scope.roster;
         auto* world = scope.world.Get();
         roster.world_driver = field<Unreal::FObjectProperty>(world, STR("NetDriver"));
         auto* driver = read_object(roster.world_driver, world);
-        if (!live_object(driver)) return false;
+        if (!live_object(driver)) return "Waiting for the current world network driver";
         roster.driver = driver;
         roster.server_connection = field<Unreal::FObjectProperty>(driver, STR("ServerConnection"));
         roster.client_connections = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
-        if (!roster.server_connection || !roster.client_connections) return false;
+        if (!roster.server_connection || !roster.client_connections) return "The network driver connection fields are unavailable";
         roster.connection_entry = Unreal::CastField<Unreal::FObjectProperty>(roster.client_connections->GetInner());
-        if (!roster.connection_entry) return false;
-        if (!roster.count) return live_game_roster(scope);
+        if (!roster.connection_entry) return "The Unreal client connection array is unavailable";
+        if (!roster.count) return game_roster_failure(scope);
 
         auto* player_controller = find<Unreal::UClass>(STR("/Script/Engine.PlayerController"));
         auto* net_connection = find<Unreal::UClass>(STR("/Script/Engine.NetConnection"));
         roster.pawn_controller = field<Unreal::FObjectProperty>(scope.pawn_class, STR("Controller"));
         roster.controller_player = field<Unreal::FObjectProperty>(player_controller, STR("Player"));
         roster.controller_pawn = field<Unreal::FObjectProperty>(player_controller, STR("Pawn"));
-        if (!net_connection || !roster.pawn_controller || !roster.controller_player || !roster.controller_pawn) return false;
+        if (!net_connection || !roster.pawn_controller || !roster.controller_player || !roster.controller_pawn)
+            return "The remote pawn's possession fields are unavailable";
         for (auto& remote : std::span{roster.remotes}.first(roster.count))
         {
             auto* pawn = remote.pawn.Get();
@@ -417,12 +417,12 @@ namespace
             if (!live_object(controller) || !controller->IsA(player_controller) || !live_object(connection) ||
                 !connection->IsA(net_connection))
             {
-                return false;
+                return "Waiting for a remote pawn's network controller";
             }
             remote.controller = controller;
             remote.connection = connection;
         }
-        return live_game_roster(scope);
+        return game_roster_failure(scope);
     }
 
     bool is_local_pawn(Unreal::UObject* pawn)
@@ -593,16 +593,17 @@ namespace
         return true;
     }
 
-    bool configure(Address local_address, Address exit_address, bool host, bool accepting, std::span<const Address> remote_addresses)
+    const char* configure(Address local_address, Address exit_address, bool host, bool accepting, std::span<const Address> remote_addresses)
     {
-        if (!local_address || remote_addresses.size() > max_remote_players || (!host && !remote_addresses.empty())) return false;
+        if (!local_address || remote_addresses.size() > max_remote_players || (!host && !remote_addresses.empty()))
+            return "The native zone roster does not match the session role";
         std::array<Address, max_remote_players> sorted{};
         std::copy(remote_addresses.begin(), remote_addresses.end(), sorted.begin());
         const auto roster = std::span{sorted}.first(remote_addresses.size());
         std::sort(roster.begin(), roster.end());
         if (std::find(roster.begin(), roster.end(), Address{}) != roster.end() ||
             std::find(roster.begin(), roster.end(), local_address) != roster.end() ||
-            std::adjacent_find(roster.begin(), roster.end()) != roster.end()) return false;
+            std::adjacent_find(roster.begin(), roster.end()) != roster.end()) return "The native zone roster contains invalid pawn addresses";
 
         const auto current_generation = generation.load(std::memory_order_acquire);
         if (scope.generation == current_generation && address(scope.local.Get()) == local_address &&
@@ -610,21 +611,26 @@ namespace
             std::ranges::equal(scope.roster.players(), roster,
                 [](const RemotePlayer& remote, Address expected) { return address(remote.pawn.Get()) == expected; }))
         {
-            if (!live_game_roster(scope) || !is_local_pawn(scope.local.Get()))
+            if (const auto* failure = game_roster_failure(scope))
             {
                 scope.accepting = false;
-                return false;
+                return failure;
+            }
+            if (!is_local_pawn(scope.local.Get()))
+            {
+                scope.accepting = false;
+                return "Waiting for the local player to possess the zone pawn";
             }
             scope.expires = Clock::now() + ttl;
             scope.accepting = accepting;
-            return true;
+            return nullptr;
         }
 
         Scope next;
         next.pawn_class = find<Unreal::UClass>(pawn_path);
         next.exit_class = find<Unreal::UClass>(exit_path);
         next.roster.count = roster.size();
-        if (!next.pawn_class || (exit_address && !next.exit_class)) return false;
+        if (!next.pawn_class || (exit_address && !next.exit_class)) return "The native zone actor classes are unavailable";
         std::size_t found_remotes{};
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
             const auto candidate = address(object);
@@ -642,8 +648,10 @@ namespace
         auto* local = next.local.Get();
         auto* fixture = next.fixture.Get();
         auto* world = actor_world(local);
-        if (!world || !is_local_pawn(local) || found_remotes != roster.size() ||
-            (exit_address && actor_world(fixture) != world)) return false;
+        if (!world || !is_local_pawn(local)) return "Waiting for the local player to possess the zone pawn";
+        if (found_remotes != roster.size()) return "Waiting for the remote zone pawns";
+        if (exit_address && !fixture) return "The cached exit no longer identifies a live level exit";
+        if (exit_address && actor_world(fixture) != world) return "Waiting for the exit in the active world";
         const auto map = world->GetPathName();
         for (const auto& route : routes)
         {
@@ -654,11 +662,12 @@ namespace
             }
         }
         next.authored_world = expanded_world(map);
-        if (!next.route && next.authored_world.empty()) return false;
+        if (!next.route && next.authored_world.empty()) return "This world has no authored co-op routes";
         if (fixture)
         {
             const auto* authored = expanded_route(next, fixture);
-            if (authored ? !is_expanded_exit(next, fixture, world, *authored) : !is_route_exit(next, fixture, world)) return false;
+            if (authored ? !is_expanded_exit(next, fixture, world, *authored) : !is_route_exit(next, fixture, world))
+                return "The placed exit differs from its authored route";
         }
 
         next.world = world;
@@ -682,7 +691,9 @@ namespace
         next.fixture_box = field<Unreal::FObjectProperty>(fixture, STR("Box"));
         next.next_level = field<Unreal::FSoftObjectProperty>(fixture, STR("NextLevel"));
         next.entrance_tag = field<Unreal::FStrProperty>(fixture, STR("Entrance Tag"));
-        if (!next.instance.Get() || !next.role || !next.prep || !next.load || !bind_game_roster(next)) return false;
+        if (!next.instance.Get() || !next.role || !next.prep || !next.load)
+            return "The native travel functions or game instance are unavailable";
+        if (const auto* failure = bind_game_roster(next)) return failure;
         const auto countdown = std::find_if(countdown_routes.begin(), countdown_routes.end(),
             [&](const CountdownRoute& candidate) { return map == candidate.world; });
         if (countdown != countdown_routes.end())
@@ -698,7 +709,7 @@ namespace
             if (!dream || !next.load_save || !next.dream_power || !next.dream_script || !next.dream_powered || !next.dream_instigator ||
                 !next.dream_entry || dream->GetClassPrivate() != next.dream_power->GetOuterPrivate() ||
                 dream->GetClassPrivate() != next.dream_script->GetOuterPrivate() || actor_world(dream) != world ||
-                !in_persistent_level(dream, world)) return false;
+                !in_persistent_level(dream, world)) return "The placed dream return is unavailable";
             next.dream = dream;
             next.dream_return_requested = scope.dream.Get() == dream && scope.dream_return_requested;
         }
@@ -708,24 +719,24 @@ namespace
                 [&](const ScriptedDreamRoute& candidate) { return map == candidate.world; });
             if (scripted != scripted_dream_routes.end())
             {
-                if (!bind_scripted_dream(next, *scripted, world)) return false;
+                if (!bind_scripted_dream(next, *scripted, world)) return "The scripted dream return is unavailable";
                 next.dream_return_requested = scope.generation == current_generation && scope.local.Get() == local &&
                     scope.dream.Get() == next.dream.Get() && scope.dream_return_requested;
             }
             else if (!next.exit_class || !next.overlap_actor || !next.overlap_component || (fixture && !next.fixture_box) ||
-                     !next.activate || !next.exit_power) return false;
+                     !next.activate || !next.exit_power) return "The native exit interaction functions are unavailable";
         }
         next.generation = current_generation;
         next.expires = Clock::now() + ttl;
         next.accepting = accepting;
         scope = next;
-        return true;
+        return nullptr;
     }
 
     bool active_host(Unreal::UObject* local)
     {
         return live_object(local) && scope.host && scope.accepting && Clock::now() < scope.expires &&
-               actor_world(local) == scope.world.Get() && live_game_roster(scope) && is_local_pawn(local) &&
+               actor_world(local) == scope.world.Get() && !game_roster_failure(scope) && is_local_pawn(local) &&
                scope.role->GetPropertyValueInContainer(local) == 3;
     }
 
@@ -978,7 +989,7 @@ namespace
 
     int lua_set_scope(const Lua& lua)
     {
-        bool accepted = false;
+        const char* failure = "The native zone hook is unavailable or received invalid arguments";
         if (Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) && lua.get_stack_size() == 5 &&
             lua.is_integer(1) && lua.is_integer(2) && lua.is_integer(3) && lua.is_bool(4) && lua.is_bool(5))
         {
@@ -989,17 +1000,19 @@ namespace
             const auto accepting = lua.get_bool();
             const auto remote_address = static_cast<Address>(remote);
             const auto roster = remote > 0 ? std::span<const Address>{&remote_address, 1} : std::span<const Address>{};
-            accepted = local > 0 && remote >= 0 && fixture >= 0 &&
-                       configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, roster);
+            if (local > 0 && remote >= 0 && fixture >= 0)
+                failure = configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, roster);
         }
-        lua.set_bool(accepted);
-        return 1;
+        lua.set_bool(!failure);
+        if (!failure) return 1;
+        lua.set_string(failure);
+        return 2;
     }
 
     int lua_set_roster(const Lua& lua)
     {
         const auto count = lua.get_stack_size();
-        bool accepted = false;
+        const char* failure = "The native zone hook is unavailable or received invalid arguments";
         if (Unreal::IsInGameThreadRaw() && installed.load(std::memory_order_acquire) &&
             count >= 4 && count <= 4 + static_cast<int>(max_remote_players) &&
             lua.is_integer(1) && lua.is_integer(2) && lua.is_bool(3) && lua.is_bool(4))
@@ -1023,12 +1036,14 @@ namespace
                     if (value <= 0) valid = false;
                     remote = static_cast<Address>(value);
                 }
-                accepted = valid && local > 0 && fixture >= 0 &&
-                    configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, remotes);
+                if (valid && local > 0 && fixture >= 0)
+                    failure = configure(static_cast<Address>(local), static_cast<Address>(fixture), host, accepting, remotes);
             }
         }
-        lua.set_bool(accepted);
-        return 1;
+        lua.set_bool(!failure);
+        if (!failure) return 1;
+        lua.set_string(failure);
+        return 2;
     }
 
     int lua_clear(const Lua&)

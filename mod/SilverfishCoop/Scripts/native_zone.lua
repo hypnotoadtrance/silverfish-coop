@@ -19,6 +19,7 @@ local nexus_portals = {
 local event_path
 local expanded_event_path
 local heartbeat_path
+local observed_map
 local armed
 local fixture
 local secondary_fixture
@@ -78,6 +79,7 @@ local function clear()
     if armed and type(SilverfishClearNativeZoneScope) == "function" then
         pcall(SilverfishClearNativeZoneScope)
     end
+    observed_map = nil
     armed = nil
     fixture = nil
     secondary_fixture = nil
@@ -180,6 +182,11 @@ function zone.sync(state, phase)
         status, failure = "inactive", ""
         return
     end
+    if observed_map ~= state.map then
+        -- Unreal can reuse an old actor's address after loading the new world.
+        clear()
+        observed_map = state.map
+    end
 
     if type(SilverfishSetNativeZoneScope) ~= "function" or type(SilverfishTakeNativeZoneEvent) ~= "function" then
         wall.sync(state, phase, fixture, false, secondary_fixture)
@@ -203,7 +210,8 @@ function zone.sync(state, phase)
         if type(SilverfishSetNativeZoneRoster) == "function" then
             return SilverfishSetNativeZoneRoster(address, exit_address, host, accepting, table.unpack(remote))
         end
-        return #remote <= 1 and SilverfishSetNativeZoneScope(address, remote[1] or 0, exit_address, host, accepting)
+        if #remote > 1 then return false, "This native zone hook only supports one guest" end
+        return SilverfishSetNativeZoneScope(address, remote[1] or 0, exit_address, host, accepting)
     end
     local exit = find_fixture(local_pawn, route)
     if route.fixture and not valid(exit) then
@@ -220,10 +228,12 @@ function zone.sync(state, phase)
     elseif not valid(secondary_fixture) or not same(secondary_fixture:GetWorld(), world) then
         secondary_fixture = placed_actor("Level_Exit_BP_C", route.secondary.fixture, world)
     end
-    local refreshed = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
+    local refreshed, reason = qualify(valid(exit) and exit:GetAddress() or 0, accepting)
     wall.sync(state, phase, exit, accepting and refreshed, secondary_fixture)
     if not refreshed then
-        wait_for_scope("Native zone hooks declined the scope")
+        fixture = nil
+        secondary_fixture = nil
+        wait_for_scope(reason or "Native zone hooks declined the scope")
         return
     end
     armed = state.map
